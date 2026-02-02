@@ -110,14 +110,18 @@ class WorkerProcess(Process):
         self.stop_threads()
 
     def stop_threads(self):
+        # First pass: call stop() on all threads to initiate shutdown
         for th in self.threads:
             if hasattr(th, "stop") and callable(getattr(th, "stop")):
                 # resume thread first if it's paused
                 if th.is_paused():
                     th.resume()
-
                 th.stop()
-                th.join(1)
+        
+        # Second pass: wait for threads to finish
+        for th in self.threads:
+            if hasattr(th, "stop") and callable(getattr(th, "stop")):
+                th.join(2)  # Wait up to 2 seconds for graceful shutdown
 
                 if th.is_alive():
                     print(

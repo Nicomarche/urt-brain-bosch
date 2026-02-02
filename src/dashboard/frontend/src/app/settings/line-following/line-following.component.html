@@ -1,0 +1,30 @@
+<div class="line-following-config">
+  <div class="header">
+    <h3>Line Following Configuration</h3>
+    <button class="btn-reset" (click)="resetDefaults()">Reset Defaults</button>
+  </div>
+  
+  <div class="slider-groups">
+    <div class="slider-group" *ngFor="let group of sliderGroups">
+      <h4>{{ group.title }}</h4>
+      <div class="sliders">
+        <div class="slider-row" *ngFor="let slider of group.sliders">
+          <label>{{ slider.label }}</label>
+          <input 
+            type="range" 
+            [min]="slider.min" 
+            [max]="slider.max" 
+            [step]="slider.step"
+            [(ngModel)]="slider.value"
+            (input)="onSliderChange(slider)"
+          />
+          <span class="value">{{ slider.value }}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <div class="actions">
+    <button class="btn-apply" (click)="sendConfig()">Apply All</button>
+  </div>
+</div>

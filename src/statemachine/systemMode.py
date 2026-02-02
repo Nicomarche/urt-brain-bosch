@@ -62,10 +62,11 @@ class SystemMode(Enum):
         "mode": "auto",
         "camera": {
             "process": {
-                "enabled": False,
+                "enabled": True,
             },
             "thread": {
                 "resolution": "480p",
+                "line_following": True,
             }
         },
         "serial_handler": {

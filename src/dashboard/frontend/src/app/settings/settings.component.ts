@@ -1,11 +1,12 @@
 import { Component, EventEmitter, Input, Output, OnChanges, SimpleChanges, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { CalibrationComponent, CalibrationStep } from './calibration/calibration.component';
+import { LineFollowingComponent } from './line-following/line-following.component';
 
 @Component({
   selector: 'app-settings',
   standalone: true,
-  imports: [CommonModule, CalibrationComponent],
+  imports: [CommonModule, CalibrationComponent, LineFollowingComponent],
   templateUrl: './settings.component.html',
   styleUrls: ['./settings.component.css']
 })

@@ -33,6 +33,7 @@ if __name__ == "__main__":
 from cv2 import meanShift
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
+from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -69,11 +70,17 @@ class processCamera(WorkerProcess):
 
     # ===================================== INIT TH ======================================
     def _init_threads(self):
-        """Create the Camera Publisher thread and add to the list of threads."""
+        """Create the Camera Publisher thread and Line Following thread and add to the list of threads."""
         camTh = threadCamera(
          self.queuesList, self.logging, self.debugging
         )
         self.threads.append(camTh)
+        
+        # Add line following thread
+        lineFollowingTh = threadLineFollowing(
+            self.queuesList, self.logging, self.debugging, show_debug=True
+        )
+        self.threads.append(lineFollowingTh)
 
 
 # =================================== EXAMPLE =========================================

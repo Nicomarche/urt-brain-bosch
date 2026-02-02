@@ -56,13 +56,14 @@ class threadCamera(ThreadWithStop):
     """
 
     # ================================ INIT ===============================================
-    def __init__(self, queuesList, logger, debugger):
+    def __init__(self, queuesList, logger, debugger, show_preview=False):
         super(threadCamera, self).__init__(pause=0.001)
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
         self.frame_rate = 5
         self.recording = False
+        self.show_preview = show_preview
 
         self.video_writer = ""
 
@@ -129,6 +130,13 @@ class threadCamera(ThreadWithStop):
 
             serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420) # type: ignore
 
+            # Show preview window if enabled
+            if self.show_preview:
+                # Show the main camera feed in a window
+                preview_frame = cv2.resize(mainRequest, (1024, 540))  # type: ignore
+                cv2.imshow("Camera Preview", preview_frame)  # type: ignore
+                cv2.waitKey(1)  # type: ignore
+
             _, mainEncodedImg = cv2.imencode(".jpg", mainRequest) # type: ignore
             _, serialEncodedImg = cv2.imencode(".jpg", serialRequest) # type: ignore
 
@@ -184,6 +192,8 @@ class threadCamera(ThreadWithStop):
             self.video_writer.release() # type: ignore
         if self.camera is not None:
             self.camera.stop()
+        if self.show_preview:
+            cv2.destroyAllWindows()  # type: ignore
         super(threadCamera, self).stop()
 
     # =============================== CONFIG ==============================================

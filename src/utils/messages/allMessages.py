@@ -193,6 +193,12 @@ class RequestSteerLimits(Enum):
     msgID = 20
     msgType = "bool"
 
+class LineFollowingConfig(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 21
+    msgType = "dict"
+
 
 ################################# From Nucleo ##################################
 class BatteryLvl(Enum):

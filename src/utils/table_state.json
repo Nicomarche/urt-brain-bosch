@@ -52,8 +52,8 @@
         "hasChanged": false
     },
     "Brightness": {
-        "value": 50,
-        "initialValue": 50,
+        "value": 55,
+        "initialValue": 55,
         "interval": 0,
         "type": "slider",
         "values": [
@@ -64,8 +64,8 @@
         "hasChanged": false
     },
     "Contrast": {
-        "value": 0,
-        "initialValue": 0,
+        "value": "0",
+        "initialValue": "0",
         "interval": 0,
         "type": "slider",
         "values": [

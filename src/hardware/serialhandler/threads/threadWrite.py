@@ -204,21 +204,23 @@ class threadWrite(ThreadWithStop):
                     if brakeRecv is not None:
                         if self.debugger:
                             self.logger.info(brakeRecv)
-                        command = {"action": "brake", "steerAngle": int(brakeRecv)}
+                        command = {"action": "brake", "steerAngle": int(float(brakeRecv))}
                         self.send_to_serial(command)
 
                     speedRecv = self.speedMotorSubscriber.receive()
                     if speedRecv is not None: 
+                        speed_value = int(float(speedRecv))
                         if self.debugger:
-                            self.logger.info(speedRecv)
-                        command = {"action": "speed", "speed": int(speedRecv)}
+                            self.logger.info(f"Speed received: {speedRecv} -> {speed_value}")
+                        command = {"action": "speed", "speed": speed_value}
                         self.send_to_serial(command)
 
                     steerRecv = self.steerMotorSubscriber.receive()
                     if steerRecv is not None:
+                        steer_value = int(float(steerRecv))
                         if self.debugger:
-                            self.logger.info(steerRecv) 
-                        command = {"action": "steer", "steerAngle": int(steerRecv)}
+                            self.logger.info(f"Steer received: {steerRecv} -> {steer_value}")
+                        command = {"action": "steer", "steerAngle": steer_value}
                         self.send_to_serial(command)
 
                     controlRecv = self.controlSubscriber.receive()

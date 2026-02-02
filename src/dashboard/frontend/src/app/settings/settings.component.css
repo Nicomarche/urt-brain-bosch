@@ -115,7 +115,9 @@
 }
 
 .right-section {
-  /* Empty section ready for future content */
+  height: 100%;
+  overflow: hidden;
+  padding-left: 1rem;
 }
 
 .section-header {
