@@ -1,5 +1,5 @@
 # Copyright (c) 2019, Bosch Engineering Center Cluj and BFMC organizers
-# All rights reserved.
+# All rights reserved.a
 # Reconstructed from bytecode
 
 import cv2
