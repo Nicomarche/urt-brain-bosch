@@ -1,0 +1,16 @@
+# LSTR Model Directory
+# 
+# Models included (all 291KB, same model different input resolutions):
+#
+# | Model           | Resolution | Speed    | Accuracy | RPi Recommended |
+# |-----------------|------------|----------|----------|-----------------|
+# | lstr_180x320    | 180x320    | Fastest  | Good     | Yes (default)   |
+# | lstr_240x320    | 240x320    | Fast     | Better   | Yes             |
+# | lstr_360x640    | 360x640    | Medium   | High     | Maybe           |
+# | lstr_480x640    | 480x640    | Slow     | Higher   | No              |
+# | lstr_720x1280   | 720x1280   | Slowest  | Highest  | No              |
+#
+# Source: https://github.com/PINTO0309/PINTO_model_zoo/tree/main/140_LSTR
+# Paper: End-to-end Lane Shape Prediction with Transformers (WACV 2021)
+#
+# Change model via dashboard slider "LSTR Model Size" (0-4)

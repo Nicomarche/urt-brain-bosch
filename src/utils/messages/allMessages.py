@@ -199,6 +199,19 @@ class LineFollowingConfig(Enum):
     msgID = 21
     msgType = "dict"
 
+################################# From Line Following ##################################
+class LineFollowingDebug(Enum):
+    Queue = "General"
+    Owner = "threadLineFollowing"
+    msgID = 1
+    msgType = "str"  # base64 encoded image
+
+class LineFollowingStatus(Enum):
+    Queue = "General"
+    Owner = "threadLineFollowing"
+    msgID = 2
+    msgType = "dict"  # steering, speed, mode, fps, etc.
+
 
 ################################# From Nucleo ##################################
 class BatteryLvl(Enum):

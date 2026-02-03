@@ -161,6 +161,78 @@
   background: #555;
 }
 
+/* Debug Stream Viewer */
+.debug-stream {
+  background: #252542;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 15px;
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #333;
+}
+
+.debug-header h4 {
+  margin: 0;
+  color: #64b5f6;
+  font-size: 0.9rem;
+}
+
+.debug-status {
+  display: flex;
+  gap: 15px;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.debug-status span {
+  background: #1a1a2e;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.debug-status .active {
+  color: #4caf50;
+  font-weight: 500;
+}
+
+.debug-image-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  background: #1a1a2e;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.debug-image {
+  max-width: 100%;
+  max-height: 400px;
+  object-fit: contain;
+}
+
+.no-stream {
+  text-align: center;
+  color: #666;
+  padding: 40px;
+}
+
+.no-stream p {
+  margin: 5px 0;
+}
+
+.no-stream .hint {
+  font-size: 0.8rem;
+  color: #555;
+}
+
 /* Responsive - single column on smaller screens */
 @media (max-width: 600px) {
   .slider-groups {
@@ -169,5 +241,10 @@
   
   .slider-row {
     grid-template-columns: 80px 1fr 40px;
+  }
+  
+  .debug-status {
+    flex-wrap: wrap;
+    gap: 8px;
   }
 }

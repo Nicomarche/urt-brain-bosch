@@ -102,6 +102,59 @@ self.roi_height_start = 0.3
 self.roi_height_end = 0.95
 ```
 
+## Sistema Adaptativo de Iluminación (NUEVO)
+
+El sistema ahora incluye técnicas avanzadas para manejar cambios de luz automáticamente:
+
+### CLAHE (Ecualización de Histograma Adaptativo)
+Normaliza la iluminación antes de procesar la imagen. Muy útil para sombras y zonas brillantes.
+
+```python
+self.use_clahe = True              # Activar/desactivar
+self.clahe_clip_limit = 2.0        # Límite de contraste (1.0-5.0)
+self.clahe_grid_size = 8           # Tamaño de la grilla (4-16)
+```
+
+### Detección Adaptativa de Blanco
+En lugar de usar un umbral V fijo, calcula el umbral dinámicamente basándose en el percentil de brillo de la imagen actual.
+
+```python
+self.use_adaptive_white = True           # Activar/desactivar
+self.adaptive_white_percentile = 92      # Percentil para umbral (80-98)
+self.adaptive_white_min_threshold = 180  # Umbral mínimo de seguridad
+```
+
+### Fallback por Gradiente
+Cuando la detección por color falla (menos del 1% de píxeles detectados), usa detección de bordes como respaldo.
+
+```python
+self.use_gradient_fallback = True   # Activar/desactivar
+self.gradient_percentile = 85       # Percentil para detección de bordes
+```
+
+### Recomendaciones para diferentes condiciones de luz:
+
+**Luz muy variable (nubes, sombras):**
+```python
+self.use_clahe = True
+self.clahe_clip_limit = 3.0
+self.use_adaptive_white = True
+self.adaptive_white_percentile = 90
+```
+
+**Luz artificial intensa:**
+```python
+self.clahe_clip_limit = 1.5
+self.adaptive_white_min_threshold = 200
+```
+
+**Condiciones oscuras:**
+```python
+self.clahe_clip_limit = 4.0
+self.adaptive_white_percentile = 85
+self.use_gradient_fallback = True
+```
+
 ### Si detecta demasiadas cosas falsas (objetos del costado):
 1. Aumenta el margen lateral para visión más estrecha:
 ```python
@@ -174,6 +227,63 @@ El sistema utiliza:
 1. **[`systemMode.py`](src/statemachine/systemMode.py)**: Habilita cámara y line following en modo AUTO
 2. **[`threadLineFollowing.py`](src/hardware/camera/threads/threadLineFollowing.py)**: Nuevo thread para seguimiento de líneas
 3. **[`processCamera.py`](src/hardware/camera/processCamera.py)**: Integra el thread de line following
+
+## Modos de Detección
+
+El sistema soporta tres modos de detección de líneas:
+
+### 1. OpenCV (por defecto)
+Usa HSV + sliding window + polynomial fitting. Rápido y calibrado para la pista BFMC.
+
+### 2. LSTR AI
+Usa el modelo LSTR (Lane Shape Prediction with Transformers). Más robusto a cambios de luz pero requiere modelo ONNX.
+
+### 3. Hybrid (Recomendado)
+Usa OpenCV como método principal y LSTR como fallback cuando la detección falla. Mejor de ambos mundos.
+
+Para cambiar el modo, usa el slider "Detection Mode" en el dashboard:
+- **0** = OpenCV
+- **1** = LSTR AI
+- **2** = Hybrid
+
+## Configuración de LSTR (AI Lane Detection)
+
+LSTR es un modelo de deep learning basado en Transformers que detecta líneas de carril de manera end-to-end. Es más robusto a cambios de iluminación porque aprende features visuales en lugar de usar umbrales de color.
+
+### Instalación
+
+1. Instalar ONNX Runtime:
+```bash
+pip install onnxruntime
+```
+
+2. Descargar el modelo ONNX:
+```bash
+# Crear directorio para modelos
+mkdir -p models/lstr
+
+# Descargar desde PINTO's model zoo:
+# https://github.com/PINTO0309/PINTO_model_zoo/tree/main/140_LSTR
+# Descargar lstr_180x320.onnx (el más pequeño, recomendado para RPi)
+
+# Guardar en: models/lstr/lstr_180x320.onnx
+```
+
+### Modelos disponibles
+
+| Modelo | Resolución | Velocidad | Precisión |
+|--------|------------|-----------|-----------|
+| lstr_180x320 | 180x320 | Más rápido | Buena |
+| lstr_240x320 | 240x320 | Rápido | Mejor |
+| lstr_360x640 | 360x640 | Medio | Alta |
+| lstr_480x640 | 480x640 | Lento | Muy alta |
+| lstr_720x1280 | 720x1280 | Muy lento | Máxima |
+
+**Recomendación para Raspberry Pi**: Usar `lstr_180x320` para mejor rendimiento.
+
+### Referencia
+- Paper: [End-to-end Lane Shape Prediction with Transformers (WACV 2021)](https://github.com/liuruijin17/LSTR)
+- ONNX Models: [PINTO Model Zoo](https://github.com/PINTO0309/PINTO_model_zoo/tree/main/140_LSTR)
 
 ## Próximas Mejoras Posibles
 

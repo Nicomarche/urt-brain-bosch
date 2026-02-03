@@ -66,7 +66,9 @@ export class WebSocketService {
     'CalibPWMData',
     'CalibRunDone',
     'ImuAck',
-    'console_log'
+    'console_log',
+    'LineFollowingDebug',
+    'LineFollowingStatus'
   ]);
 
   constructor() {
@@ -230,6 +232,16 @@ export class WebSocketService {
 
   receiveConsoleLog(): Observable<any> {
     return this.webSocket.fromEvent('console_log');
+  }
+
+  // Method to receive line following debug stream (base64 image)
+  receiveLineFollowingDebug(): Observable<any> {
+    return this.webSocket.fromEvent('LineFollowingDebug');
+  }
+
+  // Method to receive line following status (steering, speed, mode, etc.)
+  receiveLineFollowingStatus(): Observable<any> {
+    return this.webSocket.fromEvent('LineFollowingStatus');
   }
 
   // Method to receive the initial connection confirmation

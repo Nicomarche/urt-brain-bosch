@@ -4,6 +4,26 @@
     <button class="btn-reset" (click)="resetDefaults()">Reset Defaults</button>
   </div>
   
+  <!-- Debug Stream Viewer -->
+  <div class="debug-stream" *ngIf="debugStreamEnabled">
+    <div class="debug-header">
+      <h4>📺 Debug Stream: {{ debugViewName }}</h4>
+      <div class="debug-status" *ngIf="debugStatus">
+        <span>Mode: {{ debugStatus.mode }}</span>
+        <span>Steer: {{ debugStatus.steering ?? 'N/A' }}°</span>
+        <span>Speed: {{ debugStatus.speed ?? 'N/A' }}</span>
+        <span [class.active]="debugStatus.active">{{ debugStatus.active ? '🟢 ACTIVE' : '🔴 INACTIVE' }}</span>
+      </div>
+    </div>
+    <div class="debug-image-container">
+      <img [src]="debugImageSrc" *ngIf="debugImageSrc" alt="Debug View" class="debug-image"/>
+      <div class="no-stream" *ngIf="!debugImageSrc">
+        <p>Waiting for debug stream...</p>
+        <p class="hint">Set "View" to 1-10 to enable streaming</p>
+      </div>
+    </div>
+  </div>
+  
   <div class="slider-groups">
     <div class="slider-group" *ngFor="let group of sliderGroups">
       <h4>{{ group.title }}</h4>

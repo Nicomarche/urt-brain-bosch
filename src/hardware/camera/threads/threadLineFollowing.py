@@ -6,11 +6,27 @@ import cv2
 import numpy as np
 import base64
 import time
-from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig
+from enum import Enum
+from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
 from src.statemachine.systemMode import SystemMode
+
+# Import LSTR detector (AI-based lane detection)
+try:
+    from src.hardware.camera.threads.lstrDetector import LSTRDetector, LSTRModelType
+    LSTR_AVAILABLE = True
+except ImportError as e:
+    LSTR_AVAILABLE = False
+    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR not available: {e}")
+
+
+class DetectionMode(Enum):
+    """Lane detection modes."""
+    OPENCV = "opencv"       # Traditional OpenCV (HSV + Hough)
+    LSTR = "lstr"          # AI-based LSTR model
+    HYBRID = "hybrid"       # OpenCV first, LSTR as fallback
 
 
 class threadLineFollowing(ThreadWithStop):
@@ -82,6 +98,34 @@ Args:
         self.brightness = 5
         self.contrast = 0.8
 
+        # Adaptive lighting parameters
+        self.use_clahe = True
+        self.clahe_clip_limit = 2.0
+        self.clahe_grid_size = 8
+        self.use_adaptive_white = True
+        self.adaptive_white_percentile = 92
+        self.adaptive_white_min_threshold = 180
+        self.use_gradient_fallback = True
+        self.gradient_percentile = 85
+
+        # Detection mode parameters
+        self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
+        self.lstr_model_size = 0  # 0=180x320, 1=240x320, 2=360x640, 3=480x640, 4=720x1280
+        self.lstr_detector = None
+        self.lstr_fallback_threshold = 0.01  # Switch to LSTR if detection < 1% of pixels
+        self.lstr_confidence_threshold = 0.5  # Minimum confidence for LSTR detection
+        self._current_lstr_model_size = -1  # Track current loaded model
+        self._init_lstr_detector()
+
+        # Debug streaming parameters
+        self.stream_debug_view = 0  # 0=off, 1-10=different views
+        self.stream_debug_fps = 5  # Max FPS for debug stream (to save bandwidth)
+        self.stream_debug_quality = 50  # JPEG quality (1-100)
+        self.stream_debug_scale = 0.5  # Scale factor for debug images
+        self._debug_frame_counter = 0
+        self._debug_images = {}  # Store debug images for streaming
+        self._last_stream_time = 0
+
         # Sliding window parameters
         self.nwindows = 12
         self.window_margin = 60
@@ -116,6 +160,10 @@ Args:
         self.serialCameraSubscriber = messageHandlerSubscriber(self.queuesList, serialCamera, "lastOnly", True)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
+        
+        # Debug stream senders
+        self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
+        self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -127,6 +175,342 @@ Args:
         self.white_upper = np.array([self.white_h_max, self.white_s_max, self.white_v_max])
         self.yellow_lower = np.array([self.yellow_h_min, self.yellow_s_min, self.yellow_v_min])
         self.yellow_upper = np.array([self.yellow_h_max, self.yellow_s_max, self.yellow_v_max])
+
+    def _init_lstr_detector(self):
+        """Initialize LSTR detector if available."""
+        if not LSTR_AVAILABLE:
+            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR not available, using OpenCV only")
+            self.lstr_detector = None
+            return
+        
+        # Map model size index to model type
+        model_types = [
+            LSTRModelType.LSTR_180X320,   # 0 - Fastest
+            LSTRModelType.LSTR_240X320,   # 1 - Fast
+            LSTRModelType.LSTR_360X640,   # 2 - Medium
+            LSTRModelType.LSTR_480X640,   # 3 - Slow
+            LSTRModelType.LSTR_720X1280,  # 4 - Slowest
+        ]
+        
+        model_idx = max(0, min(4, int(self.lstr_model_size)))
+        selected_model = model_types[model_idx]
+        
+        # Skip if already loaded the same model
+        if self._current_lstr_model_size == model_idx and self.lstr_detector is not None:
+            return
+        
+        try:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mINFO\033[0m - Loading LSTR model: {selected_model.value}")
+            self.lstr_detector = LSTRDetector(model_type=selected_model)
+            if self.lstr_detector.is_available:
+                self._current_lstr_model_size = model_idx
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - LSTR detector initialized: {selected_model.value}")
+            else:
+                print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR model not found, using OpenCV only")
+                self.lstr_detector = None
+        except Exception as e:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to init LSTR: {e}")
+            self.lstr_detector = None
+
+    def _store_debug_image(self, name, image):
+        """Store a debug image for potential streaming."""
+        if image is not None:
+            self._debug_images[name] = image.copy()
+
+    def _send_debug_stream(self, steering_angle, speed):
+        """Send selected debug view to dashboard via websocket."""
+        if self.stream_debug_view == 0:
+            return  # Streaming disabled
+        
+        # Rate limit the streaming
+        current_time = time.time()
+        min_interval = 1.0 / max(1, self.stream_debug_fps)
+        if current_time - self._last_stream_time < min_interval:
+            return
+        self._last_stream_time = current_time
+        
+        # Debug view mapping
+        view_names = {
+            1: 'final',           # Final result with lane overlay
+            2: 'clahe',           # CLAHE normalized
+            3: 'adjusted',        # Brightness/contrast adjusted
+            4: 'hsv',             # HSV color space
+            5: 'white_mask',      # White line mask
+            6: 'yellow_mask',     # Yellow line mask
+            7: 'combined_mask',   # Combined mask
+            8: 'birds_eye',       # Bird's eye view
+            9: 'sliding_window',  # Sliding window visualization
+            10: 'lstr',           # LSTR AI result
+        }
+        
+        view_name = view_names.get(self.stream_debug_view, 'final')
+        
+        # Get the selected image
+        if view_name not in self._debug_images:
+            return
+        
+        debug_img = self._debug_images[view_name]
+        
+        if debug_img is None:
+            return
+        
+        try:
+            # Scale down for bandwidth
+            if self.stream_debug_scale < 1.0:
+                new_width = int(debug_img.shape[1] * self.stream_debug_scale)
+                new_height = int(debug_img.shape[0] * self.stream_debug_scale)
+                debug_img = cv2.resize(debug_img, (new_width, new_height))
+            
+            # Add view name overlay
+            cv2.putText(debug_img, f"View: {view_name}", (10, 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Encode to JPEG
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.stream_debug_quality]
+            _, encoded = cv2.imencode('.jpg', debug_img, encode_params)
+            
+            # Convert to base64
+            b64_data = base64.b64encode(encoded).decode('utf-8')
+            
+            # Send via message handler
+            self.debugStreamSender.send(b64_data)
+            
+            # Send status info
+            status = {
+                'steering': round(steering_angle, 2) if steering_angle is not None else None,
+                'speed': round(speed, 2) if speed is not None else None,
+                'mode': self.detection_mode,
+                'view': view_name,
+                'active': self.is_line_following_active,
+                'lstr_available': self.lstr_detector is not None and self.lstr_detector.is_available,
+            }
+            self.statusSender.send(status)
+            
+        except Exception as e:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Debug stream failed: {e}")
+
+    def _apply_clahe(self, frame):
+        """Apply CLAHE (Contrast Limited Adaptive Histogram Equalization) to normalize lighting.
+        
+        This technique equalizes the histogram locally, making the image more robust
+        to varying lighting conditions (shadows, bright spots, etc.)
+        """
+        # Convert to LAB color space (L = Lightness, A/B = color)
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l_channel, a_channel, b_channel = cv2.split(lab)
+        
+        # Apply CLAHE to the L (lightness) channel only
+        clahe = cv2.createCLAHE(
+            clipLimit=self.clahe_clip_limit,
+            tileGridSize=(self.clahe_grid_size, self.clahe_grid_size)
+        )
+        l_channel = clahe.apply(l_channel)
+        
+        # Merge channels back and convert to BGR
+        lab = cv2.merge([l_channel, a_channel, b_channel])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+    def _adaptive_white_detection(self, frame):
+        """Detect white lines using adaptive thresholding based on image statistics.
+        
+        Instead of fixed V threshold, calculates threshold dynamically based on
+        the percentile of brightness in the current frame. This adapts to
+        different lighting conditions automatically.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Calculate adaptive threshold based on percentile
+        threshold = np.percentile(gray, self.adaptive_white_percentile)
+        
+        # Ensure minimum threshold to avoid detecting everything as white
+        threshold = max(threshold, self.adaptive_white_min_threshold)
+        
+        # Create binary mask for white regions
+        _, white_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+        
+        return white_mask, threshold
+
+    def _gradient_based_detection(self, frame):
+        """Detect lane lines using gradient (edge) information.
+        
+        This method is less sensitive to color/lighting changes because it
+        focuses on detecting edges (where brightness changes sharply).
+        Useful as a fallback when color detection fails.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
+        # Apply Sobel filters to detect edges in X and Y directions
+        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        
+        # Calculate gradient magnitude
+        gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
+        
+        # Normalize to 0-255 range
+        gradient_magnitude = np.uint8(255 * gradient_magnitude / np.max(gradient_magnitude + 1e-6))
+        
+        # Calculate adaptive threshold based on percentile
+        threshold = np.percentile(gradient_magnitude, self.gradient_percentile)
+        
+        # Create binary mask for strong gradients (edges)
+        _, gradient_mask = cv2.threshold(gradient_magnitude, threshold, 255, cv2.THRESH_BINARY)
+        
+        return gradient_mask
+
+    def _preprocess_frame(self, frame):
+        """Apply all preprocessing steps to make detection robust to lighting changes.
+        
+        Returns:
+            preprocessed: The preprocessed frame
+            debug_info: Dictionary with intermediate results for debugging
+        """
+        debug_info = {}
+        
+        # Step 1: Apply CLAHE for lighting normalization
+        if self.use_clahe:
+            preprocessed = self._apply_clahe(frame)
+            debug_info['clahe'] = preprocessed.copy()
+        else:
+            preprocessed = frame.copy()
+        
+        # Step 2: Apply brightness/contrast adjustment
+        preprocessed = cv2.convertScaleAbs(preprocessed, alpha=self.contrast, beta=self.brightness)
+        debug_info['adjusted'] = preprocessed.copy()
+        
+        return preprocessed, debug_info
+
+    def _create_combined_mask(self, frame, preprocessed):
+        """Create a combined mask using multiple detection methods.
+        
+        Combines:
+        1. HSV-based color detection (white and yellow)
+        2. Adaptive white detection (if enabled)
+        3. Gradient-based detection as fallback (if enabled)
+        
+        Returns:
+            combined_mask: Binary mask with detected lane pixels
+            debug_info: Dictionary with intermediate masks for debugging
+        """
+        debug_info = {}
+        
+        # Convert to HSV for color-based detection
+        hsv = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2HSV)
+        debug_info['hsv'] = hsv.copy()
+        
+        # Standard HSV-based white detection
+        white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        debug_info['white_hsv'] = white_mask_hsv.copy()
+        
+        # Yellow detection (usually more stable across lighting)
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        debug_info['yellow'] = yellow_mask.copy()
+        
+        # Start with HSV-based masks
+        combined_mask = cv2.bitwise_or(white_mask_hsv, yellow_mask)
+        
+        # Add adaptive white detection if enabled
+        if self.use_adaptive_white:
+            adaptive_white_mask, adaptive_threshold = self._adaptive_white_detection(preprocessed)
+            debug_info['adaptive_white'] = adaptive_white_mask.copy()
+            debug_info['adaptive_threshold'] = adaptive_threshold
+            
+            # Combine with existing mask (OR operation)
+            combined_mask = cv2.bitwise_or(combined_mask, adaptive_white_mask)
+        
+        # Add gradient fallback if enabled and main detection is weak
+        if self.use_gradient_fallback:
+            # Check if we have enough detected pixels
+            white_pixel_count = np.sum(combined_mask > 0)
+            total_pixels = combined_mask.shape[0] * combined_mask.shape[1]
+            detection_ratio = white_pixel_count / total_pixels
+            
+            # If detection is weak (less than 1% of image), use gradient fallback
+            if detection_ratio < 0.01:
+                gradient_mask = self._gradient_based_detection(preprocessed)
+                debug_info['gradient'] = gradient_mask.copy()
+                debug_info['gradient_used'] = True
+                
+                # Combine gradient mask with color masks
+                combined_mask = cv2.bitwise_or(combined_mask, gradient_mask)
+            else:
+                debug_info['gradient_used'] = False
+        
+        debug_info['combined_raw'] = combined_mask.copy()
+        
+        return combined_mask, debug_info
+
+    def _detect_with_lstr(self, frame):
+        """
+        Detect lanes using LSTR (AI-based detection).
+        
+        Args:
+            frame: BGR image
+            
+        Returns:
+            tuple: (steering_angle, speed, lane_center, debug_frame) or (None, None, None, None) if failed
+        """
+        if self.lstr_detector is None or not self.lstr_detector.is_available:
+            return None, None, None, None
+        
+        try:
+            height, width = frame.shape[:2]
+            
+            # Run LSTR detection
+            lanes, lane_ids = self.lstr_detector.detect_lanes(frame)
+            
+            if len(lanes) == 0:
+                return None, None, None, None
+            
+            # Get lane center
+            lane_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
+            
+            if lane_center is None:
+                return None, None, None, None
+            
+            # Calculate steering
+            frame_center = width / 2
+            error = lane_center - frame_center
+            
+            # PID control
+            proportional = self.kp * error
+            derivative = self.kd * (error - self.previous_error)
+            self.previous_error = error
+            
+            steering_raw = proportional + derivative
+            
+            # Apply smoothing
+            if hasattr(self, 'last_steering'):
+                steering_angle = self.smoothing_factor * steering_raw + (1 - self.smoothing_factor) * self.last_steering
+            else:
+                steering_angle = steering_raw
+            
+            # Apply sensitivity and clamp
+            steering_angle = steering_angle * self.steering_sensitivity
+            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
+            
+            # Calculate speed based on steering
+            abs_steering = abs(steering_angle)
+            if abs_steering > 15:
+                speed = self.min_speed
+            elif abs_steering > 8:
+                speed = (self.min_speed + self.max_speed) / 2
+            else:
+                speed = self.max_speed
+            
+            # Create debug frame
+            debug_frame = self.lstr_detector.draw_lanes(frame)
+            cv2.putText(debug_frame, "LSTR AI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(debug_frame, f"Lanes: {len(lanes)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Store LSTR result for streaming
+            self._store_debug_image('lstr', debug_frame)
+            self._store_debug_image('final', debug_frame)
+            
+            return steering_angle, speed, lane_center, debug_frame
+            
+        except Exception as e:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - LSTR detection failed: {e}")
+            return None, None, None, None
 
     def _init_perspective_transform(self, width, height):
         """Initialize perspective transform matrices for bird's eye view."""
@@ -353,11 +737,27 @@ Returns:
                      'yellow_s_min', 'yellow_s_max', 'yellow_v_min', 'yellow_v_max',
                      'brightness', 'contrast', 'blur_kernel', 'morph_kernel',
                      'canny_low', 'canny_high', 'hough_threshold', 'hough_min_line_length',
-                     'hough_max_line_gap']
+                     'hough_max_line_gap',
+                     # Adaptive lighting parameters
+                     'use_clahe', 'clahe_clip_limit', 'clahe_grid_size',
+                     'use_adaptive_white', 'adaptive_white_percentile', 'adaptive_white_min_threshold',
+                     'use_gradient_fallback', 'gradient_percentile',
+                     # Detection mode
+                     'detection_mode', 'lstr_model_size',
+                     # Debug streaming
+                     'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale']
             
             for param in params:
                 if param in config:
                     setattr(self, param, config[param])
+            
+            # Log mode change
+            if 'detection_mode' in config:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mMODE\033[0m - Changed to: {config['detection_mode']}")
+            
+            # Reload LSTR model if size changed
+            if 'lstr_model_size' in config:
+                self._init_lstr_detector()
             
             self._update_hsv_arrays()
             print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mCONFIG\033[0m - Parameters updated")
@@ -410,7 +810,12 @@ Returns:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
     def process_frame(self, frame):
-        """Process frame using sliding window + polynomial fit for better curve detection.
+        """Process frame using selected detection mode.
+        
+        Supports three modes:
+        - opencv: Traditional HSV + sliding window (default)
+        - lstr: AI-based LSTR transformer model
+        - hybrid: OpenCV first, LSTR as fallback when detection fails
 
 Returns:
     tuple: (steering_angle, speed, debug_frame)
@@ -418,43 +823,62 @@ Returns:
         height, width = frame.shape[:2]
         
         if self.show_debug:
-            print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height}")
+            print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
+        
+        # Handle LSTR-only mode
+        if self.detection_mode == DetectionMode.LSTR.value:
+            steering, speed, center, debug = self._detect_with_lstr(frame)
+            if steering is not None:
+                self.last_line_position = center
+                self.last_steering = steering
+                return steering, speed, debug
+            else:
+                # LSTR failed, return no detection
+                debug_frame = frame.copy()
+                cv2.putText(debug_frame, "LSTR: No lanes detected", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                return None, self.min_speed, debug_frame
         
         if not self.perspective_initialized:
             self._init_perspective_transform(width, height)
         
         orig_display = frame.copy()
         
-        # Brightness and contrast adjustment
-        adjusted = cv2.convertScaleAbs(frame, alpha=self.contrast, beta=self.brightness)
+        # Apply preprocessing (CLAHE + brightness/contrast)
+        preprocessed, preprocess_debug = self._preprocess_frame(frame)
         
         if self.show_debug:
-            adj_display = adjusted.copy()
+            if self.use_clahe and 'clahe' in preprocess_debug:
+                clahe_display = preprocess_debug['clahe'].copy()
+                cv2.putText(clahe_display, f"CLAHE: clip={self.clahe_clip_limit} grid={self.clahe_grid_size}",
+                           (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                cv2.imshow("2a. CLAHE Normalized", clahe_display)
+                self._store_debug_image('clahe', clahe_display)
+            
+            adj_display = preprocess_debug['adjusted'].copy()
             cv2.putText(adj_display, f"Brightness: {self.brightness} Contrast: {self.contrast:.2f}",
                        (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.imshow("2. Brightness/Contrast", adj_display)
+            cv2.imshow("2b. Brightness/Contrast", adj_display)
+            self._store_debug_image('adjusted', adj_display)
         
-        # Convert to HSV
-        hsv = cv2.cvtColor(adjusted, cv2.COLOR_BGR2HSV)
-        
-        if self.show_debug:
-            cv2.imshow("3. HSV", hsv)
-        
-        # Create masks for white and yellow
-        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
-        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        # Create combined mask using multiple detection methods
+        combined_mask, mask_debug = self._create_combined_mask(frame, preprocessed)
         
         if self.show_debug:
-            white_display = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
+            cv2.imshow("3. HSV", mask_debug['hsv'])
+            self._store_debug_image('hsv', mask_debug['hsv'])
+            
+            white_display = cv2.cvtColor(mask_debug['white_hsv'], cv2.COLOR_GRAY2BGR)
             cv2.putText(white_display, f"H:{self.white_h_min}-{self.white_h_max}", (10, 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             cv2.putText(white_display, f"S:{self.white_s_min}-{self.white_s_max}", (10, 40),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             cv2.putText(white_display, f"V:{self.white_v_min}-{self.white_v_max}", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.imshow("4. White Mask", white_display)
+            cv2.imshow("4. White Mask (HSV)", white_display)
+            self._store_debug_image('white_mask', white_display)
             
-            yellow_display = cv2.cvtColor(yellow_mask, cv2.COLOR_GRAY2BGR)
+            yellow_display = cv2.cvtColor(mask_debug['yellow'], cv2.COLOR_GRAY2BGR)
             cv2.putText(yellow_display, f"H:{self.yellow_h_min}-{self.yellow_h_max}", (10, 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             cv2.putText(yellow_display, f"S:{self.yellow_s_min}-{self.yellow_s_max}", (10, 40),
@@ -462,12 +886,31 @@ Returns:
             cv2.putText(yellow_display, f"V:{self.yellow_v_min}-{self.yellow_v_max}", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
             cv2.imshow("5. Yellow Mask", yellow_display)
-        
-        # Combine masks
-        combined_mask = cv2.bitwise_or(white_mask, yellow_mask)
+            self._store_debug_image('yellow_mask', yellow_display)
+            
+            # Show adaptive white detection if enabled
+            if self.use_adaptive_white and 'adaptive_white' in mask_debug:
+                adaptive_display = cv2.cvtColor(mask_debug['adaptive_white'], cv2.COLOR_GRAY2BGR)
+                threshold = mask_debug.get('adaptive_threshold', 0)
+                cv2.putText(adaptive_display, f"Adaptive threshold: {threshold:.0f}", (10, 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                cv2.putText(adaptive_display, f"Percentile: {self.adaptive_white_percentile}", (10, 40),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+                cv2.imshow("5b. Adaptive White", adaptive_display)
+            
+            # Show gradient detection if it was used
+            if mask_debug.get('gradient_used', False) and 'gradient' in mask_debug:
+                gradient_display = cv2.cvtColor(mask_debug['gradient'], cv2.COLOR_GRAY2BGR)
+                cv2.putText(gradient_display, "GRADIENT FALLBACK ACTIVE", (10, 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+                cv2.imshow("5c. Gradient Fallback", gradient_display)
         
         if self.show_debug:
-            cv2.imshow("6. Combined (Raw)", combined_mask)
+            cv2.imshow("6. Combined (Raw)", mask_debug['combined_raw'])
+        
+        # Store combined mask for streaming (always, not just when show_debug)
+        combined_display = cv2.cvtColor(mask_debug['combined_raw'], cv2.COLOR_GRAY2BGR)
+        self._store_debug_image('combined_mask', combined_display)
         
         # Morphological operations
         morph_k = max(1, self.morph_kernel)
@@ -506,11 +949,18 @@ Returns:
         if self.show_debug:
             cv2.imshow("9. Bird's Eye View", binary_warped)
         
+        # Store birds eye for streaming
+        birds_eye_display = cv2.cvtColor(binary_warped, cv2.COLOR_GRAY2BGR)
+        self._store_debug_image('birds_eye', birds_eye_display)
+        
         # Find lane pixels using sliding window
         leftx, lefty, rightx, righty, sliding_window_img = self.find_lane_pixels_sliding_window(binary_warped)
         
         if self.show_debug:
             cv2.imshow("10. Sliding Window", sliding_window_img)
+        
+        # Store sliding window for streaming
+        self._store_debug_image('sliding_window', sliding_window_img)
         
         # Fit polynomial
         left_fit, right_fit, lane_center, curvature = self.fit_polynomial(leftx, lefty, rightx, righty, binary_warped.shape)
@@ -613,8 +1063,30 @@ Returns:
             self.last_line_position = lane_center_original
             self.frames_without_line = 0
         else:
-            # No lanes detected
+            # No lanes detected with OpenCV
             self.frames_without_line += 1
+            
+            # Try LSTR fallback in hybrid mode
+            if self.detection_mode == DetectionMode.HYBRID.value and self.lstr_detector is not None:
+                if self.show_debug:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mHYBRID\033[0m - OpenCV failed, trying LSTR...")
+                
+                lstr_steering, lstr_speed, lstr_center, lstr_debug = self._detect_with_lstr(frame)
+                
+                if lstr_steering is not None:
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mHYBRID\033[0m - LSTR fallback successful!")
+                    
+                    self.last_line_position = lstr_center
+                    self.last_steering = lstr_steering
+                    self.frames_without_line = 0
+                    
+                    # Add hybrid indicator to debug frame
+                    cv2.putText(lstr_debug, "HYBRID: LSTR Fallback", (10, 60), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                    
+                    return lstr_steering, lstr_speed, lstr_debug
+            
             if self.show_debug:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - Stopped. Waiting for lines... (frame {self.frames_without_line})")
             
@@ -641,6 +1113,10 @@ Returns:
                 center_x = int(self.last_line_position)
                 cv2.circle(debug_frame, (center_x, center_y), 10, (255, 0, 255), -1)
                 cv2.line(debug_frame, (width // 2, height), (width // 2, int(height * 0.6)), (0, 255, 255), 2)
+        
+        # Store final debug image and send stream
+        self._store_debug_image('final', debug_frame)
+        self._send_debug_stream(steering_angle, speed)
         
         return steering_angle, speed, debug_frame
 

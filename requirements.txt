@@ -9,3 +9,7 @@ cryptography>=43,<45
 opencv-python          # if wheel fails, use: sudo apt-get install -y python3-opencv
 pyserial==3.5
 scipy>=1.15,<2
+
+# Optional: LSTR AI-based lane detection (requires ONNX model)
+# onnxruntime>=1.16.0   # Uncomment to enable LSTR mode
+# For Raspberry Pi, use: pip install onnxruntime
