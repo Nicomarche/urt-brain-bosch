@@ -217,6 +217,92 @@ Args:
         if image is not None:
             self._debug_images[name] = image.copy()
 
+    def _show_control_panel(self, steering_angle, speed):
+        """Show a control panel window with current status."""
+        panel_width = 350
+        panel_height = 280
+        panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
+        
+        # Background gradient
+        for i in range(panel_height):
+            color = int(20 + (i / panel_height) * 20)
+            panel[i, :] = (color, color, color + 10)
+        
+        # Header
+        cv2.rectangle(panel, (0, 0), (panel_width, 45), (40, 40, 60), -1)
+        cv2.putText(panel, "CONTROL PANEL", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+        
+        # Status indicator
+        status = "ACTIVE" if self.is_line_following_active else "STANDBY"
+        status_color = (0, 255, 0) if self.is_line_following_active else (0, 165, 255)
+        cv2.circle(panel, (panel_width - 25, 25), 10, status_color, -1)
+        
+        # Detection Mode
+        y_pos = 70
+        cv2.putText(panel, "Mode:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        mode_colors = {'opencv': (0, 200, 0), 'lstr': (255, 100, 0), 'hybrid': (255, 255, 0)}
+        mode_color = mode_colors.get(self.detection_mode, (200, 200, 200))
+        cv2.putText(panel, self.detection_mode.upper(), (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
+        
+        # LSTR Status
+        y_pos += 30
+        cv2.putText(panel, "LSTR:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        if self.lstr_detector is not None and self.lstr_detector.is_available:
+            cv2.putText(panel, f"OK ({self.lstr_detector.model_type.value})", (80, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        else:
+            cv2.putText(panel, "Not Available", (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        
+        # Steering
+        y_pos += 35
+        cv2.putText(panel, "Steering:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        if steering_angle is not None:
+            steer_text = f"{steering_angle:.1f} deg"
+            steer_color = (0, 255, 255) if abs(steering_angle) < 10 else (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
+            cv2.putText(panel, steer_text, (100, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, steer_color, 2)
+            
+            # Steering bar
+            bar_center = panel_width // 2
+            bar_y = y_pos + 15
+            bar_width = 150
+            cv2.rectangle(panel, (bar_center - bar_width//2, bar_y), (bar_center + bar_width//2, bar_y + 10), (60, 60, 60), -1)
+            steer_pos = int(bar_center + (steering_angle / self.max_steering) * (bar_width // 2))
+            cv2.rectangle(panel, (bar_center - 2, bar_y), (bar_center + 2, bar_y + 10), (100, 100, 100), -1)
+            cv2.circle(panel, (steer_pos, bar_y + 5), 6, steer_color, -1)
+        else:
+            cv2.putText(panel, "---", (100, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 2)
+        
+        # Speed
+        y_pos += 50
+        cv2.putText(panel, "Speed:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        if speed is not None:
+            speed_text = f"{speed:.0f}"
+            cv2.putText(panel, speed_text, (100, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Speed bar
+            bar_x = 150
+            bar_width = 150
+            bar_y = y_pos - 12
+            cv2.rectangle(panel, (bar_x, bar_y), (bar_x + bar_width, bar_y + 15), (60, 60, 60), -1)
+            speed_width = int((speed / self.max_speed) * bar_width)
+            cv2.rectangle(panel, (bar_x, bar_y), (bar_x + speed_width, bar_y + 15), (0, 200, 0), -1)
+        else:
+            cv2.putText(panel, "---", (100, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 100, 100), 2)
+        
+        # Frames without line
+        y_pos += 35
+        cv2.putText(panel, "Lost frames:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
+        lost_color = (0, 255, 0) if self.frames_without_line < 3 else (0, 165, 255) if self.frames_without_line < 7 else (0, 0, 255)
+        cv2.putText(panel, f"{self.frames_without_line}/{self.max_frames_without_line}", (130, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, lost_color, 1)
+        
+        # PID Info
+        y_pos += 30
+        cv2.putText(panel, f"PID: Kp={self.kp:.2f} Kd={self.kd:.2f}", (15, y_pos), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
+        
+        cv2.imshow("Control Panel", panel)
+
     def _send_debug_stream(self, steering_angle, speed):
         """Send selected debug view to dashboard via websocket."""
         if self.stream_debug_view == 0:
@@ -456,15 +542,43 @@ Args:
             height, width = frame.shape[:2]
             
             # Run LSTR detection
+            start_time = time.time()
             lanes, lane_ids = self.lstr_detector.detect_lanes(frame)
+            inference_time = (time.time() - start_time) * 1000  # ms
+            
+            # Create AI analysis window (always, even if no lanes)
+            ai_analysis_frame = frame.copy()
+            
+            # Draw AI analysis header
+            cv2.rectangle(ai_analysis_frame, (0, 0), (width, 80), (20, 20, 40), -1)
+            cv2.putText(ai_analysis_frame, "LSTR AI ANALYSIS", (10, 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(ai_analysis_frame, f"Model: {self.lstr_detector.model_type.value}", (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            cv2.putText(ai_analysis_frame, f"Inference: {inference_time:.1f}ms", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            cv2.putText(ai_analysis_frame, f"Lanes: {len(lanes)}", (width - 100, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if len(lanes) > 0 else (0, 0, 255), 2)
             
             if len(lanes) == 0:
+                cv2.putText(ai_analysis_frame, "NO LANES DETECTED", (width//2 - 120, height//2),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                
+                # Show AI analysis window even when no detection
+                if self.show_debug:
+                    cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
+                    cv2.waitKey(1)
+                
+                self._store_debug_image('lstr', ai_analysis_frame)
                 return None, None, None, None
             
             # Get lane center
             lane_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
             
             if lane_center is None:
+                if self.show_debug:
+                    cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
+                    cv2.waitKey(1)
                 return None, None, None, None
             
             # Calculate steering
@@ -497,10 +611,41 @@ Args:
             else:
                 speed = self.max_speed
             
-            # Create debug frame
+            # Create debug frame with lane overlay
             debug_frame = self.lstr_detector.draw_lanes(frame)
-            cv2.putText(debug_frame, "LSTR AI", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(debug_frame, f"Lanes: {len(lanes)}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Draw header
+            cv2.rectangle(debug_frame, (0, 0), (width, 80), (20, 20, 40), -1)
+            cv2.putText(debug_frame, "LSTR AI ANALYSIS", (10, 25), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(debug_frame, f"Model: {self.lstr_detector.model_type.value}", (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            cv2.putText(debug_frame, f"Inference: {inference_time:.1f}ms ({1000/max(1,inference_time):.1f} FPS)", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            
+            # Draw lane info on right side
+            cv2.putText(debug_frame, f"Lanes: {len(lanes)}", (width - 100, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f}", (width - 130, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(debug_frame, f"Speed: {speed:.0f}", (width - 100, 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Draw lane center indicator
+            center_y = int(height * 0.7)
+            cv2.circle(debug_frame, (int(lane_center), center_y), 12, (255, 0, 255), -1)
+            cv2.line(debug_frame, (int(frame_center), center_y - 30), (int(frame_center), center_y + 30), (0, 255, 255), 2)
+            cv2.arrowedLine(debug_frame, (int(frame_center), center_y), (int(lane_center), center_y), (255, 0, 255), 2)
+            
+            # Draw offset text
+            offset_text = f"Offset: {error:.0f}px"
+            cv2.putText(debug_frame, offset_text, (int(frame_center) - 50, center_y - 40),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Show AI analysis window
+            if self.show_debug:
+                cv2.imshow("AI Analysis - LSTR", debug_frame)
+                cv2.waitKey(1)
             
             # Store LSTR result for streaming
             self._store_debug_image('lstr', debug_frame)
@@ -805,7 +950,10 @@ Returns:
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
                     cv2.imshow("1. Final Result", debug_frame)
-                    cv2.waitKey(1)
+                
+                # Show control panel with current status
+                self._show_control_panel(steering_angle, speed)
+                cv2.waitKey(1)
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
@@ -1021,7 +1169,7 @@ Returns:
                     curv_str = f"curv:{curvature:.0f}"
                 else:
                     curv_str = "curv:N/A"
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mERROR\033[0m - error:{error:.1f} ratio:{error_ratio:.1f} [{intensity_names[curve_intensity]}]")
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mOFFSET\033[0m - offset:{error:.1f}px ratio:{error_ratio:.2f} {curv_str} [{intensity_names[curve_intensity]}]")
             
             # PID control
             if self.is_line_following_active:

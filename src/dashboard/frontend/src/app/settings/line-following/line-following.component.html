@@ -1,50 +1,302 @@
 <div class="line-following-config">
   <div class="header">
-    <h3>Line Following Configuration</h3>
-    <button class="btn-reset" (click)="resetDefaults()">Reset Defaults</button>
+    <h3>Configuración de Seguimiento de Línea</h3>
+    <button class="btn-reset" (click)="resetDefaults()">Restaurar Valores</button>
   </div>
-  
-  <!-- Debug Stream Viewer -->
-  <div class="debug-stream" *ngIf="debugStreamEnabled">
-    <div class="debug-header">
-      <h4>📺 Debug Stream: {{ debugViewName }}</h4>
-      <div class="debug-status" *ngIf="debugStatus">
-        <span>Mode: {{ debugStatus.mode }}</span>
-        <span>Steer: {{ debugStatus.steering ?? 'N/A' }}°</span>
-        <span>Speed: {{ debugStatus.speed ?? 'N/A' }}</span>
-        <span [class.active]="debugStatus.active">{{ debugStatus.active ? '🟢 ACTIVE' : '🔴 INACTIVE' }}</span>
+
+  <!-- AI Analysis Window -->
+  <div class="ai-analysis-panel" *ngIf="debugStreamEnabled">
+    <div class="ai-header">
+      <h4>Análisis en Tiempo Real</h4>
+      <div class="ai-indicators">
+        <span class="indicator" [class.active]="debugStatus?.active">
+          {{ debugStatus?.active ? 'ACTIVO' : 'INACTIVO' }}
+        </span>
+        <span class="indicator mode-indicator">{{ getModeDisplayName() }}</span>
       </div>
     </div>
-    <div class="debug-image-container">
-      <img [src]="debugImageSrc" *ngIf="debugImageSrc" alt="Debug View" class="debug-image"/>
-      <div class="no-stream" *ngIf="!debugImageSrc">
-        <p>Waiting for debug stream...</p>
-        <p class="hint">Set "View" to 1-10 to enable streaming</p>
+    
+    <div class="ai-content">
+      <div class="ai-video-container">
+        <img [src]="debugImageSrc" *ngIf="debugImageSrc" alt="Debug View" class="ai-video"/>
+        <div class="no-stream" *ngIf="!debugImageSrc">
+          <div class="no-stream-icon">📷</div>
+          <p>Esperando stream de video...</p>
+          <p class="hint">Selecciona una vista de debug para comenzar</p>
+        </div>
       </div>
-    </div>
-  </div>
-  
-  <div class="slider-groups">
-    <div class="slider-group" *ngFor="let group of sliderGroups">
-      <h4>{{ group.title }}</h4>
-      <div class="sliders">
-        <div class="slider-row" *ngFor="let slider of group.sliders">
-          <label>{{ slider.label }}</label>
-          <input 
-            type="range" 
-            [min]="slider.min" 
-            [max]="slider.max" 
-            [step]="slider.step"
-            [(ngModel)]="slider.value"
-            (input)="onSliderChange(slider)"
-          />
-          <span class="value">{{ slider.value }}</span>
+      
+      <div class="ai-stats">
+        <div class="stat-item">
+          <span class="stat-label">Vista</span>
+          <span class="stat-value">{{ debugViewName }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Dirección</span>
+          <span class="stat-value">{{ debugStatus?.steering !== null ? (debugStatus?.steering | number:'1.1-1') + '°' : '--' }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Velocidad</span>
+          <span class="stat-value">{{ debugStatus?.speed ?? '--' }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">LSTR</span>
+          <span class="stat-value" [class.available]="debugStatus?.lstr_available">
+            {{ debugStatus?.lstr_available ? 'Disponible' : 'No disponible' }}
+          </span>
         </div>
       </div>
     </div>
   </div>
-  
+
+  <!-- Detection Mode Selection -->
+  <div class="config-section">
+    <div class="section-header">
+      <h4>Modo de Detección</h4>
+    </div>
+    <div class="button-group mode-buttons">
+      <button 
+        class="mode-btn" 
+        [class.selected]="selectedMode === 'opencv'"
+        (click)="setMode('opencv')">
+        <span class="mode-icon">👁️</span>
+        <span class="mode-name">OpenCV</span>
+        <span class="mode-desc">Detección clásica con visión por computadora. Usa máscaras HSV y transformaciones geométricas.</span>
+      </button>
+      <button 
+        class="mode-btn" 
+        [class.selected]="selectedMode === 'lstr'"
+        (click)="setMode('lstr')"
+        [disabled]="!lstrAvailable">
+        <span class="mode-icon">🤖</span>
+        <span class="mode-name">LSTR AI</span>
+        <span class="mode-desc">Red neuronal LSTR para detección de carriles. Más preciso pero requiere más recursos.</span>
+        <span class="mode-badge" *ngIf="!lstrAvailable">No disponible</span>
+      </button>
+      <button 
+        class="mode-btn" 
+        [class.selected]="selectedMode === 'hybrid'"
+        (click)="setMode('hybrid')"
+        [disabled]="!lstrAvailable">
+        <span class="mode-icon">⚡</span>
+        <span class="mode-name">Híbrido</span>
+        <span class="mode-desc">Combina OpenCV y LSTR. Usa IA cuando está disponible, fallback a OpenCV si falla.</span>
+        <span class="mode-badge" *ngIf="!lstrAvailable">No disponible</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- LSTR Model Selection -->
+  <div class="config-section" *ngIf="selectedMode === 'lstr' || selectedMode === 'hybrid'">
+    <div class="section-header">
+      <h4>Modelo LSTR</h4>
+    </div>
+    <div class="button-group model-buttons">
+      <button 
+        *ngFor="let model of lstrModels"
+        class="model-btn" 
+        [class.selected]="selectedLstrModel === model.id"
+        (click)="setLstrModel(model.id)">
+        <span class="model-name">{{ model.name }}</span>
+        <span class="model-resolution">{{ model.resolution }}</span>
+        <span class="model-speed">{{ model.speed }}</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Debug View Selection -->
+  <div class="config-section">
+    <div class="section-header">
+      <h4>Vista de Debug</h4>
+    </div>
+    <div class="button-group view-buttons">
+      <button 
+        *ngFor="let view of debugViews"
+        class="view-btn" 
+        [class.selected]="selectedDebugView === view.id"
+        (click)="setDebugView(view.id)">
+        <span class="view-icon">{{ view.icon }}</span>
+        <span class="view-name">{{ view.name }}</span>
+      </button>
+    </div>
+    <p class="view-description" *ngIf="getSelectedViewDescription()">
+      {{ getSelectedViewDescription() }}
+    </p>
+  </div>
+
+  <!-- Stream Settings -->
+  <div class="config-section compact">
+    <div class="section-header">
+      <h4>Configuración del Stream</h4>
+    </div>
+    <div class="inline-controls">
+      <div class="control-item">
+        <label>FPS</label>
+        <div class="btn-group-small">
+          <button *ngFor="let fps of [1, 5, 10, 15]" 
+                  [class.selected]="streamFps === fps"
+                  (click)="setStreamFps(fps)">{{ fps }}</button>
+        </div>
+      </div>
+      <div class="control-item">
+        <label>Calidad</label>
+        <div class="btn-group-small">
+          <button *ngFor="let q of [30, 50, 70, 90]" 
+                  [class.selected]="streamQuality === q"
+                  (click)="setStreamQuality(q)">{{ q }}%</button>
+        </div>
+      </div>
+      <div class="control-item">
+        <label>Escala</label>
+        <div class="btn-group-small">
+          <button *ngFor="let s of [0.25, 0.5, 0.75, 1.0]" 
+                  [class.selected]="streamScale === s"
+                  (click)="setStreamScale(s)">{{ s * 100 }}%</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Collapsible Parameter Groups -->
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('speed')">
+      <h4>🚗 Velocidad</h4>
+      <span class="toggle-icon">{{ expandedSections['speed'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['speed']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('speed')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('pid')">
+      <h4>🎯 Control PID</h4>
+      <span class="toggle-icon">{{ expandedSections['pid'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['pid']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('pid')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('roi')">
+      <h4>📐 Región de Interés (ROI)</h4>
+      <span class="toggle-icon">{{ expandedSections['roi'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['roi']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('roi')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('white')">
+      <h4>⚪ Línea Blanca (HSV)</h4>
+      <span class="toggle-icon">{{ expandedSections['white'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['white']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('white')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('yellow')">
+      <h4>🟡 Línea Amarilla (HSV)</h4>
+      <span class="toggle-icon">{{ expandedSections['yellow'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['yellow']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('yellow')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('image')">
+      <h4>🔧 Procesamiento de Imagen</h4>
+      <span class="toggle-icon">{{ expandedSections['image'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['image']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('image')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('edge')">
+      <h4>📏 Detección de Bordes</h4>
+      <span class="toggle-icon">{{ expandedSections['edge'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['edge']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('edge')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('adaptive')">
+      <h4>💡 Iluminación Adaptativa</h4>
+      <span class="toggle-icon">{{ expandedSections['adaptive'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['adaptive']">
+      <div class="toggle-row">
+        <label>CLAHE</label>
+        <button class="toggle-btn" [class.active]="useClahe" (click)="toggleClahe()">
+          {{ useClahe ? 'ON' : 'OFF' }}
+        </button>
+      </div>
+      <div class="toggle-row">
+        <label>Blanco Adaptativo</label>
+        <button class="toggle-btn" [class.active]="useAdaptiveWhite" (click)="toggleAdaptiveWhite()">
+          {{ useAdaptiveWhite ? 'ON' : 'OFF' }}
+        </button>
+      </div>
+      <div class="toggle-row">
+        <label>Fallback Gradiente</label>
+        <button class="toggle-btn" [class.active]="useGradientFallback" (click)="toggleGradientFallback()">
+          {{ useGradientFallback ? 'ON' : 'OFF' }}
+        </button>
+      </div>
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('adaptive')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
   <div class="actions">
-    <button class="btn-apply" (click)="sendConfig()">Apply All</button>
+    <button class="btn-apply" (click)="sendConfig()">Aplicar Configuración</button>
   </div>
 </div>
