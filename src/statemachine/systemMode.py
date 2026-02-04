@@ -66,7 +66,9 @@ class SystemMode(Enum):
             },
             "thread": {
                 "resolution": "480p",
-                "line_following": True,
+            },
+            "lineFollowing": {
+                "enabled": True,
             }
         },
         "serial_handler": {

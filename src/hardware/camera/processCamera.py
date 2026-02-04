@@ -77,8 +77,12 @@ class processCamera(WorkerProcess):
         self.threads.append(camTh)
         
         # Add line following thread
+        # show_debug=False for headless operation (no display)
+        # Set to True only when running with a monitor connected
+        import os
+        has_display = os.environ.get('DISPLAY') is not None
         lineFollowingTh = threadLineFollowing(
-            self.queuesList, self.logging, self.debugging, show_debug=True
+            self.queuesList, self.logging, self.debugging, show_debug=has_display
         )
         self.threads.append(lineFollowingTh)
 

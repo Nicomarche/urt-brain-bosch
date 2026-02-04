@@ -26,7 +26,7 @@ class DetectionMode(Enum):
     """Lane detection modes."""
     OPENCV = "opencv"       # Traditional OpenCV (HSV + Hough)
     LSTR = "lstr"          # AI-based LSTR model
-    HYBRID = "hybrid"       # OpenCV first, LSTR as fallback
+    HYBRID = "hybrid"       # Fusion of OpenCV + LSTR (combines both for better accuracy)
 
 
 class threadLineFollowing(ThreadWithStop):
@@ -52,13 +52,13 @@ Args:
 
         # Steering parameters
         self.max_steering = 25
-        self.steering_sensitivity = 3
+        self.dead_zone_ratio = 0.02  # 2% of frame width - ignore small errors (prevents oscillation)
 
-        # PID parameters
-        self.kp = 4
-        self.kd = 0.05
+        # PID parameters - error is normalized to [-1, 1] range
+        self.kp = 35.0  # Maps normalized error to steering (0.5 error -> ~17.5 deg)
+        self.kd = 5.0   # Derivative gain for damping
         self.previous_error = 0
-        self.smoothing_factor = 0.3
+        self.smoothing_factor = 0.5  # Higher = more reactive, Lower = more smooth
         self.lookahead = 0.4
 
         # ROI parameters
@@ -115,6 +115,12 @@ Args:
         self.lstr_fallback_threshold = 0.01  # Switch to LSTR if detection < 1% of pixels
         self.lstr_confidence_threshold = 0.5  # Minimum confidence for LSTR detection
         self._current_lstr_model_size = -1  # Track current loaded model
+        
+        # Hybrid fusion parameters
+        self.hybrid_opencv_weight = 0.4   # Weight for OpenCV detection (0-1)
+        self.hybrid_lstr_weight = 0.6     # Weight for LSTR detection (0-1) - AI is more robust
+        self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
+        
         self._init_lstr_detector()
 
         # Debug streaming parameters
@@ -211,6 +217,16 @@ Args:
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to init LSTR: {e}")
             self.lstr_detector = None
+
+    def _reset_pid_state(self):
+        """Reset PID state when changing modes to prevent corrupted values."""
+        self.previous_error = 0
+        if hasattr(self, 'last_steering'):
+            del self.last_steering
+        self.last_line_position = None
+        self.frames_without_line = 0
+        self.last_turn_direction = 0
+        print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset")
 
     def _store_debug_image(self, name, image):
         """Store a debug image for potential streaming."""
@@ -581,25 +597,63 @@ Args:
                     cv2.waitKey(1)
                 return None, None, None, None
             
-            # Calculate steering
+            # Calculate steering with NORMALIZED error
             frame_center = width / 2
             error = lane_center - frame_center
+            error_normalized = error / frame_center  # Range [-1, 1]
             
-            # PID control
-            proportional = self.kp * error
-            derivative = self.kd * (error - self.previous_error)
-            self.previous_error = error
+            # PID control with dead zone for straight line stability
+            abs_error_norm = abs(error_normalized)
+            if abs_error_norm < self.dead_zone_ratio:
+                # Very small error - no correction
+                effective_error = 0
+                derivative = 0
+            else:
+                # Outside dead zone
+                effective_error = (abs_error_norm - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
+                derivative = self.kd * (error_normalized - self.previous_error)
             
+            self.previous_error = error_normalized
+            
+            # Determine curve intensity based on error magnitude (same logic as OpenCV)
+            # Higher error = sharper curve = need more steering
+            # Lower thresholds to activate multiplier more easily
+            if abs_error_norm > 0.15:
+                curve_intensity = 3  # Sharp curve
+            elif abs_error_norm > 0.08:
+                curve_intensity = 2  # Medium curve
+            elif abs_error_norm > 0.04:
+                curve_intensity = 1  # Slight curve
+            else:
+                curve_intensity = 0  # Straight
+            
+            curve_multipliers = (40, 40, 40, 40)
+            curve_smoothing = (0.3, 0.6, 0.8, 0.15)
+            curve_multiplier = curve_multipliers[curve_intensity]
+            curve_smooth = curve_smoothing[curve_intensity]
+            is_sharp_curve = curve_intensity >= 2
+            
+            proportional = self.kp * effective_error * curve_multiplier
             steering_raw = proportional + derivative
             
-            # Apply smoothing
+            if self.show_debug:
+                intensity_names = ('STRAIGHT', 'SLIGHT', 'MEDIUM', 'SHARP!')
+                print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;96mCURVE\033[0m - error:{abs_error_norm:.2f} [{intensity_names[curve_intensity]}] mult:{curve_multiplier}x")
+            
+            # Apply smoothing - more smoothing for stability in straight lines
+            if abs_error_norm < self.dead_zone_ratio * 3:
+                smooth = 0.25  # Very smooth
+            elif is_sharp_curve:
+                smooth = curve_smooth
+            else:
+                smooth = self.smoothing_factor
+            
             if hasattr(self, 'last_steering'):
-                steering_angle = self.smoothing_factor * steering_raw + (1 - self.smoothing_factor) * self.last_steering
+                steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
             else:
                 steering_angle = steering_raw
             
-            # Apply sensitivity and clamp
-            steering_angle = steering_angle * self.steering_sensitivity
+            # Clamp to max steering
             steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
             
             # Calculate speed based on steering
@@ -656,6 +710,185 @@ Args:
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - LSTR detection failed: {e}")
             return None, None, None, None
+
+    def _detect_hybrid_fusion(self, frame):
+        """
+        Detect lanes using FUSION of OpenCV and LSTR.
+        
+        Both detectors run and their results are combined:
+        - If both detect: weighted average of steering angles
+        - If only one detects: use that one (with reduced confidence)
+        - If neither detects: return None
+        
+        Returns:
+            tuple: (steering_angle, speed, debug_frame) or (None, speed, debug_frame)
+        """
+        height, width = frame.shape[:2]
+        
+        # Initialize perspective if needed
+        if not self.perspective_initialized:
+            self._init_perspective_transform(width, height)
+        
+        # Run both detectors
+        opencv_steering = None
+        opencv_center = None
+        lstr_steering = None
+        lstr_center = None
+        
+        # 1. Run OpenCV detection (simplified - just get the lane center)
+        try:
+            preprocessed, _ = self._preprocess_frame(frame)
+            white_mask = self._threshold_white(preprocessed)
+            binary_warped = self.warp_perspective(white_mask)
+            leftx, lefty, rightx, righty = self.sliding_window(binary_warped)
+            left_fit, right_fit, lane_center_warped, curvature = self.fit_polynomial(
+                leftx, lefty, rightx, righty, binary_warped.shape
+            )
+            
+            if lane_center_warped is not None:
+                # Transform back to original coordinates
+                y_eval = int(height * (1.0 - self.lookahead))
+                y_eval_warped = int(binary_warped.shape[0] * (1.0 - self.lookahead))
+                
+                point_warped = np.array([[[lane_center_warped, y_eval_warped]]], dtype=np.float32)
+                point_original = cv2.perspectiveTransform(point_warped, self.perspective_M_inv)
+                opencv_center = point_original[0][0][0]
+                
+                # Calculate OpenCV steering
+                frame_center = width / 2
+                error_norm = (opencv_center - frame_center) / frame_center
+                opencv_steering = self.kp * error_norm  # Simplified PID
+        except Exception as e:
+            if self.show_debug:
+                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;93mOpenCV failed\033[0m - {e}")
+        
+        # 2. Run LSTR detection
+        try:
+            if self.lstr_detector is not None and self.lstr_detector.is_available:
+                lanes, _ = self.lstr_detector.detect_lanes(frame)
+                if len(lanes) > 0:
+                    lstr_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
+                    if lstr_center is not None:
+                        frame_center = width / 2
+                        error_norm = (lstr_center - frame_center) / frame_center
+                        lstr_steering = self.kp * error_norm  # Simplified PID
+        except Exception as e:
+            if self.show_debug:
+                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;93mLSTR failed\033[0m - {e}")
+        
+        # 3. Combine results
+        final_steering = None
+        confidence = 0.0
+        source = "NONE"
+        
+        if opencv_steering is not None and lstr_steering is not None:
+            # Both detected - weighted fusion
+            final_steering = (
+                self.hybrid_opencv_weight * opencv_steering + 
+                self.hybrid_lstr_weight * lstr_steering
+            )
+            
+            # Check agreement - if they agree, boost confidence
+            steering_diff = abs(opencv_steering - lstr_steering)
+            if steering_diff < 5:  # Within 5 degrees
+                confidence = 1.0 * self.hybrid_agreement_bonus
+                source = "FUSION (agree)"
+            else:
+                confidence = 0.8
+                source = f"FUSION (diff:{steering_diff:.1f}°)"
+                
+        elif opencv_steering is not None:
+            # Only OpenCV detected
+            final_steering = opencv_steering
+            confidence = 0.6
+            source = "OpenCV only"
+            
+        elif lstr_steering is not None:
+            # Only LSTR detected
+            final_steering = lstr_steering
+            confidence = 0.8  # LSTR is more reliable
+            source = "LSTR only"
+        
+        # Apply smoothing and clamp
+        if final_steering is not None:
+            # Apply dead zone
+            if abs(final_steering) < self.dead_zone_ratio * self.kp:
+                final_steering = 0
+            
+            # Smooth with previous
+            if hasattr(self, 'last_steering'):
+                smooth = 0.4
+                final_steering = smooth * final_steering + (1 - smooth) * self.last_steering
+            
+            # Clamp
+            final_steering = min(max(final_steering, -self.max_steering), self.max_steering)
+            self.last_steering = final_steering
+        
+        # Calculate speed based on steering
+        if final_steering is not None:
+            abs_steer = abs(final_steering)
+            if abs_steer > 15:
+                speed = self.min_speed
+            elif abs_steer > 8:
+                speed = (self.min_speed + self.max_speed) / 2
+            else:
+                speed = self.max_speed
+        else:
+            speed = self.min_speed
+        
+        # Create debug frame
+        debug_frame = frame.copy()
+        
+        # Draw header
+        cv2.rectangle(debug_frame, (0, 0), (width, 100), (20, 20, 40), -1)
+        cv2.putText(debug_frame, "HYBRID FUSION MODE", (10, 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        
+        # Draw detection sources
+        y_pos = 50
+        if opencv_steering is not None:
+            cv2.putText(debug_frame, f"OpenCV: {opencv_steering:.1f} deg", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if opencv_center is not None:
+                cv2.circle(debug_frame, (int(opencv_center), int(height * 0.8)), 8, (0, 255, 0), -1)
+        else:
+            cv2.putText(debug_frame, "OpenCV: --", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+        
+        y_pos = 70
+        if lstr_steering is not None:
+            cv2.putText(debug_frame, f"LSTR: {lstr_steering:.1f} deg", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 0), 1)
+            if lstr_center is not None:
+                cv2.circle(debug_frame, (int(lstr_center), int(height * 0.8)), 8, (255, 100, 0), -1)
+        else:
+            cv2.putText(debug_frame, "LSTR: --", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
+        
+        y_pos = 90
+        if final_steering is not None:
+            cv2.putText(debug_frame, f"FINAL: {final_steering:.1f} deg [{source}]", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+            # Draw final center
+            final_center = width/2 + (final_steering / self.max_steering) * (width/4)
+            cv2.circle(debug_frame, (int(final_center), int(height * 0.85)), 12, (0, 255, 255), 3)
+        else:
+            cv2.putText(debug_frame, "FINAL: NO DETECTION", (10, y_pos),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # Draw frame center reference
+        cv2.line(debug_frame, (width//2, height - 50), (width//2, height), (255, 255, 255), 2)
+        
+        if self.show_debug:
+            cv2.imshow("HYBRID Fusion", debug_frame)
+            cv2.waitKey(1)
+            if final_steering is not None:
+                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;96m{source}\033[0m - Steer: {final_steering:.1f}° (OpenCV:{opencv_steering}, LSTR:{lstr_steering})")
+        
+        self._store_debug_image('hybrid', debug_frame)
+        self._store_debug_image('final', debug_frame)
+        
+        return final_steering, speed, debug_frame
 
     def _init_perspective_transform(self, width, height):
         """Initialize perspective transform matrices for bird's eye view."""
@@ -875,7 +1108,7 @@ Returns:
         """Apply configuration from dashboard sliders."""
         try:
             params = ['base_speed', 'max_speed', 'min_speed', 'kp', 'kd', 'smoothing_factor',
-                     'steering_sensitivity', 'roi_height_start', 'roi_height_end',
+                     'dead_zone_ratio', 'max_steering', 'roi_height_start', 'roi_height_end',
                      'roi_width_margin_top', 'roi_width_margin_bottom',
                      'white_h_min', 'white_h_max', 'white_s_min', 'white_s_max',
                      'white_v_min', 'white_v_max', 'yellow_h_min', 'yellow_h_max',
@@ -896,9 +1129,11 @@ Returns:
                 if param in config:
                     setattr(self, param, config[param])
             
-            # Log mode change
+            # Log mode change and reset PID state
             if 'detection_mode' in config:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mMODE\033[0m - Changed to: {config['detection_mode']}")
+                # Reset PID state to prevent corruption between modes
+                self._reset_pid_state()
             
             # Reload LSTR model if size changed
             if 'lstr_model_size' in config:
@@ -941,8 +1176,17 @@ Returns:
                     self.frames_without_line = 0
                 else:
                     self.frames_without_line += 1
+                    if self.show_debug and self.frames_without_line % 10 == 1:
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWAIT\033[0m - No steering, frame {self.frames_without_line}/{self.max_frames_without_line}")
                     if self.frames_without_line > self.max_frames_without_line:
                         self.send_motor_commands(0, self.min_speed)
+            else:
+                # Line following not active - need to be in AUTO mode
+                if steering_angle is not None:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mBLOCKED\033[0m - Steering={steering_angle:.1f}° but is_line_following_active=False! Put system in AUTO mode.")
+                if hasattr(self, '_last_inactive_log') == False:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
+                    self._last_inactive_log = True
             
             if self.show_debug:
                 if debug_frame is not None:
@@ -963,7 +1207,7 @@ Returns:
         Supports three modes:
         - opencv: Traditional HSV + sliding window (default)
         - lstr: AI-based LSTR transformer model
-        - hybrid: OpenCV first, LSTR as fallback when detection fails
+        - hybrid: FUSION of OpenCV + LSTR (runs both, combines results)
 
 Returns:
     tuple: (steering_angle, speed, debug_frame)
@@ -973,18 +1217,43 @@ Returns:
         if self.show_debug:
             print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
         
+        # Handle HYBRID fusion mode (runs both detectors and combines)
+        if self.detection_mode == DetectionMode.HYBRID.value:
+            try:
+                steering, speed, debug = self._detect_hybrid_fusion(frame)
+                if steering is not None:
+                    self.frames_without_line = 0
+                return steering, speed, debug
+            except Exception as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mHYBRID ERROR\033[0m - {e}")
+                debug_frame = frame.copy()
+                cv2.putText(debug_frame, f"HYBRID Error: {str(e)[:50]}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                return None, self.min_speed, debug_frame
+        
         # Handle LSTR-only mode
         if self.detection_mode == DetectionMode.LSTR.value:
-            steering, speed, center, debug = self._detect_with_lstr(frame)
-            if steering is not None:
-                self.last_line_position = center
-                self.last_steering = steering
-                return steering, speed, debug
-            else:
-                # LSTR failed, return no detection
+            try:
+                steering, speed, center, debug = self._detect_with_lstr(frame)
+                if steering is not None:
+                    self.last_line_position = center
+                    self.last_steering = steering
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mLSTR\033[0m - Steer: {steering:.1f}° Speed: {speed:.1f}")
+                    return steering, speed, debug
+                else:
+                    # LSTR failed, return no detection
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mLSTR\033[0m - No lanes detected")
+                    debug_frame = frame.copy()
+                    cv2.putText(debug_frame, "LSTR: No lanes detected", (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    return None, self.min_speed, debug_frame
+            except Exception as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mLSTR ERROR\033[0m - {e}")
                 debug_frame = frame.copy()
-                cv2.putText(debug_frame, "LSTR: No lanes detected", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                cv2.putText(debug_frame, f"LSTR Error: {str(e)[:50]}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 return None, self.min_speed, debug_frame
         
         if not self.perspective_initialized:
@@ -1171,27 +1440,46 @@ Returns:
                     curv_str = "curv:N/A"
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mOFFSET\033[0m - offset:{error:.1f}px ratio:{error_ratio:.2f} {curv_str} [{intensity_names[curve_intensity]}]")
             
-            # PID control
+            # PID control with NORMALIZED error (range -1 to 1)
+            half_width = width / 2
+            error_normalized = error / half_width  # Now in range [-1, 1]
+            
             if self.is_line_following_active:
                 total_correction = self.single_line_correction if (left_fit is None or right_fit is None) else 1
             else:
                 total_correction = 1
             
-            proportional = self.kp * error * total_correction * curve_multiplier
-            derivative = self.kd * (error - self.previous_error)
-            self.previous_error = error
+            # Apply dead zone - ignore small errors to prevent oscillation in straight lines
+            abs_error_norm = abs(error_normalized)
+            if abs_error_norm < self.dead_zone_ratio:
+                # Very small error - no correction
+                effective_error = 0
+                derivative = 0
+            else:
+                # Outside dead zone - subtract dead zone for smooth transition
+                effective_error = (abs_error_norm - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
+                derivative = self.kd * (error_normalized - self.previous_error)
             
+            self.previous_error = error_normalized
+            
+            # PID calculation
+            proportional = self.kp * effective_error * total_correction * curve_multiplier
             steering_raw = proportional + derivative
             
-            # Apply smoothing
-            smooth = curve_smooth if is_sharp_curve else self.smoothing_factor
+            # Apply smoothing - more smoothing in straight lines, less in curves
+            if abs_error_norm < self.dead_zone_ratio * 3:  # Near straight
+                smooth = 0.25  # Very smooth for stability
+            elif is_sharp_curve:
+                smooth = curve_smooth
+            else:
+                smooth = self.smoothing_factor
+            
             if hasattr(self, 'last_steering'):
                 steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
             else:
                 steering_angle = steering_raw
             
-            # Apply sensitivity and clamp
-            steering_angle = steering_angle * self.steering_sensitivity
+            # Clamp to max steering
             steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
             self.last_steering = steering_angle
             
@@ -1213,27 +1501,6 @@ Returns:
         else:
             # No lanes detected with OpenCV
             self.frames_without_line += 1
-            
-            # Try LSTR fallback in hybrid mode
-            if self.detection_mode == DetectionMode.HYBRID.value and self.lstr_detector is not None:
-                if self.show_debug:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mHYBRID\033[0m - OpenCV failed, trying LSTR...")
-                
-                lstr_steering, lstr_speed, lstr_center, lstr_debug = self._detect_with_lstr(frame)
-                
-                if lstr_steering is not None:
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mHYBRID\033[0m - LSTR fallback successful!")
-                    
-                    self.last_line_position = lstr_center
-                    self.last_steering = lstr_steering
-                    self.frames_without_line = 0
-                    
-                    # Add hybrid indicator to debug frame
-                    cv2.putText(lstr_debug, "HYBRID: LSTR Fallback", (10, 60), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    
-                    return lstr_steering, lstr_speed, lstr_debug
             
             if self.show_debug:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - Stopped. Waiting for lines... (frame {self.frames_without_line})")
@@ -1347,14 +1614,24 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         return lane_center, left_x, right_x
 
     def send_motor_commands(self, steering_angle, speed):
-        """Send steering and speed commands to the motors."""
+        """Send steering and speed commands to the motors.
+        
+        Format matches frontend: SteerMotor expects string value already multiplied by 10.
+        Example: steering_angle=5.0 -> sends "50" to SteerMotor
+        """
         try:
-            self.steerMotorSender.send({"Type": "Steer", "value": float(steering_angle)})
-            self.speedMotorSender.send({"Type": "Speed", "value": float(speed)})
+            # Nucleo expects steering values multiplied by 10 (e.g. 5° becomes 50) for integer efficiency
+            # This matches frontend: Math.round(this.steer * 10)
+            steer_value = int(round(steering_angle * 10))
+            speed_value = int(round(speed * 10))  # Speed also multiplied by 10 like frontend
             
-            if self.debugger:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;94mCMD\033[0m - Steer: {steering_angle:.1f} Speed: {speed:.1f}")
-                self.logger.info(f"Line Following - Steering: {steering_angle:.1f}, Speed: {speed:.1f}")
+            # Send as string - the serial handler expects str type
+            self.steerMotorSender.send(str(steer_value))
+            self.speedMotorSender.send(str(speed_value))
+            
+            # Always log motor commands so we can see they're being sent
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR\033[0m - Steer: {steer_value} Speed: {speed_value}")
+            
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to send motor commands: {e}")
 
@@ -1362,16 +1639,21 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         """Check for state changes and enable/disable line following accordingly."""
         message = self.stateChangeSubscriber.receive()
         if message is not None:
-            mode_dict = SystemMode[message].value.get("camera", {}).get("lineFollowing", {})
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - Received: {message}")
             
-            if mode_dict.get("enabled", False):
-                if not self.is_line_following_active:
+            try:
+                mode_dict = SystemMode[message].value.get("camera", {}).get("lineFollowing", {})
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - lineFollowing config: {mode_dict}")
+                
+                if mode_dict.get("enabled", False):
                     self.is_line_following_active = True
-                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following ACTIVATED")
-            else:
-                if self.is_line_following_active:
+                    self._last_inactive_log = False  # Reset inactive log flag
+                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
+                else:
                     self.is_line_following_active = False
-                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - Line following DEACTIVATED")
+                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mDEACTIVATED\033[0m - Line following is now INACTIVE")
+            except KeyError as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
 
     def stop(self):
         """Stop the thread and cleanup."""

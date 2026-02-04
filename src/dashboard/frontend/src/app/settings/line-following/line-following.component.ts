@@ -48,7 +48,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   
   // Mode selection
   selectedMode: string = 'opencv';
-  lstrAvailable: boolean = false;
+  lstrAvailable: boolean = true;  // Assume available by default, will be updated by backend
   
   // LSTR Model selection
   selectedLstrModel: number = 0;
