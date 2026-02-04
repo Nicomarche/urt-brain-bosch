@@ -211,7 +211,11 @@ class LSTRDetector:
     
     def get_lane_center(self, image_width, y_position_ratio=0.7):
         """
-        Calculate the center of the lane at a given y position.
+        Calculate the center of the CURRENT lane at a given y position.
+        
+        When multiple lanes are visible, this method identifies which lane the vehicle
+        is currently in by finding the two closest lines to the image center (one on 
+        each side). This ensures proper lane keeping even when multiple lanes are visible.
         
         Args:
             image_width: Width of the image
@@ -220,43 +224,70 @@ class LSTRDetector:
         Returns:
             float: X coordinate of lane center, or None if not enough lanes detected
         """
-        if len(self.lanes) < 2:
-            # If only one lane detected, estimate center
-            if len(self.lanes) == 1:
-                lane_x = np.mean(self.lanes[0][0])
-                # Assume lane is on left or right based on position
-                if lane_x < image_width / 2:
-                    return lane_x + image_width * 0.25
-                else:
-                    return lane_x - image_width * 0.25
+        if len(self.lanes) < 1:
             return None
-        
-        # Find leftmost and rightmost lanes
-        lane_centers_x = [np.mean(lane[0]) for lane in self.lanes]
-        left_idx = np.argmin(lane_centers_x)
-        right_idx = np.argmax(lane_centers_x)
-        
-        if left_idx == right_idx:
-            return None
-        
-        # Calculate center at the specified y position
+            
+        # Calculate the x position of each lane at the target y position
         y_target = self.img_height * y_position_ratio
+        image_center = image_width / 2
         
-        left_lane = self.lanes[left_idx]
-        right_lane = self.lanes[right_idx]
+        lane_x_positions = []
+        for i, lane in enumerate(self.lanes):
+            # Find the x position at the target y
+            idx_y = np.argmin(np.abs(lane[1] - y_target))
+            x_at_target = lane[0][idx_y]
+            lane_x_positions.append((i, x_at_target))
         
-        # Find closest points to target y
-        left_idx_y = np.argmin(np.abs(left_lane[1] - y_target))
-        right_idx_y = np.argmin(np.abs(right_lane[1] - y_target))
+        if len(self.lanes) == 1:
+            # If only one lane detected, estimate center
+            lane_x = lane_x_positions[0][1]
+            if lane_x < image_center:
+                return lane_x + image_width * 0.25
+            else:
+                return lane_x - image_width * 0.25
         
-        left_x = left_lane[0][left_idx_y]
-        right_x = right_lane[0][right_idx_y]
+        # Separate lanes into left (to the left of image center) and right (to the right)
+        left_lanes = [(idx, x) for idx, x in lane_x_positions if x < image_center]
+        right_lanes = [(idx, x) for idx, x in lane_x_positions if x >= image_center]
         
-        return (left_x + right_x) / 2
+        # Find the CLOSEST lane on each side to the image center
+        # This identifies the current lane we're driving in
+        left_lane_idx = None
+        right_lane_idx = None
+        left_x = None
+        right_x = None
+        
+        if left_lanes:
+            # Get the rightmost lane on the left side (closest to center)
+            closest_left = max(left_lanes, key=lambda item: item[1])
+            left_lane_idx = closest_left[0]
+            left_x = closest_left[1]
+        
+        if right_lanes:
+            # Get the leftmost lane on the right side (closest to center)
+            closest_right = min(right_lanes, key=lambda item: item[1])
+            right_lane_idx = closest_right[0]
+            right_x = closest_right[1]
+        
+        # Calculate lane center based on what we found
+        if left_x is not None and right_x is not None:
+            # Both sides detected - this is the best case
+            return (left_x + right_x) / 2
+        elif left_x is not None:
+            # Only left lane visible - estimate right side
+            return left_x + image_width * 0.25
+        elif right_x is not None:
+            # Only right lane visible - estimate left side
+            return right_x - image_width * 0.25
+        
+        return None
     
     def draw_lanes(self, image, draw_center=True):
         """
-        Draw detected lanes on the image.
+        Draw detected lanes on the image, highlighting the current lane.
+        
+        The current lane (the one the vehicle is in) is identified by finding
+        the two lines closest to the image center - one on each side.
         
         Args:
             image: BGR image to draw on
@@ -269,51 +300,90 @@ class LSTRDetector:
             return image
         
         visualization_img = image.copy()
+        img_center = image.shape[1] / 2
+        img_height = image.shape[0]
         
-        # Try to draw lane area if we have left and right lanes
-        if len(self.lanes) >= 2:
-            # Find lanes closest to center (likely the ego lanes)
-            lane_centers = [np.mean(lane[0]) for lane in self.lanes]
-            img_center = image.shape[1] / 2
-            
-            # Find left and right lanes relative to center
-            left_lanes = [(i, c) for i, c in enumerate(lane_centers) if c < img_center]
-            right_lanes = [(i, c) for i, c in enumerate(lane_centers) if c >= img_center]
-            
-            if left_lanes and right_lanes:
-                # Get the rightmost left lane and leftmost right lane
-                left_idx = max(left_lanes, key=lambda x: x[1])[0]
-                right_idx = min(right_lanes, key=lambda x: x[1])[0]
-                
-                left_lane = self.lanes[left_idx]
-                right_lane = self.lanes[right_idx]
-                
-                # Create polygon for lane area
-                try:
-                    points = np.vstack((
-                        left_lane.T,
-                        np.flipud(right_lane.T)
-                    ))
-                    lane_segment_img = visualization_img.copy()
-                    cv2.fillConvexPoly(lane_segment_img, points, color=(0, 191, 255))
-                    visualization_img = cv2.addWeighted(visualization_img, 0.7, lane_segment_img, 0.3, 0)
-                except:
-                    pass
+        # Identify the current lane boundaries (closest to center on each side)
+        current_left_idx = None
+        current_right_idx = None
         
-        # Draw lane points
+        if len(self.lanes) >= 1:
+            # Calculate lane x positions at 70% of image height
+            y_target = img_height * 0.7
+            lane_x_positions = []
+            for i, lane in enumerate(self.lanes):
+                idx_y = np.argmin(np.abs(lane[1] - y_target))
+                x_at_target = lane[0][idx_y]
+                lane_x_positions.append((i, x_at_target))
+            
+            # Separate into left and right of center
+            left_lanes = [(idx, x) for idx, x in lane_x_positions if x < img_center]
+            right_lanes = [(idx, x) for idx, x in lane_x_positions if x >= img_center]
+            
+            if left_lanes:
+                # Rightmost lane on the left side = current left boundary
+                current_left_idx = max(left_lanes, key=lambda item: item[1])[0]
+            
+            if right_lanes:
+                # Leftmost lane on the right side = current right boundary
+                current_right_idx = min(right_lanes, key=lambda item: item[1])[0]
+        
+        # Draw the current lane area (highlighted)
+        if current_left_idx is not None and current_right_idx is not None:
+            left_lane = self.lanes[current_left_idx]
+            right_lane = self.lanes[current_right_idx]
+            
+            try:
+                points = np.vstack((
+                    left_lane.T,
+                    np.flipud(right_lane.T)
+                ))
+                lane_segment_img = visualization_img.copy()
+                # Bright green for current lane
+                cv2.fillConvexPoly(lane_segment_img, points, color=(0, 255, 100))
+                visualization_img = cv2.addWeighted(visualization_img, 0.6, lane_segment_img, 0.4, 0)
+            except:
+                pass
+        
+        # Draw all lane points with different colors
         for lane_num, lane_points in enumerate(self.lanes):
-            color = LANE_COLORS[lane_num % len(LANE_COLORS)]
+            # Current lane boundaries get thicker, brighter markers
+            if lane_num == current_left_idx or lane_num == current_right_idx:
+                color = (0, 255, 255)  # Yellow for current lane boundaries
+                radius = 5
+                thickness = -1
+            else:
+                color = LANE_COLORS[lane_num % len(LANE_COLORS)]
+                radius = 3
+                thickness = -1
+            
             for i in range(lane_points.shape[1]):
                 x, y = lane_points[0, i], lane_points[1, i]
                 if 0 <= x < image.shape[1] and 0 <= y < image.shape[0]:
-                    cv2.circle(visualization_img, (x, y), 3, color, -1)
+                    cv2.circle(visualization_img, (x, y), radius, color, thickness)
+        
+        # Draw lane info text
+        total_lanes = len(self.lanes)
+        cv2.putText(visualization_img, f"Lanes: {total_lanes}", (10, img_height - 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        if total_lanes > 2:
+            cv2.putText(visualization_img, "Multi-lane detected", (10, img_height - 35),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            cv2.putText(visualization_img, "Following current lane", (10, img_height - 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 100), 1)
         
         # Draw lane center
         if draw_center:
             center = self.get_lane_center(image.shape[1])
             if center is not None:
-                center_y = int(image.shape[0] * 0.7)
-                cv2.circle(visualization_img, (int(center), center_y), 10, (255, 0, 255), -1)
+                center_y = int(img_height * 0.7)
+                # Draw center point
+                cv2.circle(visualization_img, (int(center), center_y), 12, (255, 0, 255), -1)
+                cv2.circle(visualization_img, (int(center), center_y), 14, (255, 255, 255), 2)
+                # Draw center line
+                cv2.line(visualization_img, (int(center), center_y - 30), 
+                        (int(center), center_y + 30), (255, 0, 255), 2)
         
         return visualization_img
 
