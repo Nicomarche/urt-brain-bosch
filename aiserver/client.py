@@ -107,19 +107,42 @@ class HybridNetsClient:
         if self._running:
             return
         
+        # Limpiar estado viejo antes de arrancar
+        self.flush()
+        
         self._running = True
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="AIClient")
         self._thread.start()
         print(f"[AIClient] Iniciado. Conectando a {self.server_url}")
     
     def stop(self):
-        """Detener el cliente."""
+        """Detener el cliente y limpiar estado."""
         self._running = False
         if self._thread:
             self._thread.join(timeout=5.0)
             self._thread = None
         self._connected = False
+        # Limpiar colas y resultados viejos para que al re-arrancar no procese datos stale
+        self.flush()
         print("[AIClient] Detenido")
+    
+    def flush(self):
+        """Limpiar colas y resultados viejos. Llamar al cambiar de modo."""
+        # Vaciar cola de frames pendientes
+        while not self._frame_queue.empty():
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                break
+        # Vaciar cola de resultados pendientes
+        while not self._result_queue.empty():
+            try:
+                self._result_queue.get_nowait()
+            except queue.Empty:
+                break
+        # Limpiar ultimo resultado (evita devolver datos viejos)
+        self._last_result = None
+        self._last_result_time = 0
     
     def send_frame(self, frame: np.ndarray, block: bool = True) -> dict:
         """
@@ -141,7 +164,7 @@ class HybridNetsClient:
               {'steering': {...}, 'lane_points': [...], 'detections': [...], ...}
         """
         if not self._connected:
-            return self._last_result
+            return None
         
         # Comprimir frame a JPEG
         encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
@@ -163,7 +186,8 @@ class HybridNetsClient:
             result = self._result_queue.get(timeout=self.timeout)
             return result
         except queue.Empty:
-            return self._last_result
+            # Timeout: no devolver resultado viejo, devolver None
+            return None
     
     def send_frame_async(self, frame: np.ndarray):
         """

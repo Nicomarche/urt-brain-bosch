@@ -58,6 +58,9 @@ class HybridNetsEngine:
         self.previous_steering = 0.0
         self.frame_count = 0
         
+        # Visualizacion
+        self.show_visualization = getattr(config, 'SHOW_VISUALIZATION', False)
+        
         # Modelo
         self.model = None
         self.device = None
@@ -562,6 +565,10 @@ class HybridNetsEngine:
         inference_ms = (time.time() - start_time) * 1000
         self.frame_count += 1
         
+        # Visualizar en ventanas OpenCV
+        if self.show_visualization:
+            self.visualize(frame, seg_results, steering, detections, inference_ms)
+        
         return {
             'steering': steering,
             'lane_mask': lane_mask_compressed,
@@ -632,7 +639,26 @@ class HybridNetsEngine:
             seg_output = None
         
         if seg_output is None:
+            if self.show_visualization:
+                self.visualize(frame, {'road_mask': None, 'lane_mask': None, 'lane_points': []},
+                              {'steering_angle': None, 'confidence': 0, 'lane_center_x': None},
+                              None, 0)
             return self._empty_steering_result(start_time)
+        
+        # Extraer detecciones si hay visualizacion activa
+        detections = []
+        if self.show_visualization:
+            try:
+                if isinstance(outputs, tuple) and len(outputs) >= 4:
+                    if len(outputs) == 5:
+                        _f, regression, classification, _a, _s = outputs
+                    else:
+                        regression, classification, _s = outputs
+                    if regression is not None and classification is not None:
+                        detections = self._postprocess_detections(
+                            regression, classification, orig_w, orig_h)
+            except Exception:
+                pass
         
         # Post-procesar segmentacion (para lane points)
         seg_results = self.postprocess_segmentation(seg_output, (orig_h, orig_w))
@@ -646,6 +672,10 @@ class HybridNetsEngine:
         
         inference_ms = (t_steering - start_time) * 1000
         self.frame_count += 1
+        
+        # Visualizar en ventanas OpenCV
+        if self.show_visualization:
+            self.visualize(frame, seg_results, steering, detections, inference_ms)
         
         # Log desglosado para los primeros 10 frames
         if self.frame_count <= 10:
@@ -687,6 +717,137 @@ class HybridNetsEngine:
             'frame_id': self.frame_count,
             'input_size': f"{self.input_width}x{self.input_height}",
         }
+
+    def visualize(self, frame: np.ndarray, seg_results: dict, steering: dict,
+                  detections: list = None, inference_ms: float = 0):
+        """
+        Mostrar ventanas de debug con OpenCV:
+          1. Entrada original
+          2. Segmentacion (road=verde, lane=azul)
+          3. Overlay combinado con steering y detecciones
+          
+        Args:
+            frame: Frame original BGR
+            seg_results: dict con 'road_mask', 'lane_mask', 'lane_points', 'seg_raw'
+            steering: dict con 'steering_angle', 'confidence', etc.
+            detections: lista de detecciones de objetos
+            inference_ms: tiempo de inferencia en ms
+        """
+        if not self.show_visualization:
+            return
+        
+        h, w = frame.shape[:2]
+        
+        # --- 1. Ventana: Entrada original ---
+        input_display = frame.copy()
+        cv2.putText(input_display, f"Input: {w}x{h} -> model {self.input_width}x{self.input_height}",
+                   (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(input_display, f"Frame #{self.frame_count} | {inference_ms:.0f}ms",
+                   (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        
+        # --- 2. Ventana: Segmentacion coloreada ---
+        seg_colored = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        road_mask = seg_results.get('road_mask')
+        lane_mask = seg_results.get('lane_mask')
+        
+        if road_mask is not None:
+            # Road = verde semi-transparente
+            seg_colored[road_mask > 128] = (0, 180, 0)
+        if lane_mask is not None:
+            # Lane lines = azul brillante
+            seg_colored[lane_mask > 128] = (255, 100, 0)
+        
+        # Dibujar lane points
+        lane_points = seg_results.get('lane_points', [])
+        for line in lane_points:
+            for (px, py) in line:
+                cv2.circle(seg_colored, (px, py), 4, (0, 255, 255), -1)
+            # Conectar puntos de la misma linea
+            if len(line) > 1:
+                for i in range(len(line) - 1):
+                    cv2.line(seg_colored, line[i], line[i+1], (0, 255, 255), 2)
+        
+        # Leyenda
+        cv2.putText(seg_colored, "ROAD", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 180, 0), 2)
+        cv2.putText(seg_colored, "LANE", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 100, 0), 2)
+        cv2.putText(seg_colored, "POINTS", (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        
+        # --- 3. Ventana: Overlay combinado ---
+        overlay = frame.copy()
+        
+        # Superponer segmentacion semi-transparente
+        mask_overlay = seg_colored.copy()
+        alpha = 0.4
+        overlay = cv2.addWeighted(overlay, 1 - alpha, mask_overlay, alpha, 0)
+        
+        # Dibujar lane points sobre el overlay
+        for line in lane_points:
+            for (px, py) in line:
+                cv2.circle(overlay, (px, py), 5, (0, 255, 255), -1)
+            if len(line) > 1:
+                for i in range(len(line) - 1):
+                    cv2.line(overlay, line[i], line[i+1], (0, 255, 255), 2)
+        
+        # Dibujar detecciones de objetos
+        if detections:
+            for det in detections:
+                bbox = det.get('bbox', [])
+                cls_name = det.get('class_name', '?')
+                conf = det.get('confidence', 0)
+                if len(bbox) == 4:
+                    x1, y1, x2, y2 = [int(v) for v in bbox]
+                    cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    label = f"{cls_name} {conf:.0%}"
+                    cv2.putText(overlay, label, (x1, y1 - 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+        
+        # Dibujar steering
+        steer_angle = steering.get('steering_angle')
+        confidence = steering.get('confidence', 0)
+        lane_center_x = steering.get('lane_center_x')
+        
+        # Panel de info
+        cv2.rectangle(overlay, (0, 0), (w, 85), (20, 20, 40), -1)
+        cv2.putText(overlay, f"HybridNets AI Server", (10, 22),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        
+        if steer_angle is not None:
+            steer_color = (0, 255, 0) if abs(steer_angle) < 10 else \
+                          (0, 165, 255) if abs(steer_angle) < 20 else (0, 0, 255)
+            cv2.putText(overlay, f"Steer: {steer_angle:.1f} deg (serial: {int(round(steer_angle*10))})",
+                       (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, steer_color, 2)
+            cv2.putText(overlay, f"Conf: {confidence:.2f} | {inference_ms:.0f}ms | Frame #{self.frame_count}",
+                       (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+            
+            # Indicador visual de steering
+            center_x = w // 2
+            bottom_y = h - 20
+            offset_px = int((steer_angle / 25.0) * (w / 4))
+            cv2.line(overlay, (center_x, h), (center_x, h - 80), (255, 255, 0), 2)
+            cv2.arrowedLine(overlay, (center_x, bottom_y),
+                           (center_x + offset_px, bottom_y - 50), steer_color, 3)
+            
+            # Dibujar lane center
+            if lane_center_x is not None:
+                lc_x = int(lane_center_x)
+                cv2.circle(overlay, (lc_x, int(h * 0.6)), 10, (255, 0, 255), -1)
+                cv2.line(overlay, (lc_x, int(h * 0.4)), (lc_x, int(h * 0.8)),
+                        (255, 0, 255), 2)
+                # Linea del centro del frame
+                cv2.line(overlay, (center_x, int(h * 0.4)), (center_x, int(h * 0.8)),
+                        (255, 255, 0), 1)
+        else:
+            cv2.putText(overlay, "NO LANES DETECTED", (10, 48),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(overlay, f"{inference_ms:.0f}ms | Frame #{self.frame_count}",
+                       (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        
+        # Mostrar las 3 ventanas
+        cv2.imshow("AI Server - Input", input_display)
+        cv2.imshow("AI Server - Segmentation (Road+Lane)", seg_colored)
+        cv2.imshow("AI Server - Overlay (Result)", overlay)
+        cv2.waitKey(1)
 
     def _compress_mask(self, mask: np.ndarray) -> bytes:
         """Comprimir máscara binaria usando PNG para transmisión eficiente."""

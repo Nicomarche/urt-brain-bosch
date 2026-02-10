@@ -51,3 +51,9 @@ SEG_CLASSES = ['road', 'lane']  # 0=road (área manejable), 1=lane (líneas)
 
 # Clases de detección de objetos
 DET_CLASSES = ['car']
+
+# ======================== VISUALIZATION ========================
+# Mostrar ventanas de debug con OpenCV en el servidor
+# True = abre ventanas mostrando entrada, segmentacion, detecciones, steering
+# Requiere display (X11/Wayland). Desactivar en servidores headless.
+SHOW_VISUALIZATION = True

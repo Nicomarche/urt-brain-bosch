@@ -257,12 +257,16 @@ Args:
         if self._hybridnets_client is None:
             self._init_hybridnets_client()
         
-        if self._hybridnets_client is not None and not self._hybridnets_client.connected:
-            try:
-                self._hybridnets_client.start()
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client started, connecting to {self.hybridnets_server_url}")
-            except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start HybridNets client: {e}")
+        if self._hybridnets_client is not None:
+            # Siempre limpiar datos viejos al (re)arrancar para no procesar frames stale
+            self._hybridnets_client.flush()
+            
+            if not self._hybridnets_client.connected:
+                try:
+                    self._hybridnets_client.start()
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client started, connecting to {self.hybridnets_server_url}")
+                except Exception as e:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start HybridNets client: {e}")
 
     def _stop_hybridnets_client(self):
         """Stop the HybridNets client."""
@@ -362,13 +366,27 @@ Args:
             else:
                 speed = self.max_speed
             
+            # Log de diagnostico: siempre mostrar los primeros 5 y luego cada 20
+            if not hasattr(self, '_hybridnets_frame_count'):
+                self._hybridnets_frame_count = 0
+            self._hybridnets_frame_count += 1
+            if self._hybridnets_frame_count <= 5 or self._hybridnets_frame_count % 20 == 0:
+                steer_serial = int(round(steering_angle * 10))
+                speed_serial = int(round(speed * 10))
+                print(f"\033[1;97m[ HybridNets ] :\033[0m "
+                      f"steer={steering_angle:.1f}deg (serial:{steer_serial}) | "
+                      f"speed={speed:.0f} (serial:{speed_serial}) | "
+                      f"conf={confidence:.2f} | "
+                      f"server={server_time:.0f}ms RT={roundtrip:.0f}ms | "
+                      f"frame#{self._hybridnets_frame_count}")
+            
             # Draw steering info
             steer_color = (0, 255, 0) if abs(steering_angle) < 10 else (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
-            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f} deg", (width - 200, 30),
+            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f} deg (x10={int(round(steering_angle*10))})", (width - 280, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, steer_color, 2)
             cv2.putText(debug_frame, f"Confidence: {confidence:.2f}", (width - 200, 55),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(debug_frame, f"Speed: {speed:.0f}", (width - 200, 75),
+            cv2.putText(debug_frame, f"Speed: {speed:.0f} (x10={int(round(speed*10))})", (width - 280, 75),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             
             # Draw center indicator
@@ -379,15 +397,12 @@ Args:
             cv2.arrowedLine(debug_frame, (center_x, center_y), (center_x + offset_px, center_y - 30),
                            steer_color, 3)
             
-            if self.show_debug:
-                print(f"\033[1;97m[ HybridNets ] :\033[0m \033[1;92mOK\033[0m - "
-                      f"Steer: {steering_angle:.1f}° Speed: {speed:.0f} "
-                      f"Server: {server_time:.0f}ms RT: {roundtrip:.0f}ms")
-            
             self._store_debug_image('final', debug_frame)
             self._store_debug_image('hybridnets', debug_frame)
             return steering_angle, speed, debug_frame
         else:
+            print(f"\033[1;97m[ HybridNets ] :\033[0m \033[1;91mNO LANES\033[0m - server returned steering=None | "
+                  f"server={server_time:.0f}ms RT={roundtrip:.0f}ms")
             cv2.putText(debug_frame, "No lanes detected", (10, 70),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             self._store_debug_image('final', debug_frame)
@@ -401,6 +416,7 @@ Args:
         self.last_line_position = None
         self.frames_without_line = 0
         self.last_turn_direction = 0
+        self._hybridnets_frame_count = 0
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset")
 
     def _store_debug_image(self, name, image):
