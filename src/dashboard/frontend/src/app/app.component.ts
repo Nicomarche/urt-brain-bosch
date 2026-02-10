@@ -93,15 +93,19 @@ export class AppComponent implements OnDestroy {
 
     this.sessionAccessSubscription = this.webSocketService.receiveSessionAccess().subscribe(
       (message) => {
+        console.log('[AUTH] Received session_access response:', message);
         if (message.data == true) {
+          console.log('[AUTH] Session access GRANTED — authenticating user');
           this.isAuthenticated = true;
 
           // Request current states from backend upon successful login
           this.webSocketService.sendMessageToFlask(`{"Name": "GetCurrentSerialConnectionState"}`);
+        } else {
+          console.warn('[AUTH] Session access DENIED — data:', message.data);
         }
       },
       (error) => {
-        console.error('Error receiving session access:', error);
+        console.error('[AUTH] Error receiving session access:', error);
       }
     );
 
@@ -124,14 +128,17 @@ export class AppComponent implements OnDestroy {
 
     this.heartbeatDisconnectSubscription = this.webSocketService.receiveHeartbeatDisconnect().subscribe(
       (message) => {
+        console.warn('[AUTH] Heartbeat disconnect received — logging out');
         this.logout();
       }
     );
 
     // Check connection status on initialization
     this.backendConnected = this.webSocketService.isConnected();
+    console.log('[AUTH] Initial backend connection status:', this.backendConnected);
 
     this.connectionStatusSubscription = this.webSocketService.connectionStatus$.subscribe(status => {
+      console.log('[AUTH] Connection status changed:', status);
       if (status === 'disconnected' || status === 'error') {
         this.backendConnected = false;
         this.isAuthenticated = false;
@@ -149,16 +156,30 @@ export class AppComponent implements OnDestroy {
   }
 
   submitPassword() {
-    if (this.correctPassword === '' && this.enteredPassword === this.correctPassword) {
+    console.log('[AUTH] submitPassword() called');
+    console.log('[AUTH] correctPassword configured:', this.correctPassword === '' ? '(empty — no password set)' : '(hash set)');
+    console.log('[AUTH] enteredPassword:', this.enteredPassword === '' ? '(empty)' : '(has value)');
+    console.log('[AUTH] Backend connected:', this.backendConnected);
+
+    if (this.correctPassword === '') {
+      // No password has been configured — allow access but show security alert
+      console.log('[AUTH] No password configured — sending SessionAccess to backend');
       this.showAlert = true;
       this.webSocketService.sendMessageToFlask(`{"Name": "SessionAccess"}`);
       return;
     }
 
     const enteredPasswordHash = CryptoJS.MD5(this.enteredPassword).toString();
+    console.log('[AUTH] Entered password MD5:', enteredPasswordHash);
+    console.log('[AUTH] Expected hash:', this.correctPassword);
+    console.log('[AUTH] Match:', enteredPasswordHash === this.correctPassword);
+
     if (enteredPasswordHash === this.correctPassword) {
+      console.log('[AUTH] Password correct — sending SessionAccess to backend');
       this.showAlert = false;
       this.webSocketService.sendMessageToFlask(`{"Name": "SessionAccess"}`);
+    } else {
+      console.warn('[AUTH] Password INCORRECT — access denied');
     }
   }
 
@@ -179,6 +200,7 @@ export class AppComponent implements OnDestroy {
   }
 
   logout() {
+    console.log('[AUTH] logout() called — ending session');
     this.isAuthenticated = false;
     this.webSocketService.sendMessageToFlask(`{"Name": "SessionEnd"}`);
   }

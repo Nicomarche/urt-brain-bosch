@@ -64,7 +64,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   ];
 
   // HybridNets AI Server settings
-  hybridnetsServerUrl: string = 'ws://192.168.1.100:8500/ws/steering';
+  hybridnetsServerUrl: string = 'ws://192.168.1.56:8500/ws/steering';
   hybridnetsJpegQuality: number = 70;
   hybridnetsTimeout: number = 2.0;
   hybridnetsConnected: boolean = false;
@@ -440,7 +440,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.selectedLstrModel = 0;
     
     // Reset HybridNets
-    this.hybridnetsServerUrl = 'ws://192.168.1.100:8500/ws/steering';
+    this.hybridnetsServerUrl = 'ws://192.168.1.56:8500/ws/steering';
     this.hybridnetsJpegQuality = 70;
     this.hybridnetsTimeout = 2.0;
     
