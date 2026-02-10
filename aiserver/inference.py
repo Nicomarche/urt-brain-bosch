@@ -155,7 +155,7 @@ class HybridNetsEngine:
         if torch.cuda.is_available():
             print(f"[HybridNets]   GPU: {torch.cuda.get_device_name(0)}")
             mem_alloc = torch.cuda.memory_allocated(0) / 1024**2
-            mem_total = torch.cuda.get_device_properties(0).total_mem / 1024**2
+            mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**2
             print(f"[HybridNets]   VRAM: {mem_alloc:.0f}MB / {mem_total:.0f}MB")
         print(f"[HybridNets]   FP16: {self.use_half}")
         print(f"[HybridNets]   Input: {self.input_width}x{self.input_height}")
@@ -939,7 +939,7 @@ class HybridNetsEngine:
             gpu_info = {
                 'name': torch.cuda.get_device_name(0),
                 'memory_allocated_mb': round(torch.cuda.memory_allocated(0) / 1024**2, 1),
-                'memory_total_mb': round(torch.cuda.get_device_properties(0).total_mem / 1024**2, 1),
+                'memory_total_mb': round(torch.cuda.get_device_properties(0).total_memory / 1024**2, 1),
             }
         
         return {
