@@ -2,24 +2,41 @@
 Script de setup para el AI Server de HybridNets.
 
 Descarga el repositorio de HybridNets y los pesos pre-entrenados.
+Crea un entorno virtual (venv) para las dependencias de Python.
 
 Uso:
-  python setup_server.py
+  python3 setup_server.py
 """
 
 import os
 import subprocess
 import sys
 import urllib.request
+import venv
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VENV_DIR = os.path.join(BASE_DIR, "venv")
 HYBRIDNETS_DIR = os.path.join(BASE_DIR, "HybridNets")
 WEIGHTS_DIR = os.path.join(BASE_DIR, "weights")
 WEIGHTS_FILE = os.path.join(WEIGHTS_DIR, "hybridnets.pth")
 
 HYBRIDNETS_REPO = "https://github.com/datvuthanh/HybridNets.git"
 WEIGHTS_URL = "https://github.com/datvuthanh/HybridNets/releases/download/v1.0/hybridnets.pth"
+
+
+def get_venv_python():
+    """Obtener la ruta al ejecutable de Python dentro del venv."""
+    if sys.platform == "win32":
+        return os.path.join(VENV_DIR, "Scripts", "python.exe")
+    return os.path.join(VENV_DIR, "bin", "python3")
+
+
+def get_venv_pip():
+    """Obtener la ruta al ejecutable de pip dentro del venv."""
+    if sys.platform == "win32":
+        return os.path.join(VENV_DIR, "Scripts", "pip.exe")
+    return os.path.join(VENV_DIR, "bin", "pip3")
 
 
 def run_cmd(cmd, cwd=None):
@@ -29,6 +46,23 @@ def run_cmd(cmd, cwd=None):
     if result.returncode != 0:
         print(f"  WARN: Comando retornó código {result.returncode}")
     return result.returncode
+
+
+def create_venv():
+    """Crear entorno virtual si no existe."""
+    if os.path.isdir(VENV_DIR) and os.path.exists(get_venv_python()):
+        print(f"[Setup] Entorno virtual ya existe en {VENV_DIR}")
+        return
+    
+    print(f"[Setup] Creando entorno virtual en {VENV_DIR}...")
+    venv.create(VENV_DIR, with_pip=True)
+    
+    # Actualizar pip dentro del venv
+    venv_pip = get_venv_pip()
+    venv_python = get_venv_python()
+    run_cmd(f"{venv_python} -m pip install --upgrade pip")
+    
+    print(f"[Setup] Entorno virtual creado correctamente")
 
 
 def clone_hybridnets():
@@ -41,11 +75,12 @@ def clone_hybridnets():
         print(f"[Setup] Clonando HybridNets...")
         run_cmd(f"git clone {HYBRIDNETS_REPO} {HYBRIDNETS_DIR}")
     
-    # Instalar dependencias del repo
+    # Instalar dependencias del repo en el venv
     req_file = os.path.join(HYBRIDNETS_DIR, "requirements.txt")
     if os.path.exists(req_file):
-        print("[Setup] Instalando dependencias de HybridNets...")
-        run_cmd(f"{sys.executable} -m pip install -r {req_file}")
+        print("[Setup] Instalando dependencias de HybridNets en venv...")
+        venv_pip = get_venv_pip()
+        run_cmd(f"{venv_pip} install -r {req_file}")
 
 
 def download_weights():
@@ -82,69 +117,64 @@ def download_weights():
 
 
 def install_dependencies():
-    """Instalar dependencias de Python."""
-    print("[Setup] Instalando dependencias del servidor...")
+    """Instalar dependencias de Python en el venv."""
+    print("[Setup] Instalando dependencias del servidor en venv...")
     req_file = os.path.join(BASE_DIR, "requirements.txt")
     if os.path.exists(req_file):
-        run_cmd(f"{sys.executable} -m pip install -r {req_file}")
+        venv_pip = get_venv_pip()
+        run_cmd(f"{venv_pip} install -r {req_file}")
     else:
         print("[Setup] WARN: requirements.txt no encontrado")
 
 
 def verify_setup():
-    """Verificar que todo está correctamente instalado."""
+    """Verificar que todo está correctamente instalado usando el venv."""
     print("\n" + "=" * 50)
     print("  Verificación de instalación")
     print("=" * 50)
     
+    venv_python = get_venv_python()
     checks = []
     
+    def check_package(name, import_name=None):
+        """Verificar si un paquete está instalado en el venv."""
+        import_name = import_name or name
+        cmd = f'{venv_python} -c "import {import_name}; print({import_name}.__version__)"'
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        if result.returncode == 0:
+            version = result.stdout.strip()
+            return True, version
+        return False, None
+    
     # PyTorch
-    try:
-        import torch
-        gpu = torch.cuda.is_available()
-        gpu_name = torch.cuda.get_device_name(0) if gpu else "N/A"
-        print(f"  PyTorch: {torch.__version__} ({'CUDA' if gpu else 'CPU'}) {gpu_name}")
+    cmd = f'{venv_python} -c "import torch; gpu=torch.cuda.is_available(); name=torch.cuda.get_device_name(0) if gpu else \'N/A\'; print(torch.__version__, \'CUDA\' if gpu else \'CPU\', name)"'
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f"  PyTorch: {result.stdout.strip()}")
         checks.append(True)
-    except ImportError:
+    else:
         print("  PyTorch: NO INSTALADO")
         checks.append(False)
     
     # OpenCV
-    try:
-        import cv2
-        print(f"  OpenCV: {cv2.__version__}")
-        checks.append(True)
-    except ImportError:
-        print("  OpenCV: NO INSTALADO")
-        checks.append(False)
+    ok, ver = check_package("OpenCV", "cv2")
+    print(f"  OpenCV: {ver}" if ok else "  OpenCV: NO INSTALADO")
+    checks.append(ok)
     
     # FastAPI
-    try:
-        import fastapi
-        print(f"  FastAPI: {fastapi.__version__}")
-        checks.append(True)
-    except ImportError:
-        print("  FastAPI: NO INSTALADO")
-        checks.append(False)
+    ok, ver = check_package("FastAPI", "fastapi")
+    print(f"  FastAPI: {ver}" if ok else "  FastAPI: NO INSTALADO")
+    checks.append(ok)
     
     # uvicorn
-    try:
-        import uvicorn
-        print(f"  uvicorn: {uvicorn.__version__}")
-        checks.append(True)
-    except ImportError:
-        print("  uvicorn: NO INSTALADO")
-        checks.append(False)
+    ok, ver = check_package("uvicorn", "uvicorn")
+    print(f"  uvicorn: {ver}" if ok else "  uvicorn: NO INSTALADO")
+    checks.append(ok)
     
     # websockets
-    try:
-        import websockets
-        print(f"  websockets: {websockets.__version__}")
-        checks.append(True)
-    except ImportError:
-        print("  websockets: NO INSTALADO")
-        checks.append(False)
+    ok, ver = check_package("websockets", "websockets")
+    print(f"  websockets: {ver}" if ok else "  websockets: NO INSTALADO")
+    checks.append(ok)
     
     # HybridNets repo
     if os.path.isdir(HYBRIDNETS_DIR):
@@ -163,9 +193,16 @@ def verify_setup():
         print(f"  Pesos modelo: NO ENCONTRADOS")
         checks.append(False)
     
+    # Info del venv
+    print(f"\n  Entorno virtual: {VENV_DIR}")
+    print(f"  Python del venv: {venv_python}")
+    
     print()
     if all(checks):
-        print("  [OK] Todo listo! Ejecuta: python server.py")
+        print("  [OK] Todo listo!")
+        print(f"  Para ejecutar el servidor:")
+        print(f"    source {VENV_DIR}/bin/activate")
+        print(f"    python server.py")
     else:
         print("  [!!] Algunas dependencias faltan. Revisa los mensajes arriba.")
     print()
@@ -177,19 +214,23 @@ def main():
     print("=" * 50)
     print()
     
-    # 1. Instalar dependencias de Python
+    # 1. Crear entorno virtual
+    create_venv()
+    print()
+    
+    # 2. Instalar dependencias de Python en el venv
     install_dependencies()
     print()
     
-    # 2. Clonar HybridNets
+    # 3. Clonar HybridNets
     clone_hybridnets()
     print()
     
-    # 3. Descargar pesos
+    # 4. Descargar pesos
     download_weights()
     print()
     
-    # 4. Verificar
+    # 5. Verificar
     verify_setup()
 
 
