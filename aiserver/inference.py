@@ -185,11 +185,12 @@ class HybridNetsEngine:
 
         # Si es tupla o lista, buscar el tensor de segmentación dentro
         if isinstance(seg_output, (tuple, list)):
-            print(f"[HybridNets] seg_output es {type(seg_output).__name__} "
-                  f"con {len(seg_output)} elementos")
-            for i, item in enumerate(seg_output):
-                print(f"  [{i}] tipo={type(item).__name__}"
-                      f"{f', shape={item.shape}' if isinstance(item, (torch.Tensor, np.ndarray)) else ''}")
+            if self.frame_count < 3:
+                print(f"[HybridNets] seg_output es {type(seg_output).__name__} "
+                      f"con {len(seg_output)} elementos")
+                for i, item in enumerate(seg_output):
+                    print(f"  [{i}] tipo={type(item).__name__}"
+                          f"{f', shape={item.shape}' if isinstance(item, (torch.Tensor, np.ndarray)) else ''}")
 
             # Filtrar solo los tensores/arrays
             tensors = [t for t in seg_output if isinstance(t, (torch.Tensor, np.ndarray))]
@@ -219,7 +220,8 @@ class HybridNetsEngine:
                 return torch.cat(stacked, dim=1)
 
         # Último recurso: intentar convertir a tensor
-        print(f"[HybridNets] WARN: tipo de seg_output no esperado: {type(seg_output)}")
+        if self.frame_count < 3:
+            print(f"[HybridNets] WARN: tipo de seg_output no esperado: {type(seg_output)}")
         return torch.as_tensor(np.array(seg_output))
 
     def postprocess_segmentation(self, seg_output, original_size: tuple):
@@ -555,6 +557,98 @@ class HybridNetsEngine:
             'input_size': f"{self.input_width}x{self.input_height}",
         }
     
+    @torch.no_grad()
+    def infer_steering_only(self, frame: np.ndarray) -> dict:
+        """
+        Inferencia ligera: solo calcula segmentacion y steering.
+        NO comprime mascaras ni post-procesa detecciones.
+        Pensado para el endpoint /ws/steering donde solo se necesita el angulo.
+        
+        Args:
+            frame: Imagen BGR de OpenCV
+            
+        Returns:
+            dict con:
+              - 'steering': dict con angulo de direccion sugerido
+              - 'inference_time_ms': tiempo de inferencia en ms
+              - 'frame_id': ID del frame procesado
+              - 'input_size': resolucion de entrada del modelo
+        """
+        start_time = time.time()
+        orig_h, orig_w = frame.shape[:2]
+        
+        # Preprocesar
+        input_tensor = self.preprocess(frame)
+        
+        # Inferencia
+        try:
+            outputs = self.model(input_tensor)
+        except Exception as e:
+            print(f"[HybridNets] ERROR en inferencia: {e}")
+            return self._empty_steering_result(start_time)
+        
+        # Extraer segmentacion (misma logica que infer pero sin detecciones)
+        seg_output = None
+        
+        try:
+            if isinstance(outputs, tuple) and len(outputs) == 5:
+                _features, _regression, _classification, _anchors, seg_output = outputs
+            elif isinstance(outputs, tuple) and len(outputs) == 3:
+                _regression, _classification, seg_output = outputs
+            elif isinstance(outputs, dict):
+                seg_output = outputs.get('segmentation', outputs.get('seg'))
+            elif isinstance(outputs, torch.Tensor):
+                seg_output = outputs
+            else:
+                if isinstance(outputs, tuple):
+                    for item in outputs:
+                        if isinstance(item, torch.Tensor) and item.dim() == 4:
+                            h, w = item.shape[2], item.shape[3]
+                            if h == self.input_height and w == self.input_width:
+                                seg_output = item
+                                break
+        except Exception as e:
+            if self.frame_count < 3:
+                print(f"[HybridNets] WARN: Error desempaquetando salida (steering_only): {e}")
+            seg_output = None
+        
+        if seg_output is None:
+            return self._empty_steering_result(start_time)
+        
+        # Post-procesar segmentacion (para lane points)
+        seg_results = self.postprocess_segmentation(seg_output, (orig_h, orig_w))
+        
+        # Calcular direccion
+        steering = self.compute_steering(
+            seg_results['lane_points'], orig_w, orig_h
+        )
+        
+        inference_ms = (time.time() - start_time) * 1000
+        self.frame_count += 1
+        
+        return {
+            'steering': steering,
+            'inference_time_ms': round(inference_ms, 1),
+            'frame_id': self.frame_count,
+            'input_size': f"{self.input_width}x{self.input_height}",
+        }
+    
+    def _empty_steering_result(self, start_time):
+        """Resultado vacio para infer_steering_only cuando falla la inferencia."""
+        inference_ms = (time.time() - start_time) * 1000
+        self.frame_count += 1
+        return {
+            'steering': {
+                'steering_angle': None,
+                'lane_center_x': None,
+                'confidence': 0.0,
+                'error_normalized': 0.0,
+            },
+            'inference_time_ms': round(inference_ms, 1),
+            'frame_id': self.frame_count,
+            'input_size': f"{self.input_width}x{self.input_height}",
+        }
+
     def _compress_mask(self, mask: np.ndarray) -> bytes:
         """Comprimir máscara binaria usando PNG para transmisión eficiente."""
         # Reducir resolución para ahorrar ancho de banda

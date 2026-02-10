@@ -48,7 +48,7 @@ class HybridNetsClient:
     
     def __init__(self, server_url: str = "ws://192.168.1.100:8500/ws/steering",
                  jpeg_quality: int = 70,
-                 timeout: float = 15.0,
+                 timeout: float = 2.0,
                  reconnect_interval: float = 3.0,
                  mode: str = "steering"):
         """
@@ -59,7 +59,7 @@ class HybridNetsClient:
             jpeg_quality: Calidad JPEG para comprimir frames (1-100). 
                          Menor = más rápido pero menos calidad.
             timeout: Timeout en segundos para esperar respuesta del servidor.
-                     En CPU puede tardar 5-15s, en GPU <1s. Default: 15s.
+                     Con GPU (GTX 1060) la inferencia toma <100ms. Default: 2s.
             reconnect_interval: Segundos entre intentos de reconexión.
             mode: "steering" o "full". Steering es más rápido.
         """

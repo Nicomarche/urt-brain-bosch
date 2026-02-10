@@ -133,7 +133,7 @@ Args:
         # HybridNets remote AI server parameters
         self.hybridnets_server_url = "ws://192.168.1.35:8500/ws/steering"
         self.hybridnets_jpeg_quality = 70
-        self.hybridnets_timeout = 15.0  # CPU inference can take 5-15s; GPU <1s
+        self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self._hybridnets_client = None
         
         self._init_lstr_detector()
@@ -347,30 +347,13 @@ Args:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
         
         if steering_angle is not None:
-            # Apply smoothing with our PID (server gives a raw suggestion)
-            error_normalized = error_norm
-            abs_error = abs(error_normalized)
-            
-            # Dead zone
-            if abs_error < self.dead_zone_ratio:
-                effective_error = 0
-            else:
-                effective_error = (abs_error - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
-            
-            derivative = self.kd * (error_normalized - self.previous_error)
-            self.previous_error = error_normalized
-            
-            # Use steering from server with local PD smoothing
-            steering_raw = steering_angle
-            
-            if hasattr(self, 'last_steering'):
-                smooth = self.smoothing_factor
-                steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
-            
+            # El servidor ya aplica PD + smoothing, no aplicar doble PID aqui.
+            # Solo clamp al rango valido y calcular velocidad.
             steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
             self.last_steering = steering_angle
+            self.previous_error = error_norm  # Mantener tracking para cambio de modo
             
-            # Calculate speed
+            # Calculate speed based on steering magnitude
             abs_steer = abs(steering_angle)
             if abs_steer > 15:
                 speed = self.min_speed
@@ -820,7 +803,7 @@ Args:
                 curve_intensity = 0  # Straight
             
             curve_multipliers = (40, 40, 40, 40)
-            curve_smoothing = (0.3, 0.6, 0.8, 0.15)
+            curve_smoothing = (0.3, 0.5, 0.7, 0.85)
             curve_multiplier = curve_multipliers[curve_intensity]
             curve_smooth = curve_smoothing[curve_intensity]
             is_sharp_curve = curve_intensity >= 2
@@ -1647,7 +1630,7 @@ Returns:
                 curve_intensity = 0
             
             curve_multipliers = (1, 1.8, 3, 4.5)
-            curve_smoothing = (0.3, 0.6, 0.8, 0.15)
+            curve_smoothing = (0.3, 0.5, 0.7, 0.85)
             curve_multiplier = curve_multipliers[curve_intensity]
             curve_smooth = curve_smoothing[curve_intensity]
             is_sharp_curve = curve_intensity >= 2
@@ -1849,8 +1832,9 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             self.steerMotorSender.send(str(steer_value))
             self.speedMotorSender.send(str(speed_value))
             
-            # Always log motor commands so we can see they're being sent
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR\033[0m - Steer: {steer_value} Speed: {speed_value}")
+            # Log motor commands only in debug mode to avoid I/O overhead on RPi
+            if self.show_debug:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR\033[0m - Steer: {steer_value} Speed: {speed_value}")
             
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to send motor commands: {e}")

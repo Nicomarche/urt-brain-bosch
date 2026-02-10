@@ -158,9 +158,10 @@ async def websocket_inference(websocket: WebSocket):
                 await websocket.send_json({"error": "Frame inválido"})
                 continue
             
-            # Ejecutar inferencia
+            # Ejecutar inferencia en thread pool para no bloquear el event loop
+            # (evita que ping/pong de WebSocket fallen y causen desconexiones)
             infer_start = time.time()
-            result = engine.infer(frame)
+            result = await asyncio.to_thread(engine.infer, frame)
             infer_ms = (time.time() - infer_start) * 1000
             
             # Log de tiempo para los primeros frames (para diagnóstico)
@@ -259,7 +260,9 @@ async def websocket_steering_only(websocket: WebSocket):
                 await websocket.send_text('{"error":"bad frame"}')
                 continue
             
-            result = engine.infer(frame)
+            # Usar infer_steering_only para evitar trabajo innecesario
+            # (no comprime mascaras, no post-procesa detecciones)
+            result = await asyncio.to_thread(engine.infer_steering_only, frame)
             
             # Respuesta mínima
             steering = result['steering']
