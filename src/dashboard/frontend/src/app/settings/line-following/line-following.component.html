@@ -125,11 +125,11 @@
         <span class="info-label">Endpoint</span>
         <div class="btn-group-small">
           <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/steering')"
-                  (click)="setHybridnetsServerUrl(hybridnetsServerUrl.replace(/\/ws\/.*$/, '/ws/steering'))">
+                  (click)="setHybridnetsEndpoint('/ws/steering')">
             Steering
           </button>
           <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/inference')"
-                  (click)="setHybridnetsServerUrl(hybridnetsServerUrl.replace(/\/ws\/.*$/, '/ws/inference'))">
+                  (click)="setHybridnetsEndpoint('/ws/inference')">
             Completo
           </button>
         </div>

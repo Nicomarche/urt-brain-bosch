@@ -260,6 +260,12 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.debouncedSendConfig();
   }
 
+  setHybridnetsEndpoint(endpoint: string): void {
+    const base = this.hybridnetsServerUrl.replace(/\/ws\/.*$/, '');
+    this.hybridnetsServerUrl = base + endpoint;
+    this.debouncedSendConfig();
+  }
+
   // LSTR Model methods
   setLstrModel(modelId: number): void {
     this.selectedLstrModel = modelId;
