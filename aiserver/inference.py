@@ -844,10 +844,16 @@ class HybridNetsEngine:
                        (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
         
         # Mostrar las 3 ventanas
-        cv2.imshow("AI Server - Input", input_display)
-        cv2.imshow("AI Server - Segmentation (Road+Lane)", seg_colored)
-        cv2.imshow("AI Server - Overlay (Result)", overlay)
-        cv2.waitKey(1)
+        try:
+            cv2.imshow("AI Server - Input", input_display)
+            cv2.imshow("AI Server - Segmentation (Road+Lane)", seg_colored)
+            cv2.imshow("AI Server - Overlay (Result)", overlay)
+            cv2.waitKey(1)
+        except cv2.error as e:
+            # Si OpenCV no tiene soporte de GUI (headless), desactivar para no crashear
+            print(f"[HybridNets] WARN: cv2.imshow fallo ({e}). Desactivando visualizacion.")
+            print(f"[HybridNets] Instala opencv-python (no headless): pip install opencv-python")
+            self.show_visualization = False
 
     def _compress_mask(self, mask: np.ndarray) -> bytes:
         """Comprimir máscara binaria usando PNG para transmisión eficiente."""

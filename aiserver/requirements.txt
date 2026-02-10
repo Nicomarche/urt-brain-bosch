@@ -16,7 +16,7 @@ torch
 torchvision
 
 # --- Procesamiento de imágenes ---
-opencv-python-headless
+opencv-python
 numpy
 
 # --- Serialización eficiente ---
