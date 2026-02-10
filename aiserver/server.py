@@ -159,7 +159,15 @@ async def websocket_inference(websocket: WebSocket):
                 continue
             
             # Ejecutar inferencia
+            infer_start = time.time()
             result = engine.infer(frame)
+            infer_ms = (time.time() - infer_start) * 1000
+            
+            # Log de tiempo para los primeros frames (para diagnóstico)
+            if frames_processed < 5:
+                print(f"[Server] Frame {frames_processed + 1}: "
+                      f"inferencia={infer_ms:.0f}ms, "
+                      f"res={frame.shape[1]}x{frame.shape[0]}")
             
             # Preparar respuesta
             response = {

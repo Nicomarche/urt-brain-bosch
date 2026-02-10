@@ -48,7 +48,7 @@ class HybridNetsClient:
     
     def __init__(self, server_url: str = "ws://192.168.1.100:8500/ws/steering",
                  jpeg_quality: int = 70,
-                 timeout: float = 2.0,
+                 timeout: float = 15.0,
                  reconnect_interval: float = 3.0,
                  mode: str = "steering"):
         """
@@ -58,7 +58,8 @@ class HybridNetsClient:
                         Usar /ws/inference para resultados completos
             jpeg_quality: Calidad JPEG para comprimir frames (1-100). 
                          Menor = más rápido pero menos calidad.
-            timeout: Timeout en segundos para esperar respuesta.
+            timeout: Timeout en segundos para esperar respuesta del servidor.
+                     En CPU puede tardar 5-15s, en GPU <1s. Default: 15s.
             reconnect_interval: Segundos entre intentos de reconexión.
             mode: "steering" o "full". Steering es más rápido.
         """
@@ -195,13 +196,14 @@ class HybridNetsClient:
             async with websockets.connect(
                 self.server_url,
                 max_size=16 * 1024 * 1024,
-                ping_interval=20,
-                ping_timeout=10,
+                ping_interval=30,
+                ping_timeout=20,
                 close_timeout=5,
             ) as ws:
                 self._ws = ws
                 self._connected = True
-                print(f"[AIClient] Conectado a {self.server_url}")
+                consecutive_timeouts = 0
+                print(f"[AIClient] Conectado a {self.server_url} (timeout={self.timeout}s)")
                 
                 while self._running:
                     # Esperar un frame para enviar
@@ -216,20 +218,36 @@ class HybridNetsClient:
                     await ws.send(jpeg_bytes)
                     self.frames_sent += 1
                     
-                    # Recibir respuesta
-                    response_data = await asyncio.wait_for(ws.recv(), timeout=self.timeout)
+                    # Recibir respuesta (con manejo de timeout que NO mata la conexión)
+                    try:
+                        response_data = await asyncio.wait_for(ws.recv(), timeout=self.timeout)
+                    except asyncio.TimeoutError:
+                        consecutive_timeouts += 1
+                        elapsed = (time.time() - send_time) * 1000
+                        print(f"[AIClient] Timeout esperando respuesta ({elapsed:.0f}ms > {self.timeout}s). "
+                              f"Consecutivos: {consecutive_timeouts}")
+                        if consecutive_timeouts >= 3:
+                            print(f"[AIClient] {consecutive_timeouts} timeouts consecutivos, reconectando...")
+                            break
+                        # No romper la conexión — descartar este frame y seguir
+                        continue
                     
+                    consecutive_timeouts = 0
                     roundtrip_ms = (time.time() - send_time) * 1000
                     
                     # Parsear respuesta
-                    if isinstance(response_data, bytes):
-                        try:
-                            import msgpack
-                            result = msgpack.unpackb(response_data, raw=False)
-                        except (ImportError, Exception):
-                            result = json.loads(response_data.decode())
-                    else:
-                        result = json.loads(response_data)
+                    try:
+                        if isinstance(response_data, bytes):
+                            try:
+                                import msgpack
+                                result = msgpack.unpackb(response_data, raw=False)
+                            except (ImportError, Exception):
+                                result = json.loads(response_data.decode())
+                        else:
+                            result = json.loads(response_data)
+                    except (json.JSONDecodeError, Exception) as e:
+                        print(f"[AIClient] Error parseando respuesta: {e}")
+                        continue
                     
                     # Agregar roundtrip time
                     result['roundtrip_ms'] = round(roundtrip_ms, 1)
@@ -238,6 +256,11 @@ class HybridNetsClient:
                     self._last_result = result
                     self._last_result_time = time.time()
                     self.frames_received += 1
+                    
+                    # Log de los primeros frames
+                    if self.frames_received <= 3:
+                        print(f"[AIClient] Frame {self.frames_received}: roundtrip={roundtrip_ms:.0f}ms, "
+                              f"server_time={result.get('t', result.get('inference_time_ms', '?'))}ms")
                     
                     # Actualizar estadísticas
                     self._roundtrip_times.append(roundtrip_ms)
