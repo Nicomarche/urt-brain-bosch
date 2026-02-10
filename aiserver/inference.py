@@ -134,14 +134,30 @@ class HybridNetsEngine:
         
         self.model.eval()
         
-        # Warm-up: correr una inferencia dummy
+        # Warm-up: correr una inferencia dummy y medir tiempo
         print("[HybridNets] Warm-up...")
         dummy = torch.zeros(1, 3, self.input_height, self.input_width).to(self.device)
         if self.use_half:
             dummy = dummy.half()
+        
+        warmup_start = time.time()
         with torch.no_grad():
             _ = self.model(dummy)
-        print("[HybridNets] Warm-up completado")
+        warmup_ms = (time.time() - warmup_start) * 1000
+        
+        # Log de diagnostico
+        print(f"[HybridNets] Warm-up completado en {warmup_ms:.0f}ms")
+        print(f"[HybridNets] === DIAGNOSTICO ===")
+        print(f"[HybridNets]   Device: {self.device} (CUDA available: {torch.cuda.is_available()})")
+        if torch.cuda.is_available():
+            print(f"[HybridNets]   GPU: {torch.cuda.get_device_name(0)}")
+            mem_alloc = torch.cuda.memory_allocated(0) / 1024**2
+            mem_total = torch.cuda.get_device_properties(0).total_mem / 1024**2
+            print(f"[HybridNets]   VRAM: {mem_alloc:.0f}MB / {mem_total:.0f}MB")
+        print(f"[HybridNets]   FP16: {self.use_half}")
+        print(f"[HybridNets]   Input: {self.input_width}x{self.input_height}")
+        print(f"[HybridNets]   Warmup forward: {warmup_ms:.0f}ms")
+        print(f"[HybridNets] ==================")
     
     def preprocess(self, frame: np.ndarray) -> torch.Tensor:
         """
@@ -578,14 +594,17 @@ class HybridNetsEngine:
         orig_h, orig_w = frame.shape[:2]
         
         # Preprocesar
+        t0 = time.time()
         input_tensor = self.preprocess(frame)
+        t_preprocess = time.time()
         
-        # Inferencia
+        # Inferencia (forward pass del modelo)
         try:
             outputs = self.model(input_tensor)
         except Exception as e:
             print(f"[HybridNets] ERROR en inferencia: {e}")
             return self._empty_steering_result(start_time)
+        t_forward = time.time()
         
         # Extraer segmentacion (misma logica que infer pero sin detecciones)
         seg_output = None
@@ -617,14 +636,34 @@ class HybridNetsEngine:
         
         # Post-procesar segmentacion (para lane points)
         seg_results = self.postprocess_segmentation(seg_output, (orig_h, orig_w))
+        t_postprocess = time.time()
         
         # Calcular direccion
         steering = self.compute_steering(
             seg_results['lane_points'], orig_w, orig_h
         )
+        t_steering = time.time()
         
-        inference_ms = (time.time() - start_time) * 1000
+        inference_ms = (t_steering - start_time) * 1000
         self.frame_count += 1
+        
+        # Log desglosado para los primeros 10 frames
+        if self.frame_count <= 10:
+            preproc_ms = (t_preprocess - t0) * 1000
+            forward_ms = (t_forward - t_preprocess) * 1000
+            postproc_ms = (t_postprocess - t_forward) * 1000
+            steer_ms = (t_steering - t_postprocess) * 1000
+            print(f"[Engine] Frame {self.frame_count}: "
+                  f"preprocess={preproc_ms:.1f}ms | "
+                  f"forward={forward_ms:.1f}ms | "
+                  f"postprocess={postproc_ms:.1f}ms | "
+                  f"steering={steer_ms:.1f}ms | "
+                  f"TOTAL={inference_ms:.1f}ms | "
+                  f"input={orig_w}x{orig_h} -> {self.input_width}x{self.input_height}")
+        # Log resumido cada 100 frames
+        elif self.frame_count % 100 == 0:
+            print(f"[Engine] Frame {self.frame_count}: total={inference_ms:.1f}ms | "
+                  f"steer={steering['steering_angle']}")
         
         return {
             'steering': steering,

@@ -249,12 +249,19 @@ async def websocket_steering_only(websocket: WebSocket):
         await websocket.close()
         return
     
+    frames_processed = 0
+    total_infer_ms = 0
+    total_roundtrip_ms = 0
+    
     try:
         while True:
+            t_recv_start = time.time()
             data = await websocket.receive_bytes()
+            t_recv = time.time()
             
             nparr = np.frombuffer(data, np.uint8)
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            t_decode = time.time()
             
             if frame is None:
                 await websocket.send_text('{"error":"bad frame"}')
@@ -262,7 +269,9 @@ async def websocket_steering_only(websocket: WebSocket):
             
             # Usar infer_steering_only para evitar trabajo innecesario
             # (no comprime mascaras, no post-procesa detecciones)
+            t_infer_start = time.time()
             result = await asyncio.to_thread(engine.infer_steering_only, frame)
+            t_infer_end = time.time()
             
             # Respuesta mínima
             steering = result['steering']
@@ -275,10 +284,45 @@ async def websocket_steering_only(websocket: WebSocket):
             }
             
             # Enviar como texto JSON compacto (más rápido que msgpack para payloads pequeños)
-            await websocket.send_text(json.dumps(response, separators=(',', ':')))
+            response_text = json.dumps(response, separators=(',', ':'))
+            await websocket.send_text(response_text)
+            t_sent = time.time()
+            
+            # === TIMING LOGS ===
+            frames_processed += 1
+            decode_ms = (t_decode - t_recv) * 1000
+            infer_ms = (t_infer_end - t_infer_start) * 1000
+            send_ms = (t_sent - t_infer_end) * 1000
+            total_ms = (t_sent - t_recv) * 1000
+            total_infer_ms += infer_ms
+            total_roundtrip_ms += total_ms
+            
+            # Log detallado para los primeros 10 frames
+            if frames_processed <= 10:
+                print(f"[Steering] Frame {frames_processed}: "
+                      f"jpeg_decode={decode_ms:.1f}ms | "
+                      f"infer={infer_ms:.1f}ms (engine={result['inference_time_ms']}ms) | "
+                      f"send={send_ms:.1f}ms | "
+                      f"TOTAL={total_ms:.1f}ms | "
+                      f"frame={frame.shape[1]}x{frame.shape[0]} ({len(data)} bytes)")
+            # Log resumido cada 50 frames
+            elif frames_processed % 50 == 0:
+                avg_infer = total_infer_ms / frames_processed
+                avg_total = total_roundtrip_ms / frames_processed
+                fps = 1000 / avg_total if avg_total > 0 else 0
+                print(f"[Steering] {frames_processed} frames | "
+                      f"avg_infer={avg_infer:.1f}ms | "
+                      f"avg_total={avg_total:.1f}ms | "
+                      f"~{fps:.1f} FPS")
     
     except WebSocketDisconnect:
-        print(f"[Server] Cliente steering desconectado: {client_host}")
+        if frames_processed > 0:
+            avg_infer = total_infer_ms / frames_processed
+            avg_total = total_roundtrip_ms / frames_processed
+            print(f"[Steering] Cliente desconectado: {client_host} | "
+                  f"{frames_processed} frames | avg_infer={avg_infer:.1f}ms | avg_total={avg_total:.1f}ms")
+        else:
+            print(f"[Server] Cliente steering desconectado: {client_host}")
     except Exception as e:
         print(f"[Server] Error con cliente steering {client_host}: {e}")
 
