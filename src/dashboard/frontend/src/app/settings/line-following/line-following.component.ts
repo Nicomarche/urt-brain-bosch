@@ -35,6 +35,9 @@ interface DebugStatus {
   view: string;
   active: boolean;
   lstr_available: boolean;
+  hybridnets_connected?: boolean;
+  hybridnets_roundtrip_ms?: number;
+  hybridnets_server_fps?: number;
 }
 
 @Component({
@@ -59,6 +62,14 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     { id: 3, name: 'Preciso', resolution: '480×640', speed: '~5 FPS' },
     { id: 4, name: 'Máxima Calidad', resolution: '720×1280', speed: '~2 FPS' },
   ];
+
+  // HybridNets AI Server settings
+  hybridnetsServerUrl: string = 'ws://192.168.1.100:8500/ws/steering';
+  hybridnetsJpegQuality: number = 70;
+  hybridnetsTimeout: number = 2.0;
+  hybridnetsConnected: boolean = false;
+  hybridnetsRoundtripMs: number = 0;
+  hybridnetsServerFps: number = 0;
   
   // Debug view selection
   selectedDebugView: number = 0;
@@ -190,6 +201,16 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       .subscribe((status: DebugStatus) => {
         this.debugStatus = status;
         this.lstrAvailable = status?.lstr_available ?? false;
+        // Update HybridNets connection status
+        if (status?.hybridnets_connected !== undefined) {
+          this.hybridnetsConnected = status.hybridnets_connected;
+        }
+        if (status?.hybridnets_roundtrip_ms !== undefined) {
+          this.hybridnetsRoundtripMs = status.hybridnets_roundtrip_ms;
+        }
+        if (status?.hybridnets_server_fps !== undefined) {
+          this.hybridnetsServerFps = status.hybridnets_server_fps;
+        }
       });
   }
 
@@ -207,7 +228,8 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
 
   // Mode methods
   setMode(mode: string): void {
-    if (mode !== 'opencv' && !this.lstrAvailable) return;
+    // HybridNets is always available (remote server), LSTR/hybrid need local LSTR
+    if ((mode === 'lstr' || mode === 'hybrid') && !this.lstrAvailable) return;
     this.selectedMode = mode;
     this.debouncedSendConfig();
   }
@@ -216,9 +238,26 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     const names: { [key: string]: string } = {
       'opencv': 'OpenCV',
       'lstr': 'LSTR IA',
-      'hybrid': 'Híbrido'
+      'hybrid': 'Híbrido',
+      'hybridnets': 'HybridNets'
     };
     return names[this.selectedMode] || this.selectedMode;
+  }
+
+  // HybridNets methods
+  setHybridnetsServerUrl(url: string): void {
+    this.hybridnetsServerUrl = url;
+    this.debouncedSendConfig();
+  }
+
+  setHybridnetsJpegQuality(quality: number): void {
+    this.hybridnetsJpegQuality = quality;
+    this.debouncedSendConfig();
+  }
+
+  setHybridnetsTimeout(timeout: number): void {
+    this.hybridnetsTimeout = timeout;
+    this.debouncedSendConfig();
   }
 
   // LSTR Model methods
@@ -303,6 +342,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     config['detection_mode'] = this.selectedMode;
     config['lstr_model_size'] = this.selectedLstrModel;
     
+    // Add HybridNets settings
+    config['hybridnets_server_url'] = this.hybridnetsServerUrl;
+    config['hybridnets_jpeg_quality'] = this.hybridnetsJpegQuality;
+    config['hybridnets_timeout'] = this.hybridnetsTimeout;
+    
     // Add stream settings
     config['stream_debug_view'] = this.selectedDebugView;
     config['stream_debug_fps'] = this.streamFps;
@@ -338,6 +382,17 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     }
     if (config['lstr_model_size'] !== undefined) {
       this.selectedLstrModel = config['lstr_model_size'];
+    }
+    
+    // Apply HybridNets settings
+    if (config['hybridnets_server_url']) {
+      this.hybridnetsServerUrl = config['hybridnets_server_url'];
+    }
+    if (config['hybridnets_jpeg_quality'] !== undefined) {
+      this.hybridnetsJpegQuality = config['hybridnets_jpeg_quality'];
+    }
+    if (config['hybridnets_timeout'] !== undefined) {
+      this.hybridnetsTimeout = config['hybridnets_timeout'];
     }
     
     // Apply stream settings
@@ -377,6 +432,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     // Reset mode
     this.selectedMode = 'opencv';
     this.selectedLstrModel = 0;
+    
+    // Reset HybridNets
+    this.hybridnetsServerUrl = 'ws://192.168.1.100:8500/ws/steering';
+    this.hybridnetsJpegQuality = 70;
+    this.hybridnetsTimeout = 2.0;
     
     // Reset stream
     this.selectedDebugView = 0;

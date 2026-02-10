@@ -223,7 +223,7 @@
 /* Mode Buttons */
 .mode-buttons {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
 
@@ -582,6 +582,152 @@
   background: linear-gradient(135deg, #555, #666);
 }
 
+/* HybridNets Mode Button */
+.hybridnets-btn.selected {
+  border-color: #ff6348;
+  background: linear-gradient(135deg, rgba(255, 99, 72, 0.15), rgba(255, 99, 72, 0.05));
+  box-shadow: 0 0 20px rgba(255, 99, 72, 0.2);
+}
+
+.server-badge {
+  background: #ff4757 !important;
+}
+
+.hybridnets-btn.selected .server-badge {
+  background: #2ed573 !important;
+}
+
+/* HybridNets Config Section */
+.hybridnets-config {
+  border: 1px solid rgba(255, 99, 72, 0.3);
+  background: linear-gradient(135deg, #252542, #2a2045);
+}
+
+.connection-status {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: #ff4757;
+  color: white;
+  transition: all 0.3s;
+}
+
+.connection-status.connected {
+  background: linear-gradient(135deg, #2ed573, #26c066);
+  animation: pulse 2s infinite;
+}
+
+.server-url-row {
+  margin-bottom: 14px;
+}
+
+.server-url-row label {
+  display: block;
+  color: #888;
+  font-size: 0.8rem;
+  margin-bottom: 6px;
+}
+
+.server-url-input {
+  width: 100%;
+  background: #1a1a2e;
+  border: 2px solid #3a3a5c;
+  border-radius: 8px;
+  padding: 10px 14px;
+  color: #4fc3f7;
+  font-size: 0.85rem;
+  font-family: 'Monaco', 'Consolas', monospace;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.server-url-input:focus {
+  border-color: #ff6348;
+}
+
+.server-url-input::placeholder {
+  color: #555;
+}
+
+.server-info-grid {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.server-info-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.server-info-item .info-label {
+  font-size: 0.75rem;
+  color: #888;
+}
+
+.server-stats {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 10px;
+  background: #1a1a2e;
+  border-radius: 8px;
+}
+
+.server-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.server-stat .stat-label {
+  font-size: 0.7rem;
+  color: #888;
+  text-transform: uppercase;
+}
+
+.server-stat .stat-value {
+  font-size: 1rem;
+  font-weight: 600;
+  font-family: 'Monaco', monospace;
+  color: #4fc3f7;
+}
+
+.server-stat .stat-value.good {
+  color: #2ed573;
+}
+
+.server-stat .stat-value.warn {
+  color: #ffa502;
+}
+
+.server-stat .stat-value.bad {
+  color: #ff4757;
+}
+
+.hybridnets-hint {
+  margin: 0;
+  padding: 10px;
+  background: rgba(255, 99, 72, 0.08);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: #aaa;
+  border-left: 3px solid #ff6348;
+  line-height: 1.5;
+}
+
+.hybridnets-hint code {
+  background: rgba(255, 255, 255, 0.1);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #ff6348;
+  font-size: 0.8rem;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .ai-content {
@@ -599,7 +745,7 @@
   }
   
   .mode-buttons {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
   }
   
   .model-buttons {
@@ -609,12 +755,20 @@
   .view-buttons {
     grid-template-columns: repeat(4, 1fr);
   }
+
+  .server-info-grid {
+    flex-direction: column;
+  }
 }
 
 @media (max-width: 600px) {
   .header {
     flex-direction: column;
     gap: 12px;
+  }
+
+  .mode-buttons {
+    grid-template-columns: 1fr;
   }
   
   .model-buttons {

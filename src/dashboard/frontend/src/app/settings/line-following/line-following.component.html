@@ -39,10 +39,16 @@
           <span class="stat-label">Velocidad</span>
           <span class="stat-value">{{ debugStatus?.speed ?? '--' }}</span>
         </div>
-        <div class="stat-item">
+        <div class="stat-item" *ngIf="selectedMode !== 'hybridnets'">
           <span class="stat-label">LSTR</span>
           <span class="stat-value" [class.available]="debugStatus?.lstr_available">
             {{ debugStatus?.lstr_available ? 'Disponible' : 'No disponible' }}
+          </span>
+        </div>
+        <div class="stat-item" *ngIf="selectedMode === 'hybridnets'">
+          <span class="stat-label">Servidor</span>
+          <span class="stat-value" [class.available]="hybridnetsConnected">
+            {{ hybridnetsConnected ? hybridnetsRoundtripMs.toFixed(0) + 'ms' : 'Desconectado' }}
           </span>
         </div>
       </div>
@@ -83,7 +89,86 @@
         <span class="mode-desc">Combina OpenCV y LSTR. Usa IA cuando está disponible, fallback a OpenCV si falla.</span>
         <span class="mode-badge" *ngIf="!lstrAvailable">No disponible</span>
       </button>
+      <button 
+        class="mode-btn hybridnets-btn" 
+        [class.selected]="selectedMode === 'hybridnets'"
+        (click)="setMode('hybridnets')">
+        <span class="mode-icon">🌐</span>
+        <span class="mode-name">HybridNets</span>
+        <span class="mode-desc">Red neuronal en servidor remoto con GPU. Envía frames por red, máxima precisión.</span>
+        <span class="mode-badge server-badge" *ngIf="selectedMode === 'hybridnets'">
+          {{ hybridnetsConnected ? 'Conectado' : 'Desconectado' }}
+        </span>
+      </button>
     </div>
+  </div>
+
+  <!-- HybridNets Server Configuration -->
+  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'hybridnets'">
+    <div class="section-header">
+      <h4>Servidor HybridNets</h4>
+      <span class="connection-status" [class.connected]="hybridnetsConnected">
+        {{ hybridnetsConnected ? 'Conectado' : 'Desconectado' }}
+      </span>
+    </div>
+
+    <div class="server-url-row">
+      <label>URL del servidor</label>
+      <input type="text" class="server-url-input" 
+             [(ngModel)]="hybridnetsServerUrl" 
+             (change)="setHybridnetsServerUrl(hybridnetsServerUrl)"
+             placeholder="ws://192.168.1.100:8500/ws/steering"/>
+    </div>
+
+    <div class="server-info-grid">
+      <div class="server-info-item">
+        <span class="info-label">Endpoint</span>
+        <div class="btn-group-small">
+          <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/steering')"
+                  (click)="setHybridnetsServerUrl(hybridnetsServerUrl.replace(/\/ws\/.*$/, '/ws/steering'))">
+            Steering
+          </button>
+          <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/inference')"
+                  (click)="setHybridnetsServerUrl(hybridnetsServerUrl.replace(/\/ws\/.*$/, '/ws/inference'))">
+            Completo
+          </button>
+        </div>
+      </div>
+      <div class="server-info-item">
+        <span class="info-label">Calidad JPEG</span>
+        <div class="btn-group-small">
+          <button *ngFor="let q of [40, 55, 70, 85]"
+                  [class.selected]="hybridnetsJpegQuality === q"
+                  (click)="setHybridnetsJpegQuality(q)">{{ q }}%</button>
+        </div>
+      </div>
+      <div class="server-info-item">
+        <span class="info-label">Timeout (s)</span>
+        <div class="btn-group-small">
+          <button *ngFor="let t of [0.5, 1.0, 2.0, 5.0]"
+                  [class.selected]="hybridnetsTimeout === t"
+                  (click)="setHybridnetsTimeout(t)">{{ t }}s</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="server-stats" *ngIf="hybridnetsConnected">
+      <div class="server-stat">
+        <span class="stat-label">Roundtrip</span>
+        <span class="stat-value" [class.good]="hybridnetsRoundtripMs < 50" [class.warn]="hybridnetsRoundtripMs >= 50 && hybridnetsRoundtripMs < 100" [class.bad]="hybridnetsRoundtripMs >= 100">
+          {{ hybridnetsRoundtripMs | number:'1.0-0' }}ms
+        </span>
+      </div>
+      <div class="server-stat">
+        <span class="stat-label">Server FPS</span>
+        <span class="stat-value">{{ hybridnetsServerFps | number:'1.0-0' }}</span>
+      </div>
+    </div>
+
+    <p class="hybridnets-hint">
+      El servidor debe estar corriendo <code>python server.py</code> en una máquina con GPU.
+      Conecta ambos dispositivos a la misma red local.
+    </p>
   </div>
 
   <!-- LSTR Model Selection -->

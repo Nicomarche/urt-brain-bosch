@@ -21,12 +21,21 @@ except ImportError as e:
     LSTR_AVAILABLE = False
     print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR not available: {e}")
 
+# Import HybridNets remote AI client
+try:
+    from aiserver.client import HybridNetsClient
+    HYBRIDNETS_CLIENT_AVAILABLE = True
+except ImportError as e:
+    HYBRIDNETS_CLIENT_AVAILABLE = False
+    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - HybridNets client not available: {e}")
+
 
 class DetectionMode(Enum):
     """Lane detection modes."""
-    OPENCV = "opencv"       # Traditional OpenCV (HSV + Hough)
-    LSTR = "lstr"          # AI-based LSTR model
-    HYBRID = "hybrid"       # Fusion of OpenCV + LSTR (combines both for better accuracy)
+    OPENCV = "opencv"           # Traditional OpenCV (HSV + Hough)
+    LSTR = "lstr"              # AI-based LSTR model (local)
+    HYBRID = "hybrid"           # Fusion of OpenCV + LSTR (combines both for better accuracy)
+    HYBRIDNETS = "hybridnets"  # Remote HybridNets AI server (GPU offload)
 
 
 class threadLineFollowing(ThreadWithStop):
@@ -121,7 +130,14 @@ Args:
         self.hybrid_lstr_weight = 0.6     # Weight for LSTR detection (0-1) - AI is more robust
         self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
         
+        # HybridNets remote AI server parameters
+        self.hybridnets_server_url = "ws://192.168.1.100:8500/ws/steering"
+        self.hybridnets_jpeg_quality = 70
+        self.hybridnets_timeout = 2.0
+        self._hybridnets_client = None
+        
         self._init_lstr_detector()
+        self._init_hybridnets_client()
 
         # Debug streaming parameters
         self.stream_debug_view = 0  # 0=off, 1-10=different views
@@ -217,6 +233,182 @@ Args:
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to init LSTR: {e}")
             self.lstr_detector = None
+
+    def _init_hybridnets_client(self):
+        """Initialize HybridNets remote AI client if available."""
+        if not HYBRIDNETS_CLIENT_AVAILABLE:
+            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - HybridNets client not available")
+            self._hybridnets_client = None
+            return
+        
+        try:
+            self._hybridnets_client = HybridNetsClient(
+                server_url=self.hybridnets_server_url,
+                jpeg_quality=self.hybridnets_jpeg_quality,
+                timeout=self.hybridnets_timeout,
+            )
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client created (server: {self.hybridnets_server_url})")
+        except Exception as e:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to create HybridNets client: {e}")
+            self._hybridnets_client = None
+
+    def _start_hybridnets_client(self):
+        """Start or restart the HybridNets client connection."""
+        if self._hybridnets_client is None:
+            self._init_hybridnets_client()
+        
+        if self._hybridnets_client is not None and not self._hybridnets_client.connected:
+            try:
+                self._hybridnets_client.start()
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client started, connecting to {self.hybridnets_server_url}")
+            except Exception as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start HybridNets client: {e}")
+
+    def _stop_hybridnets_client(self):
+        """Stop the HybridNets client."""
+        if self._hybridnets_client is not None:
+            try:
+                self._hybridnets_client.stop()
+            except Exception:
+                pass
+
+    def _detect_with_hybridnets(self, frame):
+        """
+        Detect lanes using remote HybridNets AI server.
+        
+        Sends the frame to the server via WebSocket and receives
+        the steering angle back.
+        
+        Args:
+            frame: BGR image
+            
+        Returns:
+            tuple: (steering_angle, speed, debug_frame)
+        """
+        height, width = frame.shape[:2]
+        
+        # Ensure client is running
+        if self._hybridnets_client is None or not self._hybridnets_client.connected:
+            self._start_hybridnets_client()
+            # Give it a moment to connect on first call
+            if not self._hybridnets_client or not self._hybridnets_client.connected:
+                debug_frame = frame.copy()
+                cv2.rectangle(debug_frame, (0, 0), (width, 60), (20, 20, 40), -1)
+                cv2.putText(debug_frame, "HYBRIDNETS - Connecting...", (10, 25),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                cv2.putText(debug_frame, f"Server: {self.hybridnets_server_url}", (10, 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+                self._store_debug_image('final', debug_frame)
+                return None, self.min_speed, debug_frame
+        
+        start_time = time.time()
+        
+        # Send frame and get result
+        result = self._hybridnets_client.send_frame(frame, block=True)
+        
+        total_time_ms = (time.time() - start_time) * 1000
+        
+        # Create debug frame
+        debug_frame = frame.copy()
+        cv2.rectangle(debug_frame, (0, 0), (width, 80), (20, 20, 40), -1)
+        cv2.putText(debug_frame, "HYBRIDNETS AI SERVER", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        
+        if result is None:
+            cv2.putText(debug_frame, "No response from server", (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            stats = self._hybridnets_client.get_stats()
+            cv2.putText(debug_frame, f"Connected: {stats['connected']} | Sent: {stats['frames_sent']}", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+            self._store_debug_image('final', debug_frame)
+            return None, self.min_speed, debug_frame
+        
+        # Parse result (format from /ws/steering endpoint)
+        if 's' in result:
+            # Steering-only response
+            steering_angle = result.get('s')
+            confidence = result.get('c', 0)
+            error_norm = result.get('e', 0)
+            server_time = result.get('t', 0)
+            frame_id = result.get('f', 0)
+            roundtrip = result.get('roundtrip_ms', 0)
+        else:
+            # Full inference response
+            steering_info = result.get('steering', {})
+            steering_angle = steering_info.get('steering_angle')
+            confidence = steering_info.get('confidence', 0)
+            error_norm = steering_info.get('error_normalized', 0)
+            server_time = result.get('inference_time_ms', 0)
+            frame_id = result.get('frame_id', 0)
+            roundtrip = result.get('roundtrip_ms', 0)
+        
+        # Draw info on debug frame
+        cv2.putText(debug_frame, f"Server: {server_time:.0f}ms | Roundtrip: {roundtrip:.0f}ms", (10, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        
+        if steering_angle is not None:
+            # Apply smoothing with our PID (server gives a raw suggestion)
+            error_normalized = error_norm
+            abs_error = abs(error_normalized)
+            
+            # Dead zone
+            if abs_error < self.dead_zone_ratio:
+                effective_error = 0
+            else:
+                effective_error = (abs_error - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
+            
+            derivative = self.kd * (error_normalized - self.previous_error)
+            self.previous_error = error_normalized
+            
+            # Use steering from server with local PD smoothing
+            steering_raw = steering_angle
+            
+            if hasattr(self, 'last_steering'):
+                smooth = self.smoothing_factor
+                steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
+            
+            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
+            self.last_steering = steering_angle
+            
+            # Calculate speed
+            abs_steer = abs(steering_angle)
+            if abs_steer > 15:
+                speed = self.min_speed
+            elif abs_steer > 8:
+                speed = (self.min_speed + self.max_speed) / 2
+            else:
+                speed = self.max_speed
+            
+            # Draw steering info
+            steer_color = (0, 255, 0) if abs(steering_angle) < 10 else (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
+            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f} deg", (width - 200, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, steer_color, 2)
+            cv2.putText(debug_frame, f"Confidence: {confidence:.2f}", (width - 200, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(debug_frame, f"Speed: {speed:.0f}", (width - 200, 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Draw center indicator
+            center_x = width // 2
+            center_y = int(height * 0.8)
+            offset_px = int((steering_angle / self.max_steering) * (width / 4))
+            cv2.line(debug_frame, (center_x, height), (center_x, int(height * 0.6)), (0, 255, 255), 2)
+            cv2.arrowedLine(debug_frame, (center_x, center_y), (center_x + offset_px, center_y - 30),
+                           steer_color, 3)
+            
+            if self.show_debug:
+                print(f"\033[1;97m[ HybridNets ] :\033[0m \033[1;92mOK\033[0m - "
+                      f"Steer: {steering_angle:.1f}° Speed: {speed:.0f} "
+                      f"Server: {server_time:.0f}ms RT: {roundtrip:.0f}ms")
+            
+            self._store_debug_image('final', debug_frame)
+            self._store_debug_image('hybridnets', debug_frame)
+            return steering_angle, speed, debug_frame
+        else:
+            cv2.putText(debug_frame, "No lanes detected", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            self._store_debug_image('final', debug_frame)
+            return None, self.min_speed, debug_frame
 
     def _reset_pid_state(self):
         """Reset PID state when changing modes to prevent corrupted values."""
@@ -1123,7 +1315,9 @@ Returns:
                      # Detection mode
                      'detection_mode', 'lstr_model_size',
                      # Debug streaming
-                     'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale']
+                     'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale',
+                     # HybridNets remote AI server
+                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout']
             
             for param in params:
                 if param in config:
@@ -1138,6 +1332,18 @@ Returns:
             # Reload LSTR model if size changed
             if 'lstr_model_size' in config:
                 self._init_lstr_detector()
+            
+            # Reconnect HybridNets client if server URL changed
+            if 'hybridnets_server_url' in config:
+                self._stop_hybridnets_client()
+                self._init_hybridnets_client()
+            
+            # Start/stop HybridNets client based on mode
+            if 'detection_mode' in config:
+                if config['detection_mode'] == DetectionMode.HYBRIDNETS.value:
+                    self._start_hybridnets_client()
+                else:
+                    self._stop_hybridnets_client()
             
             self._update_hsv_arrays()
             print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mCONFIG\033[0m - Parameters updated")
@@ -1216,6 +1422,20 @@ Returns:
         
         if self.show_debug:
             print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
+        
+        # Handle HYBRIDNETS remote AI server mode
+        if self.detection_mode == DetectionMode.HYBRIDNETS.value:
+            try:
+                steering, speed, debug = self._detect_with_hybridnets(frame)
+                if steering is not None:
+                    self.frames_without_line = 0
+                return steering, speed, debug
+            except Exception as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mHYBRIDNETS ERROR\033[0m - {e}")
+                debug_frame = frame.copy()
+                cv2.putText(debug_frame, f"HybridNets Error: {str(e)[:50]}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                return None, self.min_speed, debug_frame
         
         # Handle HYBRID fusion mode (runs both detectors and combines)
         if self.detection_mode == DetectionMode.HYBRID.value:
@@ -1657,6 +1877,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
 
     def stop(self):
         """Stop the thread and cleanup."""
+        self._stop_hybridnets_client()
         if self.show_debug:
             cv2.destroyAllWindows()
         super(threadLineFollowing, self).stop()
