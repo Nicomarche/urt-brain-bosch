@@ -464,48 +464,63 @@ class HybridNetsEngine:
         if self.frame_count < 3:
             self._log_output_structure("outputs", outputs)
         
-        # El modelo HybridNets devuelve:
-        # - regression: predicciones de bounding boxes
-        # - classification: scores de clasificación
-        # - seg: mapa de segmentación
-        # La estructura exacta depende de la versión
+        # HybridNets devuelve una tupla de 5 elementos:
+        #   outputs[0] = features del backbone (tupla de 5 tensores multi-escala) — no se usa
+        #   outputs[1] = regression  [1, N, 4]   — bounding boxes
+        #   outputs[2] = classification [1, N, 1] — scores de detección de objetos
+        #   outputs[3] = anchors [1, N, 4]        — anchors para decodificar boxes
+        #   outputs[4] = segmentation [1, 3, H, W] — mapa de segmentación (3 clases: bg, road, lane)
+        
+        regression = None
+        classification = None
+        seg_output = None
         
         try:
-            # Intentar desempaquetar según la estructura de HybridNets
-            if isinstance(outputs, tuple) and len(outputs) == 3:
+            if isinstance(outputs, tuple) and len(outputs) == 5:
+                # Estructura estándar de HybridNets
+                _features, regression, classification, _anchors, seg_output = outputs
+                if self.frame_count < 3:
+                    print(f"[HybridNets] Desempaquetado 5-tupla de HybridNets:")
+                    print(f"  regression:     {regression.shape if hasattr(regression, 'shape') else type(regression)}")
+                    print(f"  classification: {classification.shape if hasattr(classification, 'shape') else type(classification)}")
+                    print(f"  seg_output:     {seg_output.shape if hasattr(seg_output, 'shape') else type(seg_output)}")
+            elif isinstance(outputs, tuple) and len(outputs) == 3:
                 regression, classification, seg_output = outputs
                 if self.frame_count < 3:
                     print(f"[HybridNets] Desempaquetado como (regression, classification, seg)")
-                    self._log_output_structure("  regression", regression)
-                    self._log_output_structure("  classification", classification)
-                    self._log_output_structure("  seg_output", seg_output)
-            elif isinstance(outputs, tuple) and len(outputs) == 2:
-                # Algunos modelos devuelven (features, seg)
-                regression_or_features, seg_output = outputs
-                regression = None
-                classification = None
-                if self.frame_count < 3:
-                    print(f"[HybridNets] Desempaquetado como tupla de 2 elementos")
-                    self._log_output_structure("  [0]", regression_or_features)
-                    self._log_output_structure("  [1] seg_output", seg_output)
             elif isinstance(outputs, dict):
                 regression = outputs.get('regression')
                 classification = outputs.get('classification')
                 seg_output = outputs.get('segmentation', outputs.get('seg'))
                 if self.frame_count < 3:
                     print(f"[HybridNets] Desempaquetado como dict, keys={list(outputs.keys())}")
-            else:
-                # Asumir que es solo segmentación
+            elif isinstance(outputs, torch.Tensor):
+                # Tensor único — asumir segmentación directa
                 seg_output = outputs
-                regression = None
-                classification = None
                 if self.frame_count < 3:
-                    print(f"[HybridNets] Salida tratada como segmentación directa")
+                    print(f"[HybridNets] Salida es tensor directo: {outputs.shape}")
+            else:
+                # Fallback: buscar el tensor con forma [1, C, H, W] que parezca segmentación
+                if isinstance(outputs, tuple):
+                    for i, item in enumerate(outputs):
+                        if isinstance(item, torch.Tensor) and item.dim() == 4:
+                            h, w = item.shape[2], item.shape[3]
+                            if h == self.input_height and w == self.input_width:
+                                seg_output = item
+                                if self.frame_count < 3:
+                                    print(f"[HybridNets] Segmentación encontrada en outputs[{i}]: {item.shape}")
+                                break
+                if seg_output is None:
+                    print(f"[HybridNets] WARN: No se pudo identificar la segmentación en outputs "
+                          f"(tipo={type(outputs).__name__}, len={len(outputs) if hasattr(outputs, '__len__') else 'N/A'})")
+                    return self._empty_result(orig_h, orig_w, start_time)
         except Exception as e:
-            print(f"[HybridNets] WARN: Estructura de salida inesperada: {e}")
-            seg_output = outputs
-            regression = None
-            classification = None
+            print(f"[HybridNets] WARN: Error desempaquetando salida: {e}")
+            seg_output = None
+        
+        if seg_output is None:
+            print(f"[HybridNets] WARN: seg_output es None, devolviendo resultado vacío")
+            return self._empty_result(orig_h, orig_w, start_time)
         
         # Post-procesar segmentación
         seg_results = self.postprocess_segmentation(seg_output, (orig_h, orig_w))
