@@ -1,4 +1,0 @@
-[submodule "src/data"]
-	path = src/data
-	url = https://github.com/ECC-BFMC/Shared.git
-	branch = data
