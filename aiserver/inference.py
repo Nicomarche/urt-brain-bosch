@@ -171,6 +171,57 @@ class HybridNetsEngine:
         
         return tensor
     
+    def _resolve_seg_tensor(self, seg_output):
+        """
+        Resuelve la salida de segmentación a un único torch.Tensor.
+        HybridNets puede devolver la segmentación como:
+          - torch.Tensor directamente
+          - Tupla/lista de tensores (ej: (road_seg, lane_seg))
+          - Tupla anidada
+        """
+        # Si ya es tensor, listo
+        if isinstance(seg_output, torch.Tensor):
+            return seg_output
+
+        # Si es tupla o lista, buscar el tensor de segmentación dentro
+        if isinstance(seg_output, (tuple, list)):
+            print(f"[HybridNets] seg_output es {type(seg_output).__name__} "
+                  f"con {len(seg_output)} elementos")
+            for i, item in enumerate(seg_output):
+                print(f"  [{i}] tipo={type(item).__name__}"
+                      f"{f', shape={item.shape}' if isinstance(item, (torch.Tensor, np.ndarray)) else ''}")
+
+            # Filtrar solo los tensores/arrays
+            tensors = [t for t in seg_output if isinstance(t, (torch.Tensor, np.ndarray))]
+            if not tensors:
+                # Buscar un nivel más profundo (tupla de tuplas)
+                for item in seg_output:
+                    if isinstance(item, (tuple, list)):
+                        for sub in item:
+                            if isinstance(sub, (torch.Tensor, np.ndarray)):
+                                tensors.append(sub)
+
+            if len(tensors) == 1:
+                t = tensors[0]
+                return torch.as_tensor(t) if isinstance(t, np.ndarray) else t
+
+            if len(tensors) >= 2:
+                # Múltiples mapas de segmentación — apilarlos en dim de canales
+                # para que argmax pueda elegir la clase
+                stacked = []
+                for t in tensors:
+                    t_tensor = torch.as_tensor(t) if isinstance(t, np.ndarray) else t
+                    # Asegurarse de que cada tensor tenga forma [1, 1, H, W]
+                    while t_tensor.dim() < 4:
+                        t_tensor = t_tensor.unsqueeze(0)
+                    stacked.append(t_tensor)
+                # Concatenar en dim=1 (canales): [1, N, H, W]
+                return torch.cat(stacked, dim=1)
+
+        # Último recurso: intentar convertir a tensor
+        print(f"[HybridNets] WARN: tipo de seg_output no esperado: {type(seg_output)}")
+        return torch.as_tensor(np.array(seg_output))
+
     def postprocess_segmentation(self, seg_output, original_size: tuple):
         """
         Post-procesar salida de segmentación.
@@ -187,18 +238,23 @@ class HybridNetsEngine:
         """
         orig_h, orig_w = original_size
         
+        # Resolver a tensor único (maneja tuplas, listas, etc.)
+        seg_tensor = self._resolve_seg_tensor(seg_output)
+        seg = seg_tensor.detach() if isinstance(seg_tensor, torch.Tensor) else seg_tensor
+
         # La salida de segmentación tiene forma [batch, classes, H, W]
         # classes: 0=background, 1=road, 2=lane
-        if isinstance(seg_output, torch.Tensor):
-            seg = seg_output.detach()
-            
+        if isinstance(seg, torch.Tensor):
             # Aplicar softmax o argmax
-            if seg.shape[1] > 1:
+            if seg.dim() >= 2 and seg.shape[1] > 1:
                 seg_pred = torch.argmax(seg, dim=1).squeeze(0).cpu().numpy()
             else:
                 seg_pred = (seg.squeeze(0).squeeze(0) > 0.5).cpu().numpy().astype(np.uint8)
+        elif isinstance(seg, np.ndarray):
+            seg_pred = seg
         else:
-            seg_pred = seg_output
+            print(f"[HybridNets] WARN: seg no es tensor ni ndarray: {type(seg)}")
+            seg_pred = np.zeros((orig_h, orig_w), dtype=np.uint8)
         
         # Redimensionar al tamaño original
         seg_resized = cv2.resize(seg_pred.astype(np.uint8), (orig_w, orig_h), 
@@ -404,6 +460,10 @@ class HybridNetsEngine:
             print(f"[HybridNets] ERROR en inferencia: {e}")
             return self._empty_result(orig_h, orig_w, start_time)
         
+        # Log de estructura de salida (solo los primeros frames)
+        if self.frame_count < 3:
+            self._log_output_structure("outputs", outputs)
+        
         # El modelo HybridNets devuelve:
         # - regression: predicciones de bounding boxes
         # - classification: scores de clasificación
@@ -414,15 +474,33 @@ class HybridNetsEngine:
             # Intentar desempaquetar según la estructura de HybridNets
             if isinstance(outputs, tuple) and len(outputs) == 3:
                 regression, classification, seg_output = outputs
+                if self.frame_count < 3:
+                    print(f"[HybridNets] Desempaquetado como (regression, classification, seg)")
+                    self._log_output_structure("  regression", regression)
+                    self._log_output_structure("  classification", classification)
+                    self._log_output_structure("  seg_output", seg_output)
+            elif isinstance(outputs, tuple) and len(outputs) == 2:
+                # Algunos modelos devuelven (features, seg)
+                regression_or_features, seg_output = outputs
+                regression = None
+                classification = None
+                if self.frame_count < 3:
+                    print(f"[HybridNets] Desempaquetado como tupla de 2 elementos")
+                    self._log_output_structure("  [0]", regression_or_features)
+                    self._log_output_structure("  [1] seg_output", seg_output)
             elif isinstance(outputs, dict):
                 regression = outputs.get('regression')
                 classification = outputs.get('classification')
                 seg_output = outputs.get('segmentation', outputs.get('seg'))
+                if self.frame_count < 3:
+                    print(f"[HybridNets] Desempaquetado como dict, keys={list(outputs.keys())}")
             else:
                 # Asumir que es solo segmentación
                 seg_output = outputs
                 regression = None
                 classification = None
+                if self.frame_count < 3:
+                    print(f"[HybridNets] Salida tratada como segmentación directa")
         except Exception as e:
             print(f"[HybridNets] WARN: Estructura de salida inesperada: {e}")
             seg_output = outputs
@@ -507,6 +585,24 @@ class HybridNetsEngine:
         
         return detections
     
+    def _log_output_structure(self, name: str, obj, depth: int = 0):
+        """Log recursivo de la estructura de un output del modelo."""
+        indent = "  " * depth
+        if isinstance(obj, torch.Tensor):
+            print(f"{indent}[HybridNets] {name}: Tensor shape={obj.shape}, dtype={obj.dtype}, device={obj.device}")
+        elif isinstance(obj, np.ndarray):
+            print(f"{indent}[HybridNets] {name}: ndarray shape={obj.shape}, dtype={obj.dtype}")
+        elif isinstance(obj, (tuple, list)):
+            kind = "tuple" if isinstance(obj, tuple) else "list"
+            print(f"{indent}[HybridNets] {name}: {kind} len={len(obj)}")
+            if depth < 2:  # No profundizar demasiado
+                for i, item in enumerate(obj):
+                    self._log_output_structure(f"{name}[{i}]", item, depth + 1)
+        elif isinstance(obj, dict):
+            print(f"{indent}[HybridNets] {name}: dict keys={list(obj.keys())}")
+        else:
+            print(f"{indent}[HybridNets] {name}: {type(obj).__name__}")
+
     def _empty_result(self, orig_h, orig_w, start_time):
         """Resultado vacío cuando falla la inferencia."""
         inference_ms = (time.time() - start_time) * 1000
