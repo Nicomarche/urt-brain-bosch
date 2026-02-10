@@ -131,7 +131,7 @@ Args:
         self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
         
         # HybridNets remote AI server parameters
-        self.hybridnets_server_url = "ws://192.168.1.56:8500/ws/steering"
+        self.hybridnets_server_url = "ws://192.168.1.35:8500/ws/steering"
         self.hybridnets_jpeg_quality = 70
         self.hybridnets_timeout = 15.0  # CPU inference can take 5-15s; GPU <1s
         self._hybridnets_client = None
