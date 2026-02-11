@@ -201,7 +201,10 @@ def verify_setup():
     if all(checks):
         print("  [OK] Todo listo!")
         print(f"  Para ejecutar el servidor:")
-        print(f"    source {VENV_DIR}/bin/activate")
+        if sys.platform == "win32":
+            print(f"    & \"{os.path.join(VENV_DIR, 'Scripts', 'Activate.ps1')}\"")
+        else:
+            print(f"    source {VENV_DIR}/bin/activate")
         print(f"    python server.py")
     else:
         print("  [!!] Algunas dependencias faltan. Revisa los mensajes arriba.")
