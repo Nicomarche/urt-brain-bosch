@@ -22,6 +22,8 @@ Output del modelo:
 
 import os
 import time
+import threading
+import queue
 import cv2
 import numpy as np
 
@@ -114,8 +116,13 @@ class SupercomboEngine:
         self._previous_steering = 0.0
         self.frame_count = 0
 
-        # Visualization
+        # Visualization — dedicated thread so cv2.imshow works on macOS
         self.show_visualization = getattr(config, 'SHOW_VISUALIZATION', False)
+        self._viz_queue = queue.Queue(maxsize=1)
+        self._viz_thread = None
+        self._viz_running = False
+        if self.show_visualization:
+            self._start_viz_thread()
 
         # ONNX session
         self.session = None
@@ -680,86 +687,275 @@ class SupercomboEngine:
             'input_size': f"{self.input_width}x{self.input_height}",
         }
 
+    # ================================================================
+    # Visualization thread (required for macOS — imshow must run in
+    # its own thread, not inside asyncio.to_thread workers)
+    # ================================================================
+
+    def _start_viz_thread(self):
+        """Start the dedicated visualization thread."""
+        if self._viz_thread is not None and self._viz_thread.is_alive():
+            return
+        self._viz_running = True
+        self._viz_thread = threading.Thread(target=self._viz_thread_loop, daemon=True)
+        self._viz_thread.start()
+        print("[Supercombo] Visualization thread started")
+
+    def _viz_thread_loop(self):
+        """Main loop for the visualization thread — displays images with cv2.imshow."""
+        while self._viz_running:
+            try:
+                frames = self._viz_queue.get(timeout=0.5)
+            except queue.Empty:
+                # Keep the windows alive even when no frames arrive
+                cv2.waitKey(1)
+                continue
+
+            try:
+                for window_name, img in frames.items():
+                    if img is not None:
+                        cv2.imshow(window_name, img)
+                cv2.waitKey(1)
+            except cv2.error as e:
+                print(f"[Supercombo] Visualization error: {e} — disabling")
+                self.show_visualization = False
+                self._viz_running = False
+                break
+
+        cv2.destroyAllWindows()
+
+    def _model_to_pixel(self, y_meters, x_idx, w, h):
+        """
+        Convert model coordinates (meters) to pixel coordinates on the display frame.
+        
+        Args:
+            y_meters: lateral offset in meters (positive = left)
+            x_idx: index into X_IDXS (longitudinal distance)
+            w, h: display frame dimensions
+            
+        Returns:
+            (px, py) tuple or None if out of bounds
+        """
+        x_m = float(X_IDXS[x_idx])
+        # Lateral: center of frame + offset scaled by a perspective factor
+        # Closer points spread wider, farther points converge to center
+        depth_factor = max(0.2, 1.0 - x_m / 200.0)  # Perspective scaling
+        px = int(w / 2 + float(y_meters) * (w / 6) * depth_factor)
+        # Longitudinal: map 0m..~50m to bottom..top of frame (use bottom 80%)
+        max_range = float(X_IDXS[min(self.lookahead_idx + 10, 32)])
+        py = int(h - (x_m / max(max_range, 1.0)) * (h * 0.80))
+        if 0 <= px < w and 0 <= py < h:
+            return (px, py)
+        return None
+
     def _visualize(self, frame, lanes, path, road_edges, steering, inference_ms):
-        """Show debug visualization windows."""
+        """
+        Build 3 visualization images and enqueue them for the viz thread.
+        
+        Window 1: "Input" — raw camera frame with resolution info
+        Window 2: "Supercombo - Lanes" — lanes, road edges, path overlay
+        Window 3: "Supercombo - Steering" — steering info, arrow, lookahead
+        """
         if not self.show_visualization:
             return
 
         h, w = frame.shape[:2]
-        overlay = frame.copy()
 
-        # Header
-        cv2.rectangle(overlay, (0, 0), (w, 85), (20, 20, 40), -1)
-        cv2.putText(overlay, "Supercombo (openpilot)", (10, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+        # Lane colors (BGR)
+        LANE_COLORS = {
+            'left_left': (0, 180, 255),     # light orange
+            'left': (255, 255, 0),           # cyan
+            'right': (0, 255, 255),          # yellow
+            'right_right': (0, 128, 255),    # dark orange
+        }
+        ROAD_EDGE_COLOR = (0, 0, 255)       # red
+        PATH_COLOR = (0, 255, 0)            # green
+        LOOKAHEAD_COLOR = (255, 0, 255)     # magenta
 
+        # ---- Window 1: Input (raw frame) ----
+        win_input = frame.copy()
+        cv2.rectangle(win_input, (0, 0), (w, 30), (0, 0, 0), -1)
+        cv2.putText(win_input, f"Input: {w}x{h} | Frame #{self.frame_count} | {inference_ms:.0f}ms",
+                    (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+        # ---- Window 2: Lanes + Road Edges + Path ----
+        win_lanes = frame.copy()
+
+        # Draw road edges
+        for edge_key in ['left', 'right']:
+            edge_y = road_edges[edge_key]['y']
+            pts = []
+            for i in range(33):
+                pt = self._model_to_pixel(edge_y[i], i, w, h)
+                if pt:
+                    pts.append(pt)
+            for j in range(len(pts) - 1):
+                cv2.line(win_lanes, pts[j], pts[j + 1], ROAD_EDGE_COLOR, 2)
+
+        # Draw 4 lane lines
+        for lane_key, color in LANE_COLORS.items():
+            prob = lanes['probabilities'][lane_key]
+            if prob > 0.2:
+                lane_y = lanes[lane_key]['y']
+                pts = []
+                for i in range(33):
+                    pt = self._model_to_pixel(lane_y[i], i, w, h)
+                    if pt:
+                        pts.append(pt)
+                thickness = 3 if lane_key in ('left', 'right') else 2
+                alpha_factor = min(1.0, prob / 0.5)
+                draw_color = tuple(int(c * alpha_factor) for c in color)
+                for j in range(len(pts) - 1):
+                    cv2.line(win_lanes, pts[j], pts[j + 1], draw_color, thickness)
+                # Label
+                if pts:
+                    lx, ly = pts[len(pts) // 2]
+                    cv2.putText(win_lanes, f"{lane_key} {prob:.0%}", (lx - 30, ly - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.3, draw_color, 1)
+
+        # Draw planned path
+        if path['confidence'] > 0.2:
+            path_pts = []
+            for i in range(33):
+                pt = self._model_to_pixel(path['y'][i], i, w, h)
+                if pt:
+                    path_pts.append(pt)
+            for j in range(len(path_pts) - 1):
+                cv2.line(win_lanes, path_pts[j], path_pts[j + 1], PATH_COLOR, 3)
+            # Draw path confidence
+            if path_pts:
+                cv2.putText(win_lanes, f"Path {path['confidence']:.0%}",
+                            (path_pts[0][0] - 30, path_pts[0][1] + 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, PATH_COLOR, 1)
+
+        # Draw lookahead point
+        idx = min(self.lookahead_idx, 32)
+        left_prob = lanes['probabilities']['left']
+        right_prob = lanes['probabilities']['right']
+        if left_prob > 0.3 and right_prob > 0.3:
+            center_y = (float(lanes['left']['y'][idx]) + float(lanes['right']['y'][idx])) / 2.0
+            la_pt = self._model_to_pixel(center_y, idx, w, h)
+            if la_pt:
+                cv2.circle(win_lanes, la_pt, 8, LOOKAHEAD_COLOR, -1)
+                cv2.putText(win_lanes, f"LA idx={idx}", (la_pt[0] + 10, la_pt[1]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, LOOKAHEAD_COLOR, 1)
+
+        # Header bar with legend
+        cv2.rectangle(win_lanes, (0, 0), (w, 45), (20, 20, 40), -1)
+        cv2.putText(win_lanes, "Supercombo - Lanes + Path + Edges", (8, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        # Mini legend
+        legend_x = 8
+        for name, color in [("LL", LANE_COLORS['left_left']), ("L", LANE_COLORS['left']),
+                            ("R", LANE_COLORS['right']), ("RR", LANE_COLORS['right_right']),
+                            ("Edge", ROAD_EDGE_COLOR), ("Path", PATH_COLOR), ("LA", LOOKAHEAD_COLOR)]:
+            cv2.putText(win_lanes, name, (legend_x, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+            legend_x += 40 + len(name) * 4
+
+        # Probability panel (right side)
+        y_prob = 55
+        for key in ['left_left', 'left', 'right', 'right_right']:
+            prob = lanes['probabilities'][key]
+            bar_w = int(prob * 80)
+            bar_color = (0, 255, 0) if prob > 0.5 else (0, 165, 255) if prob > 0.3 else (80, 80, 80)
+            cv2.rectangle(win_lanes, (w - 100, y_prob - 8), (w - 100 + bar_w, y_prob + 2), bar_color, -1)
+            cv2.putText(win_lanes, f"{key}: {prob:.2f}", (w - 200, y_prob),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (200, 200, 200), 1)
+            y_prob += 16
+
+        # ---- Window 3: Steering overlay ----
+        win_steer = frame.copy()
         steer_angle = steering.get('steering_angle')
         confidence = steering.get('confidence', 0)
+
+        # Header panel
+        cv2.rectangle(win_steer, (0, 0), (w, 85), (20, 20, 40), -1)
+        cv2.putText(win_steer, "Supercombo - Steering", (8, 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 2)
 
         if steer_angle is not None:
             steer_color = (0, 255, 0) if abs(steer_angle) < 10 else \
                 (0, 165, 255) if abs(steer_angle) < 20 else (0, 0, 255)
-            cv2.putText(overlay, f"Steer: {steer_angle:.1f} deg (serial: {int(round(steer_angle * 10))})",
-                        (10, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, steer_color, 2)
-            cv2.putText(overlay, f"Conf: {confidence:.2f} | {inference_ms:.0f}ms | Frame #{self.frame_count}",
-                        (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
 
-            # Steering arrow
-            center_x = w // 2
-            bottom_y = h - 20
+            cv2.putText(win_steer, f"Steer: {steer_angle:.1f} deg  (serial: {int(round(steer_angle * 10))})",
+                        (8, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, steer_color, 2)
+            cv2.putText(win_steer, f"Conf: {confidence:.2f} | {inference_ms:.0f}ms | Frame #{self.frame_count}",
+                        (8, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+
+            # Speed estimate
+            abs_steer = abs(steer_angle)
+            if abs_steer > 15:
+                speed_label = "SLOW"
+                speed_color = (0, 0, 255)
+            elif abs_steer > 8:
+                speed_label = "MED"
+                speed_color = (0, 165, 255)
+            else:
+                speed_label = "FAST"
+                speed_color = (0, 255, 0)
+            cv2.putText(win_steer, speed_label, (w - 80, 72),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, speed_color, 2)
+
+            # Steering gauge at bottom
+            gauge_y = h - 60
+            gauge_cx = w // 2
+            # Background bar
+            cv2.rectangle(win_steer, (gauge_cx - w // 4, gauge_y - 5),
+                         (gauge_cx + w // 4, gauge_y + 5), (50, 50, 50), -1)
+            # Center marker
+            cv2.line(win_steer, (gauge_cx, gauge_y - 15), (gauge_cx, gauge_y + 15), (200, 200, 200), 2)
+            # Steering position
+            steer_px = int(gauge_cx + (steer_angle / 25.0) * (w / 4))
+            cv2.circle(win_steer, (steer_px, gauge_y), 12, steer_color, -1)
+            cv2.putText(win_steer, f"{steer_angle:+.1f}", (steer_px - 20, gauge_y + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, steer_color, 1)
+            # Tick marks
+            for tick_deg in [-25, -15, -5, 0, 5, 15, 25]:
+                tick_px = int(gauge_cx + (tick_deg / 25.0) * (w / 4))
+                tick_h = 10 if tick_deg % 5 == 0 else 5
+                cv2.line(win_steer, (tick_px, gauge_y - tick_h), (tick_px, gauge_y + tick_h), (120, 120, 120), 1)
+
+            # Steering arrow on frame
+            arrow_start = (gauge_cx, int(h * 0.75))
             offset_px = int((steer_angle / 25.0) * (w / 4))
-            cv2.line(overlay, (center_x, h), (center_x, h - 80), (255, 255, 0), 2)
-            cv2.arrowedLine(overlay, (center_x, bottom_y),
-                            (center_x + offset_px, bottom_y - 50), steer_color, 3)
+            arrow_end = (gauge_cx + offset_px, int(h * 0.55))
+            cv2.arrowedLine(win_steer, arrow_start, arrow_end, steer_color, 3, tipLength=0.3)
+            # Center reference line
+            cv2.line(win_steer, (gauge_cx, int(h * 0.85)), (gauge_cx, int(h * 0.5)),
+                    (100, 100, 100), 1)
         else:
-            cv2.putText(overlay, "NO LANES DETECTED", (10, 48),
+            cv2.putText(win_steer, "NO LANES DETECTED", (8, 48),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            cv2.putText(win_steer, f"{inference_ms:.0f}ms | Frame #{self.frame_count}",
+                        (8, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
-        # Draw lane lines
-        scale_x = w / self.input_width
-        scale_y = h / self.input_height
-        colors = {'left': (0, 255, 255), 'right': (255, 255, 0),
-                  'left_left': (0, 128, 255), 'right_right': (255, 128, 0)}
-
-        for lane_key, color in colors.items():
-            prob = lanes['probabilities'][lane_key]
-            if prob > 0.3:
-                lane_y = lanes[lane_key]['y']
-                pts = []
-                for i in range(33):
-                    px = int((self.input_width / 2 + float(lane_y[i]) * 50) * scale_x)
-                    py = int((self.input_height - float(X_IDXS[i]) * 2) * scale_y)
-                    if 0 <= px < w and 0 <= py < h:
-                        pts.append((px, py))
-                for j in range(len(pts) - 1):
-                    cv2.line(overlay, pts[j], pts[j + 1], color, 2)
-
-        # Draw path
-        if path['confidence'] > 0.3:
-            path_pts = []
-            for i in range(33):
-                px = int((self.input_width / 2 + float(path['y'][i]) * 50) * scale_x)
-                py = int((self.input_height - float(X_IDXS[i]) * 2) * scale_y)
-                if 0 <= px < w and 0 <= py < h:
-                    path_pts.append((px, py))
-            for j in range(len(path_pts) - 1):
-                cv2.line(overlay, path_pts[j], path_pts[j + 1], (0, 255, 0), 3)
-
-        # Lane probabilities
-        y_prob = 95
-        for key in ['left_left', 'left', 'right', 'right_right']:
-            prob = lanes['probabilities'][key]
-            label = f"{key}: {prob:.2f}"
-            color = (0, 255, 0) if prob > 0.5 else (0, 165, 255) if prob > 0.3 else (0, 0, 255)
-            cv2.putText(overlay, label, (w - 180, y_prob),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1)
-            y_prob += 15
-
+        # ---- Enqueue all 3 windows for the viz thread ----
+        viz_payload = {
+            "Input": win_input,
+            "Supercombo - Lanes": win_lanes,
+            "Supercombo - Steering": win_steer,
+        }
         try:
-            cv2.imshow("Supercombo - Overlay", overlay)
-            cv2.waitKey(1)
-        except cv2.error:
-            self.show_visualization = False
+            # Non-blocking put — drop old frame if queue is full
+            try:
+                self._viz_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._viz_queue.put_nowait(viz_payload)
+        except queue.Full:
+            pass  # Skip this frame visualization
+
+    def shutdown(self):
+        """Clean up visualization thread and windows."""
+        self._viz_running = False
+        if self._viz_thread is not None:
+            self._viz_thread.join(timeout=2.0)
+            self._viz_thread = None
+        try:
+            cv2.destroyAllWindows()
+        except Exception:
+            pass
+        print("[Supercombo] Visualization shut down")
 
     def _empty_result(self, orig_h, orig_w, start_time):
         """Empty result when inference fails."""

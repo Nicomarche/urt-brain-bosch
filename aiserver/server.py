@@ -74,6 +74,8 @@ async def lifespan(app: FastAPI):
     
     # Cleanup
     print("[Server] Apagando servidor...")
+    if engine is not None and hasattr(engine, 'shutdown'):
+        engine.shutdown()
     cv2.destroyAllWindows()
     engine = None
 
