@@ -46,13 +46,22 @@ class processCamera(WorkerProcess):
             queueList (dictionar of multiprocessing.queues.Queue): Dictionar of queues where the ID is the type of messages.
             logging (logging object): Made for debugging.
             debugging (bool, optional): A flag for debugging. Defaults to False.
+            camera_type (str): "picamera" for CSI camera (default), "usb" for USB camera.
+            usb_device (int|str): USB device index or path (e.g. 0, 2, "/dev/video0").
+            usb_resolution (tuple): (width, height) for USB camera. Default (640, 480).
     """
 
     # ====================================== INIT ==========================================
-    def __init__(self, queueList, logging, ready_event=None, debugging=False):
+    def __init__(self, queueList, logging, ready_event=None, debugging=False,
+                 camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
+                 show_preview=False):
         self.queuesList = queueList
         self.logging = logging
         self.debugging = debugging
+        self.camera_type = camera_type
+        self.usb_device = usb_device
+        self.usb_resolution = usb_resolution
+        self.show_preview = show_preview
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
@@ -72,7 +81,10 @@ class processCamera(WorkerProcess):
     def _init_threads(self):
         """Create the Camera Publisher thread and Line Following thread and add to the list of threads."""
         camTh = threadCamera(
-         self.queuesList, self.logging, self.debugging
+         self.queuesList, self.logging, self.debugging,
+         show_preview=self.show_preview,
+         camera_type=self.camera_type, usb_device=self.usb_device,
+         usb_resolution=self.usb_resolution
         )
         self.threads.append(camTh)
         

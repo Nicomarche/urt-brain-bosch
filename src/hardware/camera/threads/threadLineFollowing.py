@@ -7,6 +7,7 @@ import numpy as np
 import base64
 import time
 import math
+from collections import deque
 from enum import Enum
 from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
@@ -33,7 +34,7 @@ except ImportError as e:
 
 class DetectionMode(Enum):
     """Lane detection modes."""
-    OPENCV = "opencv"           # Traditional OpenCV (HSV + Hough)
+    OPENCV = "opencv"           # BFMC-style OpenCV (Threshold + Canny + Hough)
     LSTR = "lstr"              # AI-based LSTR model (local)
     HYBRID = "hybrid"           # Fusion of OpenCV + LSTR (combines both for better accuracy)
     HYBRIDNETS = "hybridnets"  # Remote HybridNets AI server (GPU offload)
@@ -147,21 +148,23 @@ Args:
         self.show_debug = show_debug
 
         # Speed parameters
-        self.base_speed = 10
-        self.max_speed = 10
-        self.min_speed = 5
+        self.base_speed = 15
+        self.max_speed = 25
+        self.min_speed = 8
+        self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
+        self._current_speed = self.base_speed  # Tracks actual speed for ramping
 
-        # PID Controller
-        # Error normalization: ±max_error_px maps to [-1, 1]
-        # With Kp=max_steering: 40px offset → 25° steering (linear mapping)
-        self.max_error_px = 50   # Pixel offset that maps to max steering (40px = 25°)
-        self.kp = 25.0   # Proportional gain (= max_steering for direct 40px→25° mapping)
-        self.ki = 1.0    # Integral gain (corrects persistent error over time)
-        self.kd = 4.0    # Derivative gain (dampens oscillations)
-        self.max_steering = 25   # Maximum steering angle in degrees
-        self.dead_zone_ratio = 0.02  # Ignore errors below this (prevents oscillation)
+        # PID Controller (values from ricardolopezb/bfmc24-brain configs.py)
+        # Error is fed in raw pixels (not normalized). Kp=0.075 → 293px error = 22° max steering.
+        self.max_error_px = 40   # Pixel offset reference (used by LSTR normalization)
+        self.kp = 0.08  # Proportional gain (bfmc24-brain: PID_KP)
+        self.ki = 0.05   # Integral gain (bfmc24-brain: PID_KI)
+        self.kd = 0.05   # Derivative gain (bfmc24-brain: PID_KD)
+        self.max_steering = 25   # Maximum steering angle in degrees (bfmc24-brain: ±22)
+        self.dead_zone_ratio = 50  # Ignore errors below 50px (bfmc24-brain: PID_TOLERANCE)
         self.integral_reset_interval = 10  # Reset integral every N iterations (anti-windup)
         self.smoothing_factor = 0.5  # Higher = more reactive, Lower = more smooth
+        self.steer_history = deque(maxlen=1)  # Moving average of last 5 steering values (smooths erratic readings)
         self.lookahead = 0.4
         self.pid = PIDController(
             Kp=self.kp, Ki=self.ki, Kd=self.kd,
@@ -176,9 +179,9 @@ Args:
         self.ff_weight = 0.6         # Weight of feed-forward vs PID (0=pure PID, 1=pure FF)
         self.curvature_threshold = 0.5  # Min curvature to activate feed-forward (1/pixels)
 
-        # ROI parameters
-        self.roi_height_start = 0.55
-        self.roi_height_end = 0.92
+        # ROI parameters (BFMC uses roi_height_start=0.35 — top 35% masked)
+        self.roi_height_start = 0.35
+        self.roi_height_end = 1.0
         self.roi_width_margin_top = 0.35
         self.roi_width_margin_bottom = 0.15
 
@@ -198,16 +201,20 @@ Args:
         self.yellow_v_min = 100
         self.yellow_v_max = 255
 
-        # Image processing parameters
-        self.blur_kernel = 5
+        # Image processing parameters (defaults from bfmc24-brain)
+        self.blur_kernel = 3           # Median blur kernel (BFMC uses 3)
         self.morph_kernel = 7
-        self.canny_low = 100
-        self.canny_high = 200
+        self.canny_low = 100           # Canny lower threshold
+        self.canny_high = 150          # Canny upper threshold (BFMC uses 150)
         self.dilate_kernel = 5
         self.use_dilation = True
-        self.hough_threshold = 20
-        self.hough_min_line_length = 15
-        self.hough_max_line_gap = 200
+        self.binary_threshold = 165    # BFMC grayscale threshold (main)
+        self.binary_threshold_retry = 90  # Retry with lower if no lines found
+        self.hough_threshold = 50      # BFMC votes threshold
+        self.hough_min_line_length = 50  # BFMC min line length
+        self.hough_max_line_gap = 150  # BFMC max gap between segments
+        self.line_angle_filter = 30    # Min angle (degrees) to classify as lane line
+        self.line_merge_distance = 175 # Max pixel distance to merge lines
 
         # Brightness/contrast
         self.brightness = 5
@@ -288,6 +295,11 @@ Args:
         self.last_seen_side = "both"
         self.single_line_correction = 1
         self.last_turn_direction = 0
+        
+        # BFMC-style single-line tracking
+        self.consecutive_single_left = 0
+        self.consecutive_single_right = 0
+        self.just_seen_two_lines = False
 
         # Message handlers
         self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
@@ -1375,6 +1387,312 @@ Args:
         
         return final_steering, speed, debug_frame
 
+    # ==================================================================
+    # BFMC-style lane detection helpers
+    # Based on: https://github.com/ricardolopezb/bfmc24-brain
+    # Pipeline: ROI → Grayscale → Threshold → MedianBlur → Canny → HoughP
+    # ==================================================================
+
+    def _bfmc_image_processing(self, image, threshold_override=None, kernel_override=None):
+        """
+        BFMC-style image processing pipeline.
+        
+        1. Apply ROI (bottom portion of image)
+        2. Convert to grayscale
+        3. Binary threshold
+        4. Median blur for noise removal
+        5. Canny edge detection
+        6. HoughLinesP for line detection
+        7. Classify, merge, and average lines
+        
+        Args:
+            image: BGR frame
+            threshold_override: Override binary threshold (for retry)
+            kernel_override: Override median blur kernel (for retry)
+            
+        Returns:
+            (avg_left_line, avg_right_line, height, width, canny_image, debug_info)
+        """
+        threshold_val = threshold_override if threshold_override is not None else self.binary_threshold
+        kernel_val = kernel_override if kernel_override is not None else self.blur_kernel
+        if kernel_val % 2 == 0:
+            kernel_val += 1
+
+        height, width = image.shape[:2]
+        debug_info = {}
+
+        # 1. ROI mask — keep bottom portion (roi_height_start..roi_height_end)
+        y_start = int(self.roi_height_start * height)
+        y_end = int(self.roi_height_end * height)
+        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
+        mask = np.zeros_like(image)
+        cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
+        masked_image = cv2.bitwise_and(image, mask)
+        debug_info['roi'] = masked_image.copy()
+
+        # 2. Grayscale
+        grey_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
+        debug_info['grey'] = grey_image.copy()
+
+        # 3. Binary threshold
+        _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
+        debug_info['binary'] = binary_image.copy()
+
+        # 4. Median blur
+        noiseless = cv2.medianBlur(binary_image, kernel_val)
+        debug_info['noiseless'] = noiseless.copy()
+
+        # 5. Canny
+        canny = cv2.Canny(noiseless, self.canny_low, self.canny_high)
+        debug_info['canny'] = canny.copy()
+
+        # 6. HoughLinesP
+        lines = cv2.HoughLinesP(
+            canny, 1, np.pi / 180,
+            self.hough_threshold,
+            minLineLength=self.hough_min_line_length,
+            maxLineGap=self.hough_max_line_gap
+        )
+
+        # 7. Classify → merge → average
+        left_lines, right_lines = self._bfmc_classify_lines(lines)
+        merged_left = self._bfmc_merge_lines(left_lines)
+        merged_right = self._bfmc_merge_lines(right_lines)
+        avg_left = self._bfmc_average_lines(merged_left)
+        avg_right = self._bfmc_average_lines(merged_right)
+
+        debug_info['all_lines'] = lines
+        debug_info['left_lines'] = merged_left
+        debug_info['right_lines'] = merged_right
+        debug_info['threshold'] = threshold_val
+
+        return avg_left, avg_right, height, width, canny, debug_info
+
+    def _bfmc_classify_lines(self, lines):
+        """
+        Classify detected lines into left and right lanes by slope.
+        
+        Left lane lines have negative slope (going up-left).
+        Right lane lines have positive slope (going up-right).
+        Lines with angle below self.line_angle_filter are horizontal → rejected.
+        
+        Based on MarcosLaneDetector.lines_classifier()
+        """
+        left_lines = []
+        right_lines = []
+
+        if lines is None:
+            return left_lines, right_lines
+
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            dx = x2 - x1
+            if dx == 0:
+                slope = np.pi / 2
+            else:
+                slope = np.arctan((y2 - y1) / dx)
+
+            angle_degrees = np.degrees(abs(slope))
+
+            # Reject near-horizontal lines
+            if angle_degrees < self.line_angle_filter:
+                continue
+
+            if slope < 0:
+                left_lines.append(line)
+            else:
+                right_lines.append(line)
+
+        return left_lines, right_lines
+
+    def _bfmc_merge_lines(self, lines):
+        """
+        Merge nearby line segments into single lines.
+        
+        If the start x of one line is close to the end x of another
+        (within self.line_merge_distance), merge them.
+        
+        Based on MarcosLaneDetector.merge_lines()
+        """
+        merged = []
+        for line in lines:
+            if len(merged) == 0:
+                merged.append(line)
+            else:
+                merge_flag = False
+                for i, mline in enumerate(merged):
+                    if abs(line[0][0] - mline[0][2]) < self.line_merge_distance:
+                        merged[i] = np.array([[mline[0][0], mline[0][1], line[0][2], line[0][3]]])
+                        merge_flag = True
+                        break
+                if not merge_flag:
+                    merged.append(line)
+        return merged
+
+    def _bfmc_average_lines(self, lines):
+        """
+        Average all lines into a single representative line.
+        
+        Returns:
+            np.array([[x1, y1, x2, y2]]) or None if no lines
+        """
+        if len(lines) == 0:
+            return None
+        lines_array = np.array(lines)
+        return np.mean(lines_array, axis=0, dtype=np.int32)
+
+    def _bfmc_get_error(self, avg_left, avg_right, height, width):
+        """
+        Calculate lateral error: distance from lane midpoint to image center.
+        
+        When both lines are detected:
+        1. Find where each line intersects the bottom of the image
+        2. Compute the midpoint between those two intersections
+        3. Error = midpoint_x - image_center_x (positive = offset right)
+        
+        Also computes the vanishing point (intersection of left and right line).
+        
+        Based on MarcosLaneDetector.getting_error()
+        
+        Returns:
+            error in pixels (positive = car is right of center, steer left)
+        """
+        x1_l, y1_l, x2_l, y2_l = avg_left[0]
+        x1_r, y1_r, x2_r, y2_r = avg_right[0]
+
+        # Extend lines to bottom of image
+        dy_l = y2_l - y1_l
+        if dy_l == 0:
+            dy_l = 0.01
+        bottom_left_x = int(x1_l + (height - y1_l) * (x2_l - x1_l) / dy_l)
+
+        dy_r = y2_r - y1_r
+        if dy_r == 0:
+            dy_r = 0.01
+        bottom_right_x = int(x1_r + (height - y1_r) * (x2_r - x1_r) / dy_r)
+
+        midpoint_x = (bottom_left_x + bottom_right_x) // 2
+        bottom_center_x = width // 2
+        error = midpoint_x - bottom_center_x
+
+        return error, midpoint_x, bottom_left_x, bottom_right_x
+
+    def _bfmc_follow_single_line(self, line, side):
+        """
+        Compute steering angle when only one lane line is visible.
+        
+        Uses the slope of the line to estimate how much to turn:
+        - Steep line (close to vertical) → line is nearly parallel, go straight
+        - Shallow line → line is diagonal, turn harder
+        
+        Based on MarcosLaneDetector.follow_left_line / follow_right_line + slope_mapper
+        
+        Args:
+            line: np.array([[x1, y1, x2, y2]])
+            side: 'left' or 'right'
+            
+        Returns:
+            steering_angle in degrees (clamped to ±max_steering)
+        """
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0:
+            # Perfectly vertical line → go straight
+            return 0
+
+        slope_deg = math.degrees(abs(dy / dx))
+
+        # BFMC slope_mapper: maps slope angle to discrete steering values
+        if slope_deg > 50:
+            steering_angle = 3    # Nearly vertical → slight correction
+        elif slope_deg > 40:
+            steering_angle = 11   # Moderate curve
+        else:
+            steering_angle = 22   # Sharp curve → max steering
+
+        # Invert for right line (mirror steering)
+        if side == 'right':
+            steering_angle = -steering_angle
+
+        # Clamp to configured max
+        return max(-self.max_steering, min(self.max_steering, steering_angle))
+
+    def _bfmc_draw_debug(self, frame, avg_left, avg_right, error, midpoint_x, 
+                          bottom_left_x, bottom_right_x, steering_angle, debug_info):
+        """
+        Draw BFMC-style debug visualization on frame.
+        
+        Shows: detected lines (red), midpoint (cyan), center (green),
+        error line (orange), steering arrow, and info panel.
+        """
+        h, w = frame.shape[:2]
+        debug = frame.copy()
+
+        # Draw all raw Hough lines (faint blue)
+        all_lines = debug_info.get('all_lines')
+        if all_lines is not None:
+            for line in all_lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(debug, (x1, y1), (x2, y2), (180, 120, 60), 1)
+
+        # Draw averaged left line (red, extended)
+        if avg_left is not None:
+            self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2)
+
+        # Draw averaged right line (red, extended)
+        if avg_right is not None:
+            self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2)
+
+        # Draw midpoint and center
+        if midpoint_x is not None:
+            cv2.circle(debug, (midpoint_x, h), 8, (0, 255, 255), -1)  # Cyan = midpoint
+            cv2.circle(debug, (w // 2, h), 8, (0, 255, 0), -1)       # Green = center
+            cv2.line(debug, (midpoint_x, h), (w // 2, h), (0, 165, 255), 2)  # Orange = error
+
+        # Header panel
+        cv2.rectangle(debug, (0, 0), (w, 55), (20, 20, 40), -1)
+        cv2.putText(debug, "OpenCV - BFMC Pipeline", (8, 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+        if steering_angle is not None:
+            steer_color = (0, 255, 0) if abs(steering_angle) < 10 else \
+                (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
+            cv2.putText(debug, f"Steer: {steering_angle:.1f} deg  Error: {error or 0:.0f}px",
+                        (8, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.45, steer_color, 1)
+
+            # Steering arrow at bottom
+            cx = w // 2
+            offset_px = int((steering_angle / self.max_steering) * (w / 4))
+            cv2.arrowedLine(debug, (cx, h - 30), (cx + offset_px, h - 60), steer_color, 3, tipLength=0.3)
+        else:
+            cv2.putText(debug, "NO LINES DETECTED", (8, 38),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        # Detection info
+        th = debug_info.get('threshold', self.binary_threshold)
+        l_count = len(debug_info.get('left_lines', []))
+        r_count = len(debug_info.get('right_lines', []))
+        cv2.putText(debug, f"Thr:{th} L:{l_count} R:{r_count}", (8, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+
+        return debug
+
+    def _bfmc_draw_extended_line(self, image, line, height, color, thickness):
+        """Draw a line extended to top and bottom of image."""
+        x1, y1, x2, y2 = line[0]
+        dx = x2 - x1
+        if dx == 0:
+            dx = 0.001
+        slope = (y2 - y1) / dx
+        if slope == 0:
+            slope = 0.001
+        # Intersection at y=0 (top)
+        x_top = int(x1 + (0 - y1) / slope)
+        # Intersection at y=height (bottom)
+        x_bot = int(x1 + (height - y1) / slope)
+        cv2.line(image, (x_top, 0), (x_bot, height), color, thickness)
+
     def _init_perspective_transform(self, width, height):
         """Initialize perspective transform matrices for bird's eye view."""
         # Source points (trapezoid in the original image)
@@ -1603,6 +1921,9 @@ Returns:
                      'brightness', 'contrast', 'blur_kernel', 'morph_kernel',
                      'canny_low', 'canny_high', 'hough_threshold', 'hough_min_line_length',
                      'hough_max_line_gap',
+                     # BFMC-style parameters
+                     'binary_threshold', 'binary_threshold_retry',
+                     'line_angle_filter', 'line_merge_distance',
                      # Adaptive lighting parameters
                      'use_clahe', 'clahe_clip_limit', 'clahe_grid_size',
                      'use_adaptive_white', 'adaptive_white_percentile', 'adaptive_white_min_threshold',
@@ -1813,230 +2134,157 @@ Returns:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 return None, self.min_speed, debug_frame
         
-        if not self.perspective_initialized:
-            self._init_perspective_transform(width, height)
-        
-        orig_display = frame.copy()
-        
-        # Apply preprocessing (CLAHE + brightness/contrast)
-        preprocessed, preprocess_debug = self._preprocess_frame(frame)
-        
+        # ==============================================================
+        # BFMC-style OpenCV pipeline
+        # Based on: https://github.com/ricardolopezb/bfmc24-brain
+        # ROI → Grayscale → Threshold → MedianBlur → Canny → HoughP
+        # → Classify → Merge → Average → Error → PID
+        # ==============================================================
+
+        # First attempt with normal threshold
+        avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(frame)
+
+        # BFMC retry: if no lines detected, try lower threshold (from MarcosLaneDetector)
+        if avg_left is None and avg_right is None:
+            avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(
+                frame,
+                threshold_override=self.binary_threshold_retry,
+                kernel_override=3
+            )
+
+        # Show debug windows
         if self.show_debug:
-            if self.use_clahe and 'clahe' in preprocess_debug:
-                clahe_display = preprocess_debug['clahe'].copy()
-                cv2.putText(clahe_display, f"CLAHE: clip={self.clahe_clip_limit} grid={self.clahe_grid_size}",
-                           (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                cv2.imshow("2a. CLAHE Normalized", clahe_display)
-                self._store_debug_image('clahe', clahe_display)
-            
-            adj_display = preprocess_debug['adjusted'].copy()
-            cv2.putText(adj_display, f"Brightness: {self.brightness} Contrast: {self.contrast:.2f}",
-                       (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            cv2.imshow("2b. Brightness/Contrast", adj_display)
-            self._store_debug_image('adjusted', adj_display)
-        
-        # Create combined mask using multiple detection methods
-        combined_mask, mask_debug = self._create_combined_mask(frame, preprocessed)
-        
-        if self.show_debug:
-            cv2.imshow("3. HSV", mask_debug['hsv'])
-            self._store_debug_image('hsv', mask_debug['hsv'])
-            
-            white_display = cv2.cvtColor(mask_debug['white_hsv'], cv2.COLOR_GRAY2BGR)
-            cv2.putText(white_display, f"H:{self.white_h_min}-{self.white_h_max}", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(white_display, f"S:{self.white_s_min}-{self.white_s_max}", (10, 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(white_display, f"V:{self.white_v_min}-{self.white_v_max}", (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.imshow("4. White Mask (HSV)", white_display)
-            self._store_debug_image('white_mask', white_display)
-            
-            yellow_display = cv2.cvtColor(mask_debug['yellow'], cv2.COLOR_GRAY2BGR)
-            cv2.putText(yellow_display, f"H:{self.yellow_h_min}-{self.yellow_h_max}", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(yellow_display, f"S:{self.yellow_s_min}-{self.yellow_s_max}", (10, 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.putText(yellow_display, f"V:{self.yellow_v_min}-{self.yellow_v_max}", (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.imshow("5. Yellow Mask", yellow_display)
-            self._store_debug_image('yellow_mask', yellow_display)
-            
-            # Show adaptive white detection if enabled
-            if self.use_adaptive_white and 'adaptive_white' in mask_debug:
-                adaptive_display = cv2.cvtColor(mask_debug['adaptive_white'], cv2.COLOR_GRAY2BGR)
-                threshold = mask_debug.get('adaptive_threshold', 0)
-                cv2.putText(adaptive_display, f"Adaptive threshold: {threshold:.0f}", (10, 20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                cv2.putText(adaptive_display, f"Percentile: {self.adaptive_white_percentile}", (10, 40),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                cv2.imshow("5b. Adaptive White", adaptive_display)
-            
-            # Show gradient detection if it was used
-            if mask_debug.get('gradient_used', False) and 'gradient' in mask_debug:
-                gradient_display = cv2.cvtColor(mask_debug['gradient'], cv2.COLOR_GRAY2BGR)
-                cv2.putText(gradient_display, "GRADIENT FALLBACK ACTIVE", (10, 20),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-                cv2.imshow("5c. Gradient Fallback", gradient_display)
-        
-        if self.show_debug:
-            cv2.imshow("6. Combined (Raw)", mask_debug['combined_raw'])
-        
-        # Store combined mask for streaming (always, not just when show_debug)
-        combined_display = cv2.cvtColor(mask_debug['combined_raw'], cv2.COLOR_GRAY2BGR)
-        self._store_debug_image('combined_mask', combined_display)
-        
-        # Morphological operations
-        morph_k = max(1, self.morph_kernel)
-        kernel = np.ones((morph_k, morph_k), np.uint8)
-        
-        if self.use_dilation:
-            dilate_k = max(1, self.dilate_kernel)
-            dilate_kernel = np.ones((dilate_k, dilate_k), np.uint8)
-            combined_mask = cv2.dilate(combined_mask, dilate_kernel, iterations=1)
-        
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel)
-        combined_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_OPEN, kernel)
-        
-        if self.show_debug:
-            morph_display = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
-            dilate_str = f"Dilate: {self.dilate_kernel}" if self.use_dilation else "No dilate"
-            cv2.putText(morph_display, f"Morph: {self.morph_kernel} {dilate_str}", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.imshow("7. After Morphology", morph_display)
-        
-        # Blur
-        blur_k = max(1, self.blur_kernel)
-        if blur_k % 2 == 0:
-            blur_k += 1
-        combined_mask = cv2.GaussianBlur(combined_mask, (blur_k, blur_k), 0)
-        
-        if self.show_debug:
-            blur_display = cv2.cvtColor(combined_mask, cv2.COLOR_GRAY2BGR)
-            cv2.putText(blur_display, f"Blur Kernel: {blur_k}", (10, 20),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-            cv2.imshow("8. After Blur", blur_display)
-        
-        # Warp to bird's eye view
-        binary_warped = self.warp_perspective(combined_mask)
-        
-        if self.show_debug:
-            cv2.imshow("9. Bird's Eye View", binary_warped)
-        
-        # Store birds eye for streaming
-        birds_eye_display = cv2.cvtColor(binary_warped, cv2.COLOR_GRAY2BGR)
-        self._store_debug_image('birds_eye', birds_eye_display)
-        
-        # Find lane pixels using sliding window
-        leftx, lefty, rightx, righty, sliding_window_img = self.find_lane_pixels_sliding_window(binary_warped)
-        
-        if self.show_debug:
-            cv2.imshow("10. Sliding Window", sliding_window_img)
-        
-        # Store sliding window for streaming
-        self._store_debug_image('sliding_window', sliding_window_img)
-        
-        # Fit polynomial
-        left_fit, right_fit, lane_center, curvature = self.fit_polynomial(leftx, lefty, rightx, righty, binary_warped.shape)
-        
-        # Calculate steering
+            if 'binary' in debug_info:
+                bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
+                cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                cv2.imshow("2. Binary Threshold", bin_display)
+            if 'canny' in debug_info:
+                cv2.imshow("3. Canny Edges", debug_info['canny'])
+            self._store_debug_image('canny', cv2.cvtColor(canny, cv2.COLOR_GRAY2BGR))
+
+        # Calculate steering based on detected lines
         steering_angle = None
         speed = self.base_speed
-        
-        if left_fit is not None or right_fit is not None:
-            # Calculate lane center in original image coordinates
-            y_eval_warped = int(binary_warped.shape[0] * (1 - self.lookahead))
-            
-            if left_fit is not None and right_fit is not None:
-                left_x = left_fit[0] * y_eval_warped**2 + left_fit[1] * y_eval_warped + left_fit[2]
-                right_x = right_fit[0] * y_eval_warped**2 + right_fit[1] * y_eval_warped + right_fit[2]
-                lane_center_warped = (left_x + right_x) / 2
-            elif left_fit is not None:
-                lane_center_warped = left_fit[0] * y_eval_warped**2 + left_fit[1] * y_eval_warped + left_fit[2] + width * 0.3
+        error = None
+        midpoint_x = None
+        bottom_left_x = None
+        bottom_right_x = None
+
+        if avg_left is not None and avg_right is not None:
+            # ---- BOTH LINES DETECTED ----
+            # BFMC logic: if just_seen_two_lines was False, skip this frame (stabilize)
+            if self.just_seen_two_lines:
+                error, midpoint_x, bottom_left_x, bottom_right_x = self._bfmc_get_error(
+                    avg_left, avg_right, img_h, img_w
+                )
+
+                # PID control with raw pixel error (bfmc24-brain style)
+                steering_angle = self.pid.compute(error)
+
+                # Moving average of last 5 steering values (smooths erratic readings from lighting)
+                self.steer_history.append(steering_angle)
+                steering_angle = sum(self.steer_history) / len(self.steer_history)
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+
+                self.just_seen_two_lines = False
             else:
-                lane_center_warped = right_fit[0] * y_eval_warped**2 + right_fit[1] * y_eval_warped + right_fit[2] - width * 0.3
-            
-            # Transform lane center back to original image
-            point_warped = np.array([[[lane_center_warped, y_eval_warped]]], dtype=np.float32)
-            point_original = cv2.perspectiveTransform(point_warped, self.perspective_M_inv)
-            lane_center_original = point_original[0][0][0]
-            
-            # Also transform frame center for reference
-            center_warped = np.array([[[width / 2, y_eval_warped]]], dtype=np.float32)
-            center_original = cv2.perspectiveTransform(center_warped, self.perspective_M_inv)
-            frame_center_at_y = center_original[0][0][0]
-            
-            # Calculate error
-            error = lane_center_original - frame_center_at_y
-            error_ratio = abs(error) / (width / 2)
-            
-            if self.show_debug:
-                curv_str = f"curv:{curvature:.0f}" if curvature is not None else "curv:N/A"
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mOFFSET\033[0m - offset:{error:.1f}px ratio:{error_ratio:.2f} {curv_str}")
-            
-            # PID control with NORMALIZED error: ±max_error_px maps to [-1, 1]
-            error_normalized = max(min(error / self.max_error_px, 1.0), -1.0)
-            
-            # Pure PID: the PIDController handles P, I, D, dead zone, clamping and anti-windup
-            steering_angle = self.pid.compute(error_normalized)
-            
-            # Optional smoothing for stability
-            if hasattr(self, 'last_steering'):
-                steering_angle = self.smoothing_factor * steering_angle + (1 - self.smoothing_factor) * self.last_steering
-                steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
-            
-            self.last_steering = steering_angle
-            
-            # Update turn direction
-            if abs(steering_angle) > 8:
-                self.last_turn_direction = 1 if steering_angle > 0 else -1
-            
-            # Adjust speed based on steering
-            abs_steering = abs(steering_angle)
-            if abs_steering > 15:
-                speed = self.min_speed
-            elif abs_steering > 8:
-                speed = (self.min_speed + self.max_speed) / 2
-            else:
-                speed = self.max_speed
-            
-            self.last_line_position = lane_center_original
+                # First frame with two lines after single/none — use previous steering (stabilize)
+                self.just_seen_two_lines = True
+                steering_angle = getattr(self, 'last_steering', 0)
+
+            # Reset single-line counters
+            self.consecutive_single_left = 0
+            self.consecutive_single_right = 0
             self.frames_without_line = 0
+            self.last_seen_side = "both"
+
+        elif avg_left is not None:
+            # ---- ONLY LEFT LINE ----
+            self.consecutive_single_left += 1
+            self.consecutive_single_right = 0
+            self.last_seen_side = "left"
+
+            if self.consecutive_single_left >= 2:
+                # After 2 frames with only left → max right turn
+                steering_angle = self.max_steering
+                speed = self.min_speed
+            else:
+                steering_angle = self._bfmc_follow_single_line(avg_left, 'left')
+
+            self.frames_without_line = 0
+
+        elif avg_right is not None:
+            # ---- ONLY RIGHT LINE ----
+            self.consecutive_single_right += 1
+            self.consecutive_single_left = 0
+            self.last_seen_side = "right"
+
+            if self.consecutive_single_right >= 2:
+                # After 2 frames with only right → max left turn
+                steering_angle = -self.max_steering
+                speed = self.min_speed
+            else:
+                steering_angle = self._bfmc_follow_single_line(avg_right, 'right')
+
+            self.frames_without_line = 0
+
         else:
-            # No lanes detected with OpenCV
+            # ---- NO LINES ----
             self.frames_without_line += 1
-            
+
             if self.show_debug:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - Stopped. Waiting for lines... (frame {self.frames_without_line})")
-            
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
+
             if hasattr(self, 'last_steering') and self.frames_without_line < 5:
                 steering_angle = self.last_steering * 0.95
             else:
                 steering_angle = None
             speed = self.min_speed
-        
+
+        # Update state
+        if steering_angle is not None:
+            self.last_steering = steering_angle
+
+            # Update turn direction
+            if abs(steering_angle) > 8:
+                self.last_turn_direction = 1 if steering_angle > 0 else -1
+
+            # Adaptive speed based on steering magnitude (BFMC-style)
+            abs_steer = abs(steering_angle)
+            if abs_steer > 15:
+                target_speed = self.min_speed
+            elif abs_steer > 8:
+                target_speed = (self.min_speed + self.max_speed) / 2
+            else:
+                target_speed = self.max_speed
+
+            # Speed ramping: instant decrease, gradual increase
+            if target_speed <= self._current_speed:
+                # Braking: drop instantly
+                self._current_speed = target_speed
+            else:
+                # Acceleration: ramp up gradually
+                self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
+            speed = self._current_speed
+
+        if self.show_debug and steering_angle is not None:
+            src = "both" if avg_left is not None and avg_right is not None else \
+                  "left" if avg_left is not None else \
+                  "right" if avg_right is not None else "none"
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mBFMC\033[0m - "
+                  f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
+
         # Create debug frame
-        debug_frame = frame.copy()
-        
-        if left_fit is not None or right_fit is not None:
-            lane_warped = np.zeros((height, width, 3), dtype=np.uint8)
-            lane_warped = self.draw_lane(lane_warped, left_fit, right_fit, (height, width))
-            lane_unwarped = self.unwarp_perspective(lane_warped)
-            debug_frame = cv2.addWeighted(debug_frame, 1, lane_unwarped, 0.3, 0)
-            
-            # Draw lane center point
-            if self.last_line_position is not None:
-                point_for_y = int(height * (1 - self.lookahead))
-                point_y_original = int(height * 0.8)
-                center_y = point_y_original
-                center_x = int(self.last_line_position)
-                cv2.circle(debug_frame, (center_x, center_y), 10, (255, 0, 255), -1)
-                cv2.line(debug_frame, (width // 2, height), (width // 2, int(height * 0.6)), (0, 255, 255), 2)
-        
+        debug_frame = self._bfmc_draw_debug(
+            frame, avg_left, avg_right, error, midpoint_x,
+            bottom_left_x, bottom_right_x, steering_angle, debug_info
+        )
+
         # Store final debug image and send stream
         self._store_debug_image('final', debug_frame)
         self._send_debug_stream(steering_angle, speed)
-        
+
         return steering_angle, speed, debug_frame
 
     def draw_rounded_rectangle(self, img, pt1, pt2, color, thickness, radius):

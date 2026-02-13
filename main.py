@@ -68,6 +68,7 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
+from config import CAMERA_TYPE, USB_DEVICE, USB_RESOLUTION, SHOW_CAMERA_PREVIEW
 
 # ------ New component imports starts here ------#
 
@@ -143,7 +144,10 @@ processDashboard = processDashboard(queueList, logging, dashboard_ready, debuggi
 
 # Initializing camera
 camera_ready = Event()
-processCamera = processCamera(queueList, logging, camera_ready, debugging = False)
+processCamera = processCamera(queueList, logging, camera_ready, debugging = False,
+                               camera_type=CAMERA_TYPE, usb_device=USB_DEVICE,
+                               usb_resolution=USB_RESOLUTION,
+                               show_preview=SHOW_CAMERA_PREVIEW)
 
 # # Initializing semaphores
 # semaphore_ready = Event()
