@@ -282,6 +282,114 @@ class LSTRDetector:
         
         return None
     
+    def estimate_path_curvature(self, image_width):
+        """
+        Estimate the curvature of the path ahead using all detected lane points.
+        
+        Uses the full 50-point lane data from LSTR to fit a 2nd-degree polynomial
+        to the lane centerline, then computes curvature for feed-forward steering.
+        
+        The curvature formula (for x = a*y^2 + b*y + c):
+            kappa = |2a| / (1 + (2a*y + b)^2)^(3/2)
+        
+        Args:
+            image_width: Width of the image in pixels
+            
+        Returns:
+            tuple: (curvature, turn_sign) where:
+                - curvature: Magnitude of curvature (1/pixels). Higher = tighter curve.
+                - turn_sign: +1 for right curve, -1 for left curve, 0 for straight.
+                Returns (0.0, 0) if not enough data.
+        """
+        if len(self.lanes) < 1:
+            return 0.0, 0
+        
+        image_center = image_width / 2
+        
+        # Identify left and right lane boundaries (same logic as get_lane_center)
+        y_ref = self.img_height * 0.7
+        
+        lane_x_at_ref = []
+        for i, lane in enumerate(self.lanes):
+            idx_y = np.argmin(np.abs(lane[1] - y_ref))
+            x_at_ref = lane[0][idx_y]
+            lane_x_at_ref.append((i, x_at_ref))
+        
+        left_lanes = [(idx, x) for idx, x in lane_x_at_ref if x < image_center]
+        right_lanes = [(idx, x) for idx, x in lane_x_at_ref if x >= image_center]
+        
+        left_lane = None
+        right_lane = None
+        
+        if left_lanes:
+            left_idx = max(left_lanes, key=lambda item: item[1])[0]
+            left_lane = self.lanes[left_idx]
+        
+        if right_lanes:
+            right_idx = min(right_lanes, key=lambda item: item[1])[0]
+            right_lane = self.lanes[right_idx]
+        
+        # Compute centerline points from available lane data
+        if left_lane is not None and right_lane is not None:
+            # Best case: both lanes visible - compute true centerline
+            center_y = left_lane[1].astype(float)
+            center_x = np.zeros_like(center_y, dtype=float)
+            for i, y_val in enumerate(center_y):
+                left_x = float(left_lane[0][i])
+                idx_right = np.argmin(np.abs(right_lane[1] - y_val))
+                right_x = float(right_lane[0][idx_right])
+                center_x[i] = (left_x + right_x) / 2.0
+        elif left_lane is not None:
+            center_y = left_lane[1].astype(float)
+            center_x = left_lane[0].astype(float) + image_width * 0.25
+        elif right_lane is not None:
+            center_y = right_lane[1].astype(float)
+            center_x = right_lane[0].astype(float) - image_width * 0.25
+        else:
+            return 0.0, 0
+        
+        # Filter valid points (within image bounds)
+        valid = ((center_x > 0) & (center_x < image_width) & 
+                 (center_y > 0) & (center_y < self.img_height))
+        center_x = center_x[valid]
+        center_y = center_y[valid]
+        
+        if len(center_x) < 5:
+            return 0.0, 0
+        
+        # Fit 2nd degree polynomial: x = a*y^2 + b*y + c
+        try:
+            coeffs = np.polyfit(center_y, center_x, 2)
+            a, b, c = coeffs
+        except Exception:
+            return 0.0, 0
+        
+        # Calculate curvature at evaluation point (middle of visible range)
+        y_eval = np.mean(center_y)
+        
+        # kappa = |d²x/dy²| / (1 + (dx/dy)²)^(3/2)
+        first_deriv = 2 * a * y_eval + b
+        curvature = abs(2 * a) / (1 + first_deriv ** 2) ** 1.5
+        
+        # Determine turn direction from the path shape:
+        # Compare centerline position at far (low y = top of image) vs near (high y = bottom)
+        y_near = np.max(center_y)
+        y_far = np.min(center_y)
+        x_near = a * y_near**2 + b * y_near + c
+        x_far = a * y_far**2 + b * y_far + c
+        
+        # If far point is to the right of near → right curve → positive steering
+        # If far point is to the left → left curve → negative steering
+        dx = x_far - x_near
+        if abs(dx) < 3:  # Less than 3px difference = straight
+            turn_sign = 0
+        elif dx > 0:
+            turn_sign = 1   # Right curve
+        else:
+            turn_sign = -1  # Left curve
+        
+        return curvature, turn_sign
+
     def draw_lanes(self, image, draw_center=True):
         """
         Draw detected lanes on the image, highlighting the current lane.

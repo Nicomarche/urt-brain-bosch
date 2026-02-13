@@ -8,12 +8,18 @@ uvicorn[standard]
 websockets
 
 # --- ML / Inferencia ---
-# PyTorch: instalar según tu GPU/CPU
+# PyTorch (para HybridNets): instalar según tu GPU/CPU
 # CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 # CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # CPU only: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# Apple Silicon: pip install torch torchvision
 torch
 torchvision
+
+# ONNX Runtime (para Supercombo)
+# En macOS M1/M2: usa CoreMLExecutionProvider automáticamente
+# En Linux con GPU: pip install onnxruntime-gpu
+onnxruntime>=1.16.0
 
 # --- Procesamiento de imágenes ---
 opencv-python

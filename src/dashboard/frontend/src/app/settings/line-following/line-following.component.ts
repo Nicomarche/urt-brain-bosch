@@ -38,6 +38,9 @@ interface DebugStatus {
   hybridnets_connected?: boolean;
   hybridnets_roundtrip_ms?: number;
   hybridnets_server_fps?: number;
+  supercombo_connected?: boolean;
+  supercombo_roundtrip_ms?: number;
+  supercombo_server_fps?: number;
 }
 
 @Component({
@@ -70,6 +73,14 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   hybridnetsConnected: boolean = false;
   hybridnetsRoundtripMs: number = 0;
   hybridnetsServerFps: number = 0;
+
+  // Supercombo AI Server settings (openpilot model)
+  supercomboServerUrl: string = 'ws://192.168.1.35:8500/ws/steering';
+  supercomboJpegQuality: number = 70;
+  supercomboTimeout: number = 2.0;
+  supercomboConnected: boolean = false;
+  supercomboRoundtripMs: number = 0;
+  supercomboServerFps: number = 0;
   
   // Debug view selection
   selectedDebugView: number = 0;
@@ -101,6 +112,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   expandedSections: { [key: string]: boolean } = {
     speed: false,
     pid: false,
+    feedforward: false,
     roi: false,
     white: false,
     yellow: false,
@@ -115,11 +127,20 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     { key: 'base_speed', label: 'Velocidad Base', min: 5, max: 40, step: 1, value: 10, group: 'speed' },
     { key: 'max_speed', label: 'Velocidad Máxima', min: 10, max: 50, step: 1, value: 10, group: 'speed' },
     { key: 'min_speed', label: 'Velocidad Mínima', min: 5, max: 30, step: 1, value: 5, group: 'speed' },
-    // PID
-    { key: 'kp', label: 'Proporcional (Kp)', min: 0.1, max: 5.0, step: 0.1, value: 1.5, group: 'pid' },
-    { key: 'kd', label: 'Derivativo (Kd)', min: 0.0, max: 2.0, step: 0.1, value: 0.3, group: 'pid' },
-    { key: 'smoothing_factor', label: 'Suavizado', min: 0.1, max: 1.0, step: 0.1, value: 0.5, group: 'pid' },
-    { key: 'steering_sensitivity', label: 'Sensibilidad', min: 0.5, max: 2.0, step: 0.1, value: 1.0, group: 'pid' },
+    // PID (basado en bfmc24-brain - ricardolopezb/bfmc24-brain)
+    { key: 'max_error_px', label: 'Offset Máx (px→giro máx)', min: 10, max: 100, step: 1, value: 40, group: 'pid' },
+    { key: 'kp', label: 'Proporcional (Kp)', min: 0, max: 50, step: 0.5, value: 25, group: 'pid' },
+    { key: 'ki', label: 'Integral (Ki)', min: 0, max: 10, step: 0.1, value: 1.0, group: 'pid' },
+    { key: 'kd', label: 'Derivativo (Kd)', min: 0, max: 20, step: 0.5, value: 4, group: 'pid' },
+    { key: 'smoothing_factor', label: 'Suavizado', min: 0.1, max: 1.0, step: 0.05, value: 0.5, group: 'pid' },
+    { key: 'max_steering', label: 'Ángulo Máx Giro', min: 5, max: 25, step: 1, value: 25, group: 'pid' },
+    { key: 'lookahead', label: 'Lookahead (Anticipación)', min: 0.1, max: 0.8, step: 0.05, value: 0.4, group: 'pid' },
+    { key: 'dead_zone_ratio', label: 'Zona Muerta', min: 0.0, max: 0.1, step: 0.005, value: 0.02, group: 'pid' },
+    { key: 'integral_reset_interval', label: 'Reset Integral (cada N frames)', min: 1, max: 50, step: 1, value: 10, group: 'pid' },
+    // Feed-Forward curve prediction
+    { key: 'wheelbase', label: 'Distancia entre ejes (m)', min: 0.15, max: 0.35, step: 0.005, value: 0.265, group: 'feedforward' },
+    { key: 'ff_weight', label: 'Peso Feed-Forward', min: 0.0, max: 1.0, step: 0.05, value: 0.6, group: 'feedforward' },
+    { key: 'curvature_threshold', label: 'Umbral Curvatura', min: 0.1, max: 2.0, step: 0.1, value: 0.5, group: 'feedforward' },
     // ROI
     { key: 'roi_height_start', label: 'Inicio Altura', min: 0.3, max: 0.8, step: 0.05, value: 0.65, group: 'roi' },
     { key: 'roi_height_end', label: 'Fin Altura', min: 0.7, max: 1.0, step: 0.02, value: 0.92, group: 'roi' },
@@ -211,6 +232,16 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
         if (status?.hybridnets_server_fps !== undefined) {
           this.hybridnetsServerFps = status.hybridnets_server_fps;
         }
+        // Update Supercombo connection status
+        if (status?.supercombo_connected !== undefined) {
+          this.supercomboConnected = status.supercombo_connected;
+        }
+        if (status?.supercombo_roundtrip_ms !== undefined) {
+          this.supercomboRoundtripMs = status.supercombo_roundtrip_ms;
+        }
+        if (status?.supercombo_server_fps !== undefined) {
+          this.supercomboServerFps = status.supercombo_server_fps;
+        }
       });
   }
 
@@ -239,7 +270,8 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       'opencv': 'OpenCV',
       'lstr': 'LSTR IA',
       'hybrid': 'Híbrido',
-      'hybridnets': 'HybridNets'
+      'hybridnets': 'HybridNets',
+      'supercombo': 'Supercombo'
     };
     return names[this.selectedMode] || this.selectedMode;
   }
@@ -263,6 +295,28 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   setHybridnetsEndpoint(endpoint: string): void {
     const base = this.hybridnetsServerUrl.replace(/\/ws\/.*$/, '');
     this.hybridnetsServerUrl = base + endpoint;
+    this.debouncedSendConfig();
+  }
+
+  // Supercombo methods
+  setSupercomboServerUrl(url: string): void {
+    this.supercomboServerUrl = url;
+    this.debouncedSendConfig();
+  }
+
+  setSupercomboJpegQuality(quality: number): void {
+    this.supercomboJpegQuality = quality;
+    this.debouncedSendConfig();
+  }
+
+  setSupercomboTimeout(timeout: number): void {
+    this.supercomboTimeout = timeout;
+    this.debouncedSendConfig();
+  }
+
+  setSupercomboEndpoint(endpoint: string): void {
+    const base = this.supercomboServerUrl.replace(/\/ws\/.*$/, '');
+    this.supercomboServerUrl = base + endpoint;
     this.debouncedSendConfig();
   }
 
@@ -353,6 +407,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     config['hybridnets_jpeg_quality'] = this.hybridnetsJpegQuality;
     config['hybridnets_timeout'] = this.hybridnetsTimeout;
     
+    // Add Supercombo settings
+    config['supercombo_server_url'] = this.supercomboServerUrl;
+    config['supercombo_jpeg_quality'] = this.supercomboJpegQuality;
+    config['supercombo_timeout'] = this.supercomboTimeout;
+    
     // Add stream settings
     config['stream_debug_view'] = this.selectedDebugView;
     config['stream_debug_fps'] = this.streamFps;
@@ -401,6 +460,17 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       this.hybridnetsTimeout = config['hybridnets_timeout'];
     }
     
+    // Apply Supercombo settings
+    if (config['supercombo_server_url']) {
+      this.supercomboServerUrl = config['supercombo_server_url'];
+    }
+    if (config['supercombo_jpeg_quality'] !== undefined) {
+      this.supercomboJpegQuality = config['supercombo_jpeg_quality'];
+    }
+    if (config['supercombo_timeout'] !== undefined) {
+      this.supercomboTimeout = config['supercombo_timeout'];
+    }
+    
     // Apply stream settings
     if (config['stream_debug_view'] !== undefined) {
       this.selectedDebugView = config['stream_debug_view'];
@@ -444,6 +514,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.hybridnetsJpegQuality = 70;
     this.hybridnetsTimeout = 2.0;
     
+    // Reset Supercombo
+    this.supercomboServerUrl = 'ws://192.168.1.35:8500/ws/steering';
+    this.supercomboJpegQuality = 70;
+    this.supercomboTimeout = 2.0;
+    
     // Reset stream
     this.selectedDebugView = 0;
     this.streamFps = 5;
@@ -458,7 +533,9 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     // Reset sliders to defaults
     const defaults: { [key: string]: number } = {
       base_speed: 10, max_speed: 10, min_speed: 5,
-      kp: 1.5, kd: 0.3, smoothing_factor: 0.5, steering_sensitivity: 1.0,
+      max_error_px: 40, kp: 25, ki: 1.0, kd: 4, smoothing_factor: 0.5,
+      max_steering: 25, lookahead: 0.4, dead_zone_ratio: 0.02, integral_reset_interval: 10,
+      wheelbase: 0.265, ff_weight: 0.6, curvature_threshold: 0.5,
       roi_height_start: 0.65, roi_height_end: 0.92, roi_width_margin_top: 0.35, roi_width_margin_bottom: 0.15,
       white_h_min: 81, white_h_max: 180, white_s_min: 0, white_s_max: 98, white_v_min: 200, white_v_max: 255,
       yellow_h_min: 173, yellow_h_max: 86, yellow_s_min: 100, yellow_s_max: 255, yellow_v_min: 100, yellow_v_max: 255,

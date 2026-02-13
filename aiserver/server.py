@@ -1,8 +1,14 @@
 """
-AI Server para HybridNets - Servidor de inferencia remota.
+AI Server - Servidor de inferencia remota para detección de carriles.
+
+Soporta múltiples motores de inferencia:
+  - HybridNets: Segmentación + detección (requiere PyTorch + GPU)
+  - Supercombo: Modelo de openpilot (requiere ONNX Runtime)
+
+Seleccionar motor en config.py: ENGINE_TYPE = "hybridnets" | "supercombo"
 
 La Raspberry Pi envía frames por WebSocket y este servidor responde
-con los resultados de segmentación de carril y ángulo de dirección.
+con los resultados de detección de carril y ángulo de dirección.
 
 Protocolo WebSocket:
   - Cliente envía: bytes JPEG del frame
@@ -44,17 +50,24 @@ engine = None
 async def lifespan(app: FastAPI):
     """Startup/shutdown del servidor."""
     global engine
+    engine_type = getattr(config, 'ENGINE_TYPE', 'hybridnets')
+    
     print("=" * 60)
-    print("  AI Server para HybridNets - Iniciando")
+    print(f"  AI Server - Iniciando ({engine_type})")
     print("=" * 60)
     
-    # Cargar modelo
-    from inference import HybridNetsEngine
-    engine = HybridNetsEngine()
+    # Cargar motor de inferencia según configuración
+    if engine_type == "supercombo":
+        from supercombo_engine import SupercomboEngine
+        engine = SupercomboEngine()
+    else:
+        from inference import HybridNetsEngine
+        engine = HybridNetsEngine()
     
     print("=" * 60)
     print(f"  Servidor listo en {config.SERVER_HOST}:{config.SERVER_PORT}")
-    print(f"  WebSocket: ws://<ip>:{config.SERVER_PORT}/ws/inference")
+    print(f"  Motor: {engine_type}")
+    print(f"  WebSocket: ws://<ip>:{config.SERVER_PORT}/ws/steering")
     print("=" * 60)
     
     yield
@@ -66,9 +79,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="HybridNets AI Server",
-    description="Servidor de inferencia remota para detección de carriles con HybridNets",
-    version="1.0.0",
+    title="AI Server",
+    description="Servidor de inferencia remota para detección de carriles (HybridNets/Supercombo)",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -80,11 +93,12 @@ app = FastAPI(
 @app.get("/")
 async def root():
     """Estado básico del servidor."""
+    engine_type = getattr(config, 'ENGINE_TYPE', 'hybridnets')
     return {
         "status": "running",
-        "model": "HybridNets",
+        "model": engine_type,
         "port": config.SERVER_PORT,
-        "websocket_endpoint": f"ws://0.0.0.0:{config.SERVER_PORT}/ws/inference",
+        "websocket_endpoint": f"ws://0.0.0.0:{config.SERVER_PORT}/ws/steering",
     }
 
 

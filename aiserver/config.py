@@ -1,14 +1,19 @@
 """
-Configuración del AI Server para HybridNets.
+Configuración del AI Server.
+Soporta múltiples motores de inferencia: HybridNets, Supercombo.
 Modifica estos valores según tu entorno.
 """
+
+# ======================== ENGINE SELECTION ========================
+# Motor de inferencia: "hybridnets" | "supercombo"
+ENGINE_TYPE = "supercombo"
 
 # ======================== SERVER ========================
 SERVER_HOST = "0.0.0.0"       # Escucha en todas las interfaces
 SERVER_PORT = 8500            # Puerto del servidor
 MAX_CLIENTS = 4               # Máximo de clientes simultáneos
 
-# ======================== MODEL ========================
+# ======================== HYBRIDNETS MODEL ========================
 # Peso del modelo HybridNets (se descarga automáticamente si no existe)
 WEIGHTS_PATH = "weights/hybridnets.pth"
 
@@ -51,6 +56,16 @@ SEG_CLASSES = ['road', 'lane']  # 0=road (área manejable), 1=lane (líneas)
 
 # Clases de detección de objetos
 DET_CLASSES = ['car']
+
+# ======================== SUPERCOMBO MODEL ========================
+# Modelo Supercombo de openpilot (comma.ai)
+SUPERCOMBO_MODEL_PATH = "models/supercombo.onnx"
+SUPERCOMBO_INPUT_WIDTH = 512    # Fijo por el modelo
+SUPERCOMBO_INPUT_HEIGHT = 256   # Fijo por el modelo
+SUPERCOMBO_LOOKAHEAD_IDX = 15   # Índice en X_IDXS (0-32) para calcular centro
+SUPERCOMBO_STEERING_GAIN = 25.0 # Ganancia para convertir error normalizado a grados
+SUPERCOMBO_SMOOTHING = 0.7      # Suavizado del ángulo (0=sin suavizar, 1=máximo)
+SUPERCOMBO_USE_PATH = False     # True=usar trayectoria planeada, False=usar centro de lanes
 
 # ======================== VISUALIZATION ========================
 # Mostrar ventanas de debug con OpenCV en el servidor

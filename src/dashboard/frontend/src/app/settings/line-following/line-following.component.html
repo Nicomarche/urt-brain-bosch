@@ -39,7 +39,7 @@
           <span class="stat-label">Velocidad</span>
           <span class="stat-value">{{ debugStatus?.speed ?? '--' }}</span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode !== 'hybridnets'">
+        <div class="stat-item" *ngIf="selectedMode !== 'hybridnets' && selectedMode !== 'supercombo'">
           <span class="stat-label">LSTR</span>
           <span class="stat-value" [class.available]="debugStatus?.lstr_available">
             {{ debugStatus?.lstr_available ? 'Disponible' : 'No disponible' }}
@@ -49,6 +49,12 @@
           <span class="stat-label">Servidor</span>
           <span class="stat-value" [class.available]="hybridnetsConnected">
             {{ hybridnetsConnected ? hybridnetsRoundtripMs.toFixed(0) + 'ms' : 'Desconectado' }}
+          </span>
+        </div>
+        <div class="stat-item" *ngIf="selectedMode === 'supercombo'">
+          <span class="stat-label">Servidor</span>
+          <span class="stat-value" [class.available]="supercomboConnected">
+            {{ supercomboConnected ? supercomboRoundtripMs.toFixed(0) + 'ms' : 'Desconectado' }}
           </span>
         </div>
       </div>
@@ -98,6 +104,17 @@
         <span class="mode-desc">Red neuronal en servidor remoto con GPU. Envía frames por red, máxima precisión.</span>
         <span class="mode-badge server-badge" *ngIf="selectedMode === 'hybridnets'">
           {{ hybridnetsConnected ? 'Conectado' : 'Desconectado' }}
+        </span>
+      </button>
+      <button 
+        class="mode-btn hybridnets-btn" 
+        [class.selected]="selectedMode === 'supercombo'"
+        (click)="setMode('supercombo')">
+        <span class="mode-icon">🧠</span>
+        <span class="mode-name">Supercombo</span>
+        <span class="mode-desc">Modelo de openpilot (comma.ai). Detección end-to-end con trayectoria planeada.</span>
+        <span class="mode-badge server-badge" *ngIf="selectedMode === 'supercombo'">
+          {{ supercomboConnected ? 'Conectado' : 'Desconectado' }}
         </span>
       </button>
     </div>
@@ -168,6 +185,74 @@
     <p class="hybridnets-hint">
       El servidor debe estar corriendo <code>python server.py</code> en una máquina con GPU.
       Conecta ambos dispositivos a la misma red local.
+    </p>
+  </div>
+
+  <!-- Supercombo Server Configuration -->
+  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'supercombo'">
+    <div class="section-header">
+      <h4>Servidor Supercombo (openpilot)</h4>
+      <span class="connection-status" [class.connected]="supercomboConnected">
+        {{ supercomboConnected ? 'Conectado' : 'Desconectado' }}
+      </span>
+    </div>
+
+    <div class="server-url-row">
+      <label>URL del servidor</label>
+      <input type="text" class="server-url-input" 
+             [(ngModel)]="supercomboServerUrl" 
+             (change)="setSupercomboServerUrl(supercomboServerUrl)"
+             placeholder="ws://192.168.1.35:8500/ws/steering"/>
+    </div>
+
+    <div class="server-info-grid">
+      <div class="server-info-item">
+        <span class="info-label">Endpoint</span>
+        <div class="btn-group-small">
+          <button [class.selected]="supercomboServerUrl.endsWith('/ws/steering')"
+                  (click)="setSupercomboEndpoint('/ws/steering')">
+            Steering
+          </button>
+          <button [class.selected]="supercomboServerUrl.endsWith('/ws/inference')"
+                  (click)="setSupercomboEndpoint('/ws/inference')">
+            Completo
+          </button>
+        </div>
+      </div>
+      <div class="server-info-item">
+        <span class="info-label">Calidad JPEG</span>
+        <div class="btn-group-small">
+          <button *ngFor="let q of [40, 55, 70, 85]"
+                  [class.selected]="supercomboJpegQuality === q"
+                  (click)="setSupercomboJpegQuality(q)">{{ q }}%</button>
+        </div>
+      </div>
+      <div class="server-info-item">
+        <span class="info-label">Timeout (s)</span>
+        <div class="btn-group-small">
+          <button *ngFor="let t of [0.5, 1.0, 2.0, 5.0]"
+                  [class.selected]="supercomboTimeout === t"
+                  (click)="setSupercomboTimeout(t)">{{ t }}s</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="server-stats" *ngIf="supercomboConnected">
+      <div class="server-stat">
+        <span class="stat-label">Roundtrip</span>
+        <span class="stat-value" [class.good]="supercomboRoundtripMs < 50" [class.warn]="supercomboRoundtripMs >= 50 && supercomboRoundtripMs < 100" [class.bad]="supercomboRoundtripMs >= 100">
+          {{ supercomboRoundtripMs | number:'1.0-0' }}ms
+        </span>
+      </div>
+      <div class="server-stat">
+        <span class="stat-label">Server FPS</span>
+        <span class="stat-value">{{ supercomboServerFps | number:'1.0-0' }}</span>
+      </div>
+    </div>
+
+    <p class="hybridnets-hint">
+      Modelo Supercombo de openpilot (comma.ai). Requiere <code>supercombo.onnx</code> en el servidor.<br>
+      Setup: <code>cd aiserver && python setup_supercombo.py</code> | Config: <code>ENGINE_TYPE = "supercombo"</code>
     </p>
   </div>
 
@@ -265,6 +350,21 @@
     </div>
     <div class="slider-content" *ngIf="expandedSections['pid']">
       <div class="slider-row" *ngFor="let slider of getSlidersByGroup('pid')">
+        <label>{{ slider.label }}</label>
+        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
+               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
+        <span class="value">{{ slider.value }}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('feedforward')">
+      <h4>🔮 Predicción de Curvas (Feed-Forward)</h4>
+      <span class="toggle-icon">{{ expandedSections['feedforward'] ? '▼' : '▶' }}</span>
+    </div>
+    <div class="slider-content" *ngIf="expandedSections['feedforward']">
+      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('feedforward')">
         <label>{{ slider.label }}</label>
         <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
                [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>

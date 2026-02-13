@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import base64
 import time
+import math
 from enum import Enum
 from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
@@ -36,6 +37,97 @@ class DetectionMode(Enum):
     LSTR = "lstr"              # AI-based LSTR model (local)
     HYBRID = "hybrid"           # Fusion of OpenCV + LSTR (combines both for better accuracy)
     HYBRIDNETS = "hybridnets"  # Remote HybridNets AI server (GPU offload)
+    SUPERCOMBO = "supercombo"  # Remote Supercombo AI server (openpilot model, GPU offload)
+
+
+class PIDController:
+    """PID Controller for lane following steering.
+    
+    Based on bfmc24-brain implementation (ricardolopezb/bfmc24-brain).
+    Uses normalized error [-1, 1] where 1.0 = max deviation from center.
+    Output is steering angle in degrees, clamped to ±max_steering.
+    
+    Args:
+        Kp: Proportional gain. Higher = more aggressive correction.
+        Ki: Integral gain. Corrects persistent errors over time.
+        Kd: Derivative gain. Dampens oscillations.
+        max_steering: Maximum output angle in degrees (physical limit).
+        tolerance: Dead zone - errors below this are ignored (prevents oscillation).
+        integral_reset_interval: Reset integral every N iterations (anti-windup).
+    """
+    
+    def __init__(self, Kp=25.0, Ki=1.0, Kd=4.0, max_steering=25, tolerance=0.02,
+                 integral_reset_interval=10):
+        self.Kp = Kp
+        self.Ki = Ki
+        self.Kd = Kd
+        self.max_steering = max_steering
+        self.tolerance = tolerance
+        self.integral_reset_interval = integral_reset_interval
+        self.prev_error = 0
+        self.integral = 0.0
+        self.iteration_count = 0
+        self._last_time = None
+    
+    def compute(self, error):
+        """Compute PID control signal.
+        
+        Args:
+            error: Normalized error in range [-1, 1].
+                   Positive = car is to the right of center, steer left.
+                   
+        Returns:
+            float: Steering angle in degrees, clamped to ±max_steering.
+        """
+        # Calculate real dt from timestamps
+        current_time = time.time()
+        if self._last_time is not None:
+            dt = current_time - self._last_time
+            dt = max(0.01, min(dt, 1.0))  # Clamp between 10ms and 1s
+        else:
+            dt = 0.1  # Default 100ms for first frame
+        self._last_time = current_time
+        
+        # Dead zone: ignore small errors for straight line stability
+        if abs(error) < self.tolerance:
+            self.integral = 0.0  # Reset integral in dead zone
+            self.prev_error = error
+            return 0.0
+        
+        # P - Proportional: immediate response to current error
+        proportional = self.Kp * error
+        
+        # I - Integral: accumulate error over time (corrects persistent offset)
+        self.integral += error * dt
+        integral = self.Ki * self.integral
+        
+        # D - Derivative: rate of change (dampens oscillation)
+        if dt > 0:
+            derivative = self.Kd * (error - self.prev_error) / dt
+        else:
+            derivative = 0
+        
+        self.prev_error = error
+        self.iteration_count += 1
+        
+        # Reset integral periodically to prevent windup (like bfmc24-brain)
+        if self.integral_reset_interval > 0 and self.iteration_count % self.integral_reset_interval == 0:
+            self.integral = 0.0
+        
+        # Sum PID terms
+        control_signal = proportional + integral + derivative
+        
+        # Clamp to physical steering limits
+        control_signal = max(min(control_signal, self.max_steering), -self.max_steering)
+        
+        return control_signal
+    
+    def reset(self):
+        """Reset all PID state (call when switching modes or restarting)."""
+        self.prev_error = 0
+        self.integral = 0.0
+        self.iteration_count = 0
+        self._last_time = None
 
 
 class threadLineFollowing(ThreadWithStop):
@@ -59,16 +151,30 @@ Args:
         self.max_speed = 10
         self.min_speed = 5
 
-        # Steering parameters
-        self.max_steering = 25
-        self.dead_zone_ratio = 0.02  # 2% of frame width - ignore small errors (prevents oscillation)
-
-        # PID parameters - error is normalized to [-1, 1] range
-        self.kp = 35.0  # Maps normalized error to steering (0.5 error -> ~17.5 deg)
-        self.kd = 5.0   # Derivative gain for damping
-        self.previous_error = 0
+        # PID Controller
+        # Error normalization: ±max_error_px maps to [-1, 1]
+        # With Kp=max_steering: 40px offset → 25° steering (linear mapping)
+        self.max_error_px = 50   # Pixel offset that maps to max steering (40px = 25°)
+        self.kp = 25.0   # Proportional gain (= max_steering for direct 40px→25° mapping)
+        self.ki = 1.0    # Integral gain (corrects persistent error over time)
+        self.kd = 4.0    # Derivative gain (dampens oscillations)
+        self.max_steering = 25   # Maximum steering angle in degrees
+        self.dead_zone_ratio = 0.02  # Ignore errors below this (prevents oscillation)
+        self.integral_reset_interval = 10  # Reset integral every N iterations (anti-windup)
         self.smoothing_factor = 0.5  # Higher = more reactive, Lower = more smooth
         self.lookahead = 0.4
+        self.pid = PIDController(
+            Kp=self.kp, Ki=self.ki, Kd=self.kd,
+            max_steering=self.max_steering,
+            tolerance=self.dead_zone_ratio,
+            integral_reset_interval=self.integral_reset_interval
+        )
+        self.previous_error = 0  # Keep for compatibility
+
+        # Feed-forward curve prediction parameters
+        self.wheelbase = 0.265       # Distance between axles in meters (BFMC 1:10 car ~26.5cm)
+        self.ff_weight = 0.6         # Weight of feed-forward vs PID (0=pure PID, 1=pure FF)
+        self.curvature_threshold = 0.5  # Min curvature to activate feed-forward (1/pixels)
 
         # ROI parameters
         self.roi_height_start = 0.55
@@ -136,8 +242,15 @@ Args:
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self._hybridnets_client = None
         
+        # Supercombo remote AI server parameters (same protocol as HybridNets)
+        self.supercombo_server_url = "ws://192.168.1.35:8500/ws/steering"
+        self.supercombo_jpeg_quality = 70
+        self.supercombo_timeout = 2.0
+        self._supercombo_client = None
+        
         self._init_lstr_detector()
         self._init_hybridnets_client()
+        self._init_supercombo_client()
 
         # Debug streaming parameters
         self.stream_debug_view = 0  # 0=off, 1-10=different views
@@ -276,6 +389,177 @@ Args:
             except Exception:
                 pass
 
+    # ================================================================
+    # Supercombo remote AI client (same protocol as HybridNets)
+    # ================================================================
+
+    def _init_supercombo_client(self):
+        """Initialize Supercombo remote AI client if available."""
+        if not HYBRIDNETS_CLIENT_AVAILABLE:
+            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - Supercombo client not available (needs websockets)")
+            self._supercombo_client = None
+            return
+        
+        try:
+            self._supercombo_client = HybridNetsClient(
+                server_url=self.supercombo_server_url,
+                jpeg_quality=self.supercombo_jpeg_quality,
+                timeout=self.supercombo_timeout,
+            )
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Supercombo client created (server: {self.supercombo_server_url})")
+        except Exception as e:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to create Supercombo client: {e}")
+            self._supercombo_client = None
+
+    def _start_supercombo_client(self):
+        """Start or restart the Supercombo client connection."""
+        if self._supercombo_client is None:
+            self._init_supercombo_client()
+        
+        if self._supercombo_client is not None:
+            self._supercombo_client.flush()
+            
+            if not self._supercombo_client.connected:
+                try:
+                    self._supercombo_client.start()
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Supercombo client started, connecting to {self.supercombo_server_url}")
+                except Exception as e:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start Supercombo client: {e}")
+
+    def _stop_supercombo_client(self):
+        """Stop the Supercombo client."""
+        if self._supercombo_client is not None:
+            try:
+                self._supercombo_client.stop()
+            except Exception:
+                pass
+
+    def _detect_with_supercombo(self, frame):
+        """
+        Detect lanes using remote Supercombo AI server (openpilot model).
+        
+        Uses the same WebSocket protocol as HybridNets:
+        sends JPEG frame, receives steering angle.
+        
+        Args:
+            frame: BGR image
+            
+        Returns:
+            tuple: (steering_angle, speed, debug_frame)
+        """
+        height, width = frame.shape[:2]
+        
+        # Ensure client is running
+        if self._supercombo_client is None or not self._supercombo_client.connected:
+            self._start_supercombo_client()
+            if not self._supercombo_client or not self._supercombo_client.connected:
+                debug_frame = frame.copy()
+                cv2.rectangle(debug_frame, (0, 0), (width, 60), (20, 20, 40), -1)
+                cv2.putText(debug_frame, "SUPERCOMBO - Connecting...", (10, 25),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+                cv2.putText(debug_frame, f"Server: {self.supercombo_server_url}", (10, 50),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+                self._store_debug_image('final', debug_frame)
+                return None, self.min_speed, debug_frame
+        
+        start_time = time.time()
+        
+        # Send frame and get result
+        result = self._supercombo_client.send_frame(frame, block=True)
+        
+        total_time_ms = (time.time() - start_time) * 1000
+        
+        # Create debug frame
+        debug_frame = frame.copy()
+        cv2.rectangle(debug_frame, (0, 0), (width, 80), (20, 20, 40), -1)
+        cv2.putText(debug_frame, "SUPERCOMBO (openpilot)", (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
+        
+        if result is None:
+            cv2.putText(debug_frame, "No response from server", (10, 50),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            stats = self._supercombo_client.get_stats()
+            cv2.putText(debug_frame, f"Connected: {stats['connected']} | Sent: {stats['frames_sent']}", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
+            self._store_debug_image('final', debug_frame)
+            return None, self.min_speed, debug_frame
+        
+        # Parse result (same format as HybridNets /ws/steering endpoint)
+        if 's' in result:
+            steering_angle = result.get('s')
+            confidence = result.get('c', 0)
+            error_norm = result.get('e', 0)
+            server_time = result.get('t', 0)
+            frame_id = result.get('f', 0)
+            roundtrip = result.get('roundtrip_ms', 0)
+        else:
+            steering_info = result.get('steering', {})
+            steering_angle = steering_info.get('steering_angle')
+            confidence = steering_info.get('confidence', 0)
+            error_norm = steering_info.get('error_normalized', 0)
+            server_time = result.get('inference_time_ms', 0)
+            frame_id = result.get('frame_id', 0)
+            roundtrip = result.get('roundtrip_ms', 0)
+        
+        cv2.putText(debug_frame, f"Server: {server_time:.0f}ms | Roundtrip: {roundtrip:.0f}ms", (10, 50),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
+        
+        if steering_angle is not None:
+            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
+            self.last_steering = steering_angle
+            self.previous_error = error_norm
+            
+            # Calculate speed based on steering magnitude
+            abs_steer = abs(steering_angle)
+            if abs_steer > 15:
+                speed = self.min_speed
+            elif abs_steer > 8:
+                speed = (self.min_speed + self.max_speed) / 2
+            else:
+                speed = self.max_speed
+            
+            # Diagnostic logging
+            if not hasattr(self, '_supercombo_frame_count'):
+                self._supercombo_frame_count = 0
+            self._supercombo_frame_count += 1
+            if self._supercombo_frame_count <= 5 or self._supercombo_frame_count % 20 == 0:
+                steer_serial = int(round(steering_angle * 10))
+                speed_serial = int(round(speed * 10))
+                print(f"\033[1;97m[ Supercombo ] :\033[0m "
+                      f"steer={steering_angle:.1f}deg (serial:{steer_serial}) | "
+                      f"speed={speed:.0f} (serial:{speed_serial}) | "
+                      f"conf={confidence:.2f} | "
+                      f"server={server_time:.0f}ms RT={roundtrip:.0f}ms | "
+                      f"frame#{self._supercombo_frame_count}")
+            
+            # Draw steering info
+            steer_color = (0, 255, 0) if abs(steering_angle) < 10 else (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
+            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f} deg (x10={int(round(steering_angle*10))})", (width - 280, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, steer_color, 2)
+            cv2.putText(debug_frame, f"Confidence: {confidence:.2f}", (width - 200, 55),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            cv2.putText(debug_frame, f"Speed: {speed:.0f} (x10={int(round(speed*10))})", (width - 280, 75),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Draw center indicator
+            center_x = width // 2
+            center_y = int(height * 0.8)
+            offset_px = int((steering_angle / self.max_steering) * (width / 4))
+            cv2.line(debug_frame, (center_x, height), (center_x, int(height * 0.6)), (0, 255, 255), 2)
+            cv2.arrowedLine(debug_frame, (center_x, center_y), (center_x + offset_px, center_y - 30),
+                           steer_color, 3)
+            
+            self._store_debug_image('final', debug_frame)
+            self._store_debug_image('supercombo', debug_frame)
+            return steering_angle, speed, debug_frame
+        else:
+            print(f"\033[1;97m[ Supercombo ] :\033[0m \033[1;91mNO LANES\033[0m - server returned steering=None | "
+                  f"server={server_time:.0f}ms RT={roundtrip:.0f}ms")
+            cv2.putText(debug_frame, "No lanes detected", (10, 70),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            self._store_debug_image('final', debug_frame)
+            return None, self.min_speed, debug_frame
+
     def _detect_with_hybridnets(self, frame):
         """
         Detect lanes using remote HybridNets AI server.
@@ -410,6 +694,7 @@ Args:
 
     def _reset_pid_state(self):
         """Reset PID state when changing modes to prevent corrupted values."""
+        self.pid.reset()
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
             del self.last_steering
@@ -417,7 +702,7 @@ Args:
         self.frames_without_line = 0
         self.last_turn_direction = 0
         self._hybridnets_frame_count = 0
-        print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset")
+        print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset (P/I/D cleared)")
 
     def _store_debug_image(self, name, image):
         """Store a debug image for potential streaming."""
@@ -788,73 +1073,70 @@ Args:
                     cv2.waitKey(1)
                 return None, None, None, None
             
-            # Calculate steering with NORMALIZED error
+            # === CURVE PREDICTION: Estimate curvature from full lane shape ===
+            curvature, turn_sign = self.lstr_detector.estimate_path_curvature(width)
+            
+            # Feed-forward: geometric Ackermann steering angle for detected curvature
+            ff_steer = 0.0
+            radius = 0.0
+            if abs(curvature) > self.curvature_threshold and turn_sign != 0:
+                # Convert pixel curvature to approximate real-world radius
+                # The camera sees ~1m ahead in ~height pixels, so pixels_per_meter ≈ height
+                pixels_per_meter = height  # Rough approximation
+                real_curvature = curvature * pixels_per_meter  # 1/meters
+                if real_curvature > 0.01:
+                    radius = 1.0 / real_curvature  # meters
+                    # Ackermann formula: steer = atan(wheelbase / radius)
+                    ff_steer = math.degrees(math.atan(self.wheelbase / radius)) * turn_sign
+                    # Clamp feed-forward to physical limits
+                    ff_steer = max(min(ff_steer, self.max_steering), -self.max_steering)
+            
+            # === PID: fine corrections based on lane center error ===
             frame_center = width / 2
             error = lane_center - frame_center
-            error_normalized = error / frame_center  # Range [-1, 1]
+            # Normalize: ±max_error_px maps to [-1, 1] (40px offset = 25° steering)
+            error_normalized = max(min(error / self.max_error_px, 1.0), -1.0)
             
-            # PID control with dead zone for straight line stability
-            abs_error_norm = abs(error_normalized)
-            if abs_error_norm < self.dead_zone_ratio:
-                # Very small error - no correction
-                effective_error = 0
-                derivative = 0
+            pid_steer = self.pid.compute(error_normalized)
+            
+            # === BLEND: combine feed-forward prediction with PID correction ===
+            if abs(ff_steer) > 0.1:
+                # Curve detected: blend feed-forward + PID
+                steering_angle = self.ff_weight * ff_steer + (1.0 - self.ff_weight) * pid_steer
             else:
-                # Outside dead zone
-                effective_error = (abs_error_norm - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
-                derivative = self.kd * (error_normalized - self.previous_error)
+                # Straight road: use pure PID
+                steering_angle = pid_steer
             
-            self.previous_error = error_normalized
+            # Clamp to physical limits
+            steering_angle = max(min(steering_angle, self.max_steering), -self.max_steering)
             
-            # Determine curve intensity based on error magnitude (same logic as OpenCV)
-            # Higher error = sharper curve = need more steering
-            # Lower thresholds to activate multiplier more easily
-            if abs_error_norm > 0.15:
-                curve_intensity = 3  # Sharp curve
-            elif abs_error_norm > 0.08:
-                curve_intensity = 2  # Medium curve
-            elif abs_error_norm > 0.04:
-                curve_intensity = 1  # Slight curve
-            else:
-                curve_intensity = 0  # Straight
-            
-            curve_multipliers = (40, 40, 40, 40)
-            curve_smoothing = (0.3, 0.5, 0.7, 0.85)
-            curve_multiplier = curve_multipliers[curve_intensity]
-            curve_smooth = curve_smoothing[curve_intensity]
-            is_sharp_curve = curve_intensity >= 2
-            
-            proportional = self.kp * effective_error * curve_multiplier
-            steering_raw = proportional + derivative
+            # Optional smoothing for stability
+            if hasattr(self, 'last_steering'):
+                steering_angle = self.smoothing_factor * steering_angle + (1 - self.smoothing_factor) * self.last_steering
+                steering_angle = max(min(steering_angle, self.max_steering), -self.max_steering)
             
             if self.show_debug:
-                intensity_names = ('STRAIGHT', 'SLIGHT', 'MEDIUM', 'SHARP!')
-                print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;96mCURVE\033[0m - error:{abs_error_norm:.2f} [{intensity_names[curve_intensity]}] mult:{curve_multiplier}x")
+                p_term = self.pid.Kp * error_normalized
+                i_term = self.pid.Ki * self.pid.integral
+                d_term = self.pid.Kd * (error_normalized - self.pid.prev_error) if hasattr(self.pid, 'prev_error') else 0
+                if abs(ff_steer) > 0.1:
+                    curve_dir = "R" if turn_sign > 0 else "L"
+                    radius_str = f"R={radius:.2f}m" if radius > 0 else "R=inf"
+                    print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;95mCURVE {curve_dir}\033[0m - "
+                          f"curv:{curvature:.4f} {radius_str} FF:{ff_steer:.1f}° PID:{pid_steer:.1f}° "
+                          f"-> steer:{steering_angle:.1f}° (w={self.ff_weight:.1f})")
+                else:
+                    print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;96mPID\033[0m - err:{error_normalized:.3f} steer:{steering_angle:.1f}° "
+                          f"P={p_term:.1f} I={i_term:.1f} D={d_term:.1f} "
+                          f"(Kp={self.pid.Kp:.1f} Ki={self.pid.Ki:.1f} Kd={self.pid.Kd:.1f})")
             
-            # Apply smoothing - more smoothing for stability in straight lines
-            if abs_error_norm < self.dead_zone_ratio * 3:
-                smooth = 0.25  # Very smooth
-            elif is_sharp_curve:
-                smooth = curve_smooth
+            # === ADAPTIVE SPEED based on curvature ===
+            if abs(curvature) > 2.0:
+                speed = self.min_speed  # Tight curve: minimum speed
+            elif abs(curvature) > 1.0:
+                speed = (self.min_speed + self.max_speed) / 2  # Moderate curve
             else:
-                smooth = self.smoothing_factor
-            
-            if hasattr(self, 'last_steering'):
-                steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
-            else:
-                steering_angle = steering_raw
-            
-            # Clamp to max steering
-            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
-            
-            # Calculate speed based on steering
-            abs_steering = abs(steering_angle)
-            if abs_steering > 15:
-                speed = self.min_speed
-            elif abs_steering > 8:
-                speed = (self.min_speed + self.max_speed) / 2
-            else:
-                speed = self.max_speed
+                speed = self.max_speed  # Straight: full speed
             
             # Create debug frame with lane overlay
             debug_frame = self.lstr_detector.draw_lanes(frame)
@@ -875,6 +1157,18 @@ Args:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
             cv2.putText(debug_frame, f"Speed: {speed:.0f}", (width - 100, 75),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+            
+            # Draw curvature / feed-forward info bar
+            curv_bar_y = 85
+            if abs(ff_steer) > 0.1:
+                curve_dir = "R" if turn_sign > 0 else "L"
+                radius_str = f"R={radius:.2f}m" if radius > 0 else ""
+                cv2.rectangle(debug_frame, (0, curv_bar_y), (width, curv_bar_y + 25), (80, 0, 80), -1)
+                cv2.putText(debug_frame, f"CURVE {curve_dir} {radius_str} FF:{ff_steer:.1f} PID:{pid_steer:.1f} w={self.ff_weight:.1f}",
+                           (10, curv_bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 150, 255), 1)
+            else:
+                cv2.putText(debug_frame, f"STRAIGHT  PID:{pid_steer:.1f}",
+                           (10, curv_bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 255, 150), 1)
             
             # Draw lane center indicator
             center_y = int(height * 0.7)
@@ -1298,8 +1592,10 @@ Returns:
     def _apply_config(self, config):
         """Apply configuration from dashboard sliders."""
         try:
-            params = ['base_speed', 'max_speed', 'min_speed', 'kp', 'kd', 'smoothing_factor',
-                     'dead_zone_ratio', 'max_steering', 'roi_height_start', 'roi_height_end',
+            params = ['base_speed', 'max_speed', 'min_speed', 'max_error_px', 'kp', 'ki', 'kd', 'smoothing_factor',
+                     'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
+                     'wheelbase', 'ff_weight', 'curvature_threshold',
+                     'roi_height_start', 'roi_height_end',
                      'roi_width_margin_top', 'roi_width_margin_bottom',
                      'white_h_min', 'white_h_max', 'white_s_min', 'white_s_max',
                      'white_v_min', 'white_v_max', 'yellow_h_min', 'yellow_h_max',
@@ -1316,11 +1612,29 @@ Returns:
                      # Debug streaming
                      'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale',
                      # HybridNets remote AI server
-                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout']
+                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout',
+                     # Supercombo remote AI server
+                     'supercombo_server_url', 'supercombo_jpeg_quality', 'supercombo_timeout']
             
             for param in params:
                 if param in config:
                     setattr(self, param, config[param])
+            
+            # Sync PID controller with updated parameters
+            pid_params = ['kp', 'ki', 'kd', 'max_steering', 'dead_zone_ratio', 'integral_reset_interval']
+            if any(p in config for p in pid_params):
+                self.pid.Kp = self.kp
+                self.pid.Ki = self.ki
+                self.pid.Kd = self.kd
+                self.pid.max_steering = self.max_steering
+                self.pid.tolerance = self.dead_zone_ratio
+                self.pid.integral_reset_interval = self.integral_reset_interval
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - Updated: Kp={self.kp} Ki={self.ki} Kd={self.kd} max={self.max_steering}")
+            
+            # Log feed-forward parameter changes
+            ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
+            if any(p in config for p in ff_params):
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mFF\033[0m - Updated: wheelbase={self.wheelbase} ff_weight={self.ff_weight} curv_thresh={self.curvature_threshold}")
             
             # Log mode change and reset PID state
             if 'detection_mode' in config:
@@ -1337,12 +1651,22 @@ Returns:
                 self._stop_hybridnets_client()
                 self._init_hybridnets_client()
             
-            # Start/stop HybridNets client based on mode
+            # Reconnect Supercombo client if server URL changed
+            if 'supercombo_server_url' in config:
+                self._stop_supercombo_client()
+                self._init_supercombo_client()
+            
+            # Start/stop remote AI clients based on mode
             if 'detection_mode' in config:
                 if config['detection_mode'] == DetectionMode.HYBRIDNETS.value:
                     self._start_hybridnets_client()
+                    self._stop_supercombo_client()
+                elif config['detection_mode'] == DetectionMode.SUPERCOMBO.value:
+                    self._start_supercombo_client()
+                    self._stop_hybridnets_client()
                 else:
                     self._stop_hybridnets_client()
+                    self._stop_supercombo_client()
             
             self._update_hsv_arrays()
             print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mCONFIG\033[0m - Parameters updated")
@@ -1421,6 +1745,20 @@ Returns:
         
         if self.show_debug:
             print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
+        
+        # Handle SUPERCOMBO remote AI server mode
+        if self.detection_mode == DetectionMode.SUPERCOMBO.value:
+            try:
+                steering, speed, debug = self._detect_with_supercombo(frame)
+                if steering is not None:
+                    self.frames_without_line = 0
+                return steering, speed, debug
+            except Exception as e:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mSUPERCOMBO ERROR\033[0m - {e}")
+                debug_frame = frame.copy()
+                cv2.putText(debug_frame, f"Supercombo Error: {str(e)[:50]}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                return None, self.min_speed, debug_frame
         
         # Handle HYBRIDNETS remote AI server mode
         if self.detection_mode == DetectionMode.HYBRIDNETS.value:
@@ -1632,74 +1970,21 @@ Returns:
             error = lane_center_original - frame_center_at_y
             error_ratio = abs(error) / (width / 2)
             
-            # Curvature-based speed adjustment
-            if curvature is not None:
-                if curvature < 300:
-                    curve_intensity = 3  # Sharp curve
-                elif curvature < 600:
-                    curve_intensity = 2  # Medium curve
-                elif curvature < 1000:
-                    curve_intensity = 1  # Slight curve
-                else:
-                    curve_intensity = 0  # Straight
-            else:
-                curve_intensity = 0
-            
-            curve_multipliers = (1, 1.8, 3, 4.5)
-            curve_smoothing = (0.3, 0.5, 0.7, 0.85)
-            curve_multiplier = curve_multipliers[curve_intensity]
-            curve_smooth = curve_smoothing[curve_intensity]
-            is_sharp_curve = curve_intensity >= 2
-            
             if self.show_debug:
-                intensity_names = ('STRAIGHT', 'SLIGHT', 'MEDIUM', 'SHARP!')
-                if curvature is not None:
-                    curv_str = f"curv:{curvature:.0f}"
-                else:
-                    curv_str = "curv:N/A"
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mOFFSET\033[0m - offset:{error:.1f}px ratio:{error_ratio:.2f} {curv_str} [{intensity_names[curve_intensity]}]")
+                curv_str = f"curv:{curvature:.0f}" if curvature is not None else "curv:N/A"
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mOFFSET\033[0m - offset:{error:.1f}px ratio:{error_ratio:.2f} {curv_str}")
             
-            # PID control with NORMALIZED error (range -1 to 1)
-            half_width = width / 2
-            error_normalized = error / half_width  # Now in range [-1, 1]
+            # PID control with NORMALIZED error: ±max_error_px maps to [-1, 1]
+            error_normalized = max(min(error / self.max_error_px, 1.0), -1.0)
             
-            if self.is_line_following_active:
-                total_correction = self.single_line_correction if (left_fit is None or right_fit is None) else 1
-            else:
-                total_correction = 1
+            # Pure PID: the PIDController handles P, I, D, dead zone, clamping and anti-windup
+            steering_angle = self.pid.compute(error_normalized)
             
-            # Apply dead zone - ignore small errors to prevent oscillation in straight lines
-            abs_error_norm = abs(error_normalized)
-            if abs_error_norm < self.dead_zone_ratio:
-                # Very small error - no correction
-                effective_error = 0
-                derivative = 0
-            else:
-                # Outside dead zone - subtract dead zone for smooth transition
-                effective_error = (abs_error_norm - self.dead_zone_ratio) * (1 if error_normalized > 0 else -1)
-                derivative = self.kd * (error_normalized - self.previous_error)
-            
-            self.previous_error = error_normalized
-            
-            # PID calculation
-            proportional = self.kp * effective_error * total_correction * curve_multiplier
-            steering_raw = proportional + derivative
-            
-            # Apply smoothing - more smoothing in straight lines, less in curves
-            if abs_error_norm < self.dead_zone_ratio * 3:  # Near straight
-                smooth = 0.25  # Very smooth for stability
-            elif is_sharp_curve:
-                smooth = curve_smooth
-            else:
-                smooth = self.smoothing_factor
-            
+            # Optional smoothing for stability
             if hasattr(self, 'last_steering'):
-                steering_angle = smooth * steering_raw + (1 - smooth) * self.last_steering
-            else:
-                steering_angle = steering_raw
+                steering_angle = self.smoothing_factor * steering_angle + (1 - self.smoothing_factor) * self.last_steering
+                steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
             
-            # Clamp to max steering
-            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
             self.last_steering = steering_angle
             
             # Update turn direction
@@ -1835,14 +2120,13 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
     def send_motor_commands(self, steering_angle, speed):
         """Send steering and speed commands to the motors.
         
-        Format matches frontend: SteerMotor expects string value already multiplied by 10.
-        Example: steering_angle=5.0 -> sends "50" to SteerMotor
+        Protocol: Nucleo expects integer values = angle * 10 for decimal precision.
+        Example: steering_angle=5.0° -> sends "50" -> Nucleo interprets as 5.0°
+        This matches the frontend: Math.round(this.steer * 10)
         """
         try:
-            # Nucleo expects steering values multiplied by 10 (e.g. 5° becomes 50) for integer efficiency
-            # This matches frontend: Math.round(this.steer * 10)
             steer_value = int(round(steering_angle * 10))
-            speed_value = int(round(speed * 10))  # Speed also multiplied by 10 like frontend
+            speed_value = int(round(speed * 10))
             
             # Send as string - the serial handler expects str type
             self.steerMotorSender.send(str(steer_value))
