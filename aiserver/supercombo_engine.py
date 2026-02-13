@@ -177,20 +177,18 @@ class SupercomboEngine:
             print(f"  {inp.name}: {inp.shape} ({inp.type})")
         print(f"[Supercombo] Output: {self._output_name}")
 
+        # Build name-to-shape map for safe input feeding
+        self._input_shapes = {inp.name: inp.shape for inp in inputs}
+        print(f"[Supercombo] Input shapes: {self._input_shapes}")
+
         # Warm-up inference
         print("[Supercombo] Warm-up...")
-        dummy_imgs = np.zeros((1, 12, 128, 256), dtype=np.float32)
-        dummy_desire = np.zeros((1, 8), dtype=np.float32)
-        dummy_state = np.zeros((1, 512), dtype=np.float32)
-        dummy_traffic = np.zeros((1, 2), dtype=np.float32)
+        feed = self._build_feed(
+            np.zeros((1, 12, 128, 256), dtype=np.float32),
+            np.zeros((1, 512), dtype=np.float32),
+        )
 
         warmup_start = time.time()
-        feed = {
-            self._input_names[0]: dummy_imgs,
-            self._input_names[1]: dummy_desire,
-            self._input_names[2]: dummy_state,
-            self._input_names[3]: dummy_traffic,
-        }
         _ = self.session.run([self._output_name], feed)
         warmup_ms = (time.time() - warmup_start) * 1000
 
@@ -243,6 +241,51 @@ class SupercomboEngine:
 
         return input_tensor
 
+    def _build_feed(self, input_imgs: np.ndarray, recurrent_state: np.ndarray) -> dict:
+        """
+        Build the input feed dict using explicit input names from the model.
+        
+        The model has 4 inputs (order may vary between versions):
+          - input_imgs:          (1, 12, 128, 256)
+          - desire:              (1, 8)
+          - traffic_convention:  (1, 2)
+          - initial_state:       (1, 512)
+        
+        This method matches by name, not by index, to avoid shape mismatches.
+        """
+        desire = np.zeros((1, 8), dtype=np.float32)
+        traffic = np.zeros((1, 2), dtype=np.float32)
+        traffic[0, 1] = 1.0  # Right-hand traffic convention
+
+        # Map by name (handles any input order)
+        feed = {}
+        for name in self._input_names:
+            name_lower = name.lower()
+            if 'img' in name_lower or 'input_img' in name_lower:
+                feed[name] = input_imgs
+            elif 'desire' in name_lower:
+                feed[name] = desire
+            elif 'traffic' in name_lower or 'convention' in name_lower:
+                feed[name] = traffic
+            elif 'state' in name_lower or 'initial' in name_lower:
+                feed[name] = recurrent_state
+            else:
+                # Fallback: match by shape
+                shape = self._input_shapes.get(name, [])
+                if len(shape) >= 2 and shape[1] == 12:
+                    feed[name] = input_imgs
+                elif len(shape) >= 2 and shape[1] == 512:
+                    feed[name] = recurrent_state
+                elif len(shape) >= 2 and shape[1] == 8:
+                    feed[name] = desire
+                elif len(shape) >= 2 and shape[1] == 2:
+                    feed[name] = traffic
+                else:
+                    print(f"[Supercombo] WARN: Unknown input '{name}' shape={shape}, using zeros")
+                    feed[name] = np.zeros([d if isinstance(d, int) else 1 for d in shape], dtype=np.float32)
+
+        return feed
+
     def _run_inference(self, input_imgs: np.ndarray) -> np.ndarray:
         """
         Run ONNX inference with the Supercombo model.
@@ -253,16 +296,7 @@ class SupercomboEngine:
         Returns:
             Raw output array (~6609 values)
         """
-        desire = np.zeros((1, 8), dtype=np.float32)       # Follow lane (no desire)
-        traffic = np.zeros((1, 2), dtype=np.float32)       # Right-hand traffic
-        traffic[0, 1] = 1.0  # Convention: index 1 = right side driving
-
-        feed = {
-            self._input_names[0]: input_imgs,
-            self._input_names[1]: desire,
-            self._input_names[2]: self._recurrent_state,
-            self._input_names[3]: traffic,
-        }
+        feed = self._build_feed(input_imgs, self._recurrent_state)
 
         result = self.session.run([self._output_name], feed)
         output = np.array(result).flatten()
