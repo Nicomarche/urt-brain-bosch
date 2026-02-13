@@ -22,12 +22,49 @@ Output del modelo:
 
 import os
 import time
-import threading
 import queue
+import multiprocessing
 import cv2
 import numpy as np
 
 import config
+
+
+# ============================================================
+# Visualization process (standalone — runs cv2.imshow on its
+# own main thread, which is required by macOS AppKit/Cocoa)
+# ============================================================
+
+def _viz_process_main(viz_queue: multiprocessing.Queue,
+                      stop_event: multiprocessing.Event):
+    """
+    Standalone process that displays OpenCV windows.
+
+    On macOS, cv2.imshow MUST run on the main thread of a process.
+    A threading.Thread does NOT satisfy that requirement — only a
+    multiprocessing.Process (which gets its own main thread) works.
+    """
+    import cv2 as _cv2  # fresh import inside subprocess
+    try:
+        while not stop_event.is_set():
+            try:
+                frames = viz_queue.get(timeout=0.1)
+            except queue.Empty:
+                _cv2.waitKey(1)
+                continue
+
+            try:
+                for window_name, img in frames.items():
+                    if img is not None:
+                        _cv2.imshow(window_name, img)
+                _cv2.waitKey(1)
+            except _cv2.error as e:
+                print(f"[Viz] cv2 error: {e}")
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _cv2.destroyAllWindows()
 
 # Coordenadas longitudinales para los 33 puntos de cada línea/trayectoria
 # Representan distancias en metros desde el auto (espacio cuadrático)
@@ -116,13 +153,14 @@ class SupercomboEngine:
         self._previous_steering = 0.0
         self.frame_count = 0
 
-        # Visualization — dedicated thread so cv2.imshow works on macOS
+        # Visualization — dedicated process so cv2.imshow works on macOS
+        # (macOS requires imshow to run on the main thread of a process)
         self.show_visualization = getattr(config, 'SHOW_VISUALIZATION', False)
-        self._viz_queue = queue.Queue(maxsize=1)
-        self._viz_thread = None
-        self._viz_running = False
+        self._viz_queue = multiprocessing.Queue(maxsize=2)
+        self._viz_stop = multiprocessing.Event()
+        self._viz_process = None
         if self.show_visualization:
-            self._start_viz_thread()
+            self._start_viz_process()
 
         # ONNX session
         self.session = None
@@ -688,41 +726,22 @@ class SupercomboEngine:
         }
 
     # ================================================================
-    # Visualization thread (required for macOS — imshow must run in
-    # its own thread, not inside asyncio.to_thread workers)
+    # Visualization process (required for macOS — imshow must run on
+    # the main thread of a process, not in a threading.Thread)
     # ================================================================
 
-    def _start_viz_thread(self):
-        """Start the dedicated visualization thread."""
-        if self._viz_thread is not None and self._viz_thread.is_alive():
+    def _start_viz_process(self):
+        """Start the dedicated visualization process."""
+        if self._viz_process is not None and self._viz_process.is_alive():
             return
-        self._viz_running = True
-        self._viz_thread = threading.Thread(target=self._viz_thread_loop, daemon=True)
-        self._viz_thread.start()
-        print("[Supercombo] Visualization thread started")
-
-    def _viz_thread_loop(self):
-        """Main loop for the visualization thread — displays images with cv2.imshow."""
-        while self._viz_running:
-            try:
-                frames = self._viz_queue.get(timeout=0.5)
-            except queue.Empty:
-                # Keep the windows alive even when no frames arrive
-                cv2.waitKey(1)
-                continue
-
-            try:
-                for window_name, img in frames.items():
-                    if img is not None:
-                        cv2.imshow(window_name, img)
-                cv2.waitKey(1)
-            except cv2.error as e:
-                print(f"[Supercombo] Visualization error: {e} — disabling")
-                self.show_visualization = False
-                self._viz_running = False
-                break
-
-        cv2.destroyAllWindows()
+        self._viz_stop.clear()
+        self._viz_process = multiprocessing.Process(
+            target=_viz_process_main,
+            args=(self._viz_queue, self._viz_stop),
+            daemon=True,
+        )
+        self._viz_process.start()
+        print(f"[Supercombo] Visualization process started (pid={self._viz_process.pid})")
 
     def _model_to_pixel(self, y_meters, x_idx, w, h):
         """
@@ -929,28 +948,31 @@ class SupercomboEngine:
             cv2.putText(win_steer, f"{inference_ms:.0f}ms | Frame #{self.frame_count}",
                         (8, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
 
-        # ---- Enqueue all 3 windows for the viz thread ----
+        # ---- Enqueue all 3 windows for the viz process ----
         viz_payload = {
             "Input": win_input,
             "Supercombo - Lanes": win_lanes,
             "Supercombo - Steering": win_steer,
         }
-        try:
-            # Non-blocking put — drop old frame if queue is full
+        # Drain stale frames so the process always gets the latest
+        while not self._viz_queue.empty():
             try:
                 self._viz_queue.get_nowait()
-            except queue.Empty:
-                pass
+            except (queue.Empty, EOFError):
+                break
+        try:
             self._viz_queue.put_nowait(viz_payload)
-        except queue.Full:
-            pass  # Skip this frame visualization
+        except (queue.Full, EOFError):
+            pass  # Skip this frame if process is behind
 
     def shutdown(self):
-        """Clean up visualization thread and windows."""
-        self._viz_running = False
-        if self._viz_thread is not None:
-            self._viz_thread.join(timeout=2.0)
-            self._viz_thread = None
+        """Clean up visualization process and windows."""
+        self._viz_stop.set()
+        if self._viz_process is not None:
+            self._viz_process.join(timeout=3.0)
+            if self._viz_process.is_alive():
+                self._viz_process.terminate()
+            self._viz_process = None
         try:
             cv2.destroyAllWindows()
         except Exception:
