@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print(f"  AI Server - Iniciando ({engine_type})")
     if sign_enabled:
-        print(f"  + Sign Detection (MobilenetV2 SSD TFLite)")
+        print(f"  + Sign Detection (YOLOv8)")
     print("=" * 60)
     
     # Cargar motor de inferencia de carriles según configuración

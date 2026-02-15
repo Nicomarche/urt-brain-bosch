@@ -1,14 +1,15 @@
 """
-Motor de detección de señales de tráfico usando MobilenetV2 SSD (TFLite).
+Motor de detección de señales de tráfico usando YOLOv8 (ultralytics).
 
 Corre en el AI Server (PC con GPU o CPU potente), recibe frames por WebSocket
 y devuelve las señales detectadas con bounding boxes y confianza.
 
-Modelo: models/sign_detection/detect.tflite (11MB)
-Labels: models/sign_detection/labelmap.txt (9 clases)
+Modelo: models/sign_detection/trafic.pt (22MB, YOLOv8)
+Fuente: https://huggingface.co/nezahatkorkmaz/traffic-sign-detection
 
-Clases: stop, parking, priority, crosswalk, highway_entrance,
-        highway_exit, roundabout, one_way, no_entry
+Las clases del modelo se imprimen al inicio. Se puede configurar un mapeo
+de nombres de clase del modelo → nombres de acción del auto en config.py
+(SIGN_CLASS_MAP) para que coincidan con las acciones en SignActions.
 """
 
 import os
@@ -16,22 +17,9 @@ import time
 import cv2
 import numpy as np
 
-# Try multiple TFLite backends
-Interpreter = None
-try:
-    from ai_edge_litert.interpreter import Interpreter
-except ImportError:
-    try:
-        from tflite_runtime.interpreter import Interpreter
-    except ImportError:
-        try:
-            from tensorflow.lite.python.interpreter import Interpreter
-        except ImportError:
-            Interpreter = None
-
 
 class SignDetectionEngine:
-    """TFLite MobilenetV2 SSD engine for traffic sign detection.
+    """YOLOv8 engine for traffic sign detection.
 
     Compatible con la interfaz del AI Server (infer / infer_steering_only / get_status).
     """
@@ -39,10 +27,11 @@ class SignDetectionEngine:
     def __init__(self, model_dir=None, min_confidence=None):
         import config as cfg
 
-        if Interpreter is None:
+        try:
+            from ultralytics import YOLO
+        except ImportError:
             raise ImportError(
-                "TFLite runtime no encontrado. Instala con: "
-                "pip install ai-edge-litert  (o: pip install tflite-runtime)"
+                "ultralytics no encontrado. Instala con: pip install ultralytics"
             )
 
         if model_dir is None:
@@ -51,56 +40,57 @@ class SignDetectionEngine:
         if min_confidence is None:
             min_confidence = getattr(cfg, "SIGN_MIN_CONFIDENCE", 0.50)
 
-        model_path = os.path.join(model_dir, "detect.tflite")
-        labels_path = os.path.join(model_dir, "labelmap.txt")
+        model_path = os.path.join(model_dir, getattr(cfg, "SIGN_MODEL_FILE", "trafic.pt"))
 
         if not os.path.isfile(model_path):
             raise FileNotFoundError(
-                f"Modelo TFLite no encontrado: {model_path}\n"
-                f"Copia detect.tflite y labelmap.txt a {model_dir}/"
+                f"Modelo YOLOv8 no encontrado: {model_path}\n"
+                f"Descarga trafic.pt de HuggingFace a {model_dir}/"
             )
 
-        # Load labels
-        with open(labels_path, "r") as f:
-            self.labels = [line.strip() for line in f.readlines() if line.strip()]
-
         self.min_confidence = min_confidence
-        self.input_mean = 127.5
-        self.input_std = 127.5
+        self.show_visualization = getattr(cfg, "SHOW_VISUALIZATION", False)
 
-        # Initialize interpreter
-        self.interpreter = Interpreter(model_path=model_path)
-        self.interpreter.allocate_tensors()
+        # Class name mapping: model_class_name → our_action_name
+        # If a class is not in the map, the original name is used (lowercased).
+        self.class_map = getattr(cfg, "SIGN_CLASS_MAP", {})
 
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
+        # Load YOLOv8 model
+        print(f"[SignDetection] Loading YOLOv8 model: {model_path}")
+        self.model = YOLO(model_path)
 
-        self.height = self.input_details[0]["shape"][1]
-        self.width = self.input_details[0]["shape"][2]
-        self.floating_model = self.input_details[0]["dtype"] == np.float32
+        # Extract class names from model
+        self.labels = self.model.names  # dict: {0: "class0", 1: "class1", ...}
+        self.num_classes = len(self.labels)
 
-        # Output tensor ordering (TF1 vs TF2)
-        outname = self.output_details[0]["name"]
-        if "StatefulPartitionedCall" in outname:
-            self.boxes_idx, self.classes_idx, self.scores_idx = 1, 3, 0
-        else:
-            self.boxes_idx, self.classes_idx, self.scores_idx = 0, 1, 2
+        print(f"[SignDetection] Model classes ({self.num_classes}):")
+        for idx, name in self.labels.items():
+            mapped = self.class_map.get(name, name.lower().replace(" ", "_"))
+            suffix = f" → {mapped}" if mapped != name else ""
+            print(f"  [{idx}] {name}{suffix}")
+
+        # Warm-up
+        print(f"[SignDetection] Warming up model...")
+        t0 = time.time()
+        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+        self.model.predict(dummy, conf=self.min_confidence, verbose=False)
+        warmup_ms = (time.time() - t0) * 1000
+        print(f"[SignDetection] Warm-up done in {warmup_ms:.0f}ms")
 
         self.frame_count = 0
         self.total_infer_ms = 0
-        self.show_visualization = getattr(cfg, "SHOW_VISUALIZATION", False)
-
-        # Warm-up
-        print(f"[SignDetection] Warming up model ({self.width}x{self.height})...")
-        dummy = np.zeros((1, self.height, self.width, 3), dtype=np.float32 if self.floating_model else np.uint8)
-        self.interpreter.set_tensor(self.input_details[0]["index"], dummy)
-        self.interpreter.invoke()
 
         print(
-            f"[SignDetection] Engine ready: model={self.width}x{self.height}, "
-            f"float={self.floating_model}, labels={len(self.labels)}, "
+            f"[SignDetection] Engine ready: YOLOv8, "
+            f"classes={self.num_classes}, "
             f"min_conf={self.min_confidence}"
         )
+
+    def _map_class_name(self, name):
+        """Map model class name to our action name."""
+        if name in self.class_map:
+            return self.class_map[name]
+        return name.lower().replace(" ", "_")
 
     def infer(self, frame):
         """Run full inference on a BGR frame.
@@ -112,30 +102,43 @@ class SignDetectionEngine:
             dict with detections, inference time, frame id.
         """
         t_start = time.time()
+        h, w = frame.shape[:2]
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame_resized = cv2.resize(frame_rgb, (self.width, self.height))
-        input_data = np.expand_dims(frame_resized, axis=0)
-
-        if self.floating_model:
-            input_data = (np.float32(input_data) - self.input_mean) / self.input_std
-
-        self.interpreter.set_tensor(self.input_details[0]["index"], input_data)
-        self.interpreter.invoke()
-
-        boxes = self.interpreter.get_tensor(self.output_details[self.boxes_idx]["index"])[0]
-        classes = self.interpreter.get_tensor(self.output_details[self.classes_idx]["index"])[0]
-        scores = self.interpreter.get_tensor(self.output_details[self.scores_idx]["index"])[0]
+        # Run YOLOv8 inference
+        results = self.model.predict(
+            frame,
+            conf=self.min_confidence,
+            verbose=False,
+            imgsz=640,
+        )
 
         detections = []
-        for i in range(len(scores)):
-            if self.min_confidence < scores[i] <= 1.0:
-                class_idx = int(classes[i])
-                if 0 <= class_idx < len(self.labels):
+        if results and len(results) > 0:
+            result = results[0]
+            if result.boxes is not None and len(result.boxes) > 0:
+                boxes = result.boxes
+                for i in range(len(boxes)):
+                    conf = float(boxes.conf[i])
+                    cls_idx = int(boxes.cls[i])
+                    cls_name = self.labels.get(cls_idx, f"class_{cls_idx}")
+                    mapped_name = self._map_class_name(cls_name)
+
+                    # Get box in xyxy pixel format and normalize to [0,1]
+                    x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+
+                    # Convert to [ymin, xmin, ymax, xmax] normalized format
+                    # (compatible with existing client protocol)
+                    box_normalized = [
+                        round(y1 / h, 4),  # ymin
+                        round(x1 / w, 4),  # xmin
+                        round(y2 / h, 4),  # ymax
+                        round(x2 / w, 4),  # xmax
+                    ]
+
                     detections.append({
-                        "sign": self.labels[class_idx],
-                        "confidence": round(float(scores[i]), 3),
-                        "box": [round(float(v), 4) for v in boxes[i].tolist()],
+                        "sign": mapped_name,
+                        "confidence": round(conf, 3),
+                        "box": box_normalized,
                     })
 
         detections.sort(key=lambda d: d["confidence"], reverse=True)
@@ -149,7 +152,6 @@ class SignDetectionEngine:
             try:
                 self._visualize(frame, detections, infer_ms)
             except Exception:
-                # Disable visualization if it crashes (e.g. no display)
                 self.show_visualization = False
                 print("[SignDetection] Visualization disabled (no display or OpenCV error)")
 
@@ -167,11 +169,12 @@ class SignDetectionEngine:
         """Return engine status (for /status endpoint)."""
         avg_ms = (self.total_infer_ms / self.frame_count) if self.frame_count > 0 else 0
         return {
-            "engine": "sign_detection",
-            "model": f"MobilenetV2 SSD ({self.width}x{self.height})",
-            "labels": self.labels,
+            "engine": "sign_detection_yolov8",
+            "model": "YOLOv8 (trafic.pt)",
+            "labels": list(self.labels.values()),
+            "class_map": self.class_map,
             "min_confidence": self.min_confidence,
-            "floating_model": self.floating_model,
+            "num_classes": self.num_classes,
             "frames_processed": self.frame_count,
             "avg_inference_ms": round(avg_ms, 1),
         }
@@ -182,31 +185,23 @@ class SignDetectionEngine:
         h, w = vis.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
 
-        COLORS = {
-            "stop": (0, 0, 255), "no_entry": (0, 0, 200),
-            "parking": (255, 160, 0), "crosswalk": (0, 200, 255),
-            "highway_entrance": (0, 255, 0), "highway_exit": (0, 180, 0),
-            "roundabout": (255, 0, 255), "priority": (0, 255, 255),
-            "one_way": (255, 255, 0),
-        }
-
         for det in detections:
             sign = det["sign"]
             conf = det["confidence"]
             box = det["box"]
-            color = COLORS.get(sign, (0, 255, 0))
 
-            ymin, xmin, ymax, xmax = (
-                int(box[0] * h), int(box[1] * w),
-                int(box[2] * h), int(box[3] * w),
-            )
+            ymin = int(box[0] * h)
+            xmin = int(box[1] * w)
+            ymax = int(box[2] * h)
+            xmax = int(box[3] * w)
+
+            color = (0, 255, 0)
             cv2.rectangle(vis, (xmin, ymin), (xmax, ymax), color, 2)
             label = f"{sign} {conf:.0%}"
             (tw, th), _ = cv2.getTextSize(label, font, 0.55, 2)
             cv2.rectangle(vis, (xmin, ymin - th - 6), (xmin + tw + 6, ymin), color, -1)
             cv2.putText(vis, label, (xmin + 3, ymin - 3), font, 0.55, (0, 0, 0), 2)
 
-        # Status bar
         status = f"Signs: {len(detections)} | {infer_ms:.0f}ms | Frame {self.frame_count}"
         cv2.putText(vis, status, (10, 25), font, 0.6, (0, 255, 255), 2)
 

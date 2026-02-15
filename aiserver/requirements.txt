@@ -21,6 +21,9 @@ torchvision
 # En Linux con GPU: pip install onnxruntime-gpu
 onnxruntime>=1.16.0
 
+# --- YOLOv8 (para detección de señales) ---
+ultralytics
+
 # --- Procesamiento de imágenes ---
 opencv-python
 numpy

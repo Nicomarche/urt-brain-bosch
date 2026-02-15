@@ -68,10 +68,26 @@ SUPERCOMBO_SMOOTHING = 0.7      # Suavizado del ángulo (0=sin suavizar, 1=máxi
 SUPERCOMBO_USE_PATH = False     # True=usar trayectoria planeada, False=usar centro de lanes
 
 # ======================== SIGN DETECTION ========================
-# Detección de señales de tráfico (MobilenetV2 SSD TFLite)
+# Detección de señales de tráfico (YOLOv8)
+# Modelo: https://huggingface.co/nezahatkorkmaz/traffic-sign-detection
+# Requiere: pip install ultralytics
 SIGN_DETECTION_ENABLED = True
-SIGN_MODEL_DIR = "models/sign_detection"   # Contiene detect.tflite + labelmap.txt
-SIGN_MIN_CONFIDENCE = 0.50                 # Umbral de confianza (0.0 - 1.0)
+SIGN_MODEL_DIR = "models/sign_detection"   # Directorio del modelo
+SIGN_MODEL_FILE = "trafic.pt"             # Archivo del modelo YOLOv8
+SIGN_MIN_CONFIDENCE = 0.40                 # Umbral de confianza (0.0 - 1.0)
+
+# Mapeo de nombres de clase del modelo → nombres de acción del auto.
+# Las clases NO listadas aquí se pasan tal cual (en minúsculas, espacios→_).
+# Ajustar este mapeo según las clases que imprima el modelo al iniciar.
+# Ejemplo: si el modelo tiene "Stop Sign" pero nuestras acciones usan "stop":
+SIGN_CLASS_MAP = {
+    # "NombreDelModelo": "nombre_accion",
+    # Se llena después de ver las clases que imprime el modelo al iniciar.
+    # Ejemplo:
+    # "Stop Sign": "stop",
+    # "No Entry": "no_entry",
+    # "Crosswalk": "crosswalk",
+}
 
 # ======================== VISUALIZATION ========================
 # Mostrar ventanas de debug con OpenCV en el servidor
