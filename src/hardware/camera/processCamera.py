@@ -30,6 +30,8 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, "../../..")
 
+import threading
+
 from cv2 import meanShift
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
@@ -62,9 +64,11 @@ class processCamera(WorkerProcess):
     # ====================================== INIT ==========================================
     def __init__(self, queueList, logging, ready_event=None, debugging=False,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
-                 show_preview=False,
+                 show_preview=False, debug_windows=None,
                  enable_sign_detection=True, sign_detection_actions=False,
-                 sign_min_confidence=0.50, sign_server_url="ws://192.168.80.15:8500/ws/signs"):
+                 sign_min_confidence=0.50, sign_server_url="ws://192.168.80.15:8500/ws/signs",
+                 sign_min_box_area=0.01,
+                 sign_action_cooldown=15.0):
         self.queuesList = queueList
         self.logging = logging
         self.debugging = debugging
@@ -72,10 +76,13 @@ class processCamera(WorkerProcess):
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
         self.show_preview = show_preview
+        self.debug_windows = debug_windows or {}
         self.enable_sign_detection = enable_sign_detection
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
         self.sign_server_url = sign_server_url
+        self.sign_min_box_area = sign_min_box_area
+        self.sign_action_cooldown = sign_action_cooldown
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
@@ -94,21 +101,27 @@ class processCamera(WorkerProcess):
     # ===================================== INIT TH ======================================
     def _init_threads(self):
         """Create the Camera Publisher thread, Line Following thread, and Sign Detection thread."""
+        # Shared event: when set, a sign action (stop, crosswalk, etc.) is active
+        # and line following must NOT send motor commands.
+        sign_action_event = threading.Event()
+
+        # Camera preview window: only if master switch AND individual toggle are on
+        show_cam_preview = self.show_preview and self.debug_windows.get("camera_preview", False)
         camTh = threadCamera(
          self.queuesList, self.logging, self.debugging,
-         show_preview=self.show_preview,
+         show_preview=show_cam_preview,
          camera_type=self.camera_type, usb_device=self.usb_device,
          usb_resolution=self.usb_resolution
         )
         self.threads.append(camTh)
         
         # Add line following thread
-        # show_debug=False for headless operation (no display)
-        # Set to True only when running with a monitor connected
-        import os
-        has_display = os.environ.get('DISPLAY') is not None
+        # show_debug=True only when master switch SHOW_CAMERA_PREVIEW is on.
+        # Individual window toggles are controlled by debug_windows dict.
         lineFollowingTh = threadLineFollowing(
-            self.queuesList, self.logging, self.debugging, show_debug=has_display
+            self.queuesList, self.logging, self.debugging, show_debug=self.show_preview,
+            debug_windows=self.debug_windows,
+            sign_action_event=sign_action_event
         )
         self.threads.append(lineFollowingTh)
 
@@ -119,7 +132,10 @@ class processCamera(WorkerProcess):
                 server_url=self.sign_server_url,
                 enable_actions=self.sign_detection_actions,
                 min_confidence=self.sign_min_confidence,
-                show_debug=has_display,
+                min_box_area=self.sign_min_box_area,
+                action_cooldown=self.sign_action_cooldown,
+                show_debug=self.show_preview,
+                sign_action_event=sign_action_event,
             )
             self.threads.append(signDetTh)
         elif self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:

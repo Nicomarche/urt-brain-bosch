@@ -64,7 +64,7 @@ class threadRead(ThreadWithStop):
 
     # ===================================== INIT =========================================
     def __init__(self, process, logFile, queueList, logger, debugger = False):
-        super(threadRead, self).__init__(pause=0.01)
+        super(threadRead, self).__init__(pause=0.02)  # 50Hz — suficiente para leer serial NUCLEO
         self.process = process
         self.logFile = logFile
         self.buffer = ""

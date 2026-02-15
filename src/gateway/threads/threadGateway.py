@@ -40,7 +40,7 @@ class threadGateway(ThreadWithStop):
     # ===================================== INIT =========================================
 
     def __init__(self, queueList, logger, debugging):
-        super(threadGateway, self).__init__(pause=0.001)
+        super(threadGateway, self).__init__(pause=0.02)  # 50Hz — suficiente para enrutar mensajes
         self.logger = logger
         self.debugging = debugging
         self.sendingList = {}

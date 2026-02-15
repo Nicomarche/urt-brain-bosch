@@ -63,12 +63,13 @@ class processDashboard(WorkerProcess):
         debugging (bool): Enable debugging mode.
     """
     # ====================================== INIT ==========================================
-    def __init__(self, queueList, logging, ready_event=None, debugging = False):
+    def __init__(self, queueList, logging, ready_event=None, debugging = False, stream_camera=True):
 
         self.running = True
         self.queueList = queueList
         self.logger = logging
         self.debugging = debugging
+        self.stream_camera = stream_camera
         
         # ip replacement
         IpManager.replace_ip_in_file()
@@ -132,6 +133,8 @@ class processDashboard(WorkerProcess):
         self.get_name_and_vals()
         self.messagesAndVals.pop("mainCamera", None)
         self.messagesAndVals.pop("Semaphores", None)
+        if not self.stream_camera:
+            self.messagesAndVals.pop("serialCamera", None)
         self.subscribe()
     
 
@@ -165,9 +168,9 @@ class processDashboard(WorkerProcess):
                     self.socketio.emit('console_log', {'data': msg})
                     eventlet.sleep(0)
                 
-                eventlet.sleep(0.1)
+                eventlet.sleep(0.5)  # 500ms — logs no requieren baja latencia
             except queue.Empty:
-                eventlet.sleep(0.1)
+                eventlet.sleep(0.5)
             except Exception as e:
                 if self.debugging:
                     self.logger.error(f"Error streaming logs: {e}")
@@ -340,7 +343,7 @@ class processDashboard(WorkerProcess):
         self.memoryUsage = psutil.virtual_memory().percent
         self.cpuTemperature = round(psutil.sensors_temperatures()['cpu_thermal'][0].current)
 
-        eventlet.spawn_after(1, self.update_hardware_data)
+        eventlet.spawn_after(3, self.update_hardware_data)  # 3s — datos de hardware no cambian rapido
 
 
     def send_heartbeat(self):
@@ -380,7 +383,7 @@ class processDashboard(WorkerProcess):
                 if self.debugging:
                     self.logger.info(f"{msg}: {resp}")
 
-        eventlet.spawn_after(0.1, self.send_continuous_messages)
+        eventlet.spawn_after(0.15, self.send_continuous_messages)  # 150ms (~7Hz) — balance entre CPU y fluidez del stream
 
 
     def send_hardware_data_to_frontend(self):

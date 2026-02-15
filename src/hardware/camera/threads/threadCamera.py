@@ -66,7 +66,7 @@ class threadCamera(ThreadWithStop):
     # ================================ INIT ===============================================
     def __init__(self, queuesList, logger, debugger, show_preview=False,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480)):
-        super(threadCamera, self).__init__(pause=0.001)
+        super(threadCamera, self).__init__(pause=0.1)  # 10 FPS — suficiente para line following a ~5 FPS y dashboard
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
@@ -151,16 +151,15 @@ class threadCamera(ThreadWithStop):
                 cv2.imshow("Camera Preview", preview_frame)  # type: ignore
                 cv2.waitKey(1)  # type: ignore
 
-            _, mainEncodedImg = cv2.imencode(".jpg", mainRequest) # type: ignore
-            _, serialEncodedImg = cv2.imencode(".jpg", serialRequest) # type: ignore
-
-            mainEncodedImageData = base64.b64encode(mainEncodedImg).decode("utf-8") # type: ignore
+            # Only encode serialCamera (640x384) — used by line following, sign detection, and dashboard.
+            # mainCamera (2048x1080) is not consumed by any subscriber, so we skip encoding it entirely.
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+            _, serialEncodedImg = cv2.imencode(".jpg", serialRequest, encode_params) # type: ignore
             serialEncodedImageData = base64.b64encode(serialEncodedImg).decode("utf-8") # type: ignore
 
             if self._blocker.is_set():
                 return
 
-            self.mainCameraSender.send(mainEncodedImageData)
             self.serialCameraSender.send(serialEncodedImageData)
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")

@@ -140,12 +140,15 @@ Args:
     debugger (bool): A flag for debugging.
 """
 
-    def __init__(self, queuesList, logger, debugger, show_debug=False):
-        super(threadLineFollowing, self).__init__(pause=0.01)
+    def __init__(self, queuesList, logger, debugger, show_debug=False, debug_windows=None, sign_action_event=None):
+        super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
         self.show_debug = show_debug
+        self.debug_windows = debug_windows or {}
+        self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
+        self._sign_action_was_active = False  # Track transitions to reset speed ramp
 
         # Speed parameters
         self.base_speed = 15
@@ -197,6 +200,7 @@ Args:
         self.use_swept_path = True       # Enable geometric curve prediction
         self.swept_path_margin_cm = 2.0  # Safety margin for clearance checks (cm)
         self.curve_offset_gain = 1.0     # Apply full optimal offset (0-1)
+        self.curve_inner_bias_cm = 2.0   # Extra cm to shift toward inside of curve (on top of swept path)
         self.curve_confidence_threshold = 0.3  # Min confidence to apply curve offset
         self.min_clearance_warn_cm = 3.0 # Warn if clearance below this (cm)
         self.curve_speed_reduction = True  # Reduce speed when clearance is tight
@@ -224,8 +228,12 @@ Args:
         self.curve_enter_frames = 1          # Frames with 1 line to start ENTERING (fast!)
         self.curve_confirm_frames = 2        # Frames with 1 line to confirm IN_CURVE
         self.curve_exit_frames = 3           # Frames with 2 lines before EXITING→STRAIGHT
-        self.curve_vp_threshold = 0.10       # VP offset to detect curve early from 2 lines
+        self.curve_vp_threshold = 0.20       # VP offset to detect curve early from 2 lines (0.10 was too sensitive)
+        self.curve_vp_confirm_frames = 3    # Consecutive frames with VP above threshold to trigger ENTERING from 2 lines
+        self._vp_above_count = 0            # Counter: consecutive frames VP exceeded threshold
         self.curve_pre_position_gain = 0.85  # Pre-position aggressively when ENTERING
+        self.curve_exit_gain = 0.25          # Reduce curve offset when EXITING (0=ignore curve, 1=full curve)
+        self.curve_inner_line_steer_factor = 0.4  # When seeing inner line, steer opposite at this fraction of max (0-1)
 
         # Steering feedback estimator
         self._steering_radius_history = deque(maxlen=8)  # Last N radius estimates from steering
@@ -797,8 +805,20 @@ Args:
         self._hybridnets_frame_count = 0
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset (P/I/D cleared)")
 
+    @property
+    def _needs_debug(self):
+        """Check if debug images are needed (local display or dashboard streaming)."""
+        return self.show_debug or self.stream_debug_view > 0
+
+    def _is_window_enabled(self, window_key):
+        """Check if a specific debug window is enabled via DEBUG_WINDOWS config.
+        Returns True if show_debug is on AND the individual window toggle is on."""
+        return self.show_debug and self.debug_windows.get(window_key, False)
+
     def _store_debug_image(self, name, image):
         """Store a debug image for potential streaming."""
+        if self.stream_debug_view == 0:
+            return  # No streaming active, skip copy
         if image is not None:
             self._debug_images[name] = image.copy()
 
@@ -1036,17 +1056,20 @@ Args:
             debug_info: Dictionary with intermediate results for debugging
         """
         debug_info = {}
+        needs_debug = self._needs_debug
         
         # Step 1: Apply CLAHE for lighting normalization
         if self.use_clahe:
             preprocessed = self._apply_clahe(frame)
-            debug_info['clahe'] = preprocessed.copy()
+            if needs_debug:
+                debug_info['clahe'] = preprocessed.copy()
         else:
             preprocessed = frame.copy()
         
         # Step 2: Apply brightness/contrast adjustment
         preprocessed = cv2.convertScaleAbs(preprocessed, alpha=self.contrast, beta=self.brightness)
-        debug_info['adjusted'] = preprocessed.copy()
+        if needs_debug:
+            debug_info['adjusted'] = preprocessed.copy()
         
         return preprocessed, debug_info
 
@@ -1063,18 +1086,22 @@ Args:
             debug_info: Dictionary with intermediate masks for debugging
         """
         debug_info = {}
+        needs_debug = self._needs_debug
         
         # Convert to HSV for color-based detection
         hsv = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2HSV)
-        debug_info['hsv'] = hsv.copy()
+        if needs_debug:
+            debug_info['hsv'] = hsv.copy()
         
         # Standard HSV-based white detection
         white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
-        debug_info['white_hsv'] = white_mask_hsv.copy()
+        if needs_debug:
+            debug_info['white_hsv'] = white_mask_hsv.copy()
         
         # Yellow detection (usually more stable across lighting)
         yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
-        debug_info['yellow'] = yellow_mask.copy()
+        if needs_debug:
+            debug_info['yellow'] = yellow_mask.copy()
         
         # Start with HSV-based masks
         combined_mask = cv2.bitwise_or(white_mask_hsv, yellow_mask)
@@ -1082,7 +1109,8 @@ Args:
         # Add adaptive white detection if enabled
         if self.use_adaptive_white:
             adaptive_white_mask, adaptive_threshold = self._adaptive_white_detection(preprocessed)
-            debug_info['adaptive_white'] = adaptive_white_mask.copy()
+            if needs_debug:
+                debug_info['adaptive_white'] = adaptive_white_mask.copy()
             debug_info['adaptive_threshold'] = adaptive_threshold
             
             # Combine with existing mask (OR operation)
@@ -1098,7 +1126,8 @@ Args:
             # If detection is weak (less than 1% of image), use gradient fallback
             if detection_ratio < 0.01:
                 gradient_mask = self._gradient_based_detection(preprocessed)
-                debug_info['gradient'] = gradient_mask.copy()
+                if needs_debug:
+                    debug_info['gradient'] = gradient_mask.copy()
                 debug_info['gradient_used'] = True
                 
                 # Combine gradient mask with color masks
@@ -1106,7 +1135,8 @@ Args:
             else:
                 debug_info['gradient_used'] = False
         
-        debug_info['combined_raw'] = combined_mask.copy()
+        if needs_debug:
+            debug_info['combined_raw'] = combined_mask.copy()
         
         return combined_mask, debug_info
 
@@ -1150,7 +1180,7 @@ Args:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
                 
                 # Show AI analysis window even when no detection
-                if self.show_debug:
+                if self._is_window_enabled("ai_analysis"):
                     cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
                     cv2.waitKey(1)
                 
@@ -1161,7 +1191,7 @@ Args:
             lane_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
             
             if lane_center is None:
-                if self.show_debug:
+                if self._is_window_enabled("ai_analysis"):
                     cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
                     cv2.waitKey(1)
                 return None, None, None, None
@@ -1275,7 +1305,7 @@ Args:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             # Show AI analysis window
-            if self.show_debug:
+            if self._is_window_enabled("ai_analysis"):
                 cv2.imshow("AI Analysis - LSTR", debug_frame)
                 cv2.waitKey(1)
             
@@ -1457,7 +1487,7 @@ Args:
         # Draw frame center reference
         cv2.line(debug_frame, (width//2, height - 50), (width//2, height), (255, 255, 255), 2)
         
-        if self.show_debug:
+        if self._is_window_enabled("hybrid_fusion"):
             cv2.imshow("HYBRID Fusion", debug_frame)
             cv2.waitKey(1)
             if final_steering is not None:
@@ -1643,7 +1673,18 @@ Args:
             self._error_at_max_steer_start = 0.0
             return steering_angle, speed, False
 
-        # Guard 2: Don't count frames where the noise filter just rejected data
+        # Guard 2: Don't trigger recovery when steering AWAY from the curve.
+        # This happens when the car went off the INNER line (turned too tight).
+        # Steering opposite to curve direction = correcting from inside, NOT stuck.
+        if steering_angle is not None and self._curve_direction != 0:
+            steering_sign = 1 if steering_angle > 0 else -1
+            if steering_sign != self._curve_direction:
+                # Steering opposes curve direction → inner line correction, not stuck
+                self._max_steer_consecutive = 0
+                self._error_at_max_steer_start = 0.0
+                return steering_angle, speed, False
+
+        # Guard 3: Don't count frames where the noise filter just rejected data
         # (steering_angle may be stale _last_good_steering, not a real measurement)
         if self._noise_reject_count > 0:
             self._max_steer_consecutive = 0
@@ -1742,6 +1783,7 @@ Args:
 
         height, width = image.shape[:2]
         debug_info = {}
+        needs_debug = self._needs_debug
 
         # 1. ROI mask — keep bottom portion (roi_height_start..roi_height_end)
         y_start = int(self.roi_height_start * height)
@@ -1750,23 +1792,28 @@ Args:
         mask = np.zeros_like(image)
         cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
         masked_image = cv2.bitwise_and(image, mask)
-        debug_info['roi'] = masked_image.copy()
+        if needs_debug:
+            debug_info['roi'] = masked_image.copy()
 
         # 2. Grayscale
         grey_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
-        debug_info['grey'] = grey_image.copy()
+        if needs_debug:
+            debug_info['grey'] = grey_image.copy()
 
         # 3. Binary threshold
         _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
-        debug_info['binary'] = binary_image.copy()
+        if needs_debug:
+            debug_info['binary'] = binary_image.copy()
 
         # 4. Median blur
         noiseless = cv2.medianBlur(binary_image, kernel_val)
-        debug_info['noiseless'] = noiseless.copy()
+        if needs_debug:
+            debug_info['noiseless'] = noiseless.copy()
 
         # 5. Canny
         canny = cv2.Canny(noiseless, self.canny_low, self.canny_high)
-        debug_info['canny'] = canny.copy()
+        if needs_debug:
+            debug_info['canny'] = canny.copy()
 
         # 6. HoughLinesP
         lines = cv2.HoughLinesP(
@@ -2148,17 +2195,14 @@ Args:
 
         if self._curve_state == "STRAIGHT":
             if num_lines == 1:
-                # Lost a line → entering curve
+                # Lost a line → entering curve (only reliable trigger)
                 self._curve_state = "ENTERING"
                 self._curve_state_frames = 1
                 self._curve_direction = 1 if avg_left is not None else -1
-            elif num_lines == 2:
-                # Check VP for early curve detection (pre-position)
-                vp_info = self._quick_vp_check(avg_left, avg_right, img_h, img_w)
-                if vp_info and abs(vp_info['offset_norm']) > self.curve_vp_threshold:
-                    self._curve_state = "ENTERING"
-                    self._curve_state_frames = 1
-                    self._curve_direction = 1 if vp_info['offset_norm'] > 0 else -1
+            # NOTE: VP-based detection from 2 lines was removed — too many false positives.
+            # The vanishing point shifts off-center when the car is slightly off-center
+            # or the camera isn't perfectly aligned, causing constant false ENTERING triggers.
+            # The only reliable curve indicator is actually losing a line (2→1 transition).
 
         elif self._curve_state == "ENTERING":
             if num_lines == 1:
@@ -2168,15 +2212,12 @@ Args:
                 # Update direction based on which line is visible
                 self._curve_direction = 1 if avg_left is not None else -1
             elif num_lines == 2:
-                # Still see both lines - check if VP still indicates curve
-                vp_info = self._quick_vp_check(avg_left, avg_right, img_h, img_w)
-                if vp_info and abs(vp_info['offset_norm']) > self.curve_vp_threshold:
-                    pass  # Stay in ENTERING
-                else:
-                    # False alarm - back to straight
-                    self._curve_state = "STRAIGHT"
-                    self._curve_state_frames = 0
-                    self._curve_direction = 0
+                # Regained both lines → back to STRAIGHT.
+                # If it's a real curve, we'll lose the line again and re-enter ENTERING.
+                self._curve_state = "STRAIGHT"
+                self._curve_state_frames = 0
+                self._curve_direction = 0
+                self._steering_radius_history.clear()  # Clear stale steering data
             elif num_lines == 0:
                 # Lost all lines in entering - go to IN_CURVE (assume committed)
                 self._curve_state = "IN_CURVE"
@@ -2186,6 +2227,9 @@ Args:
             if num_lines == 2:
                 self._curve_state = "EXITING"
                 self._curve_state_frames = 1
+                # Reset PID integral so accumulated curve error doesn't push the car wide on exit
+                self.pid.integral = 0.0
+                self.pid.prev_error = 0
             elif num_lines == 1:
                 # Update direction (might have switched which line we see)
                 self._curve_direction = 1 if avg_left is not None else -1
@@ -2238,6 +2282,35 @@ Args:
         except Exception:
             return None
 
+    def _is_seeing_inner_line(self, visible_side):
+        """Check if the visible line is the INNER boundary of the current curve.
+        
+        During a confirmed curve (IN_CURVE/EXITING), we know the direction.
+        The inner line is the one on the same side as the turn:
+        - RIGHT curve: RIGHT line = inner, LEFT line = outer
+        - LEFT curve:  LEFT line = inner, RIGHT line = outer
+        
+        When the car goes off the INNER line (turned too tight), it needs a
+        different correction than going off the outer line (can't make the turn).
+        
+        Args:
+            visible_side: 'left' or 'right' - which line is currently visible
+            
+        Returns:
+            bool: True if the visible line is the inner boundary
+        """
+        if self._curve_state not in ("IN_CURVE", "EXITING"):
+            return False
+        if self._curve_direction == 0:
+            return False
+        # RIGHT curve (dir=1): inner line is RIGHT
+        # LEFT curve (dir=-1): inner line is LEFT
+        if self._curve_direction == 1 and visible_side == 'right':
+            return True
+        if self._curve_direction == -1 and visible_side == 'left':
+            return True
+        return False
+
     def _update_steering_radius_estimate(self):
         """Update curve radius estimate from current steering angle.
         
@@ -2289,6 +2362,9 @@ Args:
             return bfmc_radius, 0.9, "BFMC+steer"
 
         # ENTERING: blend VP estimation with BFMC default
+        # NOTE: Do NOT use steering feedback here — during ENTERING the steering
+        # history contains PID correction angles from STRAIGHT, not actual curve radii.
+        # Using them causes false R=59cm detections (25° PID correction ≠ real curve).
         if state == "ENTERING":
             if vp_radius and vp_radius > 0 and vp_confidence > 0.3:
                 # Blend VP with BFMC default (VP is still somewhat reliable here)
@@ -2297,10 +2373,6 @@ Args:
                 self._curve_radius_estimate = blended
                 self._curve_confidence = 0.7
                 return blended, 0.7, "VP+BFMC"
-            elif steer_radius is not None:
-                self._curve_radius_estimate = steer_radius
-                self._curve_confidence = 0.6
-                return steer_radius, 0.6, "steer"
             else:
                 self._curve_radius_estimate = self.bfmc_default_curve_radius
                 self._curve_confidence = 0.5
@@ -2597,6 +2669,19 @@ Args:
             if curve['px_per_cm'] > 0.5:
                 self._last_px_per_cm = curve['px_per_cm']
 
+            # STRAIGHT state: VP data is only used by FSM for curve detection,
+            # NOT for steering. Return zero offset to avoid false corrections.
+            if self._curve_state == "STRAIGHT":
+                return {
+                    'offset_px': 0.0, 'curve_radius_cm': curve.get('curve_radius_cm', 0),
+                    'turn_direction': curve.get('turn_direction', 0),
+                    'min_clearance_cm': float('inf'),
+                    'critical_corner': 'straight', 'confidence': curve.get('confidence', 0),
+                    'px_per_cm': curve['px_per_cm'], 'clearances': {},
+                    'fits': True, 'source': 'none',
+                    'curve_state': 'STRAIGHT',
+                }
+
             # Step 2: Get best radius from hybrid fusion
             best_radius, confidence, source = self._get_best_curve_radius(
                 vp_radius=curve['curve_radius_cm'],
@@ -2634,14 +2719,35 @@ Args:
             offset_result = self._calculate_curve_offset(best_radius, turn_direction)
 
             # Step 4: Convert to pixels
-            # Apply pre-position gain when ENTERING (less aggressive than full curve)
-            gain = self.curve_pre_position_gain if self._curve_state == "ENTERING" else 1.0
+            # Apply gain based on curve state:
+            #   STRAIGHT: NO offset — VP data is only used by FSM, not steering
+            #   ENTERING: pre-position (less aggressive, building up)
+            #   IN_CURVE: full curve offset
+            #   EXITING:  reduced offset — car needs to straighten, not follow curve
+            if self._curve_state == "STRAIGHT":
+                gain = 0.0  # Don't apply curve offset in straight — only FSM uses VP data
+            elif self._curve_state == "ENTERING":
+                gain = self.curve_pre_position_gain
+            elif self._curve_state == "EXITING":
+                # Progressively reduce gain as we spend more frames in EXITING
+                # Frame 1: curve_exit_gain, then fade toward 0 over curve_exit_frames
+                exit_progress = min(1.0, self._curve_state_frames / max(1, self.curve_exit_frames))
+                gain = self.curve_exit_gain * (1.0 - exit_progress)
+            else:
+                gain = 1.0  # IN_CURVE: full offset
             offset_px = -offset_result['offset_cm'] * curve['px_per_cm'] * turn_direction * gain
+
+            # Apply additional inner bias (pushes car toward inside of curve)
+            if self._curve_state in ("ENTERING", "IN_CURVE", "EXITING") and self.curve_inner_bias_cm > 0:
+                bias_gain = gain  # Same gain as offset (fades during EXITING)
+                inner_bias_px = self.curve_inner_bias_cm * curve['px_per_cm'] * turn_direction * bias_gain
+                offset_px += inner_bias_px
 
             if self.show_debug:
                 print(f"\033[1;97m[ Hybrid 2L ] :\033[0m \033[1;96m{self._curve_state}\033[0m "
                       f"src={source} R={best_radius:.0f}cm dir={'R' if turn_direction > 0 else 'L'} "
                       f"offset={offset_result['offset_cm']:.1f}cm→{offset_px:.0f}px "
+                      f"bias={self.curve_inner_bias_cm:.1f}cm "
                       f"clr={offset_result['min_clearance_cm']:.1f}cm conf={confidence:.2f}")
 
             return {
@@ -2739,6 +2845,12 @@ Args:
             offset_result = self._calculate_curve_offset(best_radius, turn_direction)
             offset_px = -offset_result['offset_cm'] * px_per_cm * turn_direction
 
+            # Apply additional inner bias (pushes car toward inside of curve)
+            inner_bias_px = 0.0
+            if self._curve_state in ("ENTERING", "IN_CURVE", "EXITING") and self.curve_inner_bias_cm > 0:
+                inner_bias_px = self.curve_inner_bias_cm * px_per_cm * turn_direction
+                offset_px += inner_bias_px
+
             target_x = lane_center_x + offset_px
             steering_error = target_x - (img_w / 2.0)
 
@@ -2747,6 +2859,7 @@ Args:
                 print(f"\033[1;97m[ Hybrid 1L ] :\033[0m \033[1;93m{self._curve_state} {dir_str}\033[0m "
                       f"src={source} R={best_radius:.0f}cm angle={angle_from_vertical:.1f}° "
                       f"offset={offset_result['offset_cm']:.1f}cm→{offset_px:.0f}px "
+                      f"bias={self.curve_inner_bias_cm:.1f}cm({inner_bias_px:.0f}px) "
                       f"target={target_x:.0f} error={steering_error:.0f}px "
                       f"clr={offset_result['min_clearance_cm']:.1f}cm")
 
@@ -3008,7 +3121,7 @@ Returns:
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
                          'use_swept_path', 'curve_speed_reduction',
-                         'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames',
+                         'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames', 'curve_vp_confirm_frames',
                          'use_noise_filter', 'noise_max_hough_lines',
                          'noise_max_reject_frames',
                          'use_curve_recovery', 'recovery_max_steer_frames'}
@@ -3044,14 +3157,16 @@ Returns:
                      'car_front_overhang', 'car_rear_overhang',
                      'camera_to_front_axle', 'camera_to_rear_axle',
                      'lane_width_cm', 'line_width_cm',
-                     'swept_path_margin_cm', 'curve_offset_gain',
+                     'swept_path_margin_cm', 'curve_offset_gain', 'curve_inner_bias_cm',
                      'curve_confidence_threshold', 'min_clearance_warn_cm',
                      'curve_speed_reduction', 'single_line_radius_k',
                      # Hybrid curve system parameters
                      'bfmc_inner_lane_radius', 'bfmc_outer_lane_radius',
                      'bfmc_default_curve_radius',
                      'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames',
-                     'curve_vp_threshold', 'curve_pre_position_gain',
+                     'curve_vp_threshold', 'curve_vp_confirm_frames',
+                     'curve_pre_position_gain', 'curve_exit_gain',
+                     'curve_inner_line_steer_factor',
                      # Noise filter parameters
                      'use_noise_filter', 'noise_max_hough_lines',
                      'noise_max_error_jump_px', 'noise_max_steer_jump_deg',
@@ -3104,8 +3219,8 @@ Returns:
             # Log swept path / car geometry parameter changes
             swept_params = ['use_swept_path', 'car_length', 'car_width', 'car_wheelbase_cm',
                            'car_front_overhang', 'car_rear_overhang', 'lane_width_cm',
-                           'swept_path_margin_cm', 'curve_offset_gain', 'curve_confidence_threshold',
-                           'min_clearance_warn_cm', 'curve_speed_reduction']
+                           'swept_path_margin_cm', 'curve_offset_gain', 'curve_inner_bias_cm',
+                           'curve_confidence_threshold', 'min_clearance_warn_cm', 'curve_speed_reduction']
             if any(p in config for p in swept_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSWEPT PATH\033[0m - Updated: "
                       f"enabled={self.use_swept_path} car={self.car_length}x{self.car_width}cm "
@@ -3117,14 +3232,18 @@ Returns:
             hybrid_params = ['bfmc_inner_lane_radius', 'bfmc_outer_lane_radius',
                             'bfmc_default_curve_radius', 'curve_enter_frames',
                             'curve_confirm_frames', 'curve_exit_frames',
-                            'curve_vp_threshold', 'curve_pre_position_gain']
+                            'curve_vp_threshold', 'curve_vp_confirm_frames',
+                            'curve_pre_position_gain', 'curve_exit_gain',
+                            'curve_inner_line_steer_factor']
             if any(p in config for p in hybrid_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mHYBRID CURVE\033[0m - Updated: "
                       f"BFMC_R: inner={self.bfmc_inner_lane_radius} outer={self.bfmc_outer_lane_radius} "
                       f"default={self.bfmc_default_curve_radius} "
                       f"FSM: enter={self.curve_enter_frames} confirm={self.curve_confirm_frames} "
                       f"exit={self.curve_exit_frames} vp_thr={self.curve_vp_threshold} "
-                      f"pre_gain={self.curve_pre_position_gain}")
+                      f"vp_confirm={self.curve_vp_confirm_frames} "
+                      f"pre_gain={self.curve_pre_position_gain} exit_gain={self.curve_exit_gain} "
+                      f"inner_steer={self.curve_inner_line_steer_factor}")
             
             # Log curve recovery parameter changes
             recovery_params = ['use_curve_recovery', 'recovery_max_steer_frames',
@@ -3235,14 +3354,15 @@ Returns:
                     self._last_inactive_log = True
             
             if self.show_debug:
-                if debug_frame is not None:
+                if debug_frame is not None and self._is_window_enabled("final_result"):
                     status_text = "ACTIVE" if self.is_line_following_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
                     cv2.imshow("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
-                self._show_control_panel(steering_angle, speed)
+                if self._is_window_enabled("control_panel"):
+                    self._show_control_panel(steering_angle, speed)
                 cv2.waitKey(1)
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
@@ -3352,14 +3472,14 @@ Returns:
                 kernel_override=3
             )
 
-        # Show debug windows
+        # Show debug windows (only enabled ones)
         if self.show_debug:
-            if 'binary' in debug_info:
+            if self._is_window_enabled("binary_threshold") and 'binary' in debug_info:
                 bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
                 cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
                 cv2.imshow("2. Binary Threshold", bin_display)
-            if 'canny' in debug_info:
+            if self._is_window_enabled("canny_edges") and 'canny' in debug_info:
                 cv2.imshow("3. Canny Edges", debug_info['canny'])
             self._store_debug_image('canny', cv2.cvtColor(canny, cv2.COLOR_GRAY2BGR))
 
@@ -3370,6 +3490,7 @@ Returns:
         midpoint_x = None
         bottom_left_x = None
         bottom_right_x = None
+        self._is_stabilization_frame = False  # Reset each frame; set True by just_seen_two_lines logic
 
         # === PRE-CHECK: Reject obviously noisy frames (reflection/glare) ===
         num_lines = (1 if avg_left is not None else 0) + (1 if avg_right is not None else 0)
@@ -3384,17 +3505,20 @@ Returns:
                       f"reason={_pre_reason}")
             steering_angle = self._last_good_steering
             speed = self.min_speed  # Slow down during noise
-            # Create debug frame showing rejection
-            debug_frame = self._bfmc_draw_debug(
-                frame, avg_left, avg_right, None, None, None, None, steering_angle, debug_info
-            )
-            cv2.rectangle(debug_frame, (0, debug_frame.shape[0] - 25),
-                         (debug_frame.shape[1], debug_frame.shape[0]), (0, 0, 150), -1)
-            cv2.putText(debug_frame, f"NOISE REJECT: {_pre_reason}",
-                       (8, debug_frame.shape[0] - 8),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
-            self._store_debug_image('final', debug_frame)
-            self._send_debug_stream(steering_angle, speed)
+            # Create debug frame showing rejection (only when debug active)
+            if self._needs_debug:
+                debug_frame = self._bfmc_draw_debug(
+                    frame, avg_left, avg_right, None, None, None, None, steering_angle, debug_info
+                )
+                cv2.rectangle(debug_frame, (0, debug_frame.shape[0] - 25),
+                             (debug_frame.shape[1], debug_frame.shape[0]), (0, 0, 150), -1)
+                cv2.putText(debug_frame, f"NOISE REJECT: {_pre_reason}",
+                           (8, debug_frame.shape[0] - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
+                self._store_debug_image('final', debug_frame)
+                self._send_debug_stream(steering_angle, speed)
+            else:
+                debug_frame = None
             return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
@@ -3442,8 +3566,10 @@ Returns:
                 self.just_seen_two_lines = False
             else:
                 # First frame with two lines after single/none — use previous steering (stabilize)
+                # Mark as stabilization so the noise filter doesn't accept this as a real measurement
                 self.just_seen_two_lines = True
                 steering_angle = getattr(self, 'last_steering', 0)
+                self._is_stabilization_frame = True
 
             # Reset single-line counters
             self.consecutive_single_left = 0
@@ -3453,13 +3579,23 @@ Returns:
 
         elif avg_left is not None:
             # ---- ONLY LEFT LINE ----
-            # Left line visible → likely RIGHT curve (left = outer boundary)
             self.consecutive_single_left += 1
             self.consecutive_single_right = 0
             self.last_seen_side = "left"
 
-            if self.use_swept_path:
-                # Use swept path geometry: estimate curve + invisible line + optimal path
+            # Check: is this the INNER line of a confirmed curve?
+            # LEFT curve + see LEFT line = seeing INNER line → car went too far inside
+            if self._is_seeing_inner_line('left'):
+                # Car turned too tight (went past inner boundary of a LEFT curve)
+                # DON'T steer more into the curve — ease off, steer gently toward outside
+                steering_angle = self.max_steering * self.curve_inner_line_steer_factor  # Steer RIGHT (away from left curve)
+                speed = self.min_speed
+                self._swept_path_info = None
+                if self.show_debug:
+                    print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mLEFT curve, seeing INNER (left) line\033[0m "
+                          f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
+            elif self.use_swept_path:
+                # Normal case: LEFT line = outer boundary of RIGHT curve
                 swept = self._predict_swept_path_single_line(avg_left, 'left', img_h, img_w)
                 self._swept_path_info = swept
                 if swept is not None:
@@ -3492,13 +3628,23 @@ Returns:
 
         elif avg_right is not None:
             # ---- ONLY RIGHT LINE ----
-            # Right line visible → likely LEFT curve (right = outer boundary)
             self.consecutive_single_right += 1
             self.consecutive_single_left = 0
             self.last_seen_side = "right"
 
-            if self.use_swept_path:
-                # Use swept path geometry: estimate curve + invisible line + optimal path
+            # Check: is this the INNER line of a confirmed curve?
+            # RIGHT curve + see RIGHT line = seeing INNER line → car went too far inside
+            if self._is_seeing_inner_line('right'):
+                # Car turned too tight (went past inner boundary of a RIGHT curve)
+                # DON'T steer more into the curve — ease off, steer gently toward outside
+                steering_angle = -self.max_steering * self.curve_inner_line_steer_factor  # Steer LEFT (away from right curve)
+                speed = self.min_speed
+                self._swept_path_info = None
+                if self.show_debug:
+                    print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mRIGHT curve, seeing INNER (right) line\033[0m "
+                          f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
+            elif self.use_swept_path:
+                # Normal case: RIGHT line = outer boundary of LEFT curve
                 swept = self._predict_swept_path_single_line(avg_right, 'right', img_h, img_w)
                 self._swept_path_info = swept
                 if swept is not None:
@@ -3541,20 +3687,27 @@ Returns:
 
         # === POST-CHECK: Reject steering if it looks like a noise spike ===
         if steering_angle is not None and self.use_noise_filter:
-            _post_noisy, _post_reason = self._is_frame_noisy(
-                debug_info, error, steering_angle, num_lines
-            )
-            if _post_noisy:
-                self._noise_reject_count += 1
-                if self.show_debug:
-                    print(f"\033[1;97m[ Noise Filter ] :\033[0m \033[1;93mSPIKE\033[0m "
-                          f"({self._noise_reject_count}/{self.noise_max_reject_frames}) "
-                          f"reason={_post_reason} steer={steering_angle:.1f}→{self._last_good_steering:.1f}")
-                steering_angle = self._last_good_steering
-                speed = max(speed, self.min_speed)  # Don't accelerate on rejected frame
+            # Skip noise filter for stabilization frames (just_seen_two_lines transition).
+            # These frames use last_steering (not a real measurement) and would falsely
+            # reset the reject counter, causing a latch-up where the correct steering
+            # value is perpetually rejected.
+            if self._is_stabilization_frame:
+                pass  # Don't check, don't accept, don't reject — just pass through
             else:
-                # Good frame - update reference
-                self._accept_frame(error, steering_angle, num_lines)
+                _post_noisy, _post_reason = self._is_frame_noisy(
+                    debug_info, error, steering_angle, num_lines
+                )
+                if _post_noisy:
+                    self._noise_reject_count += 1
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Noise Filter ] :\033[0m \033[1;93mSPIKE\033[0m "
+                              f"({self._noise_reject_count}/{self.noise_max_reject_frames}) "
+                              f"reason={_post_reason} steer={steering_angle:.1f}→{self._last_good_steering:.1f}")
+                    steering_angle = self._last_good_steering
+                    speed = max(speed, self.min_speed)  # Don't accelerate on rejected frame
+                else:
+                    # Good frame - update reference
+                    self._accept_frame(error, steering_angle, num_lines)
 
         # Update state
         if steering_angle is not None:
@@ -3590,15 +3743,16 @@ Returns:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mBFMC\033[0m - "
                   f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
 
-        # Create debug frame
-        debug_frame = self._bfmc_draw_debug(
-            frame, avg_left, avg_right, error, midpoint_x,
-            bottom_left_x, bottom_right_x, steering_angle, debug_info
-        )
-
-        # Store final debug image and send stream
-        self._store_debug_image('final', debug_frame)
-        self._send_debug_stream(steering_angle, speed)
+        # Create debug frame only when needed (saves frame.copy() + draw operations per frame)
+        if self._needs_debug:
+            debug_frame = self._bfmc_draw_debug(
+                frame, avg_left, avg_right, error, midpoint_x,
+                bottom_left_x, bottom_right_x, steering_angle, debug_info
+            )
+            self._store_debug_image('final', debug_frame)
+            self._send_debug_stream(steering_angle, speed)
+        else:
+            debug_frame = None
 
         return steering_angle, speed, debug_frame
 
@@ -3690,8 +3844,29 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         try:
             steer_value = int(round(steering_angle * 10))
             speed_value = int(round(speed * 10))
-            
-            # Send as string - the serial handler expects str type
+
+            # If a sign action (stop, crosswalk, etc.) is active:
+            # - STEER: keep sending so the car aligns with the lane while stopped
+            # - SPEED: block to not override the sign action's speed=0
+            if self.sign_action_event and self.sign_action_event.is_set():
+                self._sign_action_was_active = True
+                self.steerMotorSender.send(str(steer_value))
+                if self.show_debug:
+                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
+                return
+
+            # Just resumed from a sign action — reset speed ramp to min_speed
+            # so the car starts slow instead of jumping to its previous speed
+            if self._sign_action_was_active:
+                self._sign_action_was_active = False
+                self._current_speed = self.min_speed
+                speed_value = int(round(self.min_speed * 10))
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mRESUME\033[0m - "
+                    f"Speed reset to min ({self.min_speed}) after sign action"
+                )
+
+            # Normal operation — send both steer and speed
             self.steerMotorSender.send(str(steer_value))
             self.speedMotorSender.send(str(speed_value))
             

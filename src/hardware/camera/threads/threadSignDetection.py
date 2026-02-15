@@ -100,27 +100,20 @@ class SignDetectionClient:
             f"Stopped ({self.frames_sent} sent, {self.frames_received} received)"
         )
 
-    def send_frame(self, frame, block=True):
-        """Send frame to server and return detections.
+    def send_jpeg(self, jpeg_bytes, block=False):
+        """Send raw JPEG bytes to server (avoids decode/encode cycle on RPi).
 
         Args:
-            frame: BGR OpenCV image.
+            jpeg_bytes: Raw JPEG bytes (from base64.b64decode of camera data).
             block: If True, wait for response (up to timeout).
 
         Returns:
-            dict with keys: d (detections list), t (infer ms), f (frame id).
-            Each detection: {"s": sign_name, "c": confidence, "b": [y1,x1,y2,x2]}
-            Returns None on timeout/error.
+            dict with detections or None.
         """
         if not self._connected:
             return None
 
-        _, encoded = cv2.imencode(
-            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
-        )
-        jpeg_bytes = encoded.tobytes()
-
-        # Replace old frame in queue
+        # Replace old frame in queue (keep only latest)
         try:
             self._frame_queue.get_nowait()
         except queue.Empty:
@@ -129,7 +122,6 @@ class SignDetectionClient:
         self.frames_sent += 1
 
         if not block:
-            # Return latest result if available (non-blocking)
             try:
                 return self._result_queue.get_nowait()
             except queue.Empty:
@@ -140,6 +132,20 @@ class SignDetectionClient:
             return result
         except queue.Empty:
             return None
+
+    def send_frame(self, frame, block=True):
+        """Send OpenCV frame to server (encodes to JPEG first).
+
+        Prefer send_jpeg() when you already have JPEG bytes to avoid
+        unnecessary decode/encode cycles.
+        """
+        if not self._connected:
+            return None
+
+        _, encoded = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
+        )
+        return self.send_jpeg(encoded.tobytes(), block=block)
 
     def _run_loop(self):
         loop = asyncio.new_event_loop()
@@ -239,19 +245,41 @@ class SignActions:
         "green_light", "speed_20", "speed_30", "parking",
     }
 
-    def __init__(self, queuesList):
+    # Cooldown groups: signs that share the same cooldown timer.
+    # e.g. no_entry, stop, red_light all trigger STOP — if one fires,
+    # the others should be on cooldown too (same physical action).
+    ACTION_GROUP = {
+        "stop": "stop", "no_entry": "stop", "red_light": "stop",
+        "crosswalk": "crosswalk",
+        "yellow_light": "traffic_light", "green_light": "traffic_light",
+        "speed_20": "speed_limit", "speed_30": "speed_limit",
+        "parking": "parking",
+    }
+
+    def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0):
         self.queuesList = queuesList
+        self.sign_action_event = sign_action_event  # Shared with line following
+        self.action_cooldown = action_cooldown
         self.last_sign = None
+        self.last_action_time = {}  # {action_group: timestamp} — cooldown per group
         self.current_speed = self.BASE_SPEED
         self.is_stopped = False
 
     def execute(self, sign_name):
         """Execute action for a detected sign. Returns True if action was taken."""
-        # Avoid repeating the same action
-        if sign_name == self.last_sign:
-            return False
+        now = time.time()
 
-        self.last_sign = sign_name
+        # Cooldown by action group (stop/no_entry/red_light share "stop" group)
+        action_group = self.ACTION_GROUP.get(sign_name, sign_name)
+        last_time = self.last_action_time.get(action_group, 0)
+        elapsed = now - last_time
+        if elapsed < self.action_cooldown:
+            remaining = self.action_cooldown - elapsed
+            print(
+                f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mCOOLDOWN\033[0m - "
+                f"{sign_name} ignored ({remaining:.0f}s left)"
+            )
+            return False
 
         if sign_name == "stop":
             self._execute_stop()
@@ -277,14 +305,22 @@ class SignActions:
                 f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mINFO\033[0m - "
                 f"{sign_name} detected (no action)"
             )
+            return False
+
+        # Set cooldown AFTER successful action (not before)
+        self.last_sign = sign_name
+        self.last_action_time[action_group] = now
         return True
 
     def _send_speed(self, speed):
+        # SpeedMotor.msgType is "str" — must send string to avoid type mismatch warning.
+        # Value is speed * 10 to match Nucleo protocol (same as line following).
+        speed_value = str(int(round(speed * 10)))
         self.queuesList["General"].put({
             "Owner": SpeedMotor.Owner.value,
             "msgID": SpeedMotor.msgID.value,
             "msgType": SpeedMotor.msgType.value,
-            "msgValue": speed,
+            "msgValue": speed_value,
         })
 
     def _execute_stop(self):
@@ -292,20 +328,28 @@ class SignActions:
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mACTION\033[0m - "
             f"STOP ({self.STOP_DURATION}s)"
         )
+        if self.sign_action_event:
+            self.sign_action_event.set()  # Block line following from sending speed
         self._send_speed(0)
         self.is_stopped = True
         time.sleep(self.STOP_DURATION)
-        self._send_speed(self.current_speed)
         self.is_stopped = False
+        self._send_speed(self.current_speed)
+        if self.sign_action_event:
+            self.sign_action_event.clear()  # Resume line following
 
     def _execute_crosswalk(self):
         print(
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mACTION\033[0m - "
             f"CROSSWALK - slow to {self.LOW_SPEED} ({self.CROSSWALK_DURATION}s)"
         )
+        if self.sign_action_event:
+            self.sign_action_event.set()
         self._send_speed(self.LOW_SPEED)
         time.sleep(self.CROSSWALK_DURATION)
         self._send_speed(self.current_speed)
+        if self.sign_action_event:
+            self.sign_action_event.clear()
 
     def _execute_slow_down(self):
         print(
@@ -336,6 +380,8 @@ class SignActions:
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
             f"PARKING - stop"
         )
+        if self.sign_action_event:
+            self.sign_action_event.set()
         self._send_speed(0)
         self.is_stopped = True
 
@@ -365,8 +411,11 @@ class threadSignDetection(ThreadWithStop):
                  server_url="ws://192.168.80.15:8500/ws/signs",
                  enable_actions=False,
                  min_confidence=0.50,
-                 detection_interval=0.1,
-                 show_debug=False):
+                 min_box_area=0.01,
+                 action_cooldown=15.0,
+                 detection_interval=0.2,
+                 show_debug=False,
+                 sign_action_event=None):
         super(threadSignDetection, self).__init__(pause=0.05)  # 20Hz, suficiente para ~3 FPS de detección
         self.queuesList = queuesList
         self.logger = logger
@@ -374,11 +423,12 @@ class threadSignDetection(ThreadWithStop):
         self.server_url = server_url
         self.enable_actions = enable_actions
         self.min_confidence = min_confidence
+        self.min_box_area = min_box_area
         self.detection_interval = detection_interval
         self.show_debug = show_debug
 
         # State
-        self.sign_actions = SignActions(self.queuesList)
+        self.sign_actions = SignActions(self.queuesList, sign_action_event, action_cooldown)
         self.is_active = False
         self.last_detection_time = 0
         self.frame_count = 0
@@ -411,7 +461,8 @@ class threadSignDetection(ThreadWithStop):
             print(
                 f"\033[1;97m[ SignDetection ] :\033[0m \033[1;92mINFO\033[0m - "
                 f"Remote sign detection via {self.server_url} "
-                f"(actions={'ON' if self.enable_actions else 'OFF'})"
+                f"(actions={'ON' if self.enable_actions else 'OFF'}, "
+                f"min_box={self.min_box_area:.1%}, cooldown={self.sign_actions.action_cooldown:.0f}s)"
             )
         else:
             print(
@@ -459,23 +510,16 @@ class threadSignDetection(ThreadWithStop):
             return
 
         try:
-            # Decode base64 JPEG → OpenCV frame
-            img_data = base64.b64decode(camera_message)
-            nparr = np.frombuffer(img_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-            if frame is None:
-                return
+            # Decode base64 → raw JPEG bytes (cheap, no OpenCV needed)
+            jpeg_bytes = base64.b64decode(camera_message)
 
             self.last_detection_time = now
             self.frame_count += 1
 
-            # Send frame to remote server (non-blocking: fire-and-forget)
-            # IMPORTANT: block=False prevents this thread from stalling while
-            # waiting for the server response. A stalled thread can't drain
-            # the serialCamera pipe, causing the gateway to deadlock.
-            # Results arrive asynchronously via client._last_result.
-            result = self.client.send_frame(frame, block=False)
+            # Send raw JPEG bytes directly to server (non-blocking).
+            # This skips cv2.imdecode + cv2.imencode on the RPi,
+            # saving ~10-15ms of CPU per frame.
+            result = self.client.send_jpeg(jpeg_bytes, block=False)
 
             # Update FPS
             elapsed = now - self.fps_timer
@@ -501,32 +545,49 @@ class threadSignDetection(ThreadWithStop):
             # Best detection
             sign_name = None
             confidence = 0.0
+            box_area = 0.0
             if detections:
                 sign_name = detections[0]["sign"]
                 confidence = detections[0]["confidence"]
+                box = detections[0]["box"]
+                # box = [ymin, xmin, ymax, xmax] normalized (0-1)
+                box_area = (box[2] - box[0]) * (box[3] - box[1])
 
             if sign_name is not None:
                 self.detection_count += 1
                 self.last_sign_name = sign_name
                 self.last_sign_time = now
+                is_close = box_area >= self.min_box_area
                 print(
                     f"\033[1;97m[ SignDetection ] :\033[0m \033[1;96mDETECTED\033[0m - "
-                    f"{sign_name} ({confidence:.1%}) [server: {server_time_ms:.0f}ms]"
+                    f"{sign_name} ({confidence:.1%}) [server: {server_time_ms:.0f}ms] "
+                    f"box={box_area:.3%}{'' if is_close else ' (TOO FAR)'}"
                 )
 
                 self.signDetectedSender.send({
                     "sign": sign_name,
                     "confidence": round(confidence, 3),
+                    "box_area": round(box_area, 5),
                     "timestamp": now,
                 })
 
-                # Execute actions ONLY in AUTO mode
-                if self.is_active and self.enable_actions:
+                # Execute actions ONLY in AUTO mode AND when sign is close enough
+                if self.is_active and self.enable_actions and is_close:
                     self.sign_actions.execute(sign_name)
+                elif self.enable_actions and is_close and sign_name in SignActions.ACTIONABLE_SIGNS:
+                    # Actionable sign detected but conditions not met — log why
+                    if not self.is_active:
+                        print(
+                            f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mSKIPPED\033[0m - "
+                            f"{sign_name} — is_active=False (need AUTO mode)"
+                        )
 
-            # Debug image
-            if self.show_debug:
-                self._write_debug_image(frame, detections, now, server_time_ms)
+            # Debug image (only decode frame if debug is on — expensive!)
+            if self.show_debug and detections:
+                nparr = np.frombuffer(jpeg_bytes, np.uint8)
+                debug_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                if debug_frame is not None:
+                    self._write_debug_image(debug_frame, detections, now, server_time_ms)
 
             # Status update (every 2s)
             if now - self.last_status_time >= 2.0:
