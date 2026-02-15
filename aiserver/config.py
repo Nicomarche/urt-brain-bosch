@@ -75,6 +75,8 @@ SIGN_DETECTION_ENABLED = True
 SIGN_MODEL_DIR = "models/sign_detection"   # Directorio del modelo
 SIGN_MODEL_FILE = "trafic.pt"             # Archivo del modelo YOLOv8
 SIGN_MIN_CONFIDENCE = 0.40                 # Umbral de confianza (0.0 - 1.0)
+SIGN_IMGSZ = 320                          # Tamaño de entrada del modelo (320=rápido, 640=preciso)
+SIGN_DEVICE = "auto"                      # "auto" | "mps" (Apple Silicon) | "cuda" | "cpu"
 
 # Mapeo de nombres de clase del modelo (turco) → nombres de acción del auto.
 # Las clases NO listadas aquí se pasan tal cual (en minúsculas, espacios→_).

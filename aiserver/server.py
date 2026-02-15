@@ -403,8 +403,8 @@ async def websocket_signs(websocket: WebSocket):
     
     try:
         while True:
-            t_recv = time.time()
             data = await websocket.receive_bytes()
+            t_recv = time.time()  # Start timing AFTER receiving data
             
             try:
                 nparr = np.frombuffer(data, np.uint8)

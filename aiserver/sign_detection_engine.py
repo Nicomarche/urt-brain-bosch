@@ -50,6 +50,19 @@ class SignDetectionEngine:
 
         self.min_confidence = min_confidence
         self.show_visualization = getattr(cfg, "SHOW_VISUALIZATION", False)
+        self.imgsz = getattr(cfg, "SIGN_IMGSZ", 320)
+
+        # Device selection: auto-detect MPS (Apple Silicon) > CUDA > CPU
+        device = getattr(cfg, "SIGN_DEVICE", "auto")
+        if device == "auto":
+            import torch
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            elif torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+        self.device = device
 
         # Class name mapping: model_class_name → our_action_name
         # If a class is not in the map, the original name is used (lowercased).
@@ -57,7 +70,13 @@ class SignDetectionEngine:
 
         # Load YOLOv8 model
         print(f"[SignDetection] Loading YOLOv8 model: {model_path}")
+        print(f"[SignDetection] Device: {self.device} | imgsz: {self.imgsz}")
         self.model = YOLO(model_path)
+
+        # Move model to device
+        if self.device != "cpu":
+            self.model.to(self.device)
+            print(f"[SignDetection] Model moved to {self.device}")
 
         # Extract class names from model
         self.labels = self.model.names  # dict: {0: "class0", 1: "class1", ...}
@@ -69,20 +88,24 @@ class SignDetectionEngine:
             suffix = f" → {mapped}" if mapped != name else ""
             print(f"  [{idx}] {name}{suffix}")
 
-        # Warm-up
-        print(f"[SignDetection] Warming up model...")
-        t0 = time.time()
-        dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-        self.model.predict(dummy, conf=self.min_confidence, verbose=False)
-        warmup_ms = (time.time() - t0) * 1000
-        print(f"[SignDetection] Warm-up done in {warmup_ms:.0f}ms")
+        # Warm-up (run 3 times to stabilize timings)
+        print(f"[SignDetection] Warming up model (3 runs)...")
+        dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
+        for i in range(3):
+            t0 = time.time()
+            self.model.predict(
+                dummy, conf=self.min_confidence, verbose=False,
+                imgsz=self.imgsz, device=self.device,
+            )
+            ms = (time.time() - t0) * 1000
+            print(f"  warmup {i+1}: {ms:.0f}ms")
 
         self.frame_count = 0
         self.total_infer_ms = 0
 
         print(
-            f"[SignDetection] Engine ready: YOLOv8, "
-            f"classes={self.num_classes}, "
+            f"[SignDetection] Engine ready: YOLOv8 on {self.device}, "
+            f"imgsz={self.imgsz}, classes={self.num_classes}, "
             f"min_conf={self.min_confidence}"
         )
 
@@ -109,7 +132,8 @@ class SignDetectionEngine:
             frame,
             conf=self.min_confidence,
             verbose=False,
-            imgsz=640,
+            imgsz=self.imgsz,
+            device=self.device,
         )
 
         detections = []

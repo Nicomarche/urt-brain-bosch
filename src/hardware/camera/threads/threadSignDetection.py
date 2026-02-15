@@ -365,9 +365,9 @@ class threadSignDetection(ThreadWithStop):
                  server_url="ws://192.168.80.15:8500/ws/signs",
                  enable_actions=False,
                  min_confidence=0.50,
-                 detection_interval=0.33,
+                 detection_interval=0.1,
                  show_debug=False):
-        super(threadSignDetection, self).__init__(pause=0.001)
+        super(threadSignDetection, self).__init__(pause=0.05)  # 20Hz, suficiente para ~3 FPS de detección
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
