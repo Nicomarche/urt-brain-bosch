@@ -144,9 +144,14 @@ class SignDetectionEngine:
         self.frame_count += 1
         self.total_infer_ms += infer_ms
 
-        # Optional visualization on the server
+        # Optional visualization on the server (wrapped in try to handle headless)
         if self.show_visualization:
-            self._visualize(frame, detections, infer_ms)
+            try:
+                self._visualize(frame, detections, infer_ms)
+            except Exception:
+                # Disable visualization if it crashes (e.g. no display)
+                self.show_visualization = False
+                print("[SignDetection] Visualization disabled (no display or OpenCV error)")
 
         return {
             "detections": detections,

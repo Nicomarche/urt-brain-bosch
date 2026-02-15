@@ -129,7 +129,11 @@ class SignDetectionClient:
         self.frames_sent += 1
 
         if not block:
-            return self._last_result
+            # Return latest result if available (non-blocking)
+            try:
+                return self._result_queue.get_nowait()
+            except queue.Empty:
+                return None
 
         try:
             result = self._result_queue.get(timeout=self.timeout)
@@ -408,8 +412,12 @@ class threadSignDetection(ThreadWithStop):
             self.last_detection_time = now
             self.frame_count += 1
 
-            # Send frame to remote server (non-blocking)
-            result = self.client.send_frame(frame, block=True)
+            # Send frame to remote server (non-blocking: fire-and-forget)
+            # IMPORTANT: block=False prevents this thread from stalling while
+            # waiting for the server response. A stalled thread can't drain
+            # the serialCamera pipe, causing the gateway to deadlock.
+            # Results arrive asynchronously via client._last_result.
+            result = self.client.send_frame(frame, block=False)
 
             # Update FPS
             elapsed = now - self.fps_timer

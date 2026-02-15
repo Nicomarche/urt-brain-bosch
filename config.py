@@ -28,7 +28,7 @@ SIGN_SERVER_URL = "ws://192.168.80.15:8500/ws/signs"
 # Ejecutar acciones al detectar senales (stop, reducir velocidad, etc.)
 # False = solo detecta y publica (modo seguro para testing)
 # True  = controla velocidad/direccion del auto
-SIGN_DETECTION_ACTIONS = False
+SIGN_DETECTION_ACTIONS = True
 
 # Confianza minima para aceptar una deteccion (0.0 - 1.0)
 SIGN_MIN_CONFIDENCE = 0.50

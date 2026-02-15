@@ -399,22 +399,46 @@ async def websocket_signs(websocket: WebSocket):
     total_infer_ms = 0
     total_roundtrip_ms = 0
     
+    consecutive_errors = 0
+    
     try:
         while True:
             t_recv = time.time()
             data = await websocket.receive_bytes()
             
-            nparr = np.frombuffer(data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            try:
+                nparr = np.frombuffer(data, np.uint8)
+                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception:
+                await websocket.send_text('{"error":"decode failed"}')
+                consecutive_errors += 1
+                if consecutive_errors >= 10:
+                    print(f"[Signs] Demasiados errores de decode, cerrando {client_host}")
+                    break
+                continue
             
             if frame is None:
                 await websocket.send_text('{"error":"bad frame"}')
+                consecutive_errors += 1
+                if consecutive_errors >= 10:
+                    break
                 continue
             
-            # Run sign detection in thread pool
-            t_infer_start = time.time()
-            result = await asyncio.to_thread(sign_engine.infer, frame)
-            t_infer_end = time.time()
+            try:
+                # Run sign detection in thread pool
+                t_infer_start = time.time()
+                result = await asyncio.to_thread(sign_engine.infer, frame)
+                t_infer_end = time.time()
+            except Exception as infer_err:
+                print(f"[Signs] Inference error: {infer_err}")
+                await websocket.send_text('{"d":[],"t":0,"f":0}')
+                consecutive_errors += 1
+                if consecutive_errors >= 5:
+                    print(f"[Signs] Demasiados errores de inferencia, cerrando {client_host}")
+                    break
+                continue
+            
+            consecutive_errors = 0  # Reset on success
             
             # Compact response (minimize bandwidth)
             compact_dets = []

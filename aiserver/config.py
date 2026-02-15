@@ -77,4 +77,4 @@ SIGN_MIN_CONFIDENCE = 0.50                 # Umbral de confianza (0.0 - 1.0)
 # Mostrar ventanas de debug con OpenCV en el servidor
 # True = abre ventanas mostrando entrada, segmentacion, detecciones, steering
 # Requiere display (X11/Wayland). Desactivar en servidores headless.
-SHOW_VISUALIZATION = True
+SHOW_VISUALIZATION = False   # True crashea en macOS (GUI debe correr en main thread)
