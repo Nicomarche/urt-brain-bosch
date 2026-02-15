@@ -76,17 +76,38 @@ SIGN_MODEL_DIR = "models/sign_detection"   # Directorio del modelo
 SIGN_MODEL_FILE = "trafic.pt"             # Archivo del modelo YOLOv8
 SIGN_MIN_CONFIDENCE = 0.40                 # Umbral de confianza (0.0 - 1.0)
 
-# Mapeo de nombres de clase del modelo → nombres de acción del auto.
+# Mapeo de nombres de clase del modelo (turco) → nombres de acción del auto.
 # Las clases NO listadas aquí se pasan tal cual (en minúsculas, espacios→_).
-# Ajustar este mapeo según las clases que imprima el modelo al iniciar.
-# Ejemplo: si el modelo tiene "Stop Sign" pero nuestras acciones usan "stop":
 SIGN_CLASS_MAP = {
-    # "NombreDelModelo": "nombre_accion",
-    # Se llena después de ver las clases que imprime el modelo al iniciar.
-    # Ejemplo:
-    # "Stop Sign": "stop",
-    # "No Entry": "no_entry",
-    # "Crosswalk": "crosswalk",
+    # Señales de tráfico
+    "dur": "stop",
+    "girisyok": "no_entry",
+    "park": "parking",
+    "yayagecidi": "crosswalk",
+    "tasitrafiginekapali": "no_entry",
+    # Semáforos
+    "kirmizi": "red_light",
+    "sari": "yellow_light",
+    "yesil": "green_light",
+    # Velocidad
+    "20": "speed_20",
+    "30": "speed_30",
+    # Dirección
+    "sag": "turn_right",
+    "sol": "turn_left",
+    "sagadonulmez": "no_right_turn",
+    "soladonulmez": "no_left_turn",
+    "ilerisag": "straight_or_right",
+    "ilerisol": "straight_or_left",
+    # Estacionamiento
+    "parkyasak": "no_parking",
+    "parkyasak2": "no_parking",
+    # Otros
+    "durak": "bus_stop",
+    "arac": "vehicle",
+    "yaya": "pedestrian",
+    "otobus": "bus",
+    "bisikletli": "cyclist",
 }
 
 # ======================== VISUALIZATION ========================

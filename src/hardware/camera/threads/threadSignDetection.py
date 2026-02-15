@@ -218,36 +218,64 @@ class SignDetectionClient:
 # ============================================================================
 
 class SignActions:
-    """Executes vehicle actions in response to detected traffic signs."""
+    """Executes vehicle actions in response to detected traffic signs.
+
+    Handles signs from YOLOv8 model (mapped from Turkish class names):
+      stop, no_entry, crosswalk, parking, red_light, yellow_light,
+      green_light, speed_20, speed_30, turn_right, turn_left, etc.
+    """
 
     BASE_SPEED = 5
     LOW_SPEED = 3
-    HIGHWAY_SPEED_BONUS = 5
+    SPEED_20 = 3
+    SPEED_30 = 5
     STOP_DURATION = 3.0
-    CROSSWALK_DURATION = 5.0
+    CROSSWALK_DURATION = 3.0
+    RED_LIGHT_CHECK_INTERVAL = 0.5  # Re-check every 0.5s
+
+    # Signs that should trigger an action
+    ACTIONABLE_SIGNS = {
+        "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
+        "green_light", "speed_20", "speed_30", "parking",
+    }
 
     def __init__(self, queuesList):
         self.queuesList = queuesList
         self.last_sign = None
-        self.is_on_highway = False
+        self.current_speed = self.BASE_SPEED
+        self.is_stopped = False
 
     def execute(self, sign_name):
+        """Execute action for a detected sign. Returns True if action was taken."""
+        # Avoid repeating the same action
         if sign_name == self.last_sign:
             return False
+
         self.last_sign = sign_name
 
         if sign_name == "stop":
             self._execute_stop()
+        elif sign_name == "red_light":
+            self._execute_stop()
+        elif sign_name == "no_entry":
+            self._execute_stop()
         elif sign_name == "crosswalk":
             self._execute_crosswalk()
-        elif sign_name == "highway_entrance":
-            self._execute_highway_entrance()
-        elif sign_name == "highway_exit":
-            self._execute_highway_exit()
+        elif sign_name == "yellow_light":
+            self._execute_slow_down()
+        elif sign_name == "green_light":
+            self._execute_go()
+        elif sign_name == "speed_20":
+            self._execute_speed_limit(self.SPEED_20)
+        elif sign_name == "speed_30":
+            self._execute_speed_limit(self.SPEED_30)
+        elif sign_name == "parking":
+            self._execute_parking()
         else:
+            # Non-actionable signs (direction, objects, etc.) — just log
             print(
                 f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mINFO\033[0m - "
-                f"{sign_name} detected"
+                f"{sign_name} detected (no action)"
             )
         return True
 
@@ -260,26 +288,56 @@ class SignActions:
         })
 
     def _execute_stop(self):
-        print(f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mACTION\033[0m - STOP ({self.STOP_DURATION}s)")
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mACTION\033[0m - "
+            f"STOP ({self.STOP_DURATION}s)"
+        )
         self._send_speed(0)
+        self.is_stopped = True
         time.sleep(self.STOP_DURATION)
-        self._send_speed(self.BASE_SPEED)
+        self._send_speed(self.current_speed)
+        self.is_stopped = False
 
     def _execute_crosswalk(self):
-        print(f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mACTION\033[0m - CROSSWALK ({self.CROSSWALK_DURATION}s)")
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mACTION\033[0m - "
+            f"CROSSWALK - slow to {self.LOW_SPEED} ({self.CROSSWALK_DURATION}s)"
+        )
         self._send_speed(self.LOW_SPEED)
         time.sleep(self.CROSSWALK_DURATION)
-        self._send_speed(self.BASE_SPEED)
+        self._send_speed(self.current_speed)
 
-    def _execute_highway_entrance(self):
-        print(f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mACTION\033[0m - HIGHWAY ENTRANCE")
-        self.is_on_highway = True
-        self._send_speed(self.BASE_SPEED + self.HIGHWAY_SPEED_BONUS)
+    def _execute_slow_down(self):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mACTION\033[0m - "
+            f"YELLOW LIGHT - slow to {self.LOW_SPEED}"
+        )
+        self._send_speed(self.LOW_SPEED)
 
-    def _execute_highway_exit(self):
-        print(f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mACTION\033[0m - HIGHWAY EXIT")
-        self.is_on_highway = False
-        self._send_speed(self.BASE_SPEED)
+    def _execute_go(self):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mACTION\033[0m - "
+            f"GREEN LIGHT - resume speed {self.current_speed}"
+        )
+        self.is_stopped = False
+        self._send_speed(self.current_speed)
+
+    def _execute_speed_limit(self, speed):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
+            f"SPEED LIMIT {speed}"
+        )
+        self.current_speed = speed
+        if not self.is_stopped:
+            self._send_speed(speed)
+
+    def _execute_parking(self):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
+            f"PARKING - stop"
+        )
+        self._send_speed(0)
+        self.is_stopped = True
 
 
 # ============================================================================
