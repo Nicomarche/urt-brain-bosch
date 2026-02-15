@@ -293,17 +293,26 @@ class threadCamera(ThreadWithStop):
             self.camera = None
 
     def _usb_reader_loop(self):
-        """Background thread that continuously reads from the USB camera.
-        Keeps the V4L2 buffer drained to prevent stalls. Only the latest frame is kept.
-        Signals _usb_new_frame event so thread_work() only processes fresh frames."""
+        """Background thread that continuously grabs frames from the USB camera.
+        
+        Uses grab()/retrieve() separation to minimize latency:
+        - grab() is called in a tight loop (instant, just pulls from V4L2 buffer)
+        - retrieve() (slow JPEG decode) only runs when the consumer is ready
+        
+        This means the decoded frame is always the most recently captured one,
+        not a stale frame sitting in a buffer."""
         while self._usb_reader_running and self.camera is not None:
-            ret, frame = self.camera.read()
-            if ret and frame is not None:
-                with self._usb_frame_lock:
-                    self._usb_latest_frame = frame
-                self._usb_new_frame.set()  # Signal: new frame available
+            grabbed = self.camera.grab()  # Fast: pull latest from V4L2, don't decode
+            if grabbed:
+                # Only decode when consumer has processed the previous frame
+                if not self._usb_new_frame.is_set():
+                    ret, frame = self.camera.retrieve()  # Slow: decode JPEG → numpy
+                    if ret and frame is not None:
+                        with self._usb_frame_lock:
+                            self._usb_latest_frame = frame
+                        self._usb_new_frame.set()
             else:
-                time.sleep(0.01)  # Brief pause on failure before retrying
+                time.sleep(0.001)
 
     # =============================== STOP ================================================
     def stop(self):

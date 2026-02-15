@@ -67,6 +67,12 @@ SUPERCOMBO_STEERING_GAIN = 25.0 # Ganancia para convertir error normalizado a gr
 SUPERCOMBO_SMOOTHING = 0.7      # Suavizado del ángulo (0=sin suavizar, 1=máximo)
 SUPERCOMBO_USE_PATH = False     # True=usar trayectoria planeada, False=usar centro de lanes
 
+# ======================== SIGN DETECTION ========================
+# Detección de señales de tráfico (MobilenetV2 SSD TFLite)
+SIGN_DETECTION_ENABLED = True
+SIGN_MODEL_DIR = "models/sign_detection"   # Contiene detect.tflite + labelmap.txt
+SIGN_MIN_CONFIDENCE = 0.50                 # Umbral de confianza (0.0 - 1.0)
+
 # ======================== VISUALIZATION ========================
 # Mostrar ventanas de debug con OpenCV en el servidor
 # True = abre ventanas mostrando entrada, segmentacion, detecciones, steering

@@ -68,7 +68,11 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
-from config import CAMERA_TYPE, USB_DEVICE, USB_RESOLUTION, SHOW_CAMERA_PREVIEW
+from config import (
+    CAMERA_TYPE, USB_DEVICE, USB_RESOLUTION, SHOW_CAMERA_PREVIEW,
+    ENABLE_SIGN_DETECTION, SIGN_DETECTION_ACTIONS, SIGN_MIN_CONFIDENCE,
+    SIGN_SERVER_URL,
+)
 
 # ------ New component imports starts here ------#
 
@@ -147,7 +151,11 @@ camera_ready = Event()
 processCamera = processCamera(queueList, logging, camera_ready, debugging = False,
                                camera_type=CAMERA_TYPE, usb_device=USB_DEVICE,
                                usb_resolution=USB_RESOLUTION,
-                               show_preview=SHOW_CAMERA_PREVIEW)
+                               show_preview=SHOW_CAMERA_PREVIEW,
+                               enable_sign_detection=ENABLE_SIGN_DETECTION,
+                               sign_detection_actions=SIGN_DETECTION_ACTIONS,
+                               sign_min_confidence=SIGN_MIN_CONFIDENCE,
+                               sign_server_url=SIGN_SERVER_URL)
 
 # # Initializing semaphores
 # semaphore_ready = Event()

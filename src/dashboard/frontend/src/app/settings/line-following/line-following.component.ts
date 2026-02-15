@@ -108,6 +108,9 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   useAdaptiveWhite: boolean = true;
   useGradientFallback: boolean = true;
   
+  // Curve recovery toggle
+  useCurveRecovery: boolean = true;
+  
   // Expandable sections
   expandedSections: { [key: string]: boolean } = {
     speed: false,
@@ -118,32 +121,34 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     yellow: false,
     image: false,
     edge: false,
-    adaptive: false
+    bfmc: false,
+    adaptive: false,
+    recovery: false
   };
 
-  // All sliders organized by group
+  // All sliders organized by group (defaults synced with threadLineFollowing.py)
   sliders: SliderConfig[] = [
     // Speed
-    { key: 'base_speed', label: 'Velocidad Base', min: 5, max: 40, step: 1, value: 10, group: 'speed' },
-    { key: 'max_speed', label: 'Velocidad Máxima', min: 10, max: 50, step: 1, value: 10, group: 'speed' },
-    { key: 'min_speed', label: 'Velocidad Mínima', min: 5, max: 30, step: 1, value: 5, group: 'speed' },
-    // PID (basado en bfmc24-brain - ricardolopezb/bfmc24-brain)
-    { key: 'max_error_px', label: 'Offset Máx (px→giro máx)', min: 10, max: 100, step: 1, value: 40, group: 'pid' },
-    { key: 'kp', label: 'Proporcional (Kp)', min: 0, max: 50, step: 0.5, value: 25, group: 'pid' },
-    { key: 'ki', label: 'Integral (Ki)', min: 0, max: 10, step: 0.1, value: 1.0, group: 'pid' },
-    { key: 'kd', label: 'Derivativo (Kd)', min: 0, max: 20, step: 0.5, value: 4, group: 'pid' },
+    { key: 'base_speed', label: 'Velocidad Base', min: 5, max: 40, step: 1, value: 15, group: 'speed' },
+    { key: 'max_speed', label: 'Velocidad Máxima', min: 10, max: 50, step: 1, value: 25, group: 'speed' },
+    { key: 'min_speed', label: 'Velocidad Mínima', min: 5, max: 30, step: 1, value: 8, group: 'speed' },
+    // PID (basado en bfmc24-brain - error en píxeles)
+    { key: 'max_error_px', label: 'Offset Máx (px)', min: 10, max: 100, step: 1, value: 40, group: 'pid' },
+    { key: 'kp', label: 'Proporcional (Kp)', min: 0, max: 1, step: 0.005, value: 0.08, group: 'pid' },
+    { key: 'ki', label: 'Integral (Ki)', min: 0, max: 1, step: 0.005, value: 0.05, group: 'pid' },
+    { key: 'kd', label: 'Derivativo (Kd)', min: 0, max: 1, step: 0.005, value: 0.05, group: 'pid' },
     { key: 'smoothing_factor', label: 'Suavizado', min: 0.1, max: 1.0, step: 0.05, value: 0.5, group: 'pid' },
     { key: 'max_steering', label: 'Ángulo Máx Giro', min: 5, max: 25, step: 1, value: 25, group: 'pid' },
     { key: 'lookahead', label: 'Lookahead (Anticipación)', min: 0.1, max: 0.8, step: 0.05, value: 0.4, group: 'pid' },
-    { key: 'dead_zone_ratio', label: 'Zona Muerta', min: 0.0, max: 0.1, step: 0.005, value: 0.02, group: 'pid' },
+    { key: 'dead_zone_ratio', label: 'Zona Muerta (px)', min: 0, max: 100, step: 5, value: 50, group: 'pid' },
     { key: 'integral_reset_interval', label: 'Reset Integral (cada N frames)', min: 1, max: 50, step: 1, value: 10, group: 'pid' },
     // Feed-Forward curve prediction
     { key: 'wheelbase', label: 'Distancia entre ejes (m)', min: 0.15, max: 0.35, step: 0.005, value: 0.265, group: 'feedforward' },
     { key: 'ff_weight', label: 'Peso Feed-Forward', min: 0.0, max: 1.0, step: 0.05, value: 0.6, group: 'feedforward' },
     { key: 'curvature_threshold', label: 'Umbral Curvatura', min: 0.1, max: 2.0, step: 0.1, value: 0.5, group: 'feedforward' },
     // ROI
-    { key: 'roi_height_start', label: 'Inicio Altura', min: 0.3, max: 0.8, step: 0.05, value: 0.65, group: 'roi' },
-    { key: 'roi_height_end', label: 'Fin Altura', min: 0.7, max: 1.0, step: 0.02, value: 0.92, group: 'roi' },
+    { key: 'roi_height_start', label: 'Inicio Altura', min: 0.1, max: 0.8, step: 0.05, value: 0.35, group: 'roi' },
+    { key: 'roi_height_end', label: 'Fin Altura', min: 0.7, max: 1.0, step: 0.02, value: 1.0, group: 'roi' },
     { key: 'roi_width_margin_top', label: 'Margen Superior', min: 0.1, max: 0.5, step: 0.05, value: 0.35, group: 'roi' },
     { key: 'roi_width_margin_bottom', label: 'Margen Inferior', min: 0.0, max: 0.3, step: 0.05, value: 0.15, group: 'roi' },
     // White HSV
@@ -163,20 +168,34 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     // Image processing
     { key: 'brightness', label: 'Brillo', min: -100, max: 100, step: 5, value: 5, group: 'image' },
     { key: 'contrast', label: 'Contraste', min: 0.5, max: 2.0, step: 0.1, value: 0.8, group: 'image' },
-    { key: 'blur_kernel', label: 'Kernel Blur', min: 1, max: 15, step: 2, value: 5, group: 'image' },
-    { key: 'morph_kernel', label: 'Kernel Morph', min: 1, max: 10, step: 1, value: 3, group: 'image' },
+    { key: 'blur_kernel', label: 'Kernel Blur', min: 1, max: 15, step: 2, value: 3, group: 'image' },
+    { key: 'morph_kernel', label: 'Kernel Morph', min: 1, max: 15, step: 2, value: 7, group: 'image' },
     // Edge detection
     { key: 'canny_low', label: 'Canny Bajo', min: 10, max: 200, step: 10, value: 100, group: 'edge' },
-    { key: 'canny_high', label: 'Canny Alto', min: 50, max: 300, step: 10, value: 200, group: 'edge' },
-    { key: 'hough_threshold', label: 'Umbral Hough', min: 5, max: 100, step: 5, value: 20, group: 'edge' },
-    { key: 'hough_min_line_length', label: 'Long. Mín Línea', min: 5, max: 100, step: 5, value: 15, group: 'edge' },
-    { key: 'hough_max_line_gap', label: 'Espacio Máx Línea', min: 10, max: 300, step: 10, value: 200, group: 'edge' },
+    { key: 'canny_high', label: 'Canny Alto', min: 50, max: 300, step: 10, value: 150, group: 'edge' },
+    { key: 'hough_threshold', label: 'Umbral Hough', min: 5, max: 150, step: 5, value: 50, group: 'edge' },
+    { key: 'hough_min_line_length', label: 'Long. Mín Línea', min: 5, max: 150, step: 5, value: 50, group: 'edge' },
+    { key: 'hough_max_line_gap', label: 'Espacio Máx Línea', min: 10, max: 300, step: 10, value: 150, group: 'edge' },
+    // BFMC-style parameters
+    { key: 'binary_threshold', label: 'Umbral Binario', min: 50, max: 255, step: 5, value: 165, group: 'bfmc' },
+    { key: 'binary_threshold_retry', label: 'Umbral Reintento', min: 30, max: 200, step: 5, value: 90, group: 'bfmc' },
+    { key: 'line_angle_filter', label: 'Filtro Ángulo Línea (°)', min: 5, max: 60, step: 5, value: 30, group: 'bfmc' },
+    { key: 'line_merge_distance', label: 'Distancia Merge (px)', min: 50, max: 300, step: 25, value: 175, group: 'bfmc' },
     // Adaptive lighting
     { key: 'clahe_clip_limit', label: 'CLAHE Clip', min: 1.0, max: 5.0, step: 0.5, value: 2.0, group: 'adaptive' },
     { key: 'clahe_grid_size', label: 'CLAHE Grid', min: 4, max: 16, step: 2, value: 8, group: 'adaptive' },
     { key: 'adaptive_white_percentile', label: 'Percentil Blanco', min: 80, max: 98, step: 1, value: 92, group: 'adaptive' },
     { key: 'adaptive_white_min_threshold', label: 'Umbral Mín Blanco', min: 150, max: 220, step: 5, value: 180, group: 'adaptive' },
     { key: 'gradient_percentile', label: 'Percentil Gradiente', min: 75, max: 95, step: 1, value: 85, group: 'adaptive' },
+    // Curve recovery
+    { key: 'recovery_max_steer_frames', label: 'Frames Max Giro', min: 2, max: 15, step: 1, value: 6, group: 'recovery' },
+    { key: 'recovery_reverse_speed', label: 'Velocidad Reversa', min: -20, max: -3, step: 1, value: -8, group: 'recovery' },
+    { key: 'recovery_reverse_time_min', label: 'Reversa Min (s)', min: 0.1, max: 1.0, step: 0.05, value: 0.3, group: 'recovery' },
+    { key: 'recovery_reverse_time_max', label: 'Reversa Max (s)', min: 0.5, max: 3.0, step: 0.1, value: 1.5, group: 'recovery' },
+    { key: 'recovery_reverse_steer_scale', label: 'Escala Giro Reversa', min: 0.5, max: 3.0, step: 0.1, value: 1.5, group: 'recovery' },
+    { key: 'recovery_pre_turn_time', label: 'Tiempo Pre-Giro (s)', min: 0.1, max: 1.5, step: 0.05, value: 0.6, group: 'recovery' },
+    { key: 'recovery_realign_time', label: 'Tiempo Realinear (s)', min: 0.1, max: 1.0, step: 0.05, value: 0.6, group: 'recovery' },
+    { key: 'recovery_error_shrink_ratio', label: 'Ratio Error Corrigiendo', min: 0.5, max: 0.95, step: 0.05, value: 0.85, group: 'recovery' },
   ];
 
   private updateTimeout: any = null;
@@ -372,9 +391,35 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.debouncedSendConfig();
   }
 
+  toggleCurveRecovery(): void {
+    this.useCurveRecovery = !this.useCurveRecovery;
+    this.debouncedSendConfig();
+  }
+
   // Section toggle
   toggleSection(section: string): void {
     this.expandedSections[section] = !this.expandedSections[section];
+  }
+
+  // Check if a section group is relevant to the current detection mode
+  isSectionVisibleForMode(group: string): boolean {
+    // These sections are always visible regardless of mode
+    const alwaysVisible = ['speed'];
+    if (alwaysVisible.includes(group)) return true;
+
+    // PID and control params are used by opencv, lstr, and hybrid (local processing)
+    const controlSections = ['pid', 'feedforward'];
+    if (controlSections.includes(group)) {
+      return this.selectedMode === 'opencv' || this.selectedMode === 'lstr' || this.selectedMode === 'hybrid';
+    }
+
+    // OpenCV-specific image processing (also shown in hybrid mode since it uses OpenCV pipeline)
+    const opencvSections = ['roi', 'white', 'yellow', 'image', 'edge', 'bfmc', 'adaptive', 'recovery'];
+    if (opencvSections.includes(group)) {
+      return this.selectedMode === 'opencv' || this.selectedMode === 'hybrid';
+    }
+
+    return true;
   }
 
   // Get sliders by group
@@ -383,6 +428,8 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   }
 
   onSliderChange(slider: SliderConfig): void {
+    // HTML range inputs return strings - force back to number
+    slider.value = Number(slider.value);
     this.debouncedSendConfig();
   }
 
@@ -422,10 +469,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     config['use_clahe'] = this.useClahe ? 1 : 0;
     config['use_adaptive_white'] = this.useAdaptiveWhite ? 1 : 0;
     config['use_gradient_fallback'] = this.useGradientFallback ? 1 : 0;
+    config['use_curve_recovery'] = this.useCurveRecovery ? 1 : 0;
     
-    // Add all slider values
+    // Add all slider values (ensure numbers, not strings from range inputs)
     for (const slider of this.sliders) {
-      config[slider.key] = slider.value;
+      config[slider.key] = Number(slider.value);
     }
     
     // Save to localStorage
@@ -495,11 +543,14 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     if (config['use_gradient_fallback'] !== undefined) {
       this.useGradientFallback = config['use_gradient_fallback'] === 1;
     }
+    if (config['use_curve_recovery'] !== undefined) {
+      this.useCurveRecovery = config['use_curve_recovery'] === 1;
+    }
     
-    // Apply sliders
+    // Apply sliders (ensure numbers)
     for (const slider of this.sliders) {
       if (config[slider.key] !== undefined) {
-        slider.value = config[slider.key];
+        slider.value = Number(config[slider.key]);
       }
     }
   }
@@ -530,17 +581,18 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.useAdaptiveWhite = true;
     this.useGradientFallback = true;
     
-    // Reset sliders to defaults
+    // Reset sliders to defaults (synced with threadLineFollowing.py)
     const defaults: { [key: string]: number } = {
-      base_speed: 10, max_speed: 10, min_speed: 5,
-      max_error_px: 40, kp: 25, ki: 1.0, kd: 4, smoothing_factor: 0.5,
-      max_steering: 25, lookahead: 0.4, dead_zone_ratio: 0.02, integral_reset_interval: 10,
+      base_speed: 15, max_speed: 25, min_speed: 8,
+      max_error_px: 40, kp: 0.08, ki: 0.05, kd: 0.05, smoothing_factor: 0.5,
+      max_steering: 25, lookahead: 0.4, dead_zone_ratio: 50, integral_reset_interval: 10,
       wheelbase: 0.265, ff_weight: 0.6, curvature_threshold: 0.5,
-      roi_height_start: 0.65, roi_height_end: 0.92, roi_width_margin_top: 0.35, roi_width_margin_bottom: 0.15,
+      roi_height_start: 0.35, roi_height_end: 1.0, roi_width_margin_top: 0.35, roi_width_margin_bottom: 0.15,
       white_h_min: 81, white_h_max: 180, white_s_min: 0, white_s_max: 98, white_v_min: 200, white_v_max: 255,
       yellow_h_min: 173, yellow_h_max: 86, yellow_s_min: 100, yellow_s_max: 255, yellow_v_min: 100, yellow_v_max: 255,
-      brightness: 5, contrast: 0.8, blur_kernel: 5, morph_kernel: 3,
-      canny_low: 100, canny_high: 200, hough_threshold: 20, hough_min_line_length: 15, hough_max_line_gap: 200,
+      brightness: 5, contrast: 0.8, blur_kernel: 3, morph_kernel: 7,
+      canny_low: 100, canny_high: 150, hough_threshold: 50, hough_min_line_length: 50, hough_max_line_gap: 150,
+      binary_threshold: 165, binary_threshold_retry: 90, line_angle_filter: 30, line_merge_distance: 175,
       clahe_clip_limit: 2.0, clahe_grid_size: 8,
       adaptive_white_percentile: 92, adaptive_white_min_threshold: 180,
       gradient_percentile: 85

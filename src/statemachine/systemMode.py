@@ -65,9 +65,12 @@ class SystemMode(Enum):
                 "enabled": True,
             },
             "thread": {
-                "resolution": "480p",
+                "resolution": "1080p",
             },
             "lineFollowing": {
+                "enabled": True,
+            },
+            "signDetection": {
                 "enabled": True,
             }
         },
@@ -149,7 +152,7 @@ class SystemMode(Enum):
                 "enabled": True,
             },
             "thread": {
-                "resolution": "240p",
+                "resolution": "1080p",
             }
         },
         "serial_handler": {

@@ -39,6 +39,14 @@ from src.statemachine.systemMode import SystemMode
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 
+# Sign detection (optional — requires tflite-runtime and model file)
+try:
+    from src.hardware.camera.threads.threadSignDetection import threadSignDetection
+    SIGN_DETECTION_AVAILABLE = True
+except ImportError as e:
+    SIGN_DETECTION_AVAILABLE = False
+    print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Sign detection not available: {e}")
+
 
 class processCamera(WorkerProcess):
     """This process handle camera.\n
@@ -54,7 +62,9 @@ class processCamera(WorkerProcess):
     # ====================================== INIT ==========================================
     def __init__(self, queueList, logging, ready_event=None, debugging=False,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
-                 show_preview=False):
+                 show_preview=False,
+                 enable_sign_detection=True, sign_detection_actions=False,
+                 sign_min_confidence=0.50, sign_server_url="ws://192.168.80.15:8500/ws/signs"):
         self.queuesList = queueList
         self.logging = logging
         self.debugging = debugging
@@ -62,6 +72,10 @@ class processCamera(WorkerProcess):
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
         self.show_preview = show_preview
+        self.enable_sign_detection = enable_sign_detection
+        self.sign_detection_actions = sign_detection_actions
+        self.sign_min_confidence = sign_min_confidence
+        self.sign_server_url = sign_server_url
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
@@ -79,7 +93,7 @@ class processCamera(WorkerProcess):
 
     # ===================================== INIT TH ======================================
     def _init_threads(self):
-        """Create the Camera Publisher thread and Line Following thread and add to the list of threads."""
+        """Create the Camera Publisher thread, Line Following thread, and Sign Detection thread."""
         camTh = threadCamera(
          self.queuesList, self.logging, self.debugging,
          show_preview=self.show_preview,
@@ -97,6 +111,22 @@ class processCamera(WorkerProcess):
             self.queuesList, self.logging, self.debugging, show_debug=has_display
         )
         self.threads.append(lineFollowingTh)
+
+        # Add sign detection thread (optional — requires tflite-runtime + model)
+        if self.enable_sign_detection and SIGN_DETECTION_AVAILABLE:
+            signDetTh = threadSignDetection(
+                self.queuesList, self.logging, self.debugging,
+                server_url=self.sign_server_url,
+                enable_actions=self.sign_detection_actions,
+                min_confidence=self.sign_min_confidence,
+                show_debug=has_display,
+            )
+            self.threads.append(signDetTh)
+        elif self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:
+            print(
+                f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - "
+                f"Sign detection enabled in config but tflite-runtime not installed"
+            )
 
 
 # =================================== EXAMPLE =========================================

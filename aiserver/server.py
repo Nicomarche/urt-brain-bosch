@@ -41,22 +41,26 @@ from fastapi.responses import JSONResponse
 import config
 
 # ============================================================
-# Variable global del motor de inferencia
+# Variables globales de motores de inferencia
 # ============================================================
 engine = None
+sign_engine = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown del servidor."""
-    global engine
+    global engine, sign_engine
     engine_type = getattr(config, 'ENGINE_TYPE', 'hybridnets')
+    sign_enabled = getattr(config, 'SIGN_DETECTION_ENABLED', False)
     
     print("=" * 60)
     print(f"  AI Server - Iniciando ({engine_type})")
+    if sign_enabled:
+        print(f"  + Sign Detection (MobilenetV2 SSD TFLite)")
     print("=" * 60)
     
-    # Cargar motor de inferencia según configuración
+    # Cargar motor de inferencia de carriles según configuración
     if engine_type == "supercombo":
         from supercombo_engine import SupercomboEngine
         engine = SupercomboEngine()
@@ -64,10 +68,22 @@ async def lifespan(app: FastAPI):
         from inference import HybridNetsEngine
         engine = HybridNetsEngine()
     
+    # Cargar motor de detección de señales (opcional)
+    if sign_enabled:
+        try:
+            from sign_detection_engine import SignDetectionEngine
+            sign_engine = SignDetectionEngine()
+        except Exception as e:
+            print(f"[Server] WARNING: Sign detection disabled: {e}")
+            sign_engine = None
+    
     print("=" * 60)
     print(f"  Servidor listo en {config.SERVER_HOST}:{config.SERVER_PORT}")
-    print(f"  Motor: {engine_type}")
-    print(f"  WebSocket: ws://<ip>:{config.SERVER_PORT}/ws/steering")
+    print(f"  Motor carriles: {engine_type}")
+    print(f"  Motor señales:  {'OK' if sign_engine else 'disabled'}")
+    print(f"  WS carriles:  ws://<ip>:{config.SERVER_PORT}/ws/steering")
+    if sign_engine:
+        print(f"  WS señales:   ws://<ip>:{config.SERVER_PORT}/ws/signs")
     print("=" * 60)
     
     yield
@@ -76,8 +92,11 @@ async def lifespan(app: FastAPI):
     print("[Server] Apagando servidor...")
     if engine is not None and hasattr(engine, 'shutdown'):
         engine.shutdown()
+    if sign_engine is not None and hasattr(sign_engine, 'shutdown'):
+        sign_engine.shutdown()
     cv2.destroyAllWindows()
     engine = None
+    sign_engine = None
 
 
 app = FastAPI(
@@ -342,6 +361,109 @@ async def websocket_steering_only(websocket: WebSocket):
             print(f"[Server] Cliente steering desconectado: {client_host}")
     except Exception as e:
         print(f"[Server] Error con cliente steering {client_host}: {e}")
+
+
+# ============================================================
+# WebSocket para detección de señales de tráfico
+# ============================================================
+
+@app.websocket("/ws/signs")
+async def websocket_signs(websocket: WebSocket):
+    """
+    WebSocket para detección de señales de tráfico.
+    
+    Protocolo:
+      - Cliente envía: bytes JPEG del frame
+      - Servidor responde: JSON con detecciones
+    
+    Respuesta:
+    {
+        "d": [                        # detections (lista)
+            {"s": "stop", "c": 0.95, "b": [y1,x1,y2,x2]},
+            ...
+        ],
+        "t": 12.3,                    # inference_time_ms
+        "f": 42                       # frame_id
+    }
+    """
+    await websocket.accept()
+    client_host = websocket.client.host if websocket.client else "unknown"
+    print(f"[Signs] Cliente conectado: {client_host}")
+    
+    if sign_engine is None:
+        await websocket.send_json({"error": "Sign detection no disponible"})
+        await websocket.close()
+        return
+    
+    frames_processed = 0
+    total_infer_ms = 0
+    total_roundtrip_ms = 0
+    
+    try:
+        while True:
+            t_recv = time.time()
+            data = await websocket.receive_bytes()
+            
+            nparr = np.frombuffer(data, np.uint8)
+            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            
+            if frame is None:
+                await websocket.send_text('{"error":"bad frame"}')
+                continue
+            
+            # Run sign detection in thread pool
+            t_infer_start = time.time()
+            result = await asyncio.to_thread(sign_engine.infer, frame)
+            t_infer_end = time.time()
+            
+            # Compact response (minimize bandwidth)
+            compact_dets = []
+            for det in result["detections"]:
+                compact_dets.append({
+                    "s": det["sign"],
+                    "c": det["confidence"],
+                    "b": det["box"],
+                })
+            
+            response = {
+                "d": compact_dets,
+                "t": result["inference_time_ms"],
+                "f": result["frame_id"],
+            }
+            
+            response_text = json.dumps(response, separators=(",", ":"))
+            await websocket.send_text(response_text)
+            t_sent = time.time()
+            
+            # Timing
+            frames_processed += 1
+            infer_ms = (t_infer_end - t_infer_start) * 1000
+            total_ms = (t_sent - t_recv) * 1000
+            total_infer_ms += infer_ms
+            total_roundtrip_ms += total_ms
+            
+            if frames_processed <= 5:
+                print(f"[Signs] Frame {frames_processed}: "
+                      f"infer={infer_ms:.1f}ms | total={total_ms:.1f}ms | "
+                      f"dets={len(compact_dets)} | "
+                      f"frame={frame.shape[1]}x{frame.shape[0]} ({len(data)} bytes)")
+            elif frames_processed % 50 == 0:
+                avg_infer = total_infer_ms / frames_processed
+                avg_total = total_roundtrip_ms / frames_processed
+                fps = 1000 / avg_total if avg_total > 0 else 0
+                print(f"[Signs] {frames_processed} frames | "
+                      f"avg_infer={avg_infer:.1f}ms | avg_total={avg_total:.1f}ms | "
+                      f"~{fps:.1f} FPS")
+    
+    except WebSocketDisconnect:
+        if frames_processed > 0:
+            avg = total_infer_ms / frames_processed
+            print(f"[Signs] Cliente desconectado: {client_host} | "
+                  f"{frames_processed} frames | avg_infer={avg:.1f}ms")
+        else:
+            print(f"[Signs] Cliente desconectado: {client_host}")
+    except Exception as e:
+        print(f"[Signs] Error con cliente {client_host}: {e}")
 
 
 # ============================================================

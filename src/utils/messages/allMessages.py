@@ -212,6 +212,25 @@ class LineFollowingStatus(Enum):
     msgID = 2
     msgType = "dict"  # steering, speed, mode, fps, etc.
 
+################################# From Sign Detection ##################################
+class SignDetected(Enum):
+    Queue = "General"
+    Owner = "threadSignDetection"
+    msgID = 1
+    msgType = "dict"  # {"sign": str, "confidence": float, "timestamp": float}
+
+class SignDetectionDebug(Enum):
+    Queue = "General"
+    Owner = "threadSignDetection"
+    msgID = 2
+    msgType = "str"  # base64 encoded debug image with bounding boxes
+
+class SignDetectionStatus(Enum):
+    Queue = "General"
+    Owner = "threadSignDetection"
+    msgID = 3
+    msgType = "dict"  # {"enabled": bool, "fps": float, "last_sign": str}
+
 
 ################################# From Nucleo ##################################
 class BatteryLvl(Enum):

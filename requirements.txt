@@ -13,3 +13,8 @@ scipy>=1.15,<2
 # Optional: LSTR AI-based lane detection (requires ONNX model)
 # onnxruntime>=1.16.0   # Uncomment to enable LSTR mode
 # For Raspberry Pi, use: pip install onnxruntime
+
+# Optional: Traffic sign detection (MobilenetV2 SSD)
+# ai-edge-litert         # Recommended (Google LiteRT, supports Python 3.13+)
+# tflite-runtime          # Alternative (legacy, may not have Python 3.13 wheels)
+# For Raspberry Pi: pip install ai-edge-litert
