@@ -235,30 +235,31 @@ class SignActions:
     LOW_SPEED = 3
     SPEED_20 = 3
     SPEED_30 = 5
+    HIGHWAY_SPEED = 7
     STOP_DURATION = 3.0
     CROSSWALK_DURATION = 3.0
     RED_LIGHT_CHECK_INTERVAL = 0.5  # Re-check every 0.5s
 
-    # Signs that should trigger an action
     ACTIONABLE_SIGNS = {
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
         "green_light", "speed_20", "speed_30", "parking",
+        "highway_entrance", "highway_exit",
     }
 
-    # Cooldown groups: signs that share the same cooldown timer.
-    # e.g. no_entry, stop, red_light all trigger STOP — if one fires,
-    # the others should be on cooldown too (same physical action).
     ACTION_GROUP = {
         "stop": "stop", "no_entry": "stop", "red_light": "stop",
         "crosswalk": "crosswalk",
         "yellow_light": "traffic_light", "green_light": "traffic_light",
         "speed_20": "speed_limit", "speed_30": "speed_limit",
         "parking": "parking",
+        "highway_entrance": "highway", "highway_exit": "highway",
     }
 
-    def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0):
+    def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
+                 highway_mode_event=None):
         self.queuesList = queuesList
         self.sign_action_event = sign_action_event  # Shared with line following
+        self.highway_mode_event = highway_mode_event  # Shared with line following
         self.action_cooldown = action_cooldown
         self.last_sign = None
         self.last_action_time = {}  # {action_group: timestamp} — cooldown per group
@@ -299,6 +300,10 @@ class SignActions:
             self._execute_speed_limit(self.SPEED_30)
         elif sign_name == "parking":
             self._execute_parking()
+        elif sign_name == "highway_entrance":
+            self._execute_highway_entrance()
+        elif sign_name == "highway_exit":
+            self._execute_highway_exit()
         else:
             # Non-actionable signs (direction, objects, etc.) — just log
             print(
@@ -385,6 +390,28 @@ class SignActions:
         self._send_speed(0)
         self.is_stopped = True
 
+    def _execute_highway_entrance(self):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mACTION\033[0m - "
+            f"HIGHWAY ENTRANCE - speed up to {self.HIGHWAY_SPEED}"
+        )
+        self.current_speed = self.HIGHWAY_SPEED
+        if not self.is_stopped:
+            self._send_speed(self.HIGHWAY_SPEED)
+        if self.highway_mode_event:
+            self.highway_mode_event.set()
+
+    def _execute_highway_exit(self):
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mACTION\033[0m - "
+            f"HIGHWAY EXIT - slow down to {self.BASE_SPEED}"
+        )
+        self.current_speed = self.BASE_SPEED
+        if not self.is_stopped:
+            self._send_speed(self.BASE_SPEED)
+        if self.highway_mode_event:
+            self.highway_mode_event.clear()
+
 
 # ============================================================================
 #  Main sign detection thread
@@ -408,14 +435,15 @@ class threadSignDetection(ThreadWithStop):
     """
 
     def __init__(self, queuesList, logger, debugger,
-                 server_url="ws://192.168.80.15:8500/ws/signs",
+                 server_url="ws://172.20.10.4:8500/ws/signs",
                  enable_actions=False,
                  min_confidence=0.50,
                  min_box_area=0.01,
                  action_cooldown=15.0,
                  detection_interval=0.2,
                  show_debug=False,
-                 sign_action_event=None):
+                 sign_action_event=None,
+                 highway_mode_event=None):
         super(threadSignDetection, self).__init__(pause=0.05)  # 20Hz, suficiente para ~3 FPS de detección
         self.queuesList = queuesList
         self.logger = logger
@@ -428,7 +456,8 @@ class threadSignDetection(ThreadWithStop):
         self.show_debug = show_debug
 
         # State
-        self.sign_actions = SignActions(self.queuesList, sign_action_event, action_cooldown)
+        self.sign_actions = SignActions(self.queuesList, sign_action_event, action_cooldown,
+                                       highway_mode_event)
         self.is_active = False
         self.last_detection_time = 0
         self.frame_count = 0

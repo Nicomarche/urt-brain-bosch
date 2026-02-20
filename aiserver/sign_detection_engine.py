@@ -14,6 +14,7 @@ de nombres de clase del modelo → nombres de acción del auto en config.py
 
 import os
 import time
+import threading
 import cv2
 import numpy as np
 
@@ -103,10 +104,16 @@ class SignDetectionEngine:
         self.frame_count = 0
         self.total_infer_ms = 0
 
+        # Visualization: store latest annotated frame as JPEG for MJPEG streaming.
+        # Cross-platform (macOS/Linux/headless) — no cv2.imshow needed.
+        self._vis_jpeg = None
+        self._vis_lock = threading.Lock()
+
         print(
             f"[SignDetection] Engine ready: YOLOv8 on {self.device}, "
             f"imgsz={self.imgsz}, classes={self.num_classes}, "
             f"min_conf={self.min_confidence}"
+            f"{', visualization=ON (MJPEG at /viz)' if self.show_visualization else ''}"
         )
 
     def _map_class_name(self, name):
@@ -203,8 +210,33 @@ class SignDetectionEngine:
             "avg_inference_ms": round(avg_ms, 1),
         }
 
+    SIGN_COLORS = {
+        "stop": (0, 0, 255),
+        "no_entry": (0, 0, 200),
+        "red_light": (0, 0, 230),
+        "yellow_light": (0, 200, 255),
+        "green_light": (0, 200, 0),
+        "crosswalk": (0, 200, 255),
+        "parking": (255, 160, 0),
+        "no_parking": (80, 80, 200),
+        "speed_20": (255, 100, 0),
+        "speed_30": (255, 150, 0),
+        "turn_right": (200, 200, 0),
+        "turn_left": (200, 200, 0),
+        "highway_entrance": (0, 255, 0),
+        "highway_exit": (0, 180, 0),
+        "pedestrian": (255, 0, 255),
+        "vehicle": (255, 255, 0),
+    }
+    DEFAULT_COLOR = (0, 255, 0)
+
+    def get_vis_jpeg(self):
+        """Return the latest annotated frame as JPEG bytes (for MJPEG streaming)."""
+        with self._vis_lock:
+            return self._vis_jpeg
+
     def _visualize(self, frame, detections, infer_ms):
-        """Show debug window on the server."""
+        """Render bounding boxes on frame and store as JPEG for MJPEG streaming."""
         vis = frame.copy()
         h, w = vis.shape[:2]
         font = cv2.FONT_HERSHEY_SIMPLEX
@@ -213,29 +245,45 @@ class SignDetectionEngine:
             sign = det["sign"]
             conf = det["confidence"]
             box = det["box"]
+            color = self.SIGN_COLORS.get(sign, self.DEFAULT_COLOR)
 
             ymin = int(box[0] * h)
             xmin = int(box[1] * w)
             ymax = int(box[2] * h)
             xmax = int(box[3] * w)
 
-            color = (0, 255, 0)
             cv2.rectangle(vis, (xmin, ymin), (xmax, ymax), color, 2)
+
             label = f"{sign} {conf:.0%}"
-            (tw, th), _ = cv2.getTextSize(label, font, 0.55, 2)
-            cv2.rectangle(vis, (xmin, ymin - th - 6), (xmin + tw + 6, ymin), color, -1)
-            cv2.putText(vis, label, (xmin + 3, ymin - 3), font, 0.55, (0, 0, 0), 2)
+            (tw, th_t), _ = cv2.getTextSize(label, font, 0.55, 2)
+            label_y = max(ymin, th_t + 8)
+            cv2.rectangle(
+                vis,
+                (xmin, label_y - th_t - 6),
+                (xmin + tw + 6, label_y + 2),
+                color, -1,
+            )
+            cv2.putText(vis, label, (xmin + 3, label_y - 3), font, 0.55, (0, 0, 0), 2)
 
-        status = f"Signs: {len(detections)} | {infer_ms:.0f}ms | Frame {self.frame_count}"
-        cv2.putText(vis, status, (10, 25), font, 0.6, (0, 255, 255), 2)
+        # Status bar
+        bar_h = 32
+        overlay = vis[:bar_h, :].copy()
+        cv2.rectangle(vis, (0, 0), (w, bar_h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.3, vis[:bar_h, :], 0.7, 0, vis[:bar_h, :])
 
-        cv2.imshow("Sign Detection Server", vis)
-        cv2.waitKey(1)
+        avg_ms = (self.total_infer_ms / self.frame_count) if self.frame_count > 0 else 0
+        fps_est = 1000.0 / avg_ms if avg_ms > 0 else 0
+        status = (
+            f"Signs: {len(detections)} | "
+            f"{infer_ms:.0f}ms ({fps_est:.0f} FPS) | "
+            f"Frame {self.frame_count}"
+        )
+        cv2.putText(vis, status, (8, 22), font, 0.55, (0, 255, 255), 1, cv2.LINE_AA)
+
+        _, jpeg = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        with self._vis_lock:
+            self._vis_jpeg = jpeg.tobytes()
 
     def shutdown(self):
         """Cleanup."""
         print(f"[SignDetection] Shutdown ({self.frame_count} frames processed)")
-        try:
-            cv2.destroyWindow("Sign Detection Server")
-        except Exception:
-            pass

@@ -66,7 +66,7 @@ class processCamera(WorkerProcess):
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
                  show_preview=False, debug_windows=None,
                  enable_sign_detection=True, sign_detection_actions=False,
-                 sign_min_confidence=0.50, sign_server_url="ws://192.168.80.15:8500/ws/signs",
+                 sign_min_confidence=0.50, sign_server_url="ws://172.20.10.4:8500/ws/signs",
                  sign_min_box_area=0.01,
                  sign_action_cooldown=15.0):
         self.queuesList = queueList
@@ -105,6 +105,9 @@ class processCamera(WorkerProcess):
         # and line following must NOT send motor commands.
         sign_action_event = threading.Event()
 
+        # Shared event: when set, car is on highway — line following uses higher speeds.
+        highway_mode_event = threading.Event()
+
         # Camera preview window: only if master switch AND individual toggle are on
         show_cam_preview = self.show_preview and self.debug_windows.get("camera_preview", False)
         camTh = threadCamera(
@@ -121,7 +124,8 @@ class processCamera(WorkerProcess):
         lineFollowingTh = threadLineFollowing(
             self.queuesList, self.logging, self.debugging, show_debug=self.show_preview,
             debug_windows=self.debug_windows,
-            sign_action_event=sign_action_event
+            sign_action_event=sign_action_event,
+            highway_mode_event=highway_mode_event
         )
         self.threads.append(lineFollowingTh)
 
@@ -136,6 +140,7 @@ class processCamera(WorkerProcess):
                 action_cooldown=self.sign_action_cooldown,
                 show_debug=self.show_preview,
                 sign_action_event=sign_action_event,
+                highway_mode_event=highway_mode_event,
             )
             self.threads.append(signDetTh)
         elif self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:

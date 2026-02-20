@@ -36,7 +36,7 @@ import cv2
 import numpy as np
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 
 import config
 
@@ -77,6 +77,7 @@ async def lifespan(app: FastAPI):
             print(f"[Server] WARNING: Sign detection disabled: {e}")
             sign_engine = None
     
+    show_viz = getattr(config, 'SHOW_VISUALIZATION', False)
     print("=" * 60)
     print(f"  Servidor listo en {config.SERVER_HOST}:{config.SERVER_PORT}")
     print(f"  Motor carriles: {engine_type}")
@@ -84,6 +85,8 @@ async def lifespan(app: FastAPI):
     print(f"  WS carriles:  ws://<ip>:{config.SERVER_PORT}/ws/steering")
     if sign_engine:
         print(f"  WS señales:   ws://<ip>:{config.SERVER_PORT}/ws/signs")
+    if sign_engine and show_viz:
+        print(f"  Visualización: http://localhost:{config.SERVER_PORT}/viz")
     print("=" * 60)
     
     yield
@@ -488,6 +491,148 @@ async def websocket_signs(websocket: WebSocket):
             print(f"[Signs] Cliente desconectado: {client_host}")
     except Exception as e:
         print(f"[Signs] Error con cliente {client_host}: {e}")
+
+
+# ============================================================
+# Visualización MJPEG (bounding boxes en el navegador)
+# ============================================================
+
+@app.get("/viz/signs")
+async def viz_signs_stream():
+    """MJPEG stream: video en vivo con bounding boxes de señales detectadas.
+
+    Abre esta URL en cualquier navegador (funciona en macOS, Linux, Windows).
+    El stream se activa cuando un cliente WebSocket envía frames a /ws/signs.
+    """
+    if sign_engine is None:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Sign detection no disponible"},
+        )
+
+    async def generate():
+        while True:
+            jpeg = sign_engine.get_vis_jpeg()
+            if jpeg is not None:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                )
+            await asyncio.sleep(0.033)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
+
+@app.get("/viz", response_class=HTMLResponse)
+async def viz_page():
+    """Página HTML con visualización en vivo de detección de señales."""
+    port = config.SERVER_PORT
+    return f"""<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <title>Sign Detection — AI Server</title>
+  <style>
+    * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+    body {{
+      background: #0f0f1a;
+      color: #e0e0e0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }}
+    header {{
+      width: 100%;
+      padding: 14px 24px;
+      background: #1a1a2e;
+      border-bottom: 1px solid #2a2a4a;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }}
+    header h1 {{
+      font-size: 1.1em;
+      font-weight: 600;
+      color: #00e5ff;
+    }}
+    header .badge {{
+      font-size: 0.75em;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: #00e5ff22;
+      color: #00e5ff;
+      border: 1px solid #00e5ff44;
+    }}
+    .stream-container {{
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      width: 100%;
+    }}
+    img#stream {{
+      max-width: 95vw;
+      max-height: 82vh;
+      border: 2px solid #2a2a4a;
+      border-radius: 8px;
+      background: #1a1a2e;
+    }}
+    footer {{
+      padding: 10px;
+      font-size: 0.8em;
+      color: #555;
+    }}
+    .waiting {{
+      color: #888;
+      font-size: 1.1em;
+      text-align: center;
+      padding: 40px;
+    }}
+    .waiting .spinner {{
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      border: 3px solid #333;
+      border-top: 3px solid #00e5ff;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+      margin-bottom: 12px;
+    }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sign Detection</h1>
+    <span class="badge">AI Server :{port}</span>
+    <span class="badge" id="status">Connecting...</span>
+  </header>
+  <div class="stream-container">
+    <div class="waiting" id="waiting">
+      <div class="spinner"></div>
+      <div>Esperando frames del cliente...</div>
+      <div style="margin-top:8px;font-size:0.85em;color:#666">
+        Conecta el RPi al endpoint <code>/ws/signs</code>
+      </div>
+    </div>
+    <img id="stream" src="/viz/signs" alt="Sign Detection Stream"
+         style="display:none"
+         onload="document.getElementById('waiting').style.display='none';
+                 this.style.display='block';
+                 document.getElementById('status').textContent='Live';
+                 document.getElementById('status').style.background='#00c85322';
+                 document.getElementById('status').style.color='#00c853';
+                 document.getElementById('status').style.borderColor='#00c85344';">
+  </div>
+  <footer>MJPEG Stream &mdash; bounding boxes renderizados server-side</footer>
+</body>
+</html>"""
 
 
 # ============================================================

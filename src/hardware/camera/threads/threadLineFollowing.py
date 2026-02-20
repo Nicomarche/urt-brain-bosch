@@ -140,7 +140,8 @@ Args:
     debugger (bool): A flag for debugging.
 """
 
-    def __init__(self, queuesList, logger, debugger, show_debug=False, debug_windows=None, sign_action_event=None):
+    def __init__(self, queuesList, logger, debugger, show_debug=False, debug_windows=None,
+                 sign_action_event=None, highway_mode_event=None):
         super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
         self.queuesList = queuesList
         self.logger = logger
@@ -149,13 +150,17 @@ Args:
         self.debug_windows = debug_windows or {}
         self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
         self._sign_action_was_active = False  # Track transitions to reset speed ramp
+        self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
 
         # Speed parameters
-        self.base_speed = 15
-        self.max_speed = 25
-        self.min_speed = 8
+        self.base_speed = 10
+        self.max_speed = 10
+        self.min_speed = 5
+        self.highway_max_speed = 25
+        self.highway_min_speed = 10
         self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
         self._current_speed = self.base_speed  # Tracks actual speed for ramping
+        self.speed_steer_factor = 0.4  # Steering attenuation at max speed (0=none, 1=full mute)
 
         # PID Controller (values from ricardolopezb/bfmc24-brain configs.py)
         # Error is fed in raw pixels (not normalized). Kp=0.075 → 293px error = 22° max steering.
@@ -304,13 +309,13 @@ Args:
         self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
         
         # HybridNets remote AI server parameters
-        self.hybridnets_server_url = "ws://192.168.1.35:8500/ws/steering"
+        self.hybridnets_server_url = "ws://172.20.10.4:8500/ws/steering"
         self.hybridnets_jpeg_quality = 70
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self._hybridnets_client = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
-        self.supercombo_server_url = "ws://192.168.1.35:8500/ws/steering"
+        self.supercombo_server_url = "ws://172.20.10.4:8500/ws/steering"
         self.supercombo_jpeg_quality = 70
         self.supercombo_timeout = 2.0
         self._supercombo_client = None
@@ -792,6 +797,12 @@ Args:
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
             self._store_debug_image('final', debug_frame)
             return None, self.min_speed, debug_frame
+
+    def _get_effective_speeds(self):
+        """Return (max_speed, min_speed) considering highway mode."""
+        if self.highway_mode_event and self.highway_mode_event.is_set():
+            return self.highway_max_speed, self.highway_min_speed
+        return self.max_speed, self.min_speed
 
     def _reset_pid_state(self):
         """Reset PID state when changing modes to prevent corrupted values."""
@@ -3718,23 +3729,26 @@ Returns:
             if abs(steering_angle) > 8:
                 self.last_turn_direction = 1 if steering_angle > 0 else -1
 
-            # Adaptive speed based on steering magnitude (BFMC-style)
+            # Progressive speed: linearly map steering magnitude to speed range.
+            # steer=0° → max speed, steer=max° → min speed (no hard steps).
+            eff_max, eff_min = self._get_effective_speeds()
             abs_steer = abs(steering_angle)
-            if abs_steer > 15:
-                target_speed = self.min_speed
-            elif abs_steer > 8:
-                target_speed = (self.min_speed + self.max_speed) / 2
-            else:
-                target_speed = self.max_speed
+            steer_ratio = min(abs_steer / self.max_steering, 1.0)
+            target_speed = eff_max - steer_ratio * (eff_max - eff_min)
 
             # Speed ramping: instant decrease, gradual increase
             if target_speed <= self._current_speed:
-                # Braking: drop instantly
                 self._current_speed = target_speed
             else:
-                # Acceleration: ramp up gradually
                 self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
             speed = self._current_speed
+
+            # Speed-dependent steering: attenuate correction at higher speeds
+            # to prevent oscillations. At low speed, full correction is allowed.
+            speed_ratio = speed / eff_max
+            steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
+            steering_angle *= steer_attenuation
+            steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
 
         if self.show_debug and steering_angle is not None:
             src = "both" if avg_left is not None and avg_right is not None else \

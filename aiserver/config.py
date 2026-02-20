@@ -104,6 +104,13 @@ SIGN_CLASS_MAP = {
     # Estacionamiento
     "parkyasak": "no_parking",
     "parkyasak2": "no_parking",
+    # Autopista
+    "otoyolgiris": "highway_entrance",
+    "otoyolcikis": "highway_exit",
+    "otobangiris": "highway_entrance",
+    "otobancikis": "highway_exit",
+    "otoyol_giris": "highway_entrance",
+    "otoyol_cikis": "highway_exit",
     # Otros
     "durak": "bus_stop",
     "arac": "vehicle",
@@ -116,4 +123,4 @@ SIGN_CLASS_MAP = {
 # Mostrar ventanas de debug con OpenCV en el servidor
 # True = abre ventanas mostrando entrada, segmentacion, detecciones, steering
 # Requiere display (X11/Wayland). Desactivar en servidores headless.
-SHOW_VISUALIZATION = False   # True crashea en macOS (GUI debe correr en main thread)
+SHOW_VISUALIZATION = True    # Abre ventana con bounding boxes en el servidor

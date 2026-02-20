@@ -67,7 +67,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   ];
 
   // HybridNets AI Server settings
-  hybridnetsServerUrl: string = 'ws://192.168.1.35:8500/ws/steering';
+  hybridnetsServerUrl: string = 'ws://172.20.10.4:8500/ws/steering';
   hybridnetsJpegQuality: number = 70;
   hybridnetsTimeout: number = 2.0;
   hybridnetsConnected: boolean = false;
@@ -75,7 +75,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   hybridnetsServerFps: number = 0;
 
   // Supercombo AI Server settings (openpilot model)
-  supercomboServerUrl: string = 'ws://192.168.1.35:8500/ws/steering';
+  supercomboServerUrl: string = 'ws://172.20.10.4:8500/ws/steering';
   supercomboJpegQuality: number = 70;
   supercomboTimeout: number = 2.0;
   supercomboConnected: boolean = false;
@@ -561,12 +561,12 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.selectedLstrModel = 0;
     
     // Reset HybridNets
-    this.hybridnetsServerUrl = 'ws://192.168.1.35:8500/ws/steering';
+    this.hybridnetsServerUrl = 'ws://172.20.10.4:8500/ws/steering';
     this.hybridnetsJpegQuality = 70;
     this.hybridnetsTimeout = 2.0;
     
     // Reset Supercombo
-    this.supercomboServerUrl = 'ws://192.168.1.35:8500/ws/steering';
+    this.supercomboServerUrl = 'ws://172.20.10.4:8500/ws/steering';
     this.supercomboJpegQuality = 70;
     this.supercomboTimeout = 2.0;
     
