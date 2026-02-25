@@ -4,13 +4,13 @@ Modifica estos valores para cambiar el comportamiento del auto.
 """
 
 # ======================== CAMERA ========================
-# Tipo de camara: "picamera" (CSI ribbon cable) | "usb" (USB webcam)
-CAMERA_TYPE = "picamera"
+# Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
+CAMERA_TYPE = "jetson"
 
 # Configuracion USB (solo aplica si CAMERA_TYPE = "usb")
 # Device: numero de indice (0, 2, 4...) o path ("/dev/video0")
 # Tip: correr `ls /dev/video*` para ver camaras disponibles
-USB_DEVICE = 8  # /dev/video9 (USB Camera-B4.09.24.1)
+USB_DEVICE = 1  # /dev/video9 (USB Camera-B4.09.24.1)
 USB_RESOLUTION = (640, 480)  # (ancho, alto)
 
 # Transmitir video de la camara al dashboard web (consume CPU por JPEG encode + base64).

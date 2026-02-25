@@ -134,7 +134,7 @@ class threadCamera(ThreadWithStop):
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
         try:
-            if self.camera_type == "usb":
+            if self.camera_type in ("usb", "jetson"):
                 mainRequest, serialRequest = self._capture_usb()
             else:
                 mainRequest, serialRequest = self._capture_picamera()
@@ -201,10 +201,12 @@ class threadCamera(ThreadWithStop):
 
     # ================================ INIT CAMERA ========================================
     def _init_camera(self):
-        """Initialize the camera. Supports picamera2 (CSI) and USB (OpenCV VideoCapture)."""
+        """Initialize the camera. Supports jetson (GStreamer/nvarguscamerasrc), picamera2 (CSI) and USB (OpenCV VideoCapture)."""
 
         if self.camera_type == "usb":
             self._init_usb_camera()
+        elif self.camera_type == "jetson":
+            self._init_jetson_camera()
         else:
             self._init_picamera()
 
@@ -234,6 +236,67 @@ class threadCamera(ThreadWithStop):
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - PiCamera initialized successfully")
         except Exception as e:
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to initialize PiCamera: {e}")
+            self.camera = None
+
+    def _init_jetson_camera(self):
+        """Initialize CSI camera on Jetson via GStreamer nvarguscamerasrc pipeline.
+        Uses the same reader-thread pattern as USB for consistent frame delivery."""
+        import subprocess, os
+
+        if not any(os.path.exists(f"/dev/video{i}") for i in range(10)):
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - "
+                  f"No /dev/video* devices found. Is the CSI camera ribbon cable connected?")
+            self.camera = None
+            return
+
+        gst_check = subprocess.run(["gst-inspect-1.0", "nvarguscamerasrc"],
+                                   capture_output=True, timeout=5)
+        if gst_check.returncode != 0:
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - "
+                  f"nvarguscamerasrc not available. Install nvidia-l4t-gstreamer-plugins.")
+            self.camera = None
+            return
+
+        try:
+            gst_pipeline = (
+                "nvarguscamerasrc ! "
+                "video/x-raw(memory:NVMM),width=1920,height=1080,framerate=30/1,format=NV12 ! "
+                "nvvidconv ! video/x-raw,format=BGRx ! "
+                "videoconvert ! video/x-raw,format=BGR ! "
+                "appsink drop=1"
+            )
+            self.camera = cv2.VideoCapture(gst_pipeline, cv2.CAP_GSTREAMER)
+            if not self.camera.isOpened():
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - "
+                      f"Jetson CSI camera not found. Check ribbon cable and run: gst-launch-1.0 nvarguscamerasrc ! nvoverlaysink")
+                self.camera = None
+                return
+
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mINFO\033[0m - Jetson CSI camera warming up...")
+            for _ in range(10):
+                ret, _ = self.camera.read()
+                if not ret:
+                    time.sleep(0.1)
+
+            ret, test_frame = self.camera.read()
+            if not ret or test_frame is None:
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Jetson CSI camera opened but cannot read frames.")
+                self.camera.release()
+                self.camera = None
+                return
+
+            self._usb_latest_frame = test_frame
+            self._usb_frame_lock = threading.Lock()
+            self._usb_new_frame = threading.Event()
+            self._usb_new_frame.set()
+            self._usb_reader_running = True
+            self._usb_reader_thread = threading.Thread(target=self._usb_reader_loop, daemon=True)
+            self._usb_reader_thread.start()
+
+            h, w = test_frame.shape[:2]
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - Jetson CSI camera initialized: {w}x{h} via GStreamer")
+        except Exception as e:
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to initialize Jetson CSI camera: {e}")
             self.camera = None
 
     def _init_usb_camera(self):
@@ -318,8 +381,7 @@ class threadCamera(ThreadWithStop):
         if self.recording and self.video_writer:
             self.video_writer.release() # type: ignore
         if self.camera is not None:
-            if self.camera_type == "usb":
-                # Stop the reader thread first
+            if self.camera_type in ("usb", "jetson"):
                 self._usb_reader_running = False
                 if hasattr(self, '_usb_reader_thread'):
                     self._usb_reader_thread.join(timeout=2)
@@ -342,7 +404,7 @@ class threadCamera(ThreadWithStop):
             message = self.brightnessSubscriber.receive()
             if self.debugger:
                 self.logger.info(str(message))
-            if self.camera_type != "usb" and self.camera is not None:
+            if self.camera_type == "picamera" and self.camera is not None:
                 self.camera.set_controls(
                     {
                         "AeEnable": False,
@@ -354,7 +416,7 @@ class threadCamera(ThreadWithStop):
             message = self.contrastSubscriber.receive()
             if self.debugger:
                 self.logger.info(str(message))
-            if self.camera_type != "usb" and self.camera is not None:
+            if self.camera_type == "picamera" and self.camera is not None:
                 self.camera.set_controls(
                     {
                         "AeEnable": False,

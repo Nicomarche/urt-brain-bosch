@@ -341,7 +341,14 @@ class processDashboard(WorkerProcess):
         """Monitor and update hardware metrics periodically."""
         self.cpuCoreUsage = psutil.cpu_percent(interval=None, percpu=False)
         self.memoryUsage = psutil.virtual_memory().percent
-        self.cpuTemperature = round(psutil.sensors_temperatures()['cpu_thermal'][0].current)
+        try:
+            temps = psutil.sensors_temperatures()
+            if temps:
+                first_sensor = next(iter(temps.values()))
+                if first_sensor and first_sensor[0].current is not None:
+                    self.cpuTemperature = round(first_sensor[0].current)
+        except Exception:
+            self.cpuTemperature = 0
 
         eventlet.spawn_after(3, self.update_hardware_data)  # 3s — datos de hardware no cambian rapido
 
