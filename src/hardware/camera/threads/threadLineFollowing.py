@@ -2,6 +2,7 @@
 # All rights reserved.a
 # Reconstructed from bytecode
 
+import ast
 import cv2
 import numpy as np
 import base64
@@ -9,7 +10,7 @@ import time
 import math
 from collections import deque
 from enum import Enum
-from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus
+from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -131,6 +132,68 @@ class PIDController:
         self._last_time = None
 
 
+class StanleyController:
+    """Stanley Controller for lateral control (Hoffmann et al., Stanford 2007).
+
+    Nonlinear control law with proven global asymptotic stability:
+        δ = ψ + arctan(k · e / (k_soft + v)) + k_d_yaw · (r_meas - r_traj)
+
+    Unlike PID, this controller:
+    - Has no integral windup (no integral term)
+    - Adapts gain automatically to speed via k/(k_soft + v)
+    - Provides natural steering saturation via arctan
+    - Can use IMU yaw rate feedback for active damping at high speed
+
+    Args:
+        k: Crosstrack gain. Controls convergence rate toward the path.
+           Higher = more aggressive correction. Units: 1/px in pixel-space mode.
+        k_soft: Softening constant. Prevents gain explosion at near-zero speed.
+                In same units as speed (command units). Increase for gentler steering.
+        k_d_yaw: Yaw rate damping gain. Set >0 to use IMU feedback for stability
+                 at high speed. Set 0.0 to disable (no IMU needed).
+        max_steering: Maximum output angle in degrees (physical limit).
+    """
+
+    def __init__(self, k=0.06, k_soft=1.0, k_d_yaw=0.0, max_steering=25):
+        self.k = k
+        self.k_soft = k_soft
+        self.k_d_yaw = k_d_yaw
+        self.max_steering = max_steering
+        self._prev_heading = 0.0
+
+    def compute(self, crosstrack_error, heading_error, speed,
+                yaw_rate=0.0, traj_yaw_rate=0.0):
+        """Compute Stanley steering command.
+
+        Args:
+            crosstrack_error: Lateral error in pixels.
+                Positive = lane center is right of image center (car is left of lane).
+            heading_error: Angle between vehicle heading and lane direction (radians).
+                Positive = car heading left of lane direction.
+            speed: Vehicle speed in command units (same scale as k_soft).
+            yaw_rate: Measured yaw rate from IMU (rad/s). 0.0 if unavailable.
+            traj_yaw_rate: Expected yaw rate for current trajectory (rad/s).
+
+        Returns:
+            float: Steering angle in degrees, clamped to ±max_steering.
+        """
+        heading_term = heading_error
+        crosstrack_term = math.atan2(self.k * crosstrack_error,
+                                     self.k_soft + abs(speed))
+        yaw_damping = self.k_d_yaw * (yaw_rate - traj_yaw_rate)
+
+        delta_rad = heading_term + crosstrack_term + yaw_damping
+        delta_deg = math.degrees(delta_rad)
+        delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
+
+        self._prev_heading = heading_error
+        return delta_deg
+
+    def reset(self):
+        """Reset controller state."""
+        self._prev_heading = 0.0
+
+
 class threadLineFollowing(ThreadWithStop):
     """Thread which handles line following using OpenCV.
 
@@ -153,9 +216,9 @@ Args:
         self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
 
         # Speed parameters
-        self.base_speed = 10
-        self.max_speed = 10
-        self.min_speed = 5
+        self.base_speed = 15
+        self.max_speed = 20
+        self.min_speed = 10
         self.highway_max_speed = 25
         self.highway_min_speed = 10
         self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
@@ -186,6 +249,36 @@ Args:
         self.wheelbase = 0.265       # Distance between axles in meters (BFMC 1:10 car ~26.5cm)
         self.ff_weight = 0.6         # Weight of feed-forward vs PID (0=pure PID, 1=pure FF)
         self.curvature_threshold = 0.5  # Min curvature to activate feed-forward (1/pixels)
+
+        # ============= Stanley Controller (Hoffmann et al., Stanford 2007) =============
+        # Replaces PID for OpenCV mode with a globally stable nonlinear controller.
+        # The gain k/(k_soft + v) adapts automatically to speed:
+        #   Low speed  → aggressive correction (tight curves)
+        #   High speed → gentle correction (highway stability)
+        self.use_stanley = True          # True=Stanley, False=PID (fallback)
+        self.stanley_k = 0.04           # Crosstrack gain (higher = faster convergence)
+        self.stanley_k_soft = 3.0       # Softening at low speed (prevents oscillation near v=0)
+        self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
+        self.stanley = StanleyController(
+            k=self.stanley_k,
+            k_soft=self.stanley_k_soft,
+            k_d_yaw=self.stanley_k_d_yaw,
+            max_steering=self.max_steering
+        )
+
+        # Single-line lane centering: how far from the visible line to aim.
+        # 0.50 = exact center (17.5cm), 0.40 = closer to visible line (less overshoot).
+        # If the car overshoots past center and hits the opposite line, lower this.
+        # If the car hugs the visible line too closely, raise this.
+        self.single_line_offset_factor = 0.42
+
+        # Sensor feedback state (populated from Nucleo via message queue)
+        self._measured_speed = 0.0       # Last speed reading from encoder
+        self._measured_steer = 0.0       # Last steering angle feedback
+        self._last_yaw = 0.0             # Last IMU yaw reading (degrees)
+        self._yaw_rate = 0.0             # Computed yaw rate (rad/s)
+        self._last_imu_time = None       # Timestamp of last IMU reading
+        self._heading_error = 0.0        # Last computed heading error (rad)
 
         # ============= Car Physical Dimensions (cm) =============
         # Measured from the actual BFMC 1:10 scale car (Bosch)
@@ -287,13 +380,29 @@ Args:
 
         # Adaptive lighting parameters
         self.use_clahe = True
-        self.clahe_clip_limit = 2.0
+        self.clahe_clip_limit = 3.5
         self.clahe_grid_size = 8
         self.use_adaptive_white = True
         self.adaptive_white_percentile = 92
         self.adaptive_white_min_threshold = 180
         self.use_gradient_fallback = True
         self.gradient_percentile = 85
+
+        # Auto binary threshold: adapts to lighting changes frame by frame.
+        # Uses the brightness percentile of the ROI to set the threshold dynamically.
+        # Replaces the fixed binary_threshold (165) when enabled.
+        self.use_auto_threshold = True
+        self.auto_threshold_percentile = 90   # Percentile of ROI brightness (higher = stricter, only top ~8%)
+        self.auto_threshold_min = 140         # Floor: never go below this (avoids road surface noise)
+        self.auto_threshold_max = 220         # Ceiling: never go above this (avoids losing lines)
+        self._auto_threshold_val = self.binary_threshold  # Smoothed value
+
+        # Strip-based threshold: divides the image into vertical strips (like CLAHE tiles)
+        # and computes a separate threshold per strip. This handles uneven lighting
+        # where one lane line is dimmer than the other (e.g. left side in shadow).
+        self.use_strip_threshold = True
+        self.strip_cols = 6                   # Number of vertical strips (more = finer adaptation)
+        self.strip_rows = 2                   # Number of horizontal bands (1 = columns only)
 
         # Detection mode parameters
         self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
@@ -365,7 +474,7 @@ Args:
         self.use_noise_filter = True         # Enable noise rejection
         self.noise_max_hough_lines = 40      # Max Hough lines before flagging as noisy
         self.noise_max_error_jump_px = 80    # Max error change between frames (px)
-        self.noise_max_steer_jump_deg = 15   # Max steering change between frames (deg)
+        self.noise_max_steer_jump_deg = 22   # Max steering change between frames (deg)
         self.noise_max_reject_frames = 3     # Max consecutive frames to reject
         self._noise_reject_count = 0         # Current consecutive rejected frames
         self._last_good_error = 0.0          # Last accepted error value
@@ -402,6 +511,11 @@ Args:
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
         
+        # Sensor feedback subscribers (for Stanley controller)
+        self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
+        self.currentSpeedSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
+        self.currentSteerSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSteer, "lastOnly", True)
+
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
         self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
@@ -805,8 +919,11 @@ Args:
         return self.max_speed, self.min_speed
 
     def _reset_pid_state(self):
-        """Reset PID state when changing modes to prevent corrupted values."""
+        """Reset PID/Stanley state when changing modes to prevent corrupted values."""
         self.pid.reset()
+        self.stanley.reset()
+        self._heading_error = 0.0
+        self._yaw_rate = 0.0
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
             del self.last_steering
@@ -1668,8 +1785,8 @@ Args:
                     self._recovery_curve_sign = 0
                     self._recovery_actual_rev_time = 0.0
                     self._recovery_reverse_steer_angle = 0.0
-                    # Reset PID to prevent integral windup from recovery
                     self.pid.reset()
+                    self.stanley.reset()
                     print(f"\033[1;97m[ Recovery ] :\033[0m \033[1;92mCOMPLETE\033[0m - Resuming normal operation")
                     return steering_angle, speed, False
                 # Keep max curve steer while briefly stopped before resuming
@@ -1767,6 +1884,132 @@ Args:
 
         return steering_angle, speed, False
 
+    # ============= STANLEY CONTROLLER HELPERS =============
+
+    def _compute_heading_error(self, avg_left, avg_right):
+        """Estimate heading error from lane line geometry.
+
+        When both lines are detected, the average of their angles relative to
+        vertical gives the heading error directly:
+        - Aligned car: left angle = -α, right angle = +α → average = 0
+        - Car heading left: both angles shift positive → average > 0
+        - Car heading right: both angles shift negative → average < 0
+
+        Returns:
+            float: Heading error in radians. Positive = car heading left of lane.
+        """
+        angles = []
+        for line in [avg_left, avg_right]:
+            if line is not None:
+                x1, y1, x2, y2 = line[0]
+                if y1 < y2:
+                    x1, y1, x2, y2 = x2, y2, x1, y1
+                dx = x2 - x1
+                dy = y1 - y2
+                if dy > 1:
+                    angles.append(math.atan2(dx, dy))
+
+        if len(angles) == 2:
+            heading = (angles[0] + angles[1]) / 2.0
+        elif len(angles) == 1:
+            heading = angles[0] * 0.5
+        else:
+            heading = 0.0
+
+        self._heading_error = heading
+        return heading
+
+    def _read_sensor_data(self):
+        """Read IMU and speed feedback from Nucleo for Stanley controller.
+
+        Runs every cycle to keep sensor data fresh. All reads are non-blocking.
+        If data is unavailable, previous values are retained.
+        """
+        imu_msg = self.imuDataSubscriber.receive()
+        if imu_msg is not None:
+            try:
+                data = ast.literal_eval(imu_msg)
+                new_yaw = float(data.get('yaw', 0))
+                current_time = time.time()
+                if self._last_imu_time is not None:
+                    dt = current_time - self._last_imu_time
+                    if dt > 0.001:
+                        self._yaw_rate = math.radians(new_yaw - self._last_yaw) / dt
+                self._last_yaw = new_yaw
+                self._last_imu_time = current_time
+            except (ValueError, SyntaxError):
+                pass
+
+        speed_msg = self.currentSpeedSubscriber.receive()
+        if speed_msg is not None:
+            try:
+                self._measured_speed = float(speed_msg)
+            except (ValueError, TypeError):
+                pass
+
+        steer_msg = self.currentSteerSubscriber.receive()
+        if steer_msg is not None:
+            try:
+                self._measured_steer = float(steer_msg)
+            except (ValueError, TypeError):
+                pass
+
+    def _compute_single_line_error(self, line, side, img_h, img_w):
+        """Compute crosstrack error from a single lane line using known lane width.
+
+        Uses the 35cm lane width to estimate where the lane center should be:
+        - Left line visible  → center is half lane width to the RIGHT of the line
+        - Right line visible → center is half lane width to the LEFT of the line
+
+        The offset_factor controls where in the lane to aim:
+        - 0.50 = exact lane center (17.5cm from line)
+        - 0.40 = slightly toward the visible line (safer, less overshoot)
+        - 0.30 = much closer to visible line (very conservative)
+
+        Returns:
+            tuple: (crosstrack_error_px, heading_error_rad)
+                   crosstrack_error: positive = car left of lane center (steer right)
+                   heading_error: from single line angle (dampened)
+        """
+        x1, y1, x2, y2 = line[0]
+
+        if y1 < y2:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+
+        # Line position at bottom of image (closest to the car)
+        dy_line = y2 - y1
+        if abs(dy_line) < 0.01:
+            dy_line = -0.01
+        bottom_x = x1 + (img_h - y1) * (x2 - x1) / dy_line
+
+        # Pixel-to-cm ratio: prefer cached value from last two-line detection
+        if self._last_px_per_cm is not None and self._last_px_per_cm > 0.5:
+            px_per_cm = self._last_px_per_cm
+        else:
+            # Fallback: lane (35cm) typically spans ~45% of image width at bottom
+            px_per_cm = (img_w * 0.45) / self.lane_width_cm
+
+        # Offset = fraction of lane width toward the opposite side
+        offset_px = self.lane_width_cm * self.single_line_offset_factor * px_per_cm
+
+        if side == 'left':
+            desired_center = bottom_x + offset_px
+        else:
+            desired_center = bottom_x - offset_px
+
+        error = desired_center - (img_w / 2.0)
+
+        # Heading from single line (dampened — less reliable than two-line)
+        dx = x2 - x1
+        dy_up = y1 - y2
+        if dy_up > 1:
+            raw_angle = math.atan2(dx, dy_up)
+            heading = raw_angle * 0.3
+        else:
+            heading = 0.0
+
+        return error, heading
+
     def _bfmc_image_processing(self, image, threshold_override=None, kernel_override=None):
         """
         BFMC-style image processing pipeline.
@@ -1787,7 +2030,6 @@ Args:
         Returns:
             (avg_left_line, avg_right_line, height, width, canny_image, debug_info)
         """
-        threshold_val = threshold_override if threshold_override is not None else self.binary_threshold
         kernel_val = kernel_override if kernel_override is not None else self.blur_kernel
         if kernel_val % 2 == 0:
             kernel_val += 1
@@ -1811,8 +2053,48 @@ Args:
         if needs_debug:
             debug_info['grey'] = grey_image.copy()
 
-        # 3. Binary threshold
-        _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
+        # 3. Binary threshold (global + local adaptive)
+        if threshold_override is not None:
+            threshold_val = threshold_override
+        elif self.use_auto_threshold:
+            roi_pixels = grey_image[y_start:y_end, :]
+            nonzero = roi_pixels[roi_pixels > 0]
+            if len(nonzero) > 100:
+                raw_thresh = np.percentile(nonzero, self.auto_threshold_percentile)
+                raw_thresh = max(self.auto_threshold_min, min(self.auto_threshold_max, raw_thresh))
+                self._auto_threshold_val = 0.7 * self._auto_threshold_val + 0.3 * raw_thresh
+            threshold_val = int(self._auto_threshold_val)
+        else:
+            threshold_val = self.binary_threshold
+
+        if self.use_strip_threshold:
+            binary_image = np.zeros_like(grey_image)
+            roi_h = y_end - y_start
+            strip_h = max(1, roi_h // max(1, self.strip_rows))
+            strip_w = max(1, width // max(1, self.strip_cols))
+
+            for row in range(self.strip_rows):
+                sy = y_start + row * strip_h
+                ey = min(y_end, sy + strip_h) if row < self.strip_rows - 1 else y_end
+                for col in range(self.strip_cols):
+                    sx = col * strip_w
+                    ex = min(width, sx + strip_w) if col < self.strip_cols - 1 else width
+
+                    strip = grey_image[sy:ey, sx:ex]
+                    nonzero = strip[strip > 10]
+                    if len(nonzero) > 50:
+                        p = float(np.percentile(nonzero, self.auto_threshold_percentile))
+                        mu = float(np.mean(nonzero))
+                        sigma = float(np.std(nonzero))
+                        noise_floor = mu + 1.5 * sigma
+                        st = max(noise_floor, p * 0.85)
+                        st = max(80.0, min(float(self.auto_threshold_max), st))
+                    else:
+                        st = float(threshold_val)
+                    _, strip_bin = cv2.threshold(strip, int(st), 255, cv2.THRESH_BINARY)
+                    binary_image[sy:ey, sx:ex] = strip_bin
+        else:
+            _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
         if needs_debug:
             debug_info['binary'] = binary_image.copy()
 
@@ -3129,6 +3411,8 @@ Returns:
                          'line_merge_distance', 'lstr_model_size', 'stream_debug_view',
                          'stream_debug_fps', 'stream_debug_quality', 'use_clahe',
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
+                         'use_auto_threshold', 'auto_threshold_percentile',
+                         'auto_threshold_min', 'auto_threshold_max',
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
                          'use_swept_path', 'curve_speed_reduction',
@@ -3140,6 +3424,8 @@ Returns:
             params = ['base_speed', 'max_speed', 'min_speed', 'max_error_px', 'kp', 'ki', 'kd', 'smoothing_factor',
                      'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
                      'wheelbase', 'ff_weight', 'curvature_threshold',
+                     'use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw',
+                     'single_line_offset_factor',
                      'roi_height_start', 'roi_height_end',
                      'roi_width_margin_top', 'roi_width_margin_bottom',
                      'white_h_min', 'white_h_max', 'white_s_min', 'white_s_max',
@@ -3155,6 +3441,9 @@ Returns:
                      'use_clahe', 'clahe_clip_limit', 'clahe_grid_size',
                      'use_adaptive_white', 'adaptive_white_percentile', 'adaptive_white_min_threshold',
                      'use_gradient_fallback', 'gradient_percentile',
+                     'use_auto_threshold', 'auto_threshold_percentile',
+                     'auto_threshold_min', 'auto_threshold_max',
+                     'use_strip_threshold', 'strip_cols', 'strip_rows',
                      # Detection mode
                      'detection_mode', 'lstr_model_size',
                      # Debug streaming
@@ -3222,6 +3511,16 @@ Returns:
                 self.pid.integral_reset_interval = self.integral_reset_interval
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - Updated: Kp={self.kp} Ki={self.ki} Kd={self.kd} max={self.max_steering}")
             
+            # Sync Stanley controller with updated parameters
+            stanley_params = ['use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw', 'max_steering']
+            if any(p in config for p in stanley_params):
+                self.stanley.k = self.stanley_k
+                self.stanley.k_soft = self.stanley_k_soft
+                self.stanley.k_d_yaw = self.stanley_k_d_yaw
+                self.stanley.max_steering = self.max_steering
+                mode_str = "STANLEY" if self.use_stanley else "PID"
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} k_d_yaw={self.stanley_k_d_yaw}")
+
             # Log feed-forward parameter changes
             ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
             if any(p in config for p in ff_params):
@@ -3319,6 +3618,7 @@ Returns:
         try:
             self.check_state_change()
             self._check_config()
+            self._read_sensor_data()
             
             camera_message = self.serialCameraSubscriber.receive()
             if camera_message is None:
@@ -3566,8 +3866,16 @@ Returns:
                 else:
                     self._swept_path_info = None
 
-                # PID control with (possibly adjusted) pixel error
-                steering_angle = self.pid.compute(error)
+                # Compute steering from crosstrack error
+                if self.use_stanley:
+                    heading = self._compute_heading_error(avg_left, avg_right)
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    steering_angle = self.stanley.compute(
+                        error, heading, speed_val,
+                        yaw_rate=self._yaw_rate, traj_yaw_rate=0.0
+                    )
+                else:
+                    steering_angle = self.pid.compute(error)
 
                 # Moving average of last N steering values (smooths erratic readings from lighting)
                 self.steer_history.append(steering_angle)
@@ -3605,21 +3913,34 @@ Returns:
                 if self.show_debug:
                     print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mLEFT curve, seeing INNER (left) line\033[0m "
                           f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
+            elif self.use_stanley:
+                # Stanley: compute error from lane width to center the car
+                sl_error, sl_heading = self._compute_single_line_error(
+                    avg_left, 'left', img_h, img_w
+                )
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                steering_angle = self.stanley.compute(
+                    sl_error, sl_heading, speed_val,
+                    yaw_rate=self._yaw_rate
+                )
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                speed = self.min_speed + 3
+                self._swept_path_info = None
+                if self.show_debug:
+                    print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mLEFT\033[0m - "
+                          f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                          f"steer={steering_angle:.1f}°")
             elif self.use_swept_path:
-                # Normal case: LEFT line = outer boundary of RIGHT curve
                 swept = self._predict_swept_path_single_line(avg_left, 'left', img_h, img_w)
                 self._swept_path_info = swept
                 if swept is not None:
-                    # Use PID with geometry-calculated error instead of fixed max steering
                     steering_angle = self.pid.compute(swept['steering_error'])
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    # Speed based on clearance
                     if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
                         speed = self.min_speed
                     else:
-                        speed = self.min_speed + 3  # Slightly above min for curves
+                        speed = self.min_speed + 3
                 else:
-                    # Swept path failed → fallback to original behavior
                     self._swept_path_info = None
                     if self.consecutive_single_left >= 2:
                         steering_angle = self.max_steering
@@ -3627,7 +3948,6 @@ Returns:
                     else:
                         steering_angle = self._bfmc_follow_single_line(avg_left, 'left')
             else:
-                # Original BFMC behavior (no swept path)
                 self._swept_path_info = None
                 if self.consecutive_single_left >= 2:
                     steering_angle = self.max_steering
@@ -3643,19 +3963,30 @@ Returns:
             self.consecutive_single_left = 0
             self.last_seen_side = "right"
 
-            # Check: is this the INNER line of a confirmed curve?
-            # RIGHT curve + see RIGHT line = seeing INNER line → car went too far inside
             if self._is_seeing_inner_line('right'):
-                # Car turned too tight (went past inner boundary of a RIGHT curve)
-                # DON'T steer more into the curve — ease off, steer gently toward outside
-                steering_angle = -self.max_steering * self.curve_inner_line_steer_factor  # Steer LEFT (away from right curve)
+                steering_angle = -self.max_steering * self.curve_inner_line_steer_factor
                 speed = self.min_speed
                 self._swept_path_info = None
                 if self.show_debug:
                     print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mRIGHT curve, seeing INNER (right) line\033[0m "
                           f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
+            elif self.use_stanley:
+                sl_error, sl_heading = self._compute_single_line_error(
+                    avg_right, 'right', img_h, img_w
+                )
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                steering_angle = self.stanley.compute(
+                    sl_error, sl_heading, speed_val,
+                    yaw_rate=self._yaw_rate
+                )
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                speed = self.min_speed + 3
+                self._swept_path_info = None
+                if self.show_debug:
+                    print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mRIGHT\033[0m - "
+                          f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                          f"steer={steering_angle:.1f}°")
             elif self.use_swept_path:
-                # Normal case: RIGHT line = outer boundary of LEFT curve
                 swept = self._predict_swept_path_single_line(avg_right, 'right', img_h, img_w)
                 self._swept_path_info = swept
                 if swept is not None:
@@ -3754,8 +4085,14 @@ Returns:
             src = "both" if avg_left is not None and avg_right is not None else \
                   "left" if avg_left is not None else \
                   "right" if avg_right is not None else "none"
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mBFMC\033[0m - "
-                  f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
+            if self.use_stanley:
+                heading_deg = math.degrees(self._heading_error)
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
+                      f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px "
+                      f"Heading: {heading_deg:.1f}° YawRate: {self._yaw_rate:.2f} Source: {src}")
+            else:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - "
+                      f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
 
         # Create debug frame only when needed (saves frame.copy() + draw operations per frame)
         if self._needs_debug:

@@ -5,7 +5,7 @@ Modifica estos valores para cambiar el comportamiento del auto.
 
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
-CAMERA_TYPE = "jetson"
+CAMERA_TYPE = "picamera"
 
 # Configuracion USB (solo aplica si CAMERA_TYPE = "usb")
 # Device: numero de indice (0, 2, 4...) o path ("/dev/video0")
@@ -41,7 +41,7 @@ DEBUG_WINDOWS = {
 ENABLE_SIGN_DETECTION = True
 
 # URL WebSocket del AI Server (endpoint de senales de trafico)
-SIGN_SERVER_URL = "ws://172.20.10.4:8500/ws/signs"
+SIGN_SERVER_URL = "ws://192.168.1.44:8500/ws/signs"
 
 # Ejecutar acciones al detectar senales (stop, reducir velocidad, etc.)
 # False = solo detecta y publica (modo seguro para testing)
