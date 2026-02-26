@@ -115,7 +115,12 @@ Toda la configuración del brain está en `config.py`:
 
 | Parámetro | Descripción |
 |---|---|
-| `CAMERA_TYPE` | `"picamera"` (CSI) o `"usb"` |
+| `CAMERA_TYPE` | `"jetson"` (CSI Jetson), `"picamera"` (CSI RPi) o `"usb"` |
+| `JETSON_SENSOR_ID` | Sensor CSI en Jetson (`0` CAM0, `1` CAM1) |
+| `JETSON_CAPTURE_RESOLUTION` | Resolución nativa del sensor Jetson (ej. `(1920, 1080)`) |
+| `JETSON_OUTPUT_RESOLUTION` | Resolución final enviada a OpenCV/dashboard (ej. `(960, 720)`) |
+| `JETSON_FRAMERATE` | FPS objetivo para `nvarguscamerasrc` |
+| `JETSON_FLIP_METHOD` | `flip-method` de `nvvidconv` (0 = sin flip) |
 | `SHOW_CAMERA_PREVIEW` | Master switch para ventanas de debug OpenCV |
 | `DEBUG_WINDOWS` | Dict para habilitar ventanas individuales |
 | `ENABLE_SIGN_DETECTION` | Activar detección de señales via AI Server |

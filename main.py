@@ -74,6 +74,8 @@ from config import (
     ENABLE_SIGN_DETECTION, SIGN_DETECTION_ACTIONS, SIGN_MIN_CONFIDENCE,
     SIGN_SERVER_URL, SIGN_MIN_BOX_AREA, SIGN_ACTION_COOLDOWN,
     PICAMERA_HDR_ENABLED, PICAMERA_HDR_ALWAYS_ON, PICAMERA_HDR_GLARE_THRESHOLD,
+    JETSON_SENSOR_ID, JETSON_CAPTURE_RESOLUTION, JETSON_OUTPUT_RESOLUTION,
+    JETSON_FRAMERATE, JETSON_FLIP_METHOD,
 )
 
 # ------ New component imports starts here ------#
@@ -154,6 +156,11 @@ camera_ready = Event()
 processCamera = processCamera(queueList, logging, camera_ready, debugging = False,
                                camera_type=CAMERA_TYPE, usb_device=USB_DEVICE,
                                usb_resolution=USB_RESOLUTION,
+                               jetson_sensor_id=JETSON_SENSOR_ID,
+                               jetson_capture_resolution=JETSON_CAPTURE_RESOLUTION,
+                               jetson_output_resolution=JETSON_OUTPUT_RESOLUTION,
+                               jetson_framerate=JETSON_FRAMERATE,
+                               jetson_flip_method=JETSON_FLIP_METHOD,
                                show_preview=SHOW_CAMERA_PREVIEW,
                                debug_windows=DEBUG_WINDOWS,
                                picamera_hdr_enabled=PICAMERA_HDR_ENABLED,

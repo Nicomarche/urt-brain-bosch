@@ -5,13 +5,21 @@ Modifica estos valores para cambiar el comportamiento del auto.
 
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
-CAMERA_TYPE = "picamera"
+CAMERA_TYPE = "jetson"
 
 # Configuracion USB (solo aplica si CAMERA_TYPE = "usb")
 # Device: numero de indice (0, 2, 4...) o path ("/dev/video0")
 # Tip: correr `ls /dev/video*` para ver camaras disponibles
 USB_DEVICE = 1  # /dev/video9 (USB Camera-B4.09.24.1)
 USB_RESOLUTION = (640, 480)  # (ancho, alto)
+
+# Configuracion Jetson CSI (solo aplica si CAMERA_TYPE = "jetson")
+# Equivale al pipeline probado con `gst-launch-1.0 nvarguscamerasrc ...`.
+JETSON_SENSOR_ID = 0         # CAM0=0, CAM1=1
+JETSON_CAPTURE_RESOLUTION = (1920, 1080)  # Resolucion nativa del sensor
+JETSON_OUTPUT_RESOLUTION = (960, 720)     # Resolucion final entregada a OpenCV
+JETSON_FRAMERATE = 30
+JETSON_FLIP_METHOD = 0       # 0 = sin flip
 
 # HDR por fusion de exposiciones (Mertens) para PiCamera.
 # Se aplica sobre el stream lores (640x384) usado por line following/sign detection.

@@ -56,7 +56,7 @@ class processCamera(WorkerProcess):
             queueList (dictionar of multiprocessing.queues.Queue): Dictionar of queues where the ID is the type of messages.
             logging (logging object): Made for debugging.
             debugging (bool, optional): A flag for debugging. Defaults to False.
-            camera_type (str): "picamera" for CSI camera (default), "usb" for USB camera.
+            camera_type (str): "jetson" for Jetson CSI, "picamera" for CSI camera (RPi), "usb" for USB camera.
             usb_device (int|str): USB device index or path (e.g. 0, 2, "/dev/video0").
             usb_resolution (tuple): (width, height) for USB camera. Default (640, 480).
     """
@@ -64,6 +64,9 @@ class processCamera(WorkerProcess):
     # ====================================== INIT ==========================================
     def __init__(self, queueList, logging, ready_event=None, debugging=False,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
+                 jetson_sensor_id=0, jetson_capture_resolution=(1920, 1080),
+                 jetson_output_resolution=(960, 720), jetson_framerate=30,
+                 jetson_flip_method=0,
                  show_preview=False, debug_windows=None,
                  picamera_hdr_enabled=True, picamera_hdr_always_on=False,
                  picamera_hdr_glare_threshold=0.04,
@@ -77,6 +80,11 @@ class processCamera(WorkerProcess):
         self.camera_type = camera_type
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
+        self.jetson_sensor_id = jetson_sensor_id
+        self.jetson_capture_resolution = jetson_capture_resolution
+        self.jetson_output_resolution = jetson_output_resolution
+        self.jetson_framerate = jetson_framerate
+        self.jetson_flip_method = jetson_flip_method
         self.show_preview = show_preview
         self.debug_windows = debug_windows or {}
         self.picamera_hdr_enabled = picamera_hdr_enabled
@@ -120,6 +128,11 @@ class processCamera(WorkerProcess):
          show_preview=show_cam_preview,
          camera_type=self.camera_type, usb_device=self.usb_device,
          usb_resolution=self.usb_resolution,
+         jetson_sensor_id=self.jetson_sensor_id,
+         jetson_capture_resolution=self.jetson_capture_resolution,
+         jetson_output_resolution=self.jetson_output_resolution,
+         jetson_framerate=self.jetson_framerate,
+         jetson_flip_method=self.jetson_flip_method,
          picamera_hdr_enabled=self.picamera_hdr_enabled,
          picamera_hdr_always_on=self.picamera_hdr_always_on,
          picamera_hdr_glare_threshold=self.picamera_hdr_glare_threshold,
