@@ -187,6 +187,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     { key: 'adaptive_white_percentile', label: 'Percentil Blanco', min: 80, max: 98, step: 1, value: 92, group: 'adaptive' },
     { key: 'adaptive_white_min_threshold', label: 'Umbral Mín Blanco', min: 150, max: 220, step: 5, value: 180, group: 'adaptive' },
     { key: 'gradient_percentile', label: 'Percentil Gradiente', min: 75, max: 95, step: 1, value: 85, group: 'adaptive' },
+    { key: 'use_center_noise_guard', label: 'Guardia Centro (0/1)', min: 0, max: 1, step: 1, value: 1, group: 'adaptive' },
+    { key: 'center_noise_guard_width_ratio', label: 'Ancho Guardia Centro', min: 0.0, max: 0.5, step: 0.02, value: 0.22, group: 'adaptive' },
+    { key: 'center_noise_guard_start_ratio', label: 'Inicio Guardia (ROI)', min: 0.0, max: 1.0, step: 0.05, value: 0.55, group: 'adaptive' },
+    { key: 'center_noise_guard_extra_threshold', label: 'Boost Umbral Centro', min: 0, max: 60, step: 2, value: 18, group: 'adaptive' },
+    { key: 'center_noise_guard_hard_zero', label: 'Centro a Negro (0/1)', min: 0, max: 1, step: 1, value: 0, group: 'adaptive' },
     // Curve recovery
     { key: 'recovery_max_steer_frames', label: 'Frames Max Giro', min: 2, max: 15, step: 1, value: 6, group: 'recovery' },
     { key: 'recovery_reverse_speed', label: 'Velocidad Reversa', min: -20, max: -3, step: 1, value: -8, group: 'recovery' },
@@ -595,7 +600,10 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       binary_threshold: 165, binary_threshold_retry: 90, line_angle_filter: 30, line_merge_distance: 175,
       clahe_clip_limit: 2.0, clahe_grid_size: 8,
       adaptive_white_percentile: 92, adaptive_white_min_threshold: 180,
-      gradient_percentile: 85
+      gradient_percentile: 85,
+      use_center_noise_guard: 1, center_noise_guard_width_ratio: 0.22,
+      center_noise_guard_start_ratio: 0.55, center_noise_guard_extra_threshold: 18,
+      center_noise_guard_hard_zero: 0
     };
     
     for (const slider of this.sliders) {
