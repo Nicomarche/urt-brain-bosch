@@ -30,6 +30,7 @@ import cv2
 import threading
 import base64
 import time
+import numpy as np
 
 try:
     import picamera2
@@ -78,6 +79,20 @@ class threadCamera(ThreadWithStop):
         self.usb_resolution = usb_resolution
 
         self.video_writer = ""
+
+        # PiCamera adaptive exposure controls (robustness against direct sunlight).
+        self._picamera_control_lock = threading.RLock()
+        self._picamera_brightness = 0.0  # libcamera range: [-1.0, 1.0], 0.0 = neutral
+        self._picamera_contrast = 1.0    # neutral contrast
+        self._picamera_ev_supported = True
+        self._picamera_control_warning_printed = False
+        self._ae_current_ev = 0.0
+        self._ae_target_ev = 0.0
+        self._ae_update_interval_s = 0.25
+        self._ae_last_update_ts = 0.0
+        self._ae_step = 0.15
+        self._ae_min_ev = -2.5
+        self._ae_max_ev = 1.0
 
         self.recordingSender = messageHandlerSender(self.queuesList, Recording)
         self.mainCameraSender = messageHandlerSender(self.queuesList, mainCamera)
@@ -142,6 +157,9 @@ class threadCamera(ThreadWithStop):
             if mainRequest is None or serialRequest is None:
                 return
 
+            if self.camera_type == "picamera":
+                self._update_picamera_auto_exposure(serialRequest)
+
             if self.recording == True:
                 self.video_writer.write(mainRequest) # type: ignore
 
@@ -170,6 +188,104 @@ class threadCamera(ThreadWithStop):
         serialRequest = self.camera.capture_array("lores")
         serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420)  # type: ignore
         return mainRequest, serialRequest
+
+    def _normalize_picamera_brightness(self, value):
+        """Normalize dashboard brightness to libcamera range [-1, 1]."""
+        v = float(value)
+        # Legacy dashboard slider sends 0..1 (after dividing 0..100 by 100).
+        if 0.0 <= v <= 1.0:
+            v = (v * 2.0) - 1.0
+        return max(-1.0, min(1.0, v))
+
+    def _normalize_picamera_contrast(self, value):
+        """Normalize contrast to a safe practical range [0.5, 2.0]."""
+        v = float(value)
+        if v <= 0.0:
+            return 1.0
+        # Legacy dashboard slider can send up to 32.0 (0..3200 / 100).
+        if v > 4.0:
+            v = v / 16.0
+        return max(0.5, min(2.0, v))
+
+    def _apply_picamera_controls(self):
+        """Apply PiCamera controls with AE/AWB enabled for dynamic lighting."""
+        if self.camera_type != "picamera" or self.camera is None:
+            return
+
+        with self._picamera_control_lock:
+            controls = {
+                "AeEnable": True,
+                "AwbEnable": True,
+                "Brightness": float(self._picamera_brightness),
+                "Contrast": float(self._picamera_contrast),
+            }
+            if self._picamera_ev_supported:
+                controls["ExposureValue"] = float(self._ae_current_ev)
+
+            try:
+                self.camera.set_controls(controls)
+                return
+            except Exception as e:
+                # Fallback if ExposureValue is not supported by this sensor/driver.
+                if "ExposureValue" in controls and self._picamera_ev_supported:
+                    self._picamera_ev_supported = False
+                    controls.pop("ExposureValue", None)
+                    try:
+                        self.camera.set_controls(controls)
+                        print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mWARNING\033[0m - ExposureValue control not supported on this PiCamera. Keeping AE/AWB enabled.")
+                        return
+                    except Exception as fallback_err:
+                        if not self._picamera_control_warning_printed:
+                            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to apply PiCamera controls: {fallback_err}")
+                            self._picamera_control_warning_printed = True
+                        return
+
+                if not self._picamera_control_warning_printed:
+                    print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to apply PiCamera controls: {e}")
+                    self._picamera_control_warning_printed = True
+
+    def _update_picamera_auto_exposure(self, frame):
+        """Dynamically adapt EV for strong glare while keeping AE active."""
+        if self.camera_type != "picamera" or self.camera is None:
+            return
+
+        now = time.time()
+        if now - self._ae_last_update_ts < self._ae_update_interval_s:
+            return
+        self._ae_last_update_ts = now
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        p90 = float(np.percentile(gray, 90))
+        p99 = float(np.percentile(gray, 99))
+        saturated_ratio = float(np.mean(gray >= 245))
+        dark_ratio = float(np.mean(gray <= 20))
+
+        with self._picamera_control_lock:
+            target = self._ae_target_ev
+
+            # Overexposure handling (direct sun / glare).
+            if saturated_ratio > 0.10 or p99 > 252:
+                target -= 0.35
+            elif saturated_ratio > 0.05 or p90 > 220:
+                target -= 0.15
+            # Underexposure recovery.
+            elif dark_ratio > 0.45 and p90 < 110:
+                target += 0.15
+            else:
+                # Relax towards neutral when scene is balanced.
+                target *= 0.9
+
+            target = max(self._ae_min_ev, min(self._ae_max_ev, target))
+            self._ae_target_ev = target
+
+            delta = self._ae_target_ev - self._ae_current_ev
+            if abs(delta) < 0.03:
+                return
+
+            step = max(-self._ae_step, min(self._ae_step, delta))
+            self._ae_current_ev = max(self._ae_min_ev, min(self._ae_max_ev, self._ae_current_ev + step))
+
+        self._apply_picamera_controls()
 
     def _capture_usb(self):
         """Wait for a new frame from the USB reader thread, then return it.
@@ -233,6 +349,7 @@ class threadCamera(ThreadWithStop):
             )
             self.camera.configure(config) # type: ignore
             self.camera.start()
+            self._apply_picamera_controls()
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - PiCamera initialized successfully")
         except Exception as e:
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to initialize PiCamera: {e}")
@@ -395,7 +512,7 @@ class threadCamera(ThreadWithStop):
     # =============================== CONFIG ==============================================
     def configs(self):
         """Callback function for receiving configs on the pipe.
-        Note: Brightness/Contrast controls only work with PiCamera (picamera2 API).
+        Note: Brightness/Contrast controls currently apply to PiCamera (picamera2 API).
         USB cameras ignore these for now (could be extended with cv2.VideoCapture props).
         """
         if self._blocker.is_set():
@@ -405,23 +522,15 @@ class threadCamera(ThreadWithStop):
             if self.debugger:
                 self.logger.info(str(message))
             if self.camera_type == "picamera" and self.camera is not None:
-                self.camera.set_controls(
-                    {
-                        "AeEnable": False,
-                        "AwbEnable": False,
-                        "Brightness": max(0.0, min(1.0, float(message))), # type: ignore
-                    }
-                )
+                with self._picamera_control_lock:
+                    self._picamera_brightness = self._normalize_picamera_brightness(message)
+                self._apply_picamera_controls()
         if self.contrastSubscriber.is_data_in_pipe():
             message = self.contrastSubscriber.receive()
             if self.debugger:
                 self.logger.info(str(message))
             if self.camera_type == "picamera" and self.camera is not None:
-                self.camera.set_controls(
-                    {
-                        "AeEnable": False,
-                        "AwbEnable": False,
-                        "Contrast": max(0.0, min(32.0, float(message))), # type: ignore
-                    }
-                )
+                with self._picamera_control_lock:
+                    self._picamera_contrast = self._normalize_picamera_contrast(message)
+                self._apply_picamera_controls()
         threading.Timer(1, self.configs).start()
