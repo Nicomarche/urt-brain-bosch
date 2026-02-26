@@ -61,7 +61,7 @@ DEBUG_WINDOWS = {
 ENABLE_SIGN_DETECTION = True
 
 # URL WebSocket del AI Server (endpoint de senales de trafico)
-SIGN_SERVER_URL = "ws://192.168.1.50:8500/ws/signs"
+SIGN_SERVER_URL = "ws://localhost:8500/ws/signs"
 
 # Ejecutar acciones al detectar senales (stop, reducir velocidad, etc.)
 # False = solo detecta y publica (modo seguro para testing)
