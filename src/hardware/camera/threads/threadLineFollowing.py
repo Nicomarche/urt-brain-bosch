@@ -271,6 +271,11 @@ Args:
         # If the car overshoots past center and hits the opposite line, lower this.
         # If the car hugs the visible line too closely, raise this.
         self.single_line_offset_factor = 0.42
+        # Single-line heading calibration: compensates perspective bias so 1-line mode
+        # stays close to 0 steering when the car is centered on straight segments.
+        self.single_line_heading_ref_alpha = 0.15
+        self._single_line_heading_ref_left = 0.0
+        self._single_line_heading_ref_right = 0.0
 
         # Sensor feedback state (populated from Nucleo via message queue)
         self._measured_speed = 0.0       # Last speed reading from encoder
@@ -934,6 +939,8 @@ Args:
         self._init_error_kalman()
         self._heading_error = 0.0
         self._yaw_rate = 0.0
+        self._single_line_heading_ref_left = 0.0
+        self._single_line_heading_ref_right = 0.0
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
             del self.last_steering
@@ -1993,6 +2000,19 @@ Args:
         self._heading_error = heading
         return heading
 
+    def _compute_raw_line_heading(self, line):
+        """Compute raw heading angle from a single line (radians)."""
+        if line is None:
+            return 0.0
+        x1, y1, x2, y2 = line[0]
+        if y1 < y2:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        dx = x2 - x1
+        dy_up = y1 - y2
+        if dy_up > 1:
+            return math.atan2(dx, dy_up)
+        return 0.0
+
     def _read_sensor_data(self):
         """Read IMU and speed feedback from Nucleo for Stanley controller.
 
@@ -2028,7 +2048,7 @@ Args:
             except (ValueError, TypeError):
                 pass
 
-    def _compute_single_line_error(self, line, side, img_h, img_w):
+    def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False):
         """Compute crosstrack error from a single lane line using known lane width.
 
         Uses the 35cm lane width to estimate where the lane center should be:
@@ -2063,8 +2083,9 @@ Args:
             # Fallback: lane (35cm) typically spans ~45% of image width at bottom
             px_per_cm = (img_w * 0.45) / self.lane_width_cm
 
-        # Offset = fraction of lane width toward the opposite side
-        offset_px = self.lane_width_cm * self.single_line_offset_factor * px_per_cm
+        # On a fresh 2→1 transition, target true lane center to avoid steering jumps.
+        offset_factor = 0.5 if prefer_center else self.single_line_offset_factor
+        offset_px = self.lane_width_cm * offset_factor * px_per_cm
 
         if side == 'left':
             desired_center = bottom_x + offset_px
@@ -2074,13 +2095,11 @@ Args:
         error = desired_center - (img_w / 2.0)
 
         # Heading from single line (dampened — less reliable than two-line)
-        dx = x2 - x1
-        dy_up = y1 - y2
-        if dy_up > 1:
-            raw_angle = math.atan2(dx, dy_up)
-            heading = raw_angle * 0.3
-        else:
-            heading = 0.0
+        raw_angle = self._compute_raw_line_heading(line)
+        ref_angle = self._single_line_heading_ref_left if side == 'left' else self._single_line_heading_ref_right
+        # Remove static perspective bias from single-line heading.
+        heading_gain = 0.2 if prefer_center else 0.3
+        heading = (raw_angle - ref_angle) * heading_gain
 
         return error, heading
 
@@ -3914,6 +3933,8 @@ Returns:
         if self.use_swept_path:
             self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
+        prev_seen_side = self.last_seen_side
+
         if avg_left is not None and avg_right is not None:
             # ---- BOTH LINES DETECTED ----
             # BFMC logic: if just_seen_two_lines was False, skip this frame (stabilize)
@@ -3921,6 +3942,19 @@ Returns:
                 error, midpoint_x, bottom_left_x, bottom_right_x = self._bfmc_get_error(
                     avg_left, avg_right, img_h, img_w
                 )
+
+                # Calibrate single-line heading references from stable two-line geometry.
+                alpha = max(0.01, min(1.0, self.single_line_heading_ref_alpha))
+                left_raw_heading = self._compute_raw_line_heading(avg_left)
+                right_raw_heading = self._compute_raw_line_heading(avg_right)
+                self._single_line_heading_ref_left = (
+                    (1.0 - alpha) * self._single_line_heading_ref_left + alpha * left_raw_heading
+                )
+                self._single_line_heading_ref_right = (
+                    (1.0 - alpha) * self._single_line_heading_ref_right + alpha * right_raw_heading
+                )
+                debug_info['single_heading_ref_l'] = self._single_line_heading_ref_left
+                debug_info['single_heading_ref_r'] = self._single_line_heading_ref_right
 
                 # === SWEPT PATH CURVE PREDICTION ===
                 # Use real car dimensions to predict if the car fits in the curve.
@@ -4001,7 +4035,8 @@ Returns:
             else:
                 # Base one-line estimate from visible lane geometry
                 sl_error, sl_heading = self._compute_single_line_error(
-                    avg_left, 'left', img_h, img_w
+                    avg_left, 'left', img_h, img_w,
+                    prefer_center=(prev_seen_side == "both")
                 )
                 error = sl_error
 
@@ -4085,7 +4120,8 @@ Returns:
             else:
                 # Base one-line estimate from visible lane geometry
                 sl_error, sl_heading = self._compute_single_line_error(
-                    avg_right, 'right', img_h, img_w
+                    avg_right, 'right', img_h, img_w,
+                    prefer_center=(prev_seen_side == "both")
                 )
                 error = sl_error
 
