@@ -73,6 +73,7 @@ from config import (
     STREAM_CAMERA_TO_DASHBOARD, DEBUG_WINDOWS,
     ENABLE_SIGN_DETECTION, SIGN_DETECTION_ACTIONS, SIGN_MIN_CONFIDENCE,
     SIGN_SERVER_URL, SIGN_MIN_BOX_AREA, SIGN_ACTION_COOLDOWN,
+    PICAMERA_HDR_ENABLED, PICAMERA_HDR_ALWAYS_ON, PICAMERA_HDR_GLARE_THRESHOLD,
 )
 
 # ------ New component imports starts here ------#
@@ -155,6 +156,9 @@ processCamera = processCamera(queueList, logging, camera_ready, debugging = Fals
                                usb_resolution=USB_RESOLUTION,
                                show_preview=SHOW_CAMERA_PREVIEW,
                                debug_windows=DEBUG_WINDOWS,
+                               picamera_hdr_enabled=PICAMERA_HDR_ENABLED,
+                               picamera_hdr_always_on=PICAMERA_HDR_ALWAYS_ON,
+                               picamera_hdr_glare_threshold=PICAMERA_HDR_GLARE_THRESHOLD,
                                enable_sign_detection=ENABLE_SIGN_DETECTION,
                                sign_detection_actions=SIGN_DETECTION_ACTIONS,
                                sign_min_confidence=SIGN_MIN_CONFIDENCE,

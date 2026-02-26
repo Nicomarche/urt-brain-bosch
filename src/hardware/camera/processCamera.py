@@ -65,6 +65,8 @@ class processCamera(WorkerProcess):
     def __init__(self, queueList, logging, ready_event=None, debugging=False,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
                  show_preview=False, debug_windows=None,
+                 picamera_hdr_enabled=True, picamera_hdr_always_on=False,
+                 picamera_hdr_glare_threshold=0.04,
                  enable_sign_detection=True, sign_detection_actions=False,
                  sign_min_confidence=0.50, sign_server_url="ws://172.20.10.4:8500/ws/signs",
                  sign_min_box_area=0.01,
@@ -77,6 +79,9 @@ class processCamera(WorkerProcess):
         self.usb_resolution = usb_resolution
         self.show_preview = show_preview
         self.debug_windows = debug_windows or {}
+        self.picamera_hdr_enabled = picamera_hdr_enabled
+        self.picamera_hdr_always_on = picamera_hdr_always_on
+        self.picamera_hdr_glare_threshold = picamera_hdr_glare_threshold
         self.enable_sign_detection = enable_sign_detection
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
@@ -114,7 +119,10 @@ class processCamera(WorkerProcess):
          self.queuesList, self.logging, self.debugging,
          show_preview=show_cam_preview,
          camera_type=self.camera_type, usb_device=self.usb_device,
-         usb_resolution=self.usb_resolution
+         usb_resolution=self.usb_resolution,
+         picamera_hdr_enabled=self.picamera_hdr_enabled,
+         picamera_hdr_always_on=self.picamera_hdr_always_on,
+         picamera_hdr_glare_threshold=self.picamera_hdr_glare_threshold,
         )
         self.threads.append(camTh)
         

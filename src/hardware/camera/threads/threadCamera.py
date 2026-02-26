@@ -62,11 +62,16 @@ class threadCamera(ThreadWithStop):
         camera_type (str): "picamera" for CSI camera (default), "usb" for USB camera via OpenCV.
         usb_device (int|str): USB camera device index or path (e.g. 0, 2, "/dev/video0"). Only used when camera_type="usb".
         usb_resolution (tuple): (width, height) for USB camera. Default (640, 480).
+        picamera_hdr_enabled (bool): Enable Mertens HDR fusion on PiCamera lores stream.
+        picamera_hdr_always_on (bool): Apply HDR on every frame. If False, only when glare is detected.
+        picamera_hdr_glare_threshold (float): Saturated pixel ratio threshold to trigger HDR.
     """
 
     # ================================ INIT ===============================================
     def __init__(self, queuesList, logger, debugger, show_preview=False,
-                 camera_type="picamera", usb_device=0, usb_resolution=(640, 480)):
+                 camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
+                 picamera_hdr_enabled=True, picamera_hdr_always_on=False,
+                 picamera_hdr_glare_threshold=0.04):
         super(threadCamera, self).__init__(pause=0.1)  # 10 FPS — suficiente para line following a ~5 FPS y dashboard
         self.queuesList = queuesList
         self.logger = logger
@@ -77,6 +82,9 @@ class threadCamera(ThreadWithStop):
         self.camera_type = camera_type
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
+        self.picamera_hdr_enabled = bool(picamera_hdr_enabled and camera_type == "picamera")
+        self.picamera_hdr_always_on = bool(picamera_hdr_always_on)
+        self.picamera_hdr_glare_threshold = max(0.0, min(1.0, float(picamera_hdr_glare_threshold)))
 
         self.video_writer = ""
 
@@ -93,6 +101,21 @@ class threadCamera(ThreadWithStop):
         self._ae_step = 0.15
         self._ae_min_ev = -2.5
         self._ae_max_ev = 1.0
+
+        # Mertens HDR fusion on low-resolution stream (for line following/sign detection).
+        self._picamera_hdr_warning_printed = False
+        self._picamera_hdr_dark_alpha = 0.65
+        self._picamera_hdr_dark_beta = -20
+        self._picamera_hdr_bright_alpha = 1.35
+        self._picamera_hdr_bright_beta = 16
+        self._picamera_mertens = None
+        if self.picamera_hdr_enabled:
+            try:
+                self._picamera_mertens = cv2.createMergeMertens(1.0, 1.0, 0.0)  # type: ignore
+            except Exception as e:
+                self._picamera_mertens = None
+                self.picamera_hdr_enabled = False
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mWARNING\033[0m - Failed to initialize Mertens HDR, disabling HDR: {e}")
 
         self.recordingSender = messageHandlerSender(self.queuesList, Recording)
         self.mainCameraSender = messageHandlerSender(self.queuesList, mainCamera)
@@ -159,6 +182,7 @@ class threadCamera(ThreadWithStop):
 
             if self.camera_type == "picamera":
                 self._update_picamera_auto_exposure(serialRequest)
+                serialRequest = self._apply_picamera_hdr(serialRequest)
 
             if self.recording == True:
                 self.video_writer.write(mainRequest) # type: ignore
@@ -188,6 +212,41 @@ class threadCamera(ThreadWithStop):
         serialRequest = self.camera.capture_array("lores")
         serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420)  # type: ignore
         return mainRequest, serialRequest
+
+    def _should_apply_picamera_hdr(self, frame):
+        """Decide whether HDR fusion is needed based on glare saturation."""
+        if not self.picamera_hdr_enabled or self._picamera_mertens is None:
+            return False
+        if self.picamera_hdr_always_on:
+            return True
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        saturated_ratio = float(np.mean(gray >= 245))
+        p99 = float(np.percentile(gray, 99))
+        return saturated_ratio >= self.picamera_hdr_glare_threshold or p99 >= 250.0
+
+    def _apply_picamera_hdr(self, frame):
+        """Apply Mertens exposure fusion using synthetic brackets from the same frame."""
+        if not self._should_apply_picamera_hdr(frame):
+            return frame
+        try:
+            frame_f = frame.astype(np.float32)
+            dark = np.clip(
+                frame_f * self._picamera_hdr_dark_alpha + self._picamera_hdr_dark_beta,
+                0,
+                255,
+            ).astype(np.uint8)
+            bright = np.clip(
+                frame_f * self._picamera_hdr_bright_alpha + self._picamera_hdr_bright_beta,
+                0,
+                255,
+            ).astype(np.uint8)
+            fusion = self._picamera_mertens.process([dark, frame, bright])  # type: ignore
+            return np.clip(fusion * 255.0, 0, 255).astype(np.uint8)
+        except Exception as e:
+            if not self._picamera_hdr_warning_printed:
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mWARNING\033[0m - HDR fusion failed, using base frame: {e}")
+                self._picamera_hdr_warning_printed = True
+            return frame
 
     def _normalize_picamera_brightness(self, value):
         """Normalize dashboard brightness to libcamera range [-1, 1]."""
@@ -350,6 +409,9 @@ class threadCamera(ThreadWithStop):
             self.camera.configure(config) # type: ignore
             self.camera.start()
             self._apply_picamera_controls()
+            if self.picamera_hdr_enabled:
+                mode = "always-on" if self.picamera_hdr_always_on else f"glare-threshold={self.picamera_hdr_glare_threshold:.2f}"
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - PiCamera HDR (Mertens) enabled ({mode})")
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - PiCamera initialized successfully")
         except Exception as e:
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to initialize PiCamera: {e}")

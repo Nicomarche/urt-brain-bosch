@@ -13,6 +13,18 @@ CAMERA_TYPE = "picamera"
 USB_DEVICE = 1  # /dev/video9 (USB Camera-B4.09.24.1)
 USB_RESOLUTION = (640, 480)  # (ancho, alto)
 
+# HDR por fusion de exposiciones (Mertens) para PiCamera.
+# Se aplica sobre el stream lores (640x384) usado por line following/sign detection.
+# Default: activado para mejorar robustez en contraluz/sol directo.
+PICAMERA_HDR_ENABLED = True
+
+# Si True, aplica HDR en todos los frames. Si False, solo cuando detecta glare/saturacion.
+PICAMERA_HDR_ALWAYS_ON = False
+
+# Umbral de pixeles muy brillantes (0.0-1.0) para activar HDR cuando ALWAYS_ON=False.
+# Ejemplo 0.04 = 4% de pixeles saturados.
+PICAMERA_HDR_GLARE_THRESHOLD = 0.04
+
 # Transmitir video de la camara al dashboard web (consume CPU por JPEG encode + base64).
 # False = no envia video al browser (ahorra CPU), True = stream en vivo en la web
 STREAM_CAMERA_TO_DASHBOARD = False
