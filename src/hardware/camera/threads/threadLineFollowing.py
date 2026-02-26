@@ -403,13 +403,7 @@ Args:
         self.use_strip_threshold = True
         self.strip_cols = 6                   # Number of vertical strips (more = finer adaptation)
         self.strip_rows = 2                   # Number of horizontal bands (1 = columns only)
-        # Center-noise guard: prevent adaptive threshold from locking on dark-road texture
-        # in the middle of the lane (common with glossy/asphalt imperfections).
-        self.use_center_noise_guard = True
-        self.center_noise_guard_width_ratio = 0.22    # Width of protected center band (0-1 of image width)
-        self.center_noise_guard_start_ratio = 0.55    # Start Y inside ROI (0=top ROI, 1=bottom ROI)
-        self.center_noise_guard_extra_threshold = 18  # Extra threshold boost inside guarded area
-        self.center_noise_guard_hard_zero = False     # Force center band to black in binary output
+        self.strip_threshold_relax = 0        # Max points strips can go BELOW global threshold
 
         # Detection mode parameters
         self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
@@ -2060,33 +2054,12 @@ Args:
         if needs_debug:
             debug_info['grey'] = grey_image.copy()
 
-        # Center guard geometry (used to avoid adapting on center-road imperfections)
-        use_center_guard = (
-            self.use_center_noise_guard
-            and self.center_noise_guard_width_ratio > 0
-            and y_end > y_start
-        )
-        guard_x1 = guard_x2 = guard_y1 = None
-        if use_center_guard:
-            guard_w = int(width * max(0.0, min(0.9, float(self.center_noise_guard_width_ratio))))
-            guard_w = max(1, guard_w)
-            guard_x1 = max(0, (width - guard_w) // 2)
-            guard_x2 = min(width, guard_x1 + guard_w)
-            guard_y1 = y_start + int((y_end - y_start) * max(0.0, min(1.0, float(self.center_noise_guard_start_ratio))))
-            guard_y1 = max(y_start, min(y_end, guard_y1))
-
         # 3. Binary threshold (global + local adaptive)
         if threshold_override is not None:
             threshold_val = threshold_override
         elif self.use_auto_threshold:
             roi_pixels = grey_image[y_start:y_end, :]
-            roi_samples = roi_pixels.reshape(-1)
-            if use_center_guard and guard_y1 < y_end and guard_x1 < guard_x2:
-                guard_local_y = guard_y1 - y_start
-                stats_mask = np.ones(roi_pixels.shape, dtype=bool)
-                stats_mask[guard_local_y:, guard_x1:guard_x2] = False
-                roi_samples = roi_pixels[stats_mask]
-            nonzero = roi_samples[roi_samples > 0]
+            nonzero = roi_pixels[roi_pixels > 0]
             if len(nonzero) > 100:
                 raw_thresh = np.percentile(nonzero, self.auto_threshold_percentile)
                 raw_thresh = max(self.auto_threshold_min, min(self.auto_threshold_max, raw_thresh))
@@ -2109,54 +2082,24 @@ Args:
                     ex = min(width, sx + strip_w) if col < self.strip_cols - 1 else width
 
                     strip = grey_image[sy:ey, sx:ex]
-                    strip_samples = strip.reshape(-1)
-                    overlaps_center_guard = False
-                    if (
-                        use_center_guard
-                        and guard_y1 < ey and sy < y_end
-                        and sx < guard_x2 and ex > guard_x1
-                        and ey > guard_y1
-                    ):
-                        overlaps_center_guard = True
-                        guard_local_y = max(0, guard_y1 - sy)
-                        guard_local_x1 = max(0, guard_x1 - sx)
-                        guard_local_x2 = min(strip.shape[1], guard_x2 - sx)
-                        if guard_local_y < strip.shape[0] and guard_local_x1 < guard_local_x2:
-                            sample_mask = np.ones(strip.shape, dtype=bool)
-                            sample_mask[guard_local_y:, guard_local_x1:guard_local_x2] = False
-                            strip_samples = strip[sample_mask]
-
-                    nonzero = strip_samples[strip_samples > 10]
+                    nonzero = strip[strip > 10]
                     if len(nonzero) > 50:
                         p = float(np.percentile(nonzero, self.auto_threshold_percentile))
                         mu = float(np.mean(nonzero))
                         sigma = float(np.std(nonzero))
                         noise_floor = mu + 1.5 * sigma
                         st = max(noise_floor, p * 0.85)
-                        st = max(80.0, min(float(self.auto_threshold_max), st))
+                        strip_floor = float(max(0, int(threshold_val) - int(self.strip_threshold_relax)))
+                        st = max(strip_floor, min(float(self.auto_threshold_max), st))
                     else:
                         st = float(threshold_val)
-                    if overlaps_center_guard:
-                        st = max(st, float(threshold_val + self.center_noise_guard_extra_threshold))
-                        st = min(float(self.auto_threshold_max), st)
                     _, strip_bin = cv2.threshold(strip, int(st), 255, cv2.THRESH_BINARY)
                     binary_image[sy:ey, sx:ex] = strip_bin
         else:
             _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
 
-        # Optional hard suppression: force center guard to black in lower ROI
-        if (
-            use_center_guard
-            and self.center_noise_guard_hard_zero
-            and guard_y1 < y_end
-            and guard_x1 < guard_x2
-        ):
-            binary_image[guard_y1:y_end, guard_x1:guard_x2] = 0
-
         if needs_debug:
             debug_info['binary'] = binary_image.copy()
-        if use_center_guard:
-            debug_info['center_guard'] = (guard_x1, guard_y1, guard_x2, y_end)
 
         # 4. Median blur
         noiseless = cv2.medianBlur(binary_image, kernel_val)
@@ -3473,8 +3416,7 @@ Returns:
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
                          'use_auto_threshold', 'auto_threshold_percentile',
                          'auto_threshold_min', 'auto_threshold_max',
-                         'use_center_noise_guard', 'center_noise_guard_extra_threshold',
-                         'center_noise_guard_hard_zero',
+                         'strip_threshold_relax',
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
                          'use_swept_path', 'curve_speed_reduction',
@@ -3505,10 +3447,7 @@ Returns:
                      'use_gradient_fallback', 'gradient_percentile',
                      'use_auto_threshold', 'auto_threshold_percentile',
                      'auto_threshold_min', 'auto_threshold_max',
-                     'use_strip_threshold', 'strip_cols', 'strip_rows',
-                     'use_center_noise_guard', 'center_noise_guard_width_ratio',
-                     'center_noise_guard_start_ratio', 'center_noise_guard_extra_threshold',
-                     'center_noise_guard_hard_zero',
+                     'use_strip_threshold', 'strip_cols', 'strip_rows', 'strip_threshold_relax',
                      # Detection mode
                      'detection_mode', 'lstr_model_size',
                      # Debug streaming
@@ -3854,13 +3793,6 @@ Returns:
                 bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
                 cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                guard = debug_info.get('center_guard')
-                if guard is not None:
-                    gx1, gy1, gx2, gy2 = guard
-                    if gy1 < gy2 and gx1 < gx2:
-                        cv2.rectangle(bin_display, (gx1, gy1), (gx2, gy2), (255, 0, 255), 1)
-                        cv2.putText(bin_display, "Center guard", (gx1 + 4, max(12, gy1 - 6)),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
                 cv2.imshow("2. Binary Threshold", bin_display)
             if self._is_window_enabled("canny_edges") and 'canny' in debug_info:
                 cv2.imshow("3. Canny Edges", debug_info['canny'])
