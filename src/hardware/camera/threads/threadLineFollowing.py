@@ -279,6 +279,18 @@ Args:
         self._yaw_rate = 0.0             # Computed yaw rate (rad/s)
         self._last_imu_time = None       # Timestamp of last IMU reading
         self._heading_error = 0.0        # Last computed heading error (rad)
+        # Kalman filter for crosstrack error (robust when lanes flicker due to glare/shadows)
+        self.use_kalman_filter = True
+        self.kalman_process_noise = 0.04
+        self.kalman_measurement_noise = 25.0
+        self.kalman_max_prediction_frames = 4
+        self.kalman_prediction_damping = 0.92
+        self._kalman_error = cv2.KalmanFilter(2, 1)
+        self._kalman_initialized = False
+        self._kalman_last_ts = None
+        self._kalman_prediction = 0.0
+        self._kalman_age_frames = 0
+        self._init_error_kalman()
 
         # ============= Car Physical Dimensions (cm) =============
         # Measured from the actual BFMC 1:10 scale car (Bosch)
@@ -919,6 +931,7 @@ Args:
         """Reset PID/Stanley state when changing modes to prevent corrupted values."""
         self.pid.reset()
         self.stanley.reset()
+        self._init_error_kalman()
         self._heading_error = 0.0
         self._yaw_rate = 0.0
         self.previous_error = 0
@@ -929,6 +942,70 @@ Args:
         self.last_turn_direction = 0
         self._hybridnets_frame_count = 0
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset (P/I/D cleared)")
+
+    def _init_error_kalman(self):
+        """Initialize 1D Kalman filter for lateral error (state: error + error velocity)."""
+        q = max(1e-5, float(self.kalman_process_noise))
+        r = max(1e-3, float(self.kalman_measurement_noise))
+
+        self.kalman_prediction_damping = max(0.0, min(0.999, float(self.kalman_prediction_damping)))
+        self.kalman_max_prediction_frames = max(0, int(self.kalman_max_prediction_frames))
+
+        self._kalman_error.transitionMatrix = np.array([[1.0, 0.05], [0.0, self.kalman_prediction_damping]], dtype=np.float32)
+        self._kalman_error.measurementMatrix = np.array([[1.0, 0.0]], dtype=np.float32)
+        self._kalman_error.processNoiseCov = np.array([[q, 0.0], [0.0, q * 3.0]], dtype=np.float32)
+        self._kalman_error.measurementNoiseCov = np.array([[r]], dtype=np.float32)
+        self._kalman_error.errorCovPost = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+        self._kalman_error.statePost = np.zeros((2, 1), dtype=np.float32)
+        self._kalman_error.statePre = np.zeros((2, 1), dtype=np.float32)
+
+        self._kalman_initialized = False
+        self._kalman_last_ts = None
+        self._kalman_prediction = 0.0
+        self._kalman_age_frames = 0
+
+    def _kalman_predict_error(self):
+        """Predict crosstrack error for current frame when measurements are unavailable."""
+        if not self.use_kalman_filter or not self._kalman_initialized:
+            return None
+
+        now = time.time()
+        if self._kalman_last_ts is None:
+            dt = 0.05
+        else:
+            dt = max(0.02, min(now - self._kalman_last_ts, 0.25))
+        self._kalman_last_ts = now
+
+        self._kalman_error.transitionMatrix[0, 1] = dt
+        self._kalman_error.transitionMatrix[1, 1] = self.kalman_prediction_damping
+
+        prediction = self._kalman_error.predict()
+        self._kalman_prediction = float(prediction[0, 0])
+        self._kalman_age_frames += 1
+        return self._kalman_prediction
+
+    def _kalman_correct_error(self, measured_error):
+        """Correct Kalman state with measured crosstrack error and return filtered value."""
+        measured = float(measured_error)
+        if not self.use_kalman_filter:
+            return measured
+
+        now = time.time()
+        if not self._kalman_initialized:
+            self._kalman_error.statePost = np.array([[measured], [0.0]], dtype=np.float32)
+            self._kalman_error.statePre = self._kalman_error.statePost.copy()
+            self._kalman_initialized = True
+            self._kalman_last_ts = now
+            self._kalman_prediction = measured
+            self._kalman_age_frames = 0
+            return measured
+
+        correction = self._kalman_error.correct(np.array([[measured]], dtype=np.float32))
+        filtered = float(correction[0, 0])
+        self._kalman_prediction = filtered
+        self._kalman_age_frames = 0
+        self._kalman_last_ts = now
+        return filtered
 
     @property
     def _needs_debug(self):
@@ -2308,6 +2385,12 @@ Args:
         r_count = len(debug_info.get('right_lines', []))
         cv2.putText(debug, f"Thr:{th} L:{l_count} R:{r_count}", (8, 52),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+        kalman_error = debug_info.get('kalman_error')
+        if kalman_error is not None:
+            k_age = int(debug_info.get('kalman_age', 0))
+            k_mode = "P" if bool(debug_info.get('kalman_predicted', False)) else "C"
+            cv2.putText(debug, f"K:{k_mode} e={kalman_error:.0f}px a={k_age}", (165, 52),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 255, 180), 1)
 
         # === SWEPT PATH VISUALIZATION ===
         swept = self._swept_path_info
@@ -3395,7 +3478,8 @@ Returns:
                          'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames', 'curve_vp_confirm_frames',
                          'use_noise_filter', 'noise_max_hough_lines',
                          'noise_max_reject_frames',
-                         'use_curve_recovery', 'recovery_max_steer_frames'}
+                         'use_curve_recovery', 'recovery_max_steer_frames',
+                         'use_kalman_filter', 'kalman_max_prediction_frames'}
             
             params = ['base_speed', 'max_speed', 'min_speed', 'max_error_px', 'kp', 'ki', 'kd', 'smoothing_factor',
                      'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
@@ -3453,7 +3537,11 @@ Returns:
                      'recovery_reverse_speed', 'recovery_reverse_time_min',
                      'recovery_reverse_time_max', 'recovery_reverse_steer_scale',
                      'recovery_pre_turn_time', 'recovery_realign_time',
-                     'recovery_error_shrink_ratio']
+                     'recovery_error_shrink_ratio',
+                     # Kalman filter parameters
+                     'use_kalman_filter', 'kalman_process_noise',
+                     'kalman_measurement_noise', 'kalman_max_prediction_frames',
+                     'kalman_prediction_damping']
             
             applied = []
             for param in params:
@@ -3502,6 +3590,17 @@ Returns:
             ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
             if any(p in config for p in ff_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mFF\033[0m - Updated: wheelbase={self.wheelbase} ff_weight={self.ff_weight} curv_thresh={self.curvature_threshold}")
+
+            # Sync Kalman filter parameters
+            kalman_params = ['use_kalman_filter', 'kalman_process_noise',
+                             'kalman_measurement_noise', 'kalman_max_prediction_frames',
+                             'kalman_prediction_damping']
+            if any(p in config for p in kalman_params):
+                self._init_error_kalman()
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mKALMAN\033[0m - "
+                      f"enabled={bool(self.use_kalman_filter)} q={self.kalman_process_noise:.4f} "
+                      f"r={self.kalman_measurement_noise:.2f} max_pred={self.kalman_max_prediction_frames} "
+                      f"damp={self.kalman_prediction_damping:.2f}")
             
             # Log swept path / car geometry parameter changes
             swept_params = ['use_swept_path', 'car_length', 'car_width', 'car_wheelbase_cm',
@@ -3778,7 +3877,9 @@ Returns:
         midpoint_x = None
         bottom_left_x = None
         bottom_right_x = None
+        kalman_prediction_used = False
         self._is_stabilization_frame = False  # Reset each frame; set True by just_seen_two_lines logic
+        kalman_pred_error = self._kalman_predict_error()
 
         # === PRE-CHECK: Reject obviously noisy frames (reflection/glare) ===
         num_lines = (1 if avg_left is not None else 0) + (1 if avg_right is not None else 0)
@@ -3842,6 +3943,13 @@ Returns:
                             speed = self.min_speed
                 else:
                     self._swept_path_info = None
+
+                if self.use_kalman_filter:
+                    raw_error = error
+                    error = self._kalman_correct_error(error)
+                    debug_info['kalman_raw_error'] = raw_error
+                    debug_info['kalman_error'] = error
+                    debug_info['kalman_age'] = self._kalman_age_frames
 
                 # Compute steering from crosstrack error
                 if self.use_stanley:
@@ -3921,6 +4029,14 @@ Returns:
                 else:
                     self._swept_path_info = None
 
+                if self.use_kalman_filter:
+                    raw_error = sl_error
+                    sl_error = self._kalman_correct_error(sl_error)
+                    error = sl_error
+                    debug_info['kalman_raw_error'] = raw_error
+                    debug_info['kalman_error'] = sl_error
+                    debug_info['kalman_age'] = self._kalman_age_frames
+
                 if self.use_stanley:
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                     steering_angle = self.stanley.compute(
@@ -3996,6 +4112,14 @@ Returns:
                 else:
                     self._swept_path_info = None
 
+                if self.use_kalman_filter:
+                    raw_error = sl_error
+                    sl_error = self._kalman_correct_error(sl_error)
+                    error = sl_error
+                    debug_info['kalman_raw_error'] = raw_error
+                    debug_info['kalman_error'] = sl_error
+                    debug_info['kalman_age'] = self._kalman_age_frames
+
                 if self.use_stanley:
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                     steering_angle = self.stanley.compute(
@@ -4036,7 +4160,34 @@ Returns:
             if self.show_debug:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
 
-            if hasattr(self, 'last_steering') and self.frames_without_line < 5:
+            can_use_kalman_pred = (
+                self.use_kalman_filter and
+                self._kalman_initialized and
+                kalman_pred_error is not None and
+                self._kalman_age_frames <= self.kalman_max_prediction_frames
+            )
+            if can_use_kalman_pred:
+                error = kalman_pred_error
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
+                if self.use_stanley:
+                    steering_angle = self.stanley.compute(
+                        error, heading_pred, speed_val,
+                        yaw_rate=self._yaw_rate, traj_yaw_rate=0.0
+                    )
+                else:
+                    steering_angle = self.pid.compute(error)
+                steering_angle *= 0.9  # conservative while running on prediction only
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                kalman_prediction_used = True
+                debug_info['kalman_error'] = error
+                debug_info['kalman_age'] = self._kalman_age_frames
+                debug_info['kalman_predicted'] = True
+                if self.show_debug:
+                    print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mPREDICT\033[0m - "
+                          f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
+                          f"steer={steering_angle:.1f}°")
+            elif hasattr(self, 'last_steering') and self.frames_without_line < 5:
                 steering_angle = self.last_steering * 0.95
             else:
                 steering_angle = None
@@ -4048,7 +4199,7 @@ Returns:
             # These frames use last_steering (not a real measurement) and would falsely
             # reset the reject counter, causing a latch-up where the correct steering
             # value is perpetually rejected.
-            if self._is_stabilization_frame:
+            if self._is_stabilization_frame or kalman_prediction_used:
                 pass  # Don't check, don't accept, don't reject — just pass through
             else:
                 _post_noisy, _post_reason = self._is_frame_noisy(
