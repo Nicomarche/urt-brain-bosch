@@ -68,33 +68,83 @@ SUPERCOMBO_SMOOTHING = 0.7      # Suavizado del ángulo (0=sin suavizar, 1=máxi
 SUPERCOMBO_USE_PATH = False     # True=usar trayectoria planeada, False=usar centro de lanes
 
 # ======================== SIGN DETECTION ========================
-# Detección de señales de tráfico (YOLOv8)
-# Modelo: https://huggingface.co/nezahatkorkmaz/traffic-sign-detection
+# Deteccion de señales/elementos de trafico (YOLOv8)
 # Requiere: pip install ultralytics
 SIGN_DETECTION_ENABLED = True
-SIGN_MODEL_DIR = "models/sign_detection"   # Directorio del modelo
-SIGN_MODEL_FILE = "trafic.pt"             # Archivo del modelo YOLOv8
+SIGN_MODEL_DIR = "models/sign_detection"   # Directorio base de modelos
+SIGN_MODEL_FILE = "trafic.pt"              # Fallback (modo 1 modelo)
 SIGN_MIN_CONFIDENCE = 0.40                 # Umbral de confianza (0.0 - 1.0)
-SIGN_IMGSZ = 320                          # Tamaño de entrada del modelo (320=rápido, 640=preciso)
+SIGN_IMGSZ = 320                           # Tamano de entrada (320=rapido, 640=preciso)
 SIGN_DEVICE = "auto"                      # "auto" | "mps" (Apple Silicon) | "cuda" | "cpu"
 
-# Mapeo de nombres de clase del modelo (turco) → nombres de acción del auto.
-# Las clases NO listadas aquí se pasan tal cual (en minúsculas, espacios→_).
+# Elegir EXACTAMENTE un modelo activo para ejecutar.
+# Opciones: "trafic_legacy" | "bfmc_320" | "bfmc_640"
+SIGN_ACTIVE_MODEL = "bfmc_320"
+
+# Perfiles disponibles de modelos.
+SIGN_MODEL_OPTIONS = {
+    "trafic_legacy": {
+        "name": "trafic_legacy",
+        "file": "trafic.pt",
+        "kind": "sign",
+        "imgsz": 320,
+        "min_confidence": 0.40,
+    },
+    "bfmc_320": {
+        "name": "bfmc_320",
+        "file": "bfmc_detect_320_best.pt",
+        "kind": "sign",
+        "imgsz": 320,
+        "min_confidence": 0.40,
+    },
+    "bfmc_640": {
+        "name": "bfmc_640",
+        "file": "bfmc_detect_640_best.pt",
+        "kind": "sign",
+        "imgsz": 640,
+        "min_confidence": 0.40,
+    },
+}
+
+# Orden de prioridad al devolver detecciones
+SIGN_DETECTION_SORT_ORDER = {
+    "sign": 0,
+    "element": 1,
+}
+
+# Mapeo de nombres de clase del modelo -> nombres canonicos del auto.
+# Las clases no listadas aqui se pasan tal cual (lowercase, espacios->_).
 SIGN_CLASS_MAP = {
-    # Señales de tráfico
+    # --- Modelo BFMC (ingles) ---
+    "car": "vehicle",
+    "closed-road-stand": "road_block",
+    "crosswalk-sign": "crosswalk",
+    "highway-entry-sign": "highway_entrance",
+    "highway-exit-sign": "highway_exit",
+    "no-entry-road-sign": "no_entry",
+    "one-way-road-sign": "one_way",
+    "parking-sign": "parking",
+    "parking-spot": "parking_spot",
+    "pedestrian": "pedestrian",
+    "priority-sign": "priority",
+    "round-about-sign": "roundabout",
+    "stop-line": "stop_line",
+    "stop-sign": "stop",
+    "traffic-light": "traffic_light",
+    # --- Modelo turco legacy (trafic.pt) ---
     "dur": "stop",
     "girisyok": "no_entry",
     "park": "parking",
     "yayagecidi": "crosswalk",
     "tasitrafiginekapali": "no_entry",
-    # Semáforos
+    # Semaforos
     "kirmizi": "red_light",
     "sari": "yellow_light",
     "yesil": "green_light",
     # Velocidad
     "20": "speed_20",
     "30": "speed_30",
-    # Dirección
+    # Direccion
     "sag": "turn_right",
     "sol": "turn_left",
     "sagadonulmez": "no_right_turn",

@@ -134,7 +134,11 @@ async def status():
             status_code=503,
             content={"error": "Modelo no cargado aún"}
         )
-    return engine.get_status()
+    server_status = engine.get_status()
+    server_status["sign_detection_enabled"] = sign_engine is not None
+    if sign_engine is not None:
+        server_status["sign_detection"] = sign_engine.get_status()
+    return server_status
 
 
 # ============================================================
@@ -382,7 +386,7 @@ async def websocket_signs(websocket: WebSocket):
     Respuesta:
     {
         "d": [                        # detections (lista)
-            {"s": "stop", "c": 0.95, "b": [y1,x1,y2,x2]},
+            {"s": "stop", "c": 0.95, "b": [y1,x1,y2,x2], "k": "sign", "m": "signs_640"},
             ...
         ],
         "t": 12.3,                    # inference_time_ms
@@ -450,6 +454,8 @@ async def websocket_signs(websocket: WebSocket):
                     "s": det["sign"],
                     "c": det["confidence"],
                     "b": det["box"],
+                    "k": det.get("kind", "sign"),
+                    "m": det.get("model", "default"),
                 })
             
             response = {

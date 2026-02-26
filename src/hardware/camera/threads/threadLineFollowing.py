@@ -401,14 +401,6 @@ Args:
         self.auto_threshold_max = 220         # Ceiling: never go above this (avoids losing lines)
         self._auto_threshold_val = self.binary_threshold  # Smoothed value
 
-        # Strip-based threshold: divides the image into vertical strips (like CLAHE tiles)
-        # and computes a separate threshold per strip. This handles uneven lighting
-        # where one lane line is dimmer than the other (e.g. left side in shadow).
-        self.use_strip_threshold = True
-        self.strip_cols = 6                   # Number of vertical strips (more = finer adaptation)
-        self.strip_rows = 2                   # Number of horizontal bands (1 = columns only)
-        self.strip_threshold_relax = 24        # Max points strips can go BELOW global threshold
-
         # Detection mode parameters
         self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
         self.lstr_model_size = 0  # 0=180x320, 1=240x320, 2=360x640, 3=480x640, 4=720x1280
@@ -2058,7 +2050,7 @@ Args:
         if needs_debug:
             debug_info['grey'] = grey_image.copy()
 
-        # 3. Binary threshold (global + local adaptive)
+        # 3. Binary threshold (global, optionally auto-adjusted per frame)
         if threshold_override is not None:
             threshold_val = threshold_override
         elif self.use_auto_threshold:
@@ -2072,35 +2064,7 @@ Args:
         else:
             threshold_val = self.binary_threshold
 
-        if self.use_strip_threshold:
-            binary_image = np.zeros_like(grey_image)
-            roi_h = y_end - y_start
-            strip_h = max(1, roi_h // max(1, self.strip_rows))
-            strip_w = max(1, width // max(1, self.strip_cols))
-
-            for row in range(self.strip_rows):
-                sy = y_start + row * strip_h
-                ey = min(y_end, sy + strip_h) if row < self.strip_rows - 1 else y_end
-                for col in range(self.strip_cols):
-                    sx = col * strip_w
-                    ex = min(width, sx + strip_w) if col < self.strip_cols - 1 else width
-
-                    strip = grey_image[sy:ey, sx:ex]
-                    nonzero = strip[strip > 10]
-                    if len(nonzero) > 50:
-                        p = float(np.percentile(nonzero, self.auto_threshold_percentile))
-                        mu = float(np.mean(nonzero))
-                        sigma = float(np.std(nonzero))
-                        noise_floor = mu + 1.5 * sigma
-                        st = max(noise_floor, p * 0.85)
-                        strip_floor = float(max(0, int(threshold_val) - int(self.strip_threshold_relax)))
-                        st = max(strip_floor, min(float(self.auto_threshold_max), st))
-                    else:
-                        st = float(threshold_val)
-                    _, strip_bin = cv2.threshold(strip, int(st), 255, cv2.THRESH_BINARY)
-                    binary_image[sy:ey, sx:ex] = strip_bin
-        else:
-            _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
+        _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
 
         if needs_debug:
             debug_info['binary'] = binary_image.copy()
@@ -3425,7 +3389,6 @@ Returns:
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
                          'use_auto_threshold', 'auto_threshold_percentile',
                          'auto_threshold_min', 'auto_threshold_max',
-                         'strip_threshold_relax',
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
                          'use_swept_path', 'curve_speed_reduction',
@@ -3456,7 +3419,6 @@ Returns:
                      'use_gradient_fallback', 'gradient_percentile',
                      'use_auto_threshold', 'auto_threshold_percentile',
                      'auto_threshold_min', 'auto_threshold_max',
-                     'use_strip_threshold', 'strip_cols', 'strip_rows', 'strip_threshold_relax',
                      # Detection mode
                      'detection_mode', 'lstr_model_size',
                      # Debug streaming
