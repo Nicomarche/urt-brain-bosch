@@ -19,7 +19,7 @@ JETSON_SENSOR_ID = 0         # CAM0=0, CAM1=1
 JETSON_CAPTURE_RESOLUTION = (1920, 1080)  # Resolucion nativa del sensor
 JETSON_OUTPUT_RESOLUTION = (960, 720)     # Resolucion final entregada a OpenCV
 JETSON_FRAMERATE = 30
-JETSON_FLIP_METHOD = 0       # 0 = sin flip
+JETSON_FLIP_METHOD = 2       # 2 = rotacion 180° (imagen invertida). 0 = sin flip
 
 # HDR por fusion de exposiciones (Mertens) para PiCamera.
 # Se aplica sobre el stream lores (640x384) usado por line following/sign detection.
