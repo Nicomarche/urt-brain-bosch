@@ -332,6 +332,10 @@ Args:
         self.curve_pre_position_gain = 0.85  # Pre-position aggressively when ENTERING
         self.curve_exit_gain = 0.25          # Reduce curve offset when EXITING (0=ignore curve, 1=full curve)
         self.curve_inner_line_steer_factor = 0.4  # When seeing inner line, steer opposite at this fraction of max (0-1)
+        # Single-line fusion: blend geometric swept-path error with Stanley error in curves.
+        self.single_line_swept_weight_entering = 0.55
+        self.single_line_swept_weight_in_curve = 0.85
+        self.single_line_swept_weight_exiting = 0.65
 
         # Steering feedback estimator
         self._steering_radius_history = deque(maxlen=8)  # Last N radius estimates from steering
@@ -403,7 +407,7 @@ Args:
         self.use_strip_threshold = True
         self.strip_cols = 6                   # Number of vertical strips (more = finer adaptation)
         self.strip_rows = 2                   # Number of horizontal bands (1 = columns only)
-        self.strip_threshold_relax = 0        # Max points strips can go BELOW global threshold
+        self.strip_threshold_relax = 24        # Max points strips can go BELOW global threshold
 
         # Detection mode parameters
         self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
@@ -3095,7 +3099,12 @@ Args:
             if abs(dy) < 1:
                 return None  # Nearly horizontal - unreliable
 
-            turn_direction = 1 if side == 'left' else -1
+            # Prefer direction tracked by the curve FSM when available.
+            # Side-based fallback is kept for first entering frames.
+            if self._curve_direction in (-1, 1):
+                turn_direction = self._curve_direction
+            else:
+                turn_direction = 1 if side == 'left' else -1
             angle_from_vertical = abs(math.degrees(math.atan(dx / dy)))
 
             # --- HYBRID RADIUS ESTIMATION ---
@@ -3471,6 +3480,8 @@ Returns:
                      'curve_vp_threshold', 'curve_vp_confirm_frames',
                      'curve_pre_position_gain', 'curve_exit_gain',
                      'curve_inner_line_steer_factor',
+                     'single_line_swept_weight_entering', 'single_line_swept_weight_in_curve',
+                     'single_line_swept_weight_exiting',
                      # Noise filter parameters
                      'use_noise_filter', 'noise_max_hough_lines',
                      'noise_max_error_jump_px', 'noise_max_steer_jump_deg',
@@ -3917,27 +3928,54 @@ Returns:
                 if self.show_debug:
                     print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mLEFT curve, seeing INNER (left) line\033[0m "
                           f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
-            elif self.use_stanley:
-                # Stanley: compute error from lane width to center the car
+            else:
+                # Base one-line estimate from visible lane geometry
                 sl_error, sl_heading = self._compute_single_line_error(
                     avg_left, 'left', img_h, img_w
                 )
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                steering_angle = self.stanley.compute(
-                    sl_error, sl_heading, speed_val,
-                    yaw_rate=self._yaw_rate
-                )
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                speed = self.min_speed + 3
-                self._swept_path_info = None
-                if self.show_debug:
-                    print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mLEFT\033[0m - "
-                          f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
-                          f"steer={steering_angle:.1f}°")
-            elif self.use_swept_path:
-                swept = self._predict_swept_path_single_line(avg_left, 'left', img_h, img_w)
-                self._swept_path_info = swept
-                if swept is not None:
+                error = sl_error
+
+                # Optional curve-aware correction from swept path
+                swept = None
+                if self.use_swept_path:
+                    swept = self._predict_swept_path_single_line(avg_left, 'left', img_h, img_w)
+                    self._swept_path_info = swept
+                    if swept is not None:
+                        if self._curve_state == "IN_CURVE":
+                            w = self.single_line_swept_weight_in_curve
+                        elif self._curve_state == "EXITING":
+                            w = self.single_line_swept_weight_exiting
+                        elif self._curve_state == "ENTERING":
+                            w = self.single_line_swept_weight_entering
+                        else:
+                            w = 0.35
+                        w = max(0.0, min(1.0, w))
+                        fused_error = (1.0 - w) * sl_error + w * swept['steering_error']
+                        # Single-line heading can be noisy in tight curves, damp it when swept-path is trusted.
+                        fused_heading = sl_heading * (1.0 - 0.6 * w)
+                        sl_error = fused_error
+                        sl_heading = fused_heading
+                        error = sl_error
+                else:
+                    self._swept_path_info = None
+
+                if self.use_stanley:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    steering_angle = self.stanley.compute(
+                        sl_error, sl_heading, speed_val,
+                        yaw_rate=self._yaw_rate
+                    )
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                    if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
+                        speed = self.min_speed
+                    else:
+                        speed = self.min_speed + 3
+                    if self.show_debug:
+                        src = "fused" if swept is not None else "lane"
+                        print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mLEFT\033[0m "
+                              f"src={src} err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                              f"steer={steering_angle:.1f}° state={self._curve_state}")
+                elif swept is not None:
                     steering_angle = self.pid.compute(swept['steering_error'])
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                     if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
@@ -3945,19 +3983,11 @@ Returns:
                     else:
                         speed = self.min_speed + 3
                 else:
-                    self._swept_path_info = None
                     if self.consecutive_single_left >= 2:
                         steering_angle = self.max_steering
                         speed = self.min_speed
                     else:
                         steering_angle = self._bfmc_follow_single_line(avg_left, 'left')
-            else:
-                self._swept_path_info = None
-                if self.consecutive_single_left >= 2:
-                    steering_angle = self.max_steering
-                    speed = self.min_speed
-                else:
-                    steering_angle = self._bfmc_follow_single_line(avg_left, 'left')
 
             self.frames_without_line = 0
 
@@ -3974,26 +4004,53 @@ Returns:
                 if self.show_debug:
                     print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mRIGHT curve, seeing INNER (right) line\033[0m "
                           f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
-            elif self.use_stanley:
+            else:
+                # Base one-line estimate from visible lane geometry
                 sl_error, sl_heading = self._compute_single_line_error(
                     avg_right, 'right', img_h, img_w
                 )
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                steering_angle = self.stanley.compute(
-                    sl_error, sl_heading, speed_val,
-                    yaw_rate=self._yaw_rate
-                )
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                speed = self.min_speed + 3
-                self._swept_path_info = None
-                if self.show_debug:
-                    print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mRIGHT\033[0m - "
-                          f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
-                          f"steer={steering_angle:.1f}°")
-            elif self.use_swept_path:
-                swept = self._predict_swept_path_single_line(avg_right, 'right', img_h, img_w)
-                self._swept_path_info = swept
-                if swept is not None:
+                error = sl_error
+
+                # Optional curve-aware correction from swept path
+                swept = None
+                if self.use_swept_path:
+                    swept = self._predict_swept_path_single_line(avg_right, 'right', img_h, img_w)
+                    self._swept_path_info = swept
+                    if swept is not None:
+                        if self._curve_state == "IN_CURVE":
+                            w = self.single_line_swept_weight_in_curve
+                        elif self._curve_state == "EXITING":
+                            w = self.single_line_swept_weight_exiting
+                        elif self._curve_state == "ENTERING":
+                            w = self.single_line_swept_weight_entering
+                        else:
+                            w = 0.35
+                        w = max(0.0, min(1.0, w))
+                        fused_error = (1.0 - w) * sl_error + w * swept['steering_error']
+                        fused_heading = sl_heading * (1.0 - 0.6 * w)
+                        sl_error = fused_error
+                        sl_heading = fused_heading
+                        error = sl_error
+                else:
+                    self._swept_path_info = None
+
+                if self.use_stanley:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    steering_angle = self.stanley.compute(
+                        sl_error, sl_heading, speed_val,
+                        yaw_rate=self._yaw_rate
+                    )
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                    if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
+                        speed = self.min_speed
+                    else:
+                        speed = self.min_speed + 3
+                    if self.show_debug:
+                        src = "fused" if swept is not None else "lane"
+                        print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mRIGHT\033[0m "
+                              f"src={src} err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                              f"steer={steering_angle:.1f}° state={self._curve_state}")
+                elif swept is not None:
                     steering_angle = self.pid.compute(swept['steering_error'])
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                     if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
@@ -4001,19 +4058,11 @@ Returns:
                     else:
                         speed = self.min_speed + 3
                 else:
-                    self._swept_path_info = None
                     if self.consecutive_single_right >= 2:
                         steering_angle = -self.max_steering
                         speed = self.min_speed
                     else:
                         steering_angle = self._bfmc_follow_single_line(avg_right, 'right')
-            else:
-                self._swept_path_info = None
-                if self.consecutive_single_right >= 2:
-                    steering_angle = -self.max_steering
-                    speed = self.min_speed
-                else:
-                    steering_angle = self._bfmc_follow_single_line(avg_right, 'right')
 
             self.frames_without_line = 0
 
