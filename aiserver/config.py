@@ -31,7 +31,8 @@ IOU_THRESHOLD = 0.3
 
 # ======================== INFERENCE ========================
 # Dispositivo: "cuda", "cuda:0", "cuda:1", "cpu", "mps" (Apple Silicon)
-DEVICE = "mps"
+# En Jetson Nano usa "cuda" para aprovechar la GPU.
+DEVICE = "cuda"
 
 # Usar half precision (FP16) para mayor velocidad en GPU
 USE_HALF = True
