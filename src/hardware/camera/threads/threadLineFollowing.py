@@ -365,38 +365,35 @@ Args:
         self.roi_width_margin_bottom = 0.15
 
         # HSV thresholds for white
-        self.white_h_min = 0
+        self.white_h_min = 81
         self.white_h_max = 180
         self.white_s_min = 0
-        self.white_s_max = 110
-        self.white_v_min = 175
+        self.white_s_max = 98
+        self.white_v_min = 200
         self.white_v_max = 255
 
         # HSV thresholds for yellow
-        self.yellow_h_min = 15
-        self.yellow_h_max = 40
-        self.yellow_s_min = 70
+        self.yellow_h_min = 173
+        self.yellow_h_max = 86
+        self.yellow_s_min = 100
         self.yellow_s_max = 255
-        self.yellow_v_min = 120
+        self.yellow_v_min = 100
         self.yellow_v_max = 255
 
-        # Image processing parameters (tuned for más robustez de líneas)
-        self.blur_kernel = 3              # Median blur kernel (mantener pequeño para no deformar bordes)
+        # Image processing parameters (defaults from bfmc24-brain)
+        self.blur_kernel = 3           # Median blur kernel (BFMC uses 3)
         self.morph_kernel = 7
-        # Canny: relación alta/baja ≈ 3:1 para mejor estabilidad de bordes
-        self.canny_low = 60               # Umbral bajo de Canny (más sensible que 100)
-        self.canny_high = 180             # Umbral alto de Canny (≈3× low)
+        self.canny_low = 100           # Canny lower threshold
+        self.canny_high = 150          # Canny upper threshold (BFMC uses 150)
         self.dilate_kernel = 5
         self.use_dilation = True
-        # Umbral base de binarización; auto-threshold se centra alrededor de este valor
-        self.binary_threshold = 160       # Ligeramente más bajo que 165 para asfalto algo más oscuro
-        self.binary_threshold_retry = 135 # Reintento más permisivo si no se detectan líneas
-        # Parámetros de Hough más sensibles pero filtrando por ángulo
-        self.hough_threshold = 35         # Menos votos necesarios → más segmentos de línea
-        self.hough_min_line_length = 40   # Segmentos algo más cortos aceptados
-        self.hough_max_line_gap = 120     # Gaps algo menores → menos “saltos” extraños
-        self.line_angle_filter = 35       # Filtra mejor líneas casi horizontales (ruido)
-        self.line_merge_distance = 200    # Permite fusionar segmentos más separados
+        self.binary_threshold = 165    # BFMC grayscale threshold (main)
+        self.binary_threshold_retry = 90  # Retry with lower if no lines found
+        self.hough_threshold = 50      # BFMC votes threshold
+        self.hough_min_line_length = 50  # BFMC min line length
+        self.hough_max_line_gap = 150  # BFMC max gap between segments
+        self.line_angle_filter = 30    # Min angle (degrees) to classify as lane line
+        self.line_merge_distance = 175 # Max pixel distance to merge lines
 
         # Brightness/contrast
         self.brightness = 5
@@ -404,7 +401,7 @@ Args:
 
         # Adaptive lighting parameters
         self.use_clahe = True
-        self.clahe_clip_limit = 3.5
+        self.clahe_clip_limit = 2.0
         self.clahe_grid_size = 8
         self.use_adaptive_white = True
         self.adaptive_white_percentile = 92
@@ -413,19 +410,19 @@ Args:
         self.adaptive_white_tophat_min_threshold = 20
         self.use_gradient_fallback = True
         self.gradient_percentile = 85
-        self.use_component_filter = True
+        self.use_component_filter = False
         self.component_min_area = 20
         self.component_min_height = 12
         self.component_min_aspect_ratio = 2.0
         self.component_min_angle = 25.0
-        self.use_local_adaptive_threshold = True
+        self.use_local_adaptive_threshold = False
         self.local_adaptive_block_size = 31
         self.local_adaptive_c = 7.0
         self.hough_max_lines_per_side = 12
 
         # Auto binary threshold: adapta a cambios de luz frame a frame.
         # Desactivado: se usa siempre binary_threshold fijo.
-        self.use_auto_threshold = True
+        self.use_auto_threshold = False
         self.auto_threshold_percentile = 85   # Más permisivo que 90 → coge más píxeles de línea
         self.auto_threshold_min = 125         # Permite bajar más en asfalto oscuro
         self.auto_threshold_max = 220         # Mantener techo para no perder líneas en brillo alto
@@ -501,7 +498,7 @@ Args:
         self.use_noise_filter = True         # Enable noise rejection
         self.noise_max_hough_lines = 40      # Max Hough lines before flagging as noisy
         self.noise_max_error_jump_px = 80    # Max error change between frames (px)
-        self.noise_max_steer_jump_deg = 22   # Max steering change between frames (deg)
+        self.noise_max_steer_jump_deg = 15   # Max steering change between frames (deg)
         self.noise_max_reject_frames = 3     # Max consecutive frames to reject
         self._noise_reject_count = 0         # Current consecutive rejected frames
         self._last_good_error = 0.0          # Last accepted error value
@@ -1231,27 +1228,15 @@ Args:
         different lighting conditions automatically.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        kernel_size = max(3, int(self.adaptive_white_tophat_kernel))
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        tophat_kernel = cv2.getStructuringElement(
-            cv2.MORPH_RECT, (kernel_size, kernel_size)
-        )
-        # Top-hat keeps thin bright structures (lane paint) and suppresses broad glare blobs.
-        response = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, tophat_kernel)
-        valid_pixels = response[gray > 0]
-
+        
         # Calculate adaptive threshold based on percentile
-        if valid_pixels.size > 0:
-            threshold = np.percentile(valid_pixels, self.adaptive_white_percentile)
-        else:
-            threshold = self.adaptive_white_tophat_min_threshold
+        threshold = np.percentile(gray, self.adaptive_white_percentile)
 
         # Ensure minimum threshold to avoid detecting everything as white
-        threshold = max(threshold, self.adaptive_white_tophat_min_threshold)
+        threshold = max(threshold, self.adaptive_white_min_threshold)
         
         # Create binary mask for white regions
-        _, white_mask = cv2.threshold(response, threshold, 255, cv2.THRESH_BINARY)
+        _, white_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
         
         return white_mask, threshold
 
@@ -1273,13 +1258,8 @@ Args:
         
         # Normalize to 0-255 range
         gradient_magnitude = np.uint8(255 * gradient_magnitude / np.max(gradient_magnitude + 1e-6))
-        valid_gradients = gradient_magnitude[gray > 0]
-
-        if valid_gradients.size == 0:
-            return np.zeros_like(gray)
-
         # Calculate adaptive threshold based on percentile
-        threshold = np.percentile(valid_gradients, self.gradient_percentile)
+        threshold = np.percentile(gradient_magnitude, self.gradient_percentile)
 
         # Create binary mask for strong gradients (edges)
         _, gradient_mask = cv2.threshold(gradient_magnitude, threshold, 255, cv2.THRESH_BINARY)
@@ -1440,24 +1420,14 @@ Args:
             debug_info['hsv'] = hsv.copy()
         
         # Standard HSV-based white detection
-        white_mask_hsv = self._create_hsv_mask(
-            hsv,
-            self.white_h_min, self.white_h_max,
-            self.white_s_min, self.white_s_max,
-            self.white_v_min, self.white_v_max
-        )
+        white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
         if needs_debug:
-            debug_info['white_mask'] = white_mask_hsv.copy()
+            debug_info['white_hsv'] = white_mask_hsv.copy()
 
         # Yellow detection (usually more stable across lighting)
-        yellow_mask = self._create_hsv_mask(
-            hsv,
-            self.yellow_h_min, self.yellow_h_max,
-            self.yellow_s_min, self.yellow_s_max,
-            self.yellow_v_min, self.yellow_v_max
-        )
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
         if needs_debug:
-            debug_info['yellow_mask'] = yellow_mask.copy()
+            debug_info['yellow'] = yellow_mask.copy()
         
         # Start with HSV-based masks
         combined_mask = cv2.bitwise_or(white_mask_hsv, yellow_mask)
@@ -1476,8 +1446,7 @@ Args:
         if self.use_gradient_fallback:
             # Check if we have enough detected pixels
             white_pixel_count = np.sum(combined_mask > 0)
-            active_pixels = np.count_nonzero(np.any(preprocessed > 0, axis=2))
-            total_pixels = max(active_pixels, 1)
+            total_pixels = combined_mask.shape[0] * combined_mask.shape[1]
             detection_ratio = white_pixel_count / total_pixels
             
             # If detection is weak (less than 1% of image), use gradient fallback
@@ -1494,11 +1463,6 @@ Args:
         
         if needs_debug:
             debug_info['combined_raw'] = combined_mask.copy()
-
-        combined_mask = self._filter_line_like_components(combined_mask)
-
-        if needs_debug:
-            debug_info['combined_mask'] = combined_mask.copy()
 
         return combined_mask, debug_info
 
@@ -2276,6 +2240,7 @@ Args:
         Returns:
             (avg_left_line, avg_right_line, height, width, canny_image, debug_info)
         """
+        threshold_val = threshold_override if threshold_override is not None else self.binary_threshold
         kernel_val = kernel_override if kernel_override is not None else self.blur_kernel
         if kernel_val % 2 == 0:
             kernel_val += 1
@@ -2284,68 +2249,24 @@ Args:
         debug_info = {}
         needs_debug = self._needs_debug
 
-        # 1. ROI mask — use a trapezoid to ignore lateral reflections
+        # 1. ROI mask — keep bottom portion (roi_height_start..roi_height_end)
         y_start = int(self.roi_height_start * height)
         y_end = int(self.roi_height_end * height)
-        top_margin = int(width * max(0.0, min(self.roi_width_margin_top, 0.49)))
-        bottom_margin = int(width * max(0.0, min(self.roi_width_margin_bottom, 0.49)))
-        roi_vertices = np.array([[
-            (top_margin, y_start),
-            (width - top_margin, y_start),
-            (width - bottom_margin, y_end),
-            (bottom_margin, y_end),
-        ]], dtype=np.int32)
+        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
         mask = np.zeros_like(image)
         cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
         masked_image = cv2.bitwise_and(image, mask)
         if needs_debug:
             debug_info['roi'] = masked_image.copy()
 
-        combined_mask, combined_debug = self._create_combined_mask(masked_image, masked_image)
-        debug_info.update(combined_debug)
-
         # 2. Grayscale
         grey_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
         if needs_debug:
             debug_info['grey'] = grey_image.copy()
 
-        # 3. Binary threshold (global, optionally auto-adjusted per frame)
-        if threshold_override is not None:
-            threshold_val = threshold_override
-        elif self.use_auto_threshold:
-            roi_pixels = grey_image[y_start:y_end, :]
-            nonzero = roi_pixels[roi_pixels > 0]
-            if len(nonzero) > 100:
-                raw_thresh = np.percentile(nonzero, self.auto_threshold_percentile)
-                raw_thresh = max(self.auto_threshold_min, min(self.auto_threshold_max, raw_thresh))
-                self._auto_threshold_val = 0.7 * self._auto_threshold_val + 0.3 * raw_thresh
-            threshold_val = int(self._auto_threshold_val)
-        else:
-            threshold_val = self.binary_threshold
-
-        _, binary_threshold = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
-        binary_threshold = self._filter_line_like_components(binary_threshold)
-        local_adaptive = None
-        if self.use_local_adaptive_threshold:
-            local_adaptive = self._adaptive_local_threshold(grey_image)
-        binary_image = cv2.bitwise_or(binary_threshold, combined_mask)
-        if local_adaptive is not None:
-            binary_image = cv2.bitwise_or(binary_image, local_adaptive)
-
-        morph_size = max(3, min(int(self.morph_kernel), 5))
-        if morph_size % 2 == 0:
-            morph_size += 1
-        morph_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (morph_size, morph_size)
-        )
-        binary_image = cv2.morphologyEx(binary_image, cv2.MORPH_CLOSE, morph_kernel)
-        binary_image = cv2.morphologyEx(binary_image, cv2.MORPH_OPEN, morph_kernel)
-
+        # 3. Binary threshold
+        _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
         if needs_debug:
-            debug_info['binary_gray'] = binary_threshold.copy()
-            if local_adaptive is not None:
-                debug_info['binary_local'] = local_adaptive.copy()
-            debug_info['combined_mask'] = binary_image.copy()
             debug_info['binary'] = binary_image.copy()
 
         # 4. Median blur
@@ -2355,17 +2276,16 @@ Args:
 
         # 5. Canny
         canny = cv2.Canny(noiseless, self.canny_low, self.canny_high)
-        if self.use_dilation:
-            dilate_size = max(1, min(int(self.dilate_kernel), 5))
-            dilate_kernel = cv2.getStructuringElement(
-                cv2.MORPH_RECT, (dilate_size, dilate_size)
-            )
-            canny = cv2.dilate(canny, dilate_kernel, iterations=1)
         if needs_debug:
             debug_info['canny'] = canny.copy()
 
         # 6. HoughLinesP
-        lines = self._hough_lines_by_half(canny)
+        lines = cv2.HoughLinesP(
+            canny, 1, np.pi / 180,
+            self.hough_threshold,
+            minLineLength=self.hough_min_line_length,
+            maxLineGap=self.hough_max_line_gap
+        )
 
         # 7. Classify → merge → average
         left_lines, right_lines = self._bfmc_classify_lines(lines)
