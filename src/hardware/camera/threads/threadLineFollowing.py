@@ -380,20 +380,23 @@ Args:
         self.yellow_v_min = 100
         self.yellow_v_max = 255
 
-        # Image processing parameters (defaults from bfmc24-brain)
-        self.blur_kernel = 3           # Median blur kernel (BFMC uses 3)
+        # Image processing parameters (tuned for más robustez de líneas)
+        self.blur_kernel = 3              # Median blur kernel (mantener pequeño para no deformar bordes)
         self.morph_kernel = 7
-        self.canny_low = 100           # Canny lower threshold
-        self.canny_high = 150          # Canny upper threshold (BFMC uses 150)
+        # Canny: relación alta/baja ≈ 3:1 para mejor estabilidad de bordes
+        self.canny_low = 60               # Umbral bajo de Canny (más sensible que 100)
+        self.canny_high = 180             # Umbral alto de Canny (≈3× low)
         self.dilate_kernel = 5
         self.use_dilation = True
-        self.binary_threshold = 165    # BFMC grayscale threshold (main)
-        self.binary_threshold_retry = 90  # Retry with lower if no lines found
-        self.hough_threshold = 50      # BFMC votes threshold
-        self.hough_min_line_length = 50  # BFMC min line length
-        self.hough_max_line_gap = 150  # BFMC max gap between segments
-        self.line_angle_filter = 30    # Min angle (degrees) to classify as lane line
-        self.line_merge_distance = 175 # Max pixel distance to merge lines
+        # Umbral base de binarización; auto-threshold se centra alrededor de este valor
+        self.binary_threshold = 160       # Ligeramente más bajo que 165 para asfalto algo más oscuro
+        self.binary_threshold_retry = 160 # Reintento más permisivo si no se detectan líneas
+        # Parámetros de Hough más sensibles pero filtrando por ángulo
+        self.hough_threshold = 35         # Menos votos necesarios → más segmentos de línea
+        self.hough_min_line_length = 40   # Segmentos algo más cortos aceptados
+        self.hough_max_line_gap = 120     # Gaps algo menores → menos “saltos” extraños
+        self.line_angle_filter = 35       # Filtra mejor líneas casi horizontales (ruido)
+        self.line_merge_distance = 200    # Permite fusionar segmentos más separados
 
         # Brightness/contrast
         self.brightness = 5
@@ -409,14 +412,13 @@ Args:
         self.use_gradient_fallback = True
         self.gradient_percentile = 85
 
-        # Auto binary threshold: adapts to lighting changes frame by frame.
-        # Uses the brightness percentile of the ROI to set the threshold dynamically.
-        # Replaces the fixed binary_threshold (165) when enabled.
-        self.use_auto_threshold = True
-        self.auto_threshold_percentile = 90   # Percentile of ROI brightness (higher = stricter, only top ~8%)
-        self.auto_threshold_min = 140         # Floor: never go below this (avoids road surface noise)
-        self.auto_threshold_max = 220         # Ceiling: never go above this (avoids losing lines)
-        self._auto_threshold_val = self.binary_threshold  # Smoothed value
+        # Auto binary threshold: adapta a cambios de luz frame a frame.
+        # Desactivado: se usa siempre binary_threshold fijo.
+        self.use_auto_threshold = False
+        self.auto_threshold_percentile = 85   # Más permisivo que 90 → coge más píxeles de línea
+        self.auto_threshold_min = 125         # Permite bajar más en asfalto oscuro
+        self.auto_threshold_max = 220         # Mantener techo para no perder líneas en brillo alto
+        self._auto_threshold_val = self.binary_threshold  # Valor suavizado inicial
 
         # Detection mode parameters
         self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
