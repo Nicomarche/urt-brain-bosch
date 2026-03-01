@@ -465,6 +465,12 @@ Args:
         self._debug_frame_counter = 0
         self._debug_images = {}  # Store debug images for streaming
         self._last_stream_time = 0
+        self.line_visual_smoothing_alpha = 0.35
+        self.line_visual_missing_reset_frames = 2
+        self._smoothed_left_line = None
+        self._smoothed_right_line = None
+        self._left_line_missing_frames = 0
+        self._right_line_missing_frames = 0
 
         # Sliding window parameters
         self.nwindows = 12
@@ -2255,25 +2261,30 @@ Args:
         debug_info = {}
         needs_debug = self._needs_debug
 
-        # 1. ROI mask — match bfmc24-brain StanleyLaneDetector.image_processing()
-        # The original detector uses a fixed polygon for 512x270 that removes the
-        # center-bottom hood area. Scale it to the current frame size.
+        # 1. ROI mask — trapezoid with a center notch.
+        # Keep the hood cut-out from the Stanley detector, but use diagonal side
+        # edges so the ROI follows lane perspective better.
         y_start = int(self.roi_height_start * height)
         y_end = int(self.roi_height_end * height)
         x3 = int(width * (365.0 / 512.0))
         x4 = int(width * (145.0 / 512.0))
         y3 = int(height * (230.0 / 270.0))
         y3 = max(y_start, min(y_end, y3))
+        max_margin = max(0, min(x4, width - x3))
+        top_margin = int(width * max(0.0, min(self.roi_width_margin_top, 0.49)))
+        bottom_margin = int(width * max(0.0, min(self.roi_width_margin_bottom, 0.49)))
+        top_margin = min(top_margin, max_margin)
+        bottom_margin = min(bottom_margin, max_margin)
 
         roi_vertices = np.array([[
-            (0, y_start),
-            (width, y_start),
-            (width, y_end),
+            (top_margin, y_start),
+            (width - top_margin, y_start),
+            (width - bottom_margin, y_end),
             (x3, y_end),
             (x3, y3),
             (x4, y3),
             (x4, y_end),
-            (0, y_end),
+            (bottom_margin, y_end),
         ]], dtype=np.int32)
         mask = np.zeros_like(image)
         cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
@@ -2316,6 +2327,8 @@ Args:
         merged_right = self._bfmc_merge_lines(right_lines)
         avg_left = self._bfmc_average_lines(merged_left)
         avg_right = self._bfmc_average_lines(merged_right)
+        avg_left = self._smooth_detected_line(avg_left, 'left')
+        avg_right = self._smooth_detected_line(avg_right, 'right')
 
         debug_info['all_lines'] = lines
         debug_info['left_lines'] = merged_left
@@ -2396,6 +2409,35 @@ Args:
             return None
         lines_array = np.array(lines)
         return np.mean(lines_array, axis=0, dtype=np.int32)
+
+    def _smooth_detected_line(self, line, side):
+        """Apply a light EMA to the representative line to reduce frame-to-frame jitter."""
+        if side == 'left':
+            state_attr = '_smoothed_left_line'
+            miss_attr = '_left_line_missing_frames'
+        else:
+            state_attr = '_smoothed_right_line'
+            miss_attr = '_right_line_missing_frames'
+
+        if line is None:
+            missing = getattr(self, miss_attr) + 1
+            setattr(self, miss_attr, missing)
+            if missing >= self.line_visual_missing_reset_frames:
+                setattr(self, state_attr, None)
+            return None
+
+        setattr(self, miss_attr, 0)
+        current = line.astype(np.float32)
+        previous = getattr(self, state_attr)
+        alpha = max(0.0, min(1.0, self.line_visual_smoothing_alpha))
+
+        if previous is None:
+            smoothed = current
+        else:
+            smoothed = (1.0 - alpha) * previous + alpha * current
+
+        setattr(self, state_attr, smoothed)
+        return np.rint(smoothed).astype(np.int32)
 
     def _bfmc_get_error(self, avg_left, avg_right, height, width):
         """
@@ -2494,16 +2536,18 @@ Args:
 
         # Draw ROI contour used by the image pipeline
         roi_vertices = debug_info.get('roi_vertices')
+        roi_top = 0
         if roi_vertices is not None:
             cv2.polylines(debug, roi_vertices, True, (255, 255, 0), 2)
+            roi_top = int(np.min(roi_vertices[0][:, 1]))
 
         # Draw averaged left line (red, extended)
         if avg_left is not None:
-            self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2)
+            self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2, top_y=roi_top)
 
         # Draw averaged right line (red, extended)
         if avg_right is not None:
-            self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2)
+            self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2, top_y=roi_top)
 
         # Draw midpoint and center
         if midpoint_x is not None:
@@ -2649,8 +2693,8 @@ Args:
 
         return debug
 
-    def _bfmc_draw_extended_line(self, image, line, height, color, thickness):
-        """Draw a line extended to top and bottom of image."""
+    def _bfmc_draw_extended_line(self, image, line, height, color, thickness, top_y=0):
+        """Draw a line extended between the ROI top and the bottom of the image."""
         x1, y1, x2, y2 = line[0]
         dx = x2 - x1
         if dx == 0:
@@ -2658,11 +2702,12 @@ Args:
         slope = (y2 - y1) / dx
         if slope == 0:
             slope = 0.001
-        # Intersection at y=0 (top)
-        x_top = int(x1 + (0 - y1) / slope)
+        top_y = max(0, min(height, int(top_y)))
+        # Intersection at the ROI top
+        x_top = int(x1 + (top_y - y1) / slope)
         # Intersection at y=height (bottom)
         x_bot = int(x1 + (height - y1) / slope)
-        cv2.line(image, (x_top, 0), (x_bot, height), color, thickness)
+        cv2.line(image, (x_top, top_y), (x_bot, height), color, thickness)
 
     # ================================================================
     # HYBRID CURVE SYSTEM - Context-aware curve navigation
