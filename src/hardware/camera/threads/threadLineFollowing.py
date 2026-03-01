@@ -409,8 +409,15 @@ Args:
         self.use_adaptive_white = True
         self.adaptive_white_percentile = 92
         self.adaptive_white_min_threshold = 180
+        self.adaptive_white_tophat_kernel = 15
+        self.adaptive_white_tophat_min_threshold = 20
         self.use_gradient_fallback = True
         self.gradient_percentile = 85
+        self.use_component_filter = True
+        self.component_min_area = 20
+        self.component_min_height = 12
+        self.component_min_aspect_ratio = 2.0
+        self.component_min_angle = 25.0
 
         # Auto binary threshold: adapta a cambios de luz frame a frame.
         # Desactivado: se usa siempre binary_threshold fijo.
@@ -1220,19 +1227,27 @@ Args:
         different lighting conditions automatically.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        valid_pixels = gray[gray > 0]
+        kernel_size = max(3, int(self.adaptive_white_tophat_kernel))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        tophat_kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (kernel_size, kernel_size)
+        )
+        # Top-hat keeps thin bright structures (lane paint) and suppresses broad glare blobs.
+        response = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, tophat_kernel)
+        valid_pixels = response[gray > 0]
 
         # Calculate adaptive threshold based on percentile
         if valid_pixels.size > 0:
             threshold = np.percentile(valid_pixels, self.adaptive_white_percentile)
         else:
-            threshold = self.adaptive_white_min_threshold
+            threshold = self.adaptive_white_tophat_min_threshold
 
         # Ensure minimum threshold to avoid detecting everything as white
-        threshold = max(threshold, self.adaptive_white_min_threshold)
+        threshold = max(threshold, self.adaptive_white_tophat_min_threshold)
         
         # Create binary mask for white regions
-        _, white_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
+        _, white_mask = cv2.threshold(response, threshold, 255, cv2.THRESH_BINARY)
         
         return white_mask, threshold
 
@@ -1284,6 +1299,44 @@ Args:
             cv2.inRange(hsv, lower_wrap, upper_wrap),
             cv2.inRange(hsv, lower_tail, upper_tail)
         )
+
+    def _filter_line_like_components(self, mask):
+        """Keep only connected components that resemble elongated lane markings."""
+        if not self.use_component_filter:
+            return mask
+
+        contours_data = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = contours_data[0] if len(contours_data) == 2 else contours_data[1]
+        filtered = np.zeros_like(mask)
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < self.component_min_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+            if max(w, h) < self.component_min_height:
+                continue
+
+            rect = cv2.minAreaRect(contour)
+            rect_w, rect_h = rect[1]
+            long_side = max(rect_w, rect_h)
+            short_side = max(min(rect_w, rect_h), 1.0)
+            if long_side < self.component_min_height:
+                continue
+
+            aspect_ratio = long_side / short_side
+            if aspect_ratio < self.component_min_aspect_ratio:
+                continue
+
+            vx, vy, _, _ = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01)
+            angle = abs(math.degrees(math.atan2(float(vy), float(vx))))
+            if angle < self.component_min_angle:
+                continue
+
+            cv2.drawContours(filtered, [contour], -1, 255, -1)
+
+        return filtered
 
     def _preprocess_frame(self, frame):
         """Apply all preprocessing steps to make detection robust to lighting changes.
@@ -1383,6 +1436,11 @@ Args:
             else:
                 debug_info['gradient_used'] = False
         
+        if needs_debug:
+            debug_info['combined_raw'] = combined_mask.copy()
+
+        combined_mask = self._filter_line_like_components(combined_mask)
+
         if needs_debug:
             debug_info['combined_mask'] = combined_mask.copy()
 
@@ -2210,6 +2268,7 @@ Args:
             threshold_val = self.binary_threshold
 
         _, binary_threshold = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
+        binary_threshold = self._filter_line_like_components(binary_threshold)
         binary_image = cv2.bitwise_or(binary_threshold, combined_mask)
 
         morph_size = max(3, min(int(self.morph_kernel), 5))
@@ -3557,10 +3616,12 @@ Returns:
                          'line_merge_distance', 'lstr_model_size', 'stream_debug_view',
                          'stream_debug_fps', 'stream_debug_quality', 'use_clahe',
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
+                         'adaptive_white_tophat_kernel', 'adaptive_white_tophat_min_threshold',
                          'use_auto_threshold', 'auto_threshold_percentile',
                          'auto_threshold_min', 'auto_threshold_max',
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
+                         'use_component_filter', 'component_min_area', 'component_min_height',
                          'use_swept_path', 'curve_speed_reduction',
                          'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames', 'curve_vp_confirm_frames',
                          'use_noise_filter', 'noise_max_hough_lines',
@@ -3588,7 +3649,10 @@ Returns:
                      # Adaptive lighting parameters
                      'use_clahe', 'clahe_clip_limit', 'clahe_grid_size',
                      'use_adaptive_white', 'adaptive_white_percentile', 'adaptive_white_min_threshold',
+                     'adaptive_white_tophat_kernel', 'adaptive_white_tophat_min_threshold',
                      'use_gradient_fallback', 'gradient_percentile',
+                     'use_component_filter', 'component_min_area', 'component_min_height',
+                     'component_min_aspect_ratio', 'component_min_angle',
                      'use_auto_threshold', 'auto_threshold_percentile',
                      'auto_threshold_min', 'auto_threshold_max',
                      # Detection mode
