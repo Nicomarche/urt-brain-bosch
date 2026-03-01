@@ -2280,6 +2280,7 @@ Args:
         masked_image = cv2.bitwise_and(image, mask)
         if needs_debug:
             debug_info['roi'] = masked_image.copy()
+            debug_info['roi_vertices'] = roi_vertices.copy()
 
         # 2. Grayscale
         grey_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
@@ -2490,6 +2491,11 @@ Args:
             for line in all_lines:
                 x1, y1, x2, y2 = line[0]
                 cv2.line(debug, (x1, y1), (x2, y2), (180, 120, 60), 1)
+
+        # Draw ROI contour used by the image pipeline
+        roi_vertices = debug_info.get('roi_vertices')
+        if roi_vertices is not None:
+            cv2.polylines(debug, roi_vertices, True, (255, 255, 0), 2)
 
         # Draw averaged left line (red, extended)
         if avg_left is not None:
@@ -4018,6 +4024,8 @@ Returns:
 
         # Show debug windows (only enabled ones)
         if self.show_debug:
+            if 'roi' in debug_info:
+                cv2.imshow("ROI", debug_info['roi'])
             if self._is_window_enabled("binary_threshold") and 'binary' in debug_info:
                 bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
                 cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
