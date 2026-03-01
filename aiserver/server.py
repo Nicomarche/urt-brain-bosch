@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI):
     print(f"  WS carriles:  ws://<ip>:{config.SERVER_PORT}/ws/steering")
     if sign_engine:
         print(f"  WS señales:   ws://<ip>:{config.SERVER_PORT}/ws/signs")
-    if sign_engine and show_viz:
+    if show_viz and (sign_engine or (engine is not None and hasattr(engine, "get_vis_jpeg"))):
         print(f"  Visualización: http://localhost:{config.SERVER_PORT}/viz")
     print("=" * 60)
     
@@ -508,6 +508,34 @@ async def websocket_signs(websocket: WebSocket):
 # Visualización MJPEG (bounding boxes en el navegador)
 # ============================================================
 
+@app.get("/viz/lanes")
+async def viz_lanes_stream():
+    """MJPEG stream: video en vivo con overlay de carriles detectados."""
+    if (
+        engine is None
+        or not hasattr(engine, "get_vis_jpeg")
+        or not getattr(engine, "show_visualization", False)
+    ):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Visualizacion de carriles no disponible"},
+        )
+
+    async def generate():
+        while True:
+            jpeg = engine.get_vis_jpeg()
+            if jpeg is not None:
+                yield (
+                    b"--frame\r\n"
+                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                )
+            await asyncio.sleep(0.033)
+
+    return StreamingResponse(
+        generate(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+    )
+
 @app.get("/viz/signs")
 async def viz_signs_stream():
     """MJPEG stream: video en vivo con bounding boxes de señales detectadas.
@@ -515,7 +543,7 @@ async def viz_signs_stream():
     Abre esta URL en cualquier navegador (funciona en macOS, Linux, Windows).
     El stream se activa cuando un cliente WebSocket envía frames a /ws/signs.
     """
-    if sign_engine is None:
+    if sign_engine is None or not getattr(sign_engine, "show_visualization", False):
         return JSONResponse(
             status_code=503,
             content={"error": "Sign detection no disponible"},
@@ -539,13 +567,65 @@ async def viz_signs_stream():
 
 @app.get("/viz", response_class=HTMLResponse)
 async def viz_page():
-    """Página HTML con visualización en vivo de detección de señales."""
+    """Página HTML con visualización en vivo de carriles y señales."""
     port = config.SERVER_PORT
+    lane_available = (
+        engine is not None
+        and hasattr(engine, "get_vis_jpeg")
+        and getattr(engine, "show_visualization", False)
+    )
+    sign_available = sign_engine is not None and getattr(sign_engine, "show_visualization", False)
+    lane_section = ""
+    if lane_available:
+        lane_section = """
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Carriles</h2>
+        <span class="badge">/viz/lanes</span>
+      </div>
+      <div class="panel-body">
+        <div class="waiting" id="waiting-lanes">
+          <div class="spinner"></div>
+          <div>Esperando frames de /ws/steering...</div>
+        </div>
+        <img class="stream" src="/viz/lanes" alt="Lane Stream"
+             style="display:none"
+             onload="showStream('lanes', this)">
+      </div>
+    </section>"""
+    sign_section = ""
+    if sign_available:
+        sign_section = """
+    <section class="panel">
+      <div class="panel-header">
+        <h2>Señales</h2>
+        <span class="badge">/viz/signs</span>
+      </div>
+      <div class="panel-body">
+        <div class="waiting" id="waiting-signs">
+          <div class="spinner"></div>
+          <div>Esperando frames de /ws/signs...</div>
+        </div>
+        <img class="stream" src="/viz/signs" alt="Sign Stream"
+             style="display:none"
+             onload="showStream('signs', this)">
+      </div>
+    </section>"""
+    if not lane_section and not sign_section:
+        lane_section = """
+    <section class="panel">
+      <div class="panel-body">
+        <div class="waiting" style="display:block">
+          <div class="spinner"></div>
+          <div>No hay streams de visualizacion disponibles.</div>
+        </div>
+      </div>
+    </section>"""
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="utf-8">
-  <title>Sign Detection — AI Server</title>
+  <title>AI Server Viz</title>
   <style>
     * {{ margin: 0; padding: 0; box-sizing: border-box; }}
     body {{
@@ -554,7 +634,6 @@ async def viz_page():
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       display: flex;
       flex-direction: column;
-      align-items: center;
       min-height: 100vh;
     }}
     header {{
@@ -571,6 +650,41 @@ async def viz_page():
       font-weight: 600;
       color: #00e5ff;
     }}
+    main {{
+      width: 100%;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      gap: 16px;
+      padding: 16px;
+    }}
+    .panel {{
+      background: #151528;
+      border: 1px solid #2a2a4a;
+      border-radius: 10px;
+      overflow: hidden;
+      min-height: 280px;
+    }}
+    .panel-header {{
+      padding: 12px 14px;
+      border-bottom: 1px solid #2a2a4a;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }}
+    .panel-header h2 {{
+      font-size: 0.95em;
+      font-weight: 600;
+      color: #9be7ff;
+    }}
+    .panel-body {{
+      padding: 12px;
+      min-height: 240px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }}
     header .badge {{
       font-size: 0.75em;
       padding: 2px 8px;
@@ -579,17 +693,10 @@ async def viz_page():
       color: #00e5ff;
       border: 1px solid #00e5ff44;
     }}
-    .stream-container {{
-      flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 16px;
+    .stream {{
       width: 100%;
-    }}
-    img#stream {{
-      max-width: 95vw;
-      max-height: 82vh;
+      max-height: 72vh;
+      object-fit: contain;
       border: 2px solid #2a2a4a;
       border-radius: 8px;
       background: #1a1a2e;
@@ -603,7 +710,7 @@ async def viz_page():
       color: #888;
       font-size: 1.1em;
       text-align: center;
-      padding: 40px;
+      padding: 24px;
     }}
     .waiting .spinner {{
       display: inline-block;
@@ -617,31 +724,30 @@ async def viz_page():
     }}
     @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
   </style>
+  <script>
+    function showStream(name, img) {{
+      const waiting = document.getElementById('waiting-' + name);
+      if (waiting) waiting.style.display = 'none';
+      const status = document.getElementById('status');
+      status.textContent = 'Live';
+      status.style.background = '#00c85322';
+      status.style.color = '#00c853';
+      status.style.borderColor = '#00c85344';
+      if (img) img.style.display = 'block';
+    }}
+  </script>
 </head>
 <body>
   <header>
-    <h1>Sign Detection</h1>
+    <h1>AI Server Visualization</h1>
     <span class="badge">AI Server :{port}</span>
     <span class="badge" id="status">Connecting...</span>
   </header>
-  <div class="stream-container">
-    <div class="waiting" id="waiting">
-      <div class="spinner"></div>
-      <div>Esperando frames del cliente...</div>
-      <div style="margin-top:8px;font-size:0.85em;color:#666">
-        Conecta el RPi al endpoint <code>/ws/signs</code>
-      </div>
-    </div>
-    <img id="stream" src="/viz/signs" alt="Sign Detection Stream"
-         style="display:none"
-         onload="document.getElementById('waiting').style.display='none';
-                 this.style.display='block';
-                 document.getElementById('status').textContent='Live';
-                 document.getElementById('status').style.background='#00c85322';
-                 document.getElementById('status').style.color='#00c853';
-                 document.getElementById('status').style.borderColor='#00c85344';">
-  </div>
-  <footer>MJPEG Stream &mdash; bounding boxes renderizados server-side</footer>
+  <main>
+    {lane_section}
+    {sign_section}
+  </main>
+  <footer>MJPEG stream server-side para carriles y señales</footer>
 </body>
 </html>"""
 

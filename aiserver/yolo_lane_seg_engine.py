@@ -7,6 +7,7 @@ carril derecho, y calcula el mismo payload que esperan los endpoints
 """
 
 import os
+import threading
 import time
 
 import cv2
@@ -38,6 +39,15 @@ class YOLOLaneSegEngine:
         "derecha",
         "carril_derecho",
     )
+    DEFAULT_GENERIC_LANE_ALIASES = (
+        "lane",
+        "lanes",
+        "lane_line",
+        "lane_lines",
+        "line",
+        "linea",
+        "carril",
+    )
 
     def __init__(self, model_path=None, min_confidence=None, imgsz=None, device=None):
         try:
@@ -68,9 +78,16 @@ class YOLOLaneSegEngine:
 
         left_aliases = getattr(config, "LANE_SEG_LEFT_CLASS_ALIASES", None)
         right_aliases = getattr(config, "LANE_SEG_RIGHT_CLASS_ALIASES", None)
+        generic_aliases = getattr(config, "LANE_SEG_GENERIC_CLASS_ALIASES", None)
         self.left_aliases = self._normalize_aliases(left_aliases or self.DEFAULT_LEFT_ALIASES)
         self.right_aliases = self._normalize_aliases(
             right_aliases or self.DEFAULT_RIGHT_ALIASES
+        )
+        self.generic_lane_aliases = self._normalize_aliases(
+            generic_aliases or self.DEFAULT_GENERIC_LANE_ALIASES
+        )
+        self.min_component_area_ratio = float(
+            getattr(config, "LANE_SEG_MIN_COMPONENT_AREA_RATIO", 0.0008)
         )
 
         model_full_path = self._resolve_model_path(self.model_path)
@@ -87,6 +104,9 @@ class YOLOLaneSegEngine:
         self.labels = getattr(self.model, "names", {})
         self.frame_count = 0
         self.previous_steering = 0.0
+        self.show_visualization = getattr(config, "SHOW_VISUALIZATION", False)
+        self._vis_jpeg = None
+        self._vis_lock = threading.Lock()
 
         print(f"[YOLOLaneSeg] Cargando modelo desde: {model_full_path}")
         print(f"[YOLOLaneSeg] Device: {self.device}")
@@ -99,6 +119,11 @@ class YOLOLaneSegEngine:
         print(
             f"[YOLOLaneSeg] Alias izquierda={sorted(self.left_aliases)} | "
             f"derecha={sorted(self.right_aliases)}"
+        )
+        print(f"[YOLOLaneSeg] Alias generico={sorted(self.generic_lane_aliases)}")
+        print(
+            f"[YOLOLaneSeg] Visualization: "
+            f"{'ON (/viz/lanes)' if self.show_visualization else 'OFF'}"
         )
 
         self._warmup()
@@ -142,12 +167,14 @@ class YOLOLaneSegEngine:
         warmup_ms = (time.time() - start_time) * 1000
         print(f"[YOLOLaneSeg] Warm-up completado en {warmup_ms:.0f}ms")
 
-    def _class_to_side(self, class_name):
+    def _class_to_role(self, class_name):
         normalized = self._normalize(class_name)
         if normalized in self.left_aliases:
             return "left"
         if normalized in self.right_aliases:
             return "right"
+        if normalized in self.generic_lane_aliases:
+            return "generic"
         return None
 
     def _segments_to_mask(self, segments, shape):
@@ -230,6 +257,48 @@ class YOLOLaneSegEngine:
             ],
         }
 
+    def _mask_bbox(self, mask):
+        ys, xs = np.where(mask > 0)
+        if xs.size == 0 or ys.size == 0:
+            return None
+        return (
+            float(xs.min()),
+            float(ys.min()),
+            float(xs.max()),
+            float(ys.max()),
+        )
+
+    def _split_mask_components(self, mask):
+        if mask is None or not np.any(mask):
+            return []
+
+        min_area_px = int(mask.shape[0] * mask.shape[1] * self.min_component_area_ratio)
+        min_area_px = max(min_area_px, 20)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        components = []
+        for label_idx in range(1, num_labels):
+            area = int(stats[label_idx, cv2.CC_STAT_AREA])
+            if area < min_area_px:
+                continue
+
+            component_mask = np.where(labels == label_idx, 255, 0).astype(np.uint8)
+            bbox = self._mask_bbox(component_mask)
+            if bbox is None:
+                continue
+
+            x1, y1, x2, y2 = bbox
+            components.append(
+                {
+                    "mask": component_mask,
+                    "box": bbox,
+                    "x_center": (x1 + x2) / 2.0,
+                    "area": area,
+                }
+            )
+
+        return sorted(components, key=lambda item: item["x_center"])
+
     def _split_lane_candidates(self, result, frame_shape):
         height, width = frame_shape
         boxes = result.boxes
@@ -245,7 +314,9 @@ class YOLOLaneSegEngine:
             conf = float(boxes.conf[idx])
             cls_idx = int(boxes.cls[idx])
             class_name = str(self.labels.get(cls_idx, f"class_{cls_idx}"))
-            side = self._class_to_side(class_name)
+            role = self._class_to_role(class_name)
+            if role is None:
+                continue
 
             box = boxes.xyxy[idx].tolist()
             x1, y1, x2, y2 = [float(v) for v in box]
@@ -253,10 +324,41 @@ class YOLOLaneSegEngine:
             segments = masks_xy[idx] if idx < len(masks_xy) else None
             mask = self._segments_to_mask(segments, (height, width))
 
+            if role == "generic":
+                components = self._split_mask_components(mask)
+                if len(components) >= 2:
+                    left_component = components[0]
+                    right_component = components[-1]
+                    candidate_entries.append(
+                        {
+                            "class_name": class_name,
+                            "role": "left",
+                            "confidence": conf,
+                            "box": left_component["box"],
+                            "x_center": left_component["x_center"],
+                            "mask": left_component["mask"],
+                        }
+                    )
+                    candidate_entries.append(
+                        {
+                            "class_name": class_name,
+                            "role": "right",
+                            "confidence": conf,
+                            "box": right_component["box"],
+                            "x_center": right_component["x_center"],
+                            "mask": right_component["mask"],
+                        }
+                    )
+                    continue
+                elif len(components) == 1:
+                    mask = components[0]["mask"]
+                    x1, y1, x2, y2 = components[0]["box"]
+                    x_center = components[0]["x_center"]
+
             candidate_entries.append(
                 {
                     "class_name": class_name,
-                    "side": side,
+                    "role": role,
                     "confidence": conf,
                     "box": (x1, y1, x2, y2),
                     "x_center": x_center,
@@ -269,11 +371,11 @@ class YOLOLaneSegEngine:
         frame_center = width / 2.0
 
         for entry in candidate_entries:
-            if entry["side"] == "left":
+            if entry["role"] == "left":
                 side_candidates["left"].append(entry)
-            elif entry["side"] == "right":
+            elif entry["role"] == "right":
                 side_candidates["right"].append(entry)
-            else:
+            elif entry["role"] == "generic":
                 unknown.append(entry)
 
         if not side_candidates["left"] and not side_candidates["right"] and unknown:
@@ -374,6 +476,70 @@ class YOLOLaneSegEngine:
         ok, encoded = cv2.imencode(".png", mask)
         return encoded.tobytes() if ok else b""
 
+    def get_vis_jpeg(self):
+        with self._vis_lock:
+            return self._vis_jpeg
+
+    def _visualize(self, frame, side_masks, lane_points, steering, infer_ms):
+        vis = frame.copy()
+        height, width = vis.shape[:2]
+
+        overlay = np.zeros_like(vis)
+        left_mask = side_masks.get("left")
+        right_mask = side_masks.get("right")
+
+        if left_mask is not None and np.any(left_mask):
+            overlay[left_mask > 0] = (255, 120, 0)
+        if right_mask is not None and np.any(right_mask):
+            overlay[right_mask > 0] = (0, 200, 255)
+        if np.any(overlay):
+            vis = cv2.addWeighted(vis, 1.0, overlay, 0.35, 0)
+
+        line_colors = [(255, 170, 0), (0, 220, 255)]
+        for idx, line in enumerate(lane_points):
+            if len(line) < 2:
+                continue
+            pts = np.array(line, dtype=np.int32).reshape((-1, 1, 2))
+            color = line_colors[idx % len(line_colors)]
+            cv2.polylines(vis, [pts], False, color, 3, cv2.LINE_AA)
+            for point in line:
+                cv2.circle(vis, point, 3, color, -1, cv2.LINE_AA)
+
+        frame_center = width // 2
+        cv2.line(vis, (frame_center, height), (frame_center, int(height * 0.45)), (200, 200, 200), 1)
+
+        lane_center_x = steering.get("lane_center_x")
+        if lane_center_x is not None:
+            lane_center_x = int(round(lane_center_x))
+            lookahead_y = int(height * (1.0 - config.LOOKAHEAD_RATIO))
+            cv2.circle(vis, (lane_center_x, lookahead_y), 8, (0, 255, 0), -1, cv2.LINE_AA)
+            cv2.line(vis, (frame_center, lookahead_y), (lane_center_x, lookahead_y), (0, 255, 0), 2, cv2.LINE_AA)
+
+        bar_h = 42
+        cv2.rectangle(vis, (0, 0), (width, bar_h), (0, 0, 0), -1)
+        steer_angle = steering.get("steering_angle")
+        steer_text = "--" if steer_angle is None else f"{steer_angle:.1f} deg"
+        conf_text = f"{steering.get('confidence', 0.0):.2f}"
+        status = (
+            f"YOLO Lanes | steer:{steer_text} | conf:{conf_text} | "
+            f"{infer_ms:.0f}ms | frame {self.frame_count}"
+        )
+        cv2.putText(
+            vis,
+            status,
+            (8, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        ok, jpeg = cv2.imencode(".jpg", vis, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            with self._vis_lock:
+                self._vis_jpeg = jpeg.tobytes()
+
     def _run_model(self, frame):
         results = self.model.predict(
             frame,
@@ -429,6 +595,8 @@ class YOLOLaneSegEngine:
             "frame_id": self.frame_count,
             "input_size": f"{self.imgsz}x{self.imgsz}",
         }
+        if self.show_visualization:
+            self._visualize(frame, side_masks, lane_points, steering, inference_ms)
         return payload
 
     def infer(self, frame):
@@ -462,5 +630,7 @@ class YOLOLaneSegEngine:
             "classes": labels,
             "left_aliases": sorted(self.left_aliases),
             "right_aliases": sorted(self.right_aliases),
-            "show_visualization": False,
+            "generic_lane_aliases": sorted(self.generic_lane_aliases),
+            "show_visualization": self.show_visualization,
+            "supports_browser_viz": True,
         }

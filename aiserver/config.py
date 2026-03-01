@@ -78,6 +78,16 @@ LANE_SEG_RIGHT_CLASS_ALIASES = [
     "derecha",
     "carril_derecho",
 ]
+LANE_SEG_GENERIC_CLASS_ALIASES = [
+    "lane",
+    "lanes",
+    "lane_line",
+    "line",
+    "carril",
+]
+
+# Area minima de un componente conectado para considerarlo como carril.
+LANE_SEG_MIN_COMPONENT_AREA_RATIO = 0.0008
 
 # ======================== LANE FOLLOWING ========================
 # Parámetros para calcular el ángulo de dirección desde las detecciones
