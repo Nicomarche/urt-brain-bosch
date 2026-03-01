@@ -435,7 +435,7 @@ class threadSignDetection(ThreadWithStop):
     """
 
     def __init__(self, queuesList, logger, debugger,
-                 server_url="ws://172.20.10.4:8500/ws/signs",
+                 server_url="ws://127.0.0.1:8500/ws/signs",
                  enable_actions=False,
                  min_confidence=0.50,
                  min_box_area=0.01,

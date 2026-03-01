@@ -71,7 +71,7 @@ class processCamera(WorkerProcess):
                  picamera_hdr_enabled=True, picamera_hdr_always_on=False,
                  picamera_hdr_glare_threshold=0.04,
                  enable_sign_detection=True, sign_detection_actions=False,
-                 sign_min_confidence=0.50, sign_server_url="ws://172.20.10.4:8500/ws/signs",
+                 sign_min_confidence=0.50, sign_server_url="ws://127.0.0.1:8500/ws/signs",
                  sign_min_box_area=0.01,
                  sign_action_cooldown=15.0):
         self.queuesList = queueList

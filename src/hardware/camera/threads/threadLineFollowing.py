@@ -442,13 +442,13 @@ Args:
         self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
         
         # HybridNets remote AI server parameters
-        self.hybridnets_server_url = "ws://172.20.10.4:8500/ws/steering"
+        self.hybridnets_server_url = "ws://127.0.0.1:8500/ws/steering"
         self.hybridnets_jpeg_quality = 70
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self._hybridnets_client = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
-        self.supercombo_server_url = "ws://172.20.10.4:8500/ws/steering"
+        self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
         self.supercombo_jpeg_quality = 70
         self.supercombo_timeout = 2.0
         self._supercombo_client = None
