@@ -392,7 +392,7 @@ Args:
         self.hough_threshold = 50      # BFMC votes threshold
         self.hough_min_line_length = 50  # BFMC min line length
         self.hough_max_line_gap = 150  # BFMC max gap between segments
-        self.line_angle_filter = 30    # Min angle (degrees) to classify as lane line
+        self.line_angle_filter = 20    # Min angle (degrees) to classify as lane line
         self.line_merge_distance = 175 # Max pixel distance to merge lines
 
         # Brightness/contrast
@@ -1855,7 +1855,13 @@ Args:
         # Check 1: Too many Hough lines = reflections/glare
         all_lines = debug_info.get('all_lines')
         if all_lines is not None and len(all_lines) > self.noise_max_hough_lines:
-            return True, f"hough_overflow({len(all_lines)}>{self.noise_max_hough_lines})"
+            merged_left = len(debug_info.get('left_lines', []))
+            merged_right = len(debug_info.get('right_lines', []))
+            merged_total = merged_left + merged_right
+            # Let true single-line detections pass through even if raw Hough found
+            # many short segments. Otherwise the 1-line controller never runs.
+            if not (num_lines == 1 and merged_total <= 6):
+                return True, f"hough_overflow({len(all_lines)}>{self.noise_max_hough_lines})"
 
         # Check 2: Sudden error jump (only if we have a previous reference)
         if error is not None and self._last_good_error is not None:
@@ -2249,10 +2255,26 @@ Args:
         debug_info = {}
         needs_debug = self._needs_debug
 
-        # 1. ROI mask — keep bottom portion (roi_height_start..roi_height_end)
+        # 1. ROI mask — match bfmc24-brain StanleyLaneDetector.image_processing()
+        # The original detector uses a fixed polygon for 512x270 that removes the
+        # center-bottom hood area. Scale it to the current frame size.
         y_start = int(self.roi_height_start * height)
         y_end = int(self.roi_height_end * height)
-        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
+        x3 = int(width * (365.0 / 512.0))
+        x4 = int(width * (145.0 / 512.0))
+        y3 = int(height * (230.0 / 270.0))
+        y3 = max(y_start, min(y_end, y3))
+
+        roi_vertices = np.array([[
+            (0, y_start),
+            (width, y_start),
+            (width, y_end),
+            (x3, y_end),
+            (x3, y3),
+            (x4, y3),
+            (x4, y_end),
+            (0, y_end),
+        ]], dtype=np.int32)
         mask = np.zeros_like(image)
         cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
         masked_image = cv2.bitwise_and(image, mask)
@@ -3973,22 +3995,14 @@ Returns:
         
        
 
-        # Preprocess: apply CLAHE and brightness/contrast before detection
-        preprocessed, preprocess_debug = self._preprocess_frame(frame)
-        
-        # Store debug images from preprocessing
-        if 'clahe' in preprocess_debug:
-            self._store_debug_image('clahe', preprocess_debug['clahe'])
-        if 'adjusted' in preprocess_debug:
-            self._store_debug_image('adjusted', preprocess_debug['adjusted'])
-
-        # First attempt with normal threshold
-        avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(preprocessed)
+        # Match bfmc24-brain StanleyLaneDetector.image_processing(): raw frame goes
+        # directly into ROI -> grayscale -> threshold -> median -> canny -> hough.
+        avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(frame)
 
         # BFMC retry: if no lines detected, try lower threshold (from MarcosLaneDetector)
         if avg_left is None and avg_right is None:
             avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(
-                preprocessed,
+                frame,
                 threshold_override=self.binary_threshold_retry,
                 kernel_override=3
             )
