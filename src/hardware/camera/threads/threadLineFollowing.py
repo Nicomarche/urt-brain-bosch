@@ -418,6 +418,10 @@ Args:
         self.component_min_height = 12
         self.component_min_aspect_ratio = 2.0
         self.component_min_angle = 25.0
+        self.use_local_adaptive_threshold = True
+        self.local_adaptive_block_size = 31
+        self.local_adaptive_c = 7.0
+        self.hough_max_lines_per_side = 12
 
         # Auto binary threshold: adapta a cambios de luz frame a frame.
         # Desactivado: se usa siempre binary_threshold fijo.
@@ -1337,6 +1341,58 @@ Args:
             cv2.drawContours(filtered, [contour], -1, 255, -1)
 
         return filtered
+
+    def _adaptive_local_threshold(self, gray_image):
+        """Local adaptive thresholding, as suggested by classic layered lane pipelines."""
+        block_size = max(3, int(self.local_adaptive_block_size))
+        if block_size % 2 == 0:
+            block_size += 1
+
+        adaptive_mask = cv2.adaptiveThreshold(
+            gray_image,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            block_size,
+            self.local_adaptive_c
+        )
+        return self._filter_line_like_components(adaptive_mask)
+
+    def _hough_lines_by_half(self, canny):
+        """Run Hough independently on each half of the image and keep strongest segments."""
+        height, width = canny.shape[:2]
+        split_x = width // 2
+        selected_lines = []
+
+        for x_start, x_end in ((0, split_x), (split_x, width)):
+            half = canny[:, x_start:x_end]
+            half_lines = cv2.HoughLinesP(
+                half, 1, np.pi / 180,
+                self.hough_threshold,
+                minLineLength=self.hough_min_line_length,
+                maxLineGap=self.hough_max_line_gap
+            )
+            if half_lines is None:
+                continue
+
+            scored_lines = []
+            for line in half_lines:
+                x1, y1, x2, y2 = line[0]
+                x1 += x_start
+                x2 += x_start
+                length_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
+                scored_lines.append(
+                    (length_sq, np.array([[x1, y1, x2, y2]], dtype=np.int32))
+                )
+
+            scored_lines.sort(key=lambda item: item[0], reverse=True)
+            limit = max(1, int(self.hough_max_lines_per_side))
+            selected_lines.extend(line for _, line in scored_lines[:limit])
+
+        if len(selected_lines) == 0:
+            return None
+
+        return np.array(selected_lines, dtype=np.int32)
 
     def _preprocess_frame(self, frame):
         """Apply all preprocessing steps to make detection robust to lighting changes.
@@ -2269,7 +2325,12 @@ Args:
 
         _, binary_threshold = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
         binary_threshold = self._filter_line_like_components(binary_threshold)
+        local_adaptive = None
+        if self.use_local_adaptive_threshold:
+            local_adaptive = self._adaptive_local_threshold(grey_image)
         binary_image = cv2.bitwise_or(binary_threshold, combined_mask)
+        if local_adaptive is not None:
+            binary_image = cv2.bitwise_or(binary_image, local_adaptive)
 
         morph_size = max(3, min(int(self.morph_kernel), 5))
         if morph_size % 2 == 0:
@@ -2282,6 +2343,8 @@ Args:
 
         if needs_debug:
             debug_info['binary_gray'] = binary_threshold.copy()
+            if local_adaptive is not None:
+                debug_info['binary_local'] = local_adaptive.copy()
             debug_info['combined_mask'] = binary_image.copy()
             debug_info['binary'] = binary_image.copy()
 
@@ -2302,12 +2365,7 @@ Args:
             debug_info['canny'] = canny.copy()
 
         # 6. HoughLinesP
-        lines = cv2.HoughLinesP(
-            canny, 1, np.pi / 180,
-            self.hough_threshold,
-            minLineLength=self.hough_min_line_length,
-            maxLineGap=self.hough_max_line_gap
-        )
+        lines = self._hough_lines_by_half(canny)
 
         # 7. Classify → merge → average
         left_lines, right_lines = self._bfmc_classify_lines(lines)
@@ -3617,11 +3675,13 @@ Returns:
                          'stream_debug_fps', 'stream_debug_quality', 'use_clahe',
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
                          'adaptive_white_tophat_kernel', 'adaptive_white_tophat_min_threshold',
+                         'use_local_adaptive_threshold', 'local_adaptive_block_size',
                          'use_auto_threshold', 'auto_threshold_percentile',
                          'auto_threshold_min', 'auto_threshold_max',
                          'integral_reset_interval', 'hybridnets_jpeg_quality',
                          'supercombo_jpeg_quality', 'brightness',
                          'use_component_filter', 'component_min_area', 'component_min_height',
+                         'hough_max_lines_per_side',
                          'use_swept_path', 'curve_speed_reduction',
                          'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames', 'curve_vp_confirm_frames',
                          'use_noise_filter', 'noise_max_hough_lines',
@@ -3653,6 +3713,8 @@ Returns:
                      'use_gradient_fallback', 'gradient_percentile',
                      'use_component_filter', 'component_min_area', 'component_min_height',
                      'component_min_aspect_ratio', 'component_min_angle',
+                     'use_local_adaptive_threshold', 'local_adaptive_block_size',
+                     'local_adaptive_c', 'hough_max_lines_per_side',
                      'use_auto_threshold', 'auto_threshold_percentile',
                      'auto_threshold_min', 'auto_threshold_max',
                      # Detection mode
