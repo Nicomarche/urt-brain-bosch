@@ -1,12 +1,12 @@
 """
 Configuración del AI Server.
-Soporta múltiples motores de inferencia: HybridNets, Supercombo.
+Soporta multiples motores de inferencia: HybridNets, Supercombo, YOLO lane seg.
 Modifica estos valores según tu entorno.
 """
 
 # ======================== ENGINE SELECTION ========================
-# Motor de inferencia: "hybridnets" | "supercombo"
-ENGINE_TYPE = "supercombo"
+# Motor de inferencia: "hybridnets" | "supercombo" | "yolo_lane_seg"
+ENGINE_TYPE = "yolo_lane_seg"
 
 # ======================== SERVER ========================
 SERVER_HOST = "0.0.0.0"       # Escucha en todas las interfaces
@@ -45,6 +45,39 @@ RESPONSE_FORMAT = "msgpack"
 # Calidad JPEG al recibir frames (el cliente comprime antes de enviar)
 # Si el servidor necesita re-comprimir para debug: 1-100
 DEBUG_JPEG_QUALITY = 80
+
+# ======================== YOLO LANE SEG ========================
+# Modelo YOLOv8 de segmentacion para carril izquierdo/derecho.
+# El modelo actual viene del ZIP BFMC YOLOv8n Segment 6402.
+LANE_SEG_MODEL_PATH = "models/lane_segmentation/best.pt"
+LANE_SEG_MIN_CONFIDENCE = 0.35
+LANE_SEG_IMGSZ = 320
+LANE_SEG_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
+
+# Si solo se detecta un lado del carril, se estima el centro usando este ancho.
+# Se interpreta como fraccion del ancho del frame.
+LANE_SEG_FALLBACK_CENTER_OFFSET = 0.5
+
+# Alias de clases del modelo para identificar izquierda/derecha.
+# Si el modelo usa nombres distintos, ajustalos aqui.
+LANE_SEG_LEFT_CLASS_ALIASES = [
+    "left",
+    "left_lane",
+    "lane_left",
+    "left line",
+    "left-line",
+    "izquierda",
+    "carril_izquierdo",
+]
+LANE_SEG_RIGHT_CLASS_ALIASES = [
+    "right",
+    "right_lane",
+    "lane_right",
+    "right line",
+    "right-line",
+    "derecha",
+    "carril_derecho",
+]
 
 # ======================== LANE FOLLOWING ========================
 # Parámetros para calcular el ángulo de dirección desde las detecciones

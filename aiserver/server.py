@@ -4,8 +4,10 @@ AI Server - Servidor de inferencia remota para detección de carriles.
 Soporta múltiples motores de inferencia:
   - HybridNets: Segmentación + detección (requiere PyTorch + GPU)
   - Supercombo: Modelo de openpilot (requiere ONNX Runtime)
+  - YOLO Lane Seg: Segmentación de carril izquierdo/derecho (requiere Ultralytics)
 
-Seleccionar motor en config.py: ENGINE_TYPE = "hybridnets" | "supercombo"
+Seleccionar motor en config.py:
+  ENGINE_TYPE = "hybridnets" | "supercombo" | "yolo_lane_seg"
 
 La Raspberry Pi envía frames por WebSocket y este servidor responde
 con los resultados de detección de carril y ángulo de dirección.
@@ -64,6 +66,9 @@ async def lifespan(app: FastAPI):
     if engine_type == "supercombo":
         from supercombo_engine import SupercomboEngine
         engine = SupercomboEngine()
+    elif engine_type == "yolo_lane_seg":
+        from yolo_lane_seg_engine import YOLOLaneSegEngine
+        engine = YOLOLaneSegEngine()
     else:
         from inference import HybridNetsEngine
         engine = HybridNetsEngine()
@@ -104,7 +109,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AI Server",
-    description="Servidor de inferencia remota para detección de carriles (HybridNets/Supercombo)",
+    description="Servidor de inferencia remota para deteccion de carriles (HybridNets/Supercombo/YOLO Lane Seg)",
     version="2.0.0",
     lifespan=lifespan,
 )

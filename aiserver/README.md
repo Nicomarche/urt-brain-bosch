@@ -1,6 +1,11 @@
-# HybridNets AI Server
+# AI Server
 
-Servidor de inferencia remota para detección de carriles con **HybridNets**.
+Servidor de inferencia remota para deteccion de carriles.
+
+Motores soportados:
+- `hybridnets`
+- `supercombo`
+- `yolo_lane_seg` (YOLOv8 segmentation para carril izquierdo/derecho)
 
 La Raspberry Pi captura frames de la cámara, los envía por WebSocket al servidor potente,
 y el servidor responde con los resultados de segmentación de carril + ángulo de dirección.
@@ -11,8 +16,8 @@ y el servidor responde con los resultados de segmentación de carril + ángulo d
 ┌──────────────┐     WebSocket (JPEG)      ┌──────────────────┐
 │  Raspberry Pi │ ────────────────────────> │  Servidor (GPU)  │
 │               │                           │                  │
-│  - Cámara     │ <──────────────────────── │  - HybridNets    │
-│  - Motores    │     JSON (steering)       │  - PyTorch       │
+│  - Cámara     │ <──────────────────────── │  - Motor AI      │
+│  - Motores    │     JSON (steering)       │  - GPU/CPU       │
 │  - PID Control│                           │  - FastAPI       │
 └──────────────┘                            └──────────────────┘
 ```
@@ -21,7 +26,7 @@ y el servidor responde con los resultados de segmentación de carril + ángulo d
 
 1. **RPi** captura frame de la cámara (512x270 o configurable)
 2. **RPi** comprime a JPEG (calidad 70) y envía por WebSocket
-3. **Server** decodifica, redimensiona a 640x384, ejecuta HybridNets
+3. **Server** decodifica, redimensiona y ejecuta el motor configurado
 4. **Server** extrae líneas de carril, calcula ángulo de dirección
 5. **Server** responde con JSON: `{steering, confidence, lane_points, ...}`
 6. **RPi** aplica el ángulo a los motores con PID control
@@ -44,6 +49,9 @@ Esto automáticamente:
 - Instala dependencias de Python
 - Clona el repositorio de HybridNets
 - Descarga los pesos pre-entrenados (~200MB)
+
+Si vas a usar `yolo_lane_seg`, el modelo ya queda en:
+`aiserver/models/lane_segmentation/best.pt`
 
 ### 3. Instalación manual
 
@@ -74,6 +82,17 @@ python server.py
 ```
 
 El servidor escucha en `0.0.0.0:8500` por defecto.
+
+Para usar tu modelo YOLO de carriles, verifica en `config.py`:
+
+```python
+ENGINE_TYPE = "yolo_lane_seg"
+LANE_SEG_MODEL_PATH = "models/lane_segmentation/best.pt"
+```
+
+En la Raspberry/brain puedes seguir usando el modo `hybridnets` del dashboard:
+ese modo solo activa el cliente remoto y consume cualquier motor que exponga
+`/ws/steering` con el mismo protocolo.
 
 ## Setup del Cliente (Raspberry Pi)
 
@@ -135,10 +154,13 @@ la IP del servidor.
 
 Editar `config.py` para ajustar:
 
+- `ENGINE_TYPE`: `hybridnets`, `supercombo` o `yolo_lane_seg`
 - `SERVER_PORT`: Puerto del servidor (default: 8500)
 - `DEVICE`: "cuda", "cpu", etc.
 - `INPUT_WIDTH/HEIGHT`: Resolución del modelo (640x384)
 - `USE_HALF`: FP16 para mayor velocidad en GPU
+- `LANE_SEG_MODEL_PATH`: Modelo YOLOv8 de segmentacion de carriles
+- `LANE_SEG_LEFT_CLASS_ALIASES` / `LANE_SEG_RIGHT_CLASS_ALIASES`: nombres de clase que mapean a carril izquierdo/derecho
 - `LOOKAHEAD_RATIO`: Qué tan adelante mirar para calcular dirección
 - `STEERING_SMOOTHING`: Suavizado del ángulo
 
