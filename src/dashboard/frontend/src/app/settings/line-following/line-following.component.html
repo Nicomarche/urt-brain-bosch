@@ -32,12 +32,34 @@
           <span class="stat-value">{{ debugViewName }}</span>
         </div>
         <div class="stat-item">
-          <span class="stat-label">Direccion</span>
-          <span class="stat-value">{{ debugStatus?.steering !== null ? (debugStatus?.steering | number:'1.1-1') + '°' : '--' }}</span>
+          <span class="stat-label">Comando</span>
+          <span class="stat-value">{{ debugStatus?.commanded_steering !== null && debugStatus?.commanded_steering !== undefined ? (debugStatus?.commanded_steering | number:'1.1-1') + '°' : (debugStatus?.steering !== null ? (debugStatus?.steering | number:'1.1-1') + '°' : '--') }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Calculado</span>
+          <span class="stat-value">{{ debugStatus?.computed_steering !== null && debugStatus?.computed_steering !== undefined ? (debugStatus?.computed_steering | number:'1.1-1') + '°' : '--' }}</span>
         </div>
         <div class="stat-item">
           <span class="stat-label">Velocidad</span>
-          <span class="stat-value">{{ debugStatus?.speed ?? '--' }}</span>
+          <span class="stat-value">{{ debugStatus?.commanded_speed !== null && debugStatus?.commanded_speed !== undefined ? (debugStatus?.commanded_speed | number:'1.1-1') : (debugStatus?.speed ?? '--') }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Fuente</span>
+          <span class="stat-value">{{ getCommandSourceLabel() }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Actuador</span>
+          <span class="stat-value" [class.available]="debugStatus?.engine_enabled && debugStatus?.serial_connected !== false">
+            {{ getActuatorLabel() }}
+          </span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">KL</span>
+          <span class="stat-value">{{ debugStatus?.klem_mode ?? '--' }}</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-label">Real</span>
+          <span class="stat-value">{{ debugStatus?.actual_steering !== null && debugStatus?.actual_steering !== undefined ? (debugStatus?.actual_steering | number:'1.1-1') + '°' : '--' }}</span>
         </div>
         <div class="stat-item" *ngIf="selectedMode !== 'ai_local'">
           <span class="stat-label">LSTR</span>

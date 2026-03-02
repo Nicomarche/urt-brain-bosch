@@ -10,7 +10,7 @@ import time
 import math
 from collections import deque
 from enum import Enum
-from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus
+from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -451,6 +451,7 @@ Args:
         self._hybridnets_client = None
         self._last_local_lane_payload = None
         self._last_local_perception_status = None
+        self._last_actuator_status = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
         self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
@@ -547,6 +548,7 @@ Args:
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
         self.localLanePerceptionSubscriber = messageHandlerSubscriber(self.queuesList, LocalLanePerception, "lastOnly", True)
         self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
+        self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ActuatorCommandStatus, "lastOnly", True)
         
         # Sensor feedback subscribers (for Stanley controller)
         self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
@@ -639,7 +641,7 @@ Args:
         return mode_str
 
     def _poll_local_ai_messages(self):
-        """Cache the latest local AI perception payloads."""
+        """Cache the latest local AI and actuator payloads."""
         lane_payload = self.localLanePerceptionSubscriber.receive()
         if lane_payload is not None:
             self._last_local_lane_payload = lane_payload
@@ -647,6 +649,10 @@ Args:
         status_payload = self.localPerceptionStatusSubscriber.receive()
         if status_payload is not None:
             self._last_local_perception_status = status_payload
+
+        actuator_payload = self.actuatorStatusSubscriber.receive()
+        if actuator_payload is not None:
+            self._last_actuator_status = actuator_payload
 
     def _fit_lane_points_line(self, lane_points, img_h, img_w):
         """Compatibility wrapper for generic AI lane-point geometry."""
@@ -1314,11 +1320,37 @@ Args:
         
         cv2.imshow("Control Panel", panel)
 
-    def _send_debug_stream(self, steering_angle, speed):
-        """Send selected debug view to dashboard via websocket."""
-        if self.stream_debug_view == 0:
-            return  # Streaming disabled
-        
+    def _overlay_command_status(self, image, computed_steering, computed_speed,
+                                commanded_steering, commanded_speed, command_source):
+        """Overlay computed vs commanded control on the debug image."""
+        if image is None:
+            return None
+
+        overlay = image
+        height, width = overlay.shape[:2]
+        panel_top = max(0, height - 46)
+        cv2.rectangle(overlay, (0, panel_top), (width, height), (15, 15, 15), -1)
+        computed_text = (
+            f"Computed: {computed_steering:.1f}deg / {computed_speed:.1f}"
+            if computed_steering is not None and computed_speed is not None
+            else "Computed: --"
+        )
+        if commanded_steering is not None:
+            if commanded_speed is not None:
+                commanded_text = f"Commanded: {commanded_steering:.1f}deg / {commanded_speed:.1f}"
+            else:
+                commanded_text = f"Commanded: {commanded_steering:.1f}deg / speed hold"
+        else:
+            commanded_text = "Commanded: --"
+        source_text = f"Source: {command_source}"
+        cv2.putText(overlay, computed_text, (8, panel_top + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
+        cv2.putText(overlay, commanded_text, (8, panel_top + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(overlay, source_text, (max(8, width - 180), panel_top + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
+        return overlay
+
+    def _send_debug_stream(self, computed_steering, computed_speed,
+                           commanded_steering, commanded_speed, command_source):
+        """Send the final commanded status and, if enabled, the selected debug stream."""
         # Rate limit the streaming
         current_time = time.time()
         min_interval = 1.0 / max(1, self.stream_debug_fps)
@@ -1340,46 +1372,58 @@ Args:
             10: 'lstr',           # LSTR AI result
         }
         
-        view_name = view_names.get(self.stream_debug_view, 'final')
-        
-        # Get the selected image
-        if view_name not in self._debug_images:
-            return
-        
-        debug_img = self._debug_images[view_name]
-        
-        if debug_img is None:
-            return
-        
+        view_name = view_names.get(self.stream_debug_view, 'off')
+
         try:
-            # Scale down for bandwidth
-            if self.stream_debug_scale < 1.0:
-                new_width = int(debug_img.shape[1] * self.stream_debug_scale)
-                new_height = int(debug_img.shape[0] * self.stream_debug_scale)
-                debug_img = cv2.resize(debug_img, (new_width, new_height))
-            
-            # Add view name overlay
-            cv2.putText(debug_img, f"View: {view_name}", (10, 20), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            
-            # Encode to JPEG
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.stream_debug_quality]
-            _, encoded = cv2.imencode('.jpg', debug_img, encode_params)
-            
-            # Convert to base64
-            b64_data = base64.b64encode(encoded).decode('utf-8')
-            
-            # Send via message handler
-            self.debugStreamSender.send(b64_data)
-            
-            # Send status info
+            debug_img = None
+            if self.stream_debug_view > 0 and view_name in self._debug_images:
+                stored_img = self._debug_images.get(view_name)
+                if stored_img is not None:
+                    debug_img = stored_img.copy()
+
+            if debug_img is not None:
+                # Scale down for bandwidth
+                if self.stream_debug_scale < 1.0:
+                    new_width = int(debug_img.shape[1] * self.stream_debug_scale)
+                    new_height = int(debug_img.shape[0] * self.stream_debug_scale)
+                    debug_img = cv2.resize(debug_img, (new_width, new_height))
+
+                # Add view name overlay
+                cv2.putText(debug_img, f"View: {view_name}", (10, 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                # Encode to JPEG
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.stream_debug_quality]
+                _, encoded = cv2.imencode('.jpg', debug_img, encode_params)
+
+                # Convert to base64
+                b64_data = base64.b64encode(encoded).decode('utf-8')
+
+                # Send via message handler
+                self.debugStreamSender.send(b64_data)
+
+            actuator_status = self._last_actuator_status or {}
             status = {
-                'steering': round(steering_angle, 2) if steering_angle is not None else None,
-                'speed': round(speed, 2) if speed is not None else None,
+                'steering': round(commanded_steering, 2) if commanded_steering is not None else (round(computed_steering, 2) if computed_steering is not None else None),
+                'speed': round(commanded_speed, 2) if commanded_speed is not None else (round(computed_speed, 2) if computed_speed is not None else None),
                 'mode': self.detection_mode,
                 'view': view_name,
                 'active': self.is_line_following_active,
                 'lstr_available': self.lstr_detector is not None and self.lstr_detector.is_available,
+                'computed_steering': round(computed_steering, 2) if computed_steering is not None else None,
+                'computed_speed': round(computed_speed, 2) if computed_speed is not None else None,
+                'commanded_steering': round(commanded_steering, 2) if commanded_steering is not None else None,
+                'commanded_speed': round(commanded_speed, 2) if commanded_speed is not None else None,
+                'command_source': command_source,
+                'actual_steering': round(self._measured_steer, 2),
+                'actual_speed': round(self._measured_speed, 2),
+                'serial_connected': actuator_status.get('serial_connected'),
+                'engine_enabled': actuator_status.get('engine_enabled'),
+                'klem_mode': actuator_status.get('klem_mode'),
+                'actuator_command_type': actuator_status.get('command_type'),
+                'actuator_speed_x10': actuator_status.get('speed_x10'),
+                'actuator_steer_x10': actuator_status.get('steer_x10'),
+                'actuator_blocked_reason': actuator_status.get('blocked_reason'),
                 'local_ai_ready': False,
                 'local_ai_infer_ms': None,
                 'local_ai_fps': None,
@@ -4094,6 +4138,11 @@ Returns:
                 return
             
             steering_angle, speed, debug_frame = self.process_frame(frame)
+            computed_steering = steering_angle
+            computed_speed = speed
+            commanded_steering = None
+            commanded_speed = None
+            command_source = "no_command"
             
             if self.is_line_following_active:
                 # Check curve recovery FIRST - overrides normal commands if active
@@ -4102,6 +4151,9 @@ Returns:
                     speed, frame)
                 
                 if is_recovering:
+                    commanded_steering = rec_steer
+                    commanded_speed = rec_speed
+                    command_source = "curve_recovery"
                     self.send_motor_commands(rec_steer, rec_speed)
                     self.frames_without_line = 0
                     # Draw recovery status on debug frame
@@ -4109,6 +4161,9 @@ Returns:
                         cv2.putText(debug_frame, f"RECOVERY: {self._recovery_state}", 
                                     (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                 elif steering_angle is not None:
+                    commanded_steering = steering_angle
+                    commanded_speed = speed
+                    command_source = "normal"
                     self.send_motor_commands(steering_angle, speed)
                     self.frames_without_line = 0
                 else:
@@ -4116,14 +4171,61 @@ Returns:
                     if self.show_debug and self.frames_without_line % 10 == 1:
                         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWAIT\033[0m - No steering, frame {self.frames_without_line}/{self.max_frames_without_line}")
                     if self.frames_without_line > self.max_frames_without_line:
+                        commanded_steering = 0
+                        commanded_speed = self.min_speed
+                        command_source = "normal"
                         self.send_motor_commands(0, self.min_speed)
             else:
+                command_source = "blocked_inactive"
                 # Line following not active - need to be in AUTO mode
                 if steering_angle is not None:
                     print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mBLOCKED\033[0m - Steering={steering_angle:.1f}° but is_line_following_active=False! Put system in AUTO mode.")
                 if hasattr(self, '_last_inactive_log') == False:
                     print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
                     self._last_inactive_log = True
+
+            if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
+                if command_source == "normal":
+                    command_source = "sign_override"
+                commanded_speed = None
+
+            actuator_status = self._last_actuator_status or {}
+            if (
+                self.is_line_following_active
+                and commanded_steering is not None
+                and actuator_status.get("engine_enabled") is False
+            ):
+                command_source = "blocked_klem"
+
+            if self.show_debug and (computed_steering is not None or commanded_steering is not None):
+                comp_text = f"{computed_steering:.1f}" if computed_steering is not None else "--"
+                cmd_text = f"{commanded_steering:.1f}" if commanded_steering is not None else "--"
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mCMD\033[0m - "
+                    f"computed={comp_text}° commanded={cmd_text}° source={command_source}"
+                )
+
+            display_steering = commanded_steering if commanded_steering is not None else computed_steering
+            display_speed = commanded_speed if commanded_speed is not None else computed_speed
+
+            if debug_frame is not None:
+                self._overlay_command_status(
+                    debug_frame,
+                    computed_steering,
+                    computed_speed,
+                    commanded_steering,
+                    commanded_speed,
+                    command_source,
+                )
+                self._store_debug_image('final', debug_frame)
+
+            self._send_debug_stream(
+                computed_steering,
+                computed_speed,
+                commanded_steering,
+                commanded_speed,
+                command_source,
+            )
             
             if self.show_debug:
                 if debug_frame is not None and self._is_window_enabled("final_result"):
@@ -4134,7 +4236,7 @@ Returns:
                 
                 # Show control panel with current status
                 if self._is_window_enabled("control_panel"):
-                    self._show_control_panel(steering_angle, speed)
+                    self._show_control_panel(display_steering, display_speed)
                 cv2.waitKey(1)
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
@@ -4297,7 +4399,6 @@ Returns:
                            (8, debug_frame.shape[0] - 8),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
                 self._store_debug_image('final', debug_frame)
-                self._send_debug_stream(steering_angle, speed)
             else:
                 debug_frame = None
             return steering_angle, speed, debug_frame
@@ -4676,7 +4777,6 @@ Returns:
                 bottom_left_x, bottom_right_x, steering_angle, debug_info
             )
             self._store_debug_image('final', debug_frame)
-            self._send_debug_stream(steering_angle, speed)
         else:
             debug_frame = None
 

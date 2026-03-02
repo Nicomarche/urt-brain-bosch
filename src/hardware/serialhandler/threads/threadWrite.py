@@ -34,6 +34,7 @@ from datetime import datetime, timedelta
 from src.hardware.serialhandler.threads.messageconverter import MessageConverter
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.allMessages import (
+    ActuatorCommandStatus,
     Klem,
     Control,
     SteerMotor,
@@ -74,10 +75,24 @@ class threadWrite(ThreadWithStop):
 
         self.running = False
         self.engineEnabled = False
+        self.currentKlemMode = 0
         self.messageConverter = MessageConverter()
         self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
         self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
         self.configPath = "src/utils/table_state.json"
+        self.motionCommandTime = 0
+        self.last_speed_cmd = None
+        self.last_steer_cmd = None
+        self.last_speed_ts = 0.0
+        self.last_steer_ts = 0.0
+        self.last_motion_command = None
+        self.last_motion_command_ts = 0.0
+        self.last_motion_speed_x10 = None
+        self.last_motion_steer_x10 = None
+        self.last_motion_raw_command = None
+        self.last_blocked_reason = None
+        self._last_status_snapshot = None
+        self._last_status_send_time = 0.0
 
         # error rate limiting
         self.last_error_time = None
@@ -110,6 +125,7 @@ class threadWrite(ThreadWithStop):
         
     def _init_senders(self):
         self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
+        self.actuatorStatusSender = messageHandlerSender(self.queuesList, ActuatorCommandStatus)
 
     # ==================================== SENDING =======================================
 
@@ -122,11 +138,95 @@ class threadWrite(ThreadWithStop):
                     if serialCon and self.process.serialConnected and serialCon.is_open:
                         serialCon.write(command_msg.encode("ascii"))
                         self.logFile.write(command_msg)
+                        return True, command_msg
+                self.last_blocked_reason = "serial_disconnected"
+                self._publish_actuator_status(force=True)
 
             except Exception as e:
                 if self._should_send_error():
                     self.serialConnectionStateSender.send(False)
                     print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Failed to write to serial ({e})")
+                self.last_blocked_reason = "serial_disconnected"
+                self._publish_actuator_status(force=True)
+                return False, command_msg
+        else:
+            self.last_blocked_reason = "invalid_command"
+            self._publish_actuator_status(force=True)
+            return False, None
+        return False, command_msg
+
+    def _publish_actuator_status(self, force=False):
+        now = time.time()
+        snapshot = {
+            "serial_connected": bool(self.process.serialConnected),
+            "klem_mode": int(self.currentKlemMode),
+            "engine_enabled": bool(self.engineEnabled),
+            "command_type": self.last_motion_command,
+            "speed_x10": self.last_motion_speed_x10,
+            "steer_x10": self.last_motion_steer_x10,
+            "last_serial_command": self.last_motion_raw_command,
+            "raw_command": self.last_motion_raw_command,
+            "blocked_reason": self.last_blocked_reason,
+            "last_serial_command_ts": self.last_motion_command_ts or None,
+        }
+        should_send = (
+            force
+            or snapshot != self._last_status_snapshot
+            or (now - self._last_status_send_time) >= 0.5
+        )
+        if not should_send:
+            return
+
+        payload = dict(snapshot)
+        payload["timestamp"] = now
+        self.actuatorStatusSender.send(payload)
+        self._last_status_snapshot = snapshot
+        self._last_status_send_time = now
+
+    def _record_motion_command(self, command_type, raw_command, speed_x10=None, steer_x10=None,
+                               blocked_reason=None, force=False):
+        self.last_motion_command = command_type
+        self.last_motion_command_ts = time.time()
+        self.last_motion_speed_x10 = speed_x10
+        self.last_motion_steer_x10 = steer_x10
+        self.last_motion_raw_command = raw_command
+        self.last_blocked_reason = blocked_reason
+        self._publish_actuator_status(force=force)
+
+    def _handle_vcd_command(self, speed_x10, steer_x10):
+        command = {
+            "action": "vcd",
+            "speed": int(speed_x10),
+            "steer": int(steer_x10),
+            "time": int(self.motionCommandTime),
+        }
+        sent, raw_command = self.send_to_serial(command)
+        blocked_reason = None if sent else "serial_disconnected"
+        self._record_motion_command(
+            "vcd",
+            raw_command,
+            speed_x10=int(speed_x10),
+            steer_x10=int(steer_x10),
+            blocked_reason=blocked_reason,
+            force=True,
+        )
+        if sent and self.debugger:
+            self.logger.info(f"VCD sent: speed={int(speed_x10)} steer={int(steer_x10)}")
+        return sent
+
+    def _handle_brake_command(self, brake_value):
+        command = {"action": "brake", "steerAngle": int(brake_value)}
+        sent, raw_command = self.send_to_serial(command)
+        blocked_reason = None if sent else "serial_disconnected"
+        self._record_motion_command(
+            "brake",
+            raw_command,
+            speed_x10=0,
+            steer_x10=int(brake_value),
+            blocked_reason=blocked_reason,
+            force=True,
+        )
+        return sent
 
     def load_config(self, configType):
         with open(self.configPath, "r") as file:
@@ -169,20 +269,32 @@ class threadWrite(ThreadWithStop):
                 if klRecv == "30":
                     self.running = True
                     self.engineEnabled = True
+                    self.currentKlemMode = 30
+                    self.last_blocked_reason = None
                     command = {"action": "kl", "mode": 30}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
+                        self._handle_vcd_command(self.last_speed_cmd, self.last_steer_cmd)
+                    else:
+                        self._publish_actuator_status(force=True)
                 elif klRecv == "15":
                     self.running = True
                     self.engineEnabled = False
+                    self.currentKlemMode = 15
+                    self.last_blocked_reason = "klem_not_30"
                     command = {"action": "kl", "mode": 15}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    self._publish_actuator_status(force=True)
                 elif klRecv == "0":
                     self.running = False
                     self.engineEnabled = False
+                    self.currentKlemMode = 0
+                    self.last_blocked_reason = "klem_off"
                     command = {"action": "kl", "mode": 0}
                     self.send_to_serial(command)
+                    self._publish_actuator_status(force=True)
 
             isAliveRecv = self.isAliveSubscriber.receive()
             if isAliveRecv is not None:
@@ -199,53 +311,127 @@ class threadWrite(ThreadWithStop):
                 self.send_to_serial(command)
 
             if self.running:
-                if self.engineEnabled:
-                    brakeRecv = self.brakeSubscriber.receive()
-                    if brakeRecv is not None:
-                        if self.debugger:
-                            self.logger.info(brakeRecv)
-                        command = {"action": "brake", "steerAngle": int(float(brakeRecv))}
-                        self.send_to_serial(command)
+                brakeRecv = self.brakeSubscriber.receive()
+                speedRecv = self.speedMotorSubscriber.receive()
+                steerRecv = self.steerMotorSubscriber.receive()
 
-                    speedRecv = self.speedMotorSubscriber.receive()
-                    if speedRecv is not None: 
-                        speed_value = int(float(speedRecv))
-                        if self.debugger:
-                            self.logger.info(f"Speed received: {speedRecv} -> {speed_value}")
-                        command = {"action": "speed", "speed": speed_value}
-                        self.send_to_serial(command)
+                if speedRecv is not None:
+                    self.last_speed_cmd = int(float(speedRecv))
+                    self.last_speed_ts = time.time()
+                    if self.debugger:
+                        self.logger.info(f"Speed cached: {speedRecv} -> {self.last_speed_cmd}")
 
-                    steerRecv = self.steerMotorSubscriber.receive()
-                    if steerRecv is not None:
-                        steer_value = int(float(steerRecv))
-                        if self.debugger:
-                            self.logger.info(f"Steer received: {steerRecv} -> {steer_value}")
-                        command = {"action": "steer", "steerAngle": steer_value}
-                        self.send_to_serial(command)
+                if steerRecv is not None:
+                    self.last_steer_cmd = int(float(steerRecv))
+                    self.last_steer_ts = time.time()
+                    if self.debugger:
+                        self.logger.info(f"Steer cached: {steerRecv} -> {self.last_steer_cmd}")
 
-                    controlRecv = self.controlSubscriber.receive()
-                    if controlRecv is not None:
-                        if self.debugger:
-                            self.logger.info(controlRecv) 
+                if brakeRecv is not None:
+                    if self.debugger:
+                        self.logger.info(brakeRecv)
+                    self.last_speed_cmd = None
+                    self.last_speed_ts = 0.0
+                    if self.engineEnabled:
+                        self._handle_brake_command(int(float(brakeRecv)))
+                    else:
+                        self.last_blocked_reason = "klem_not_30"
+                        self._record_motion_command(
+                            "brake",
+                            None,
+                            speed_x10=None,
+                            steer_x10=int(float(brakeRecv)),
+                            blocked_reason=self.last_blocked_reason,
+                            force=True,
+                        )
+
+                speed_or_steer_updated = speedRecv is not None or steerRecv is not None
+                if speed_or_steer_updated and brakeRecv is None:
+                    if self.engineEnabled:
+                        if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
+                            self._handle_vcd_command(self.last_speed_cmd, self.last_steer_cmd)
+                    else:
+                        self.last_blocked_reason = "klem_not_30"
+                        self._record_motion_command(
+                            "vcd",
+                            None,
+                            speed_x10=self.last_speed_cmd,
+                            steer_x10=self.last_steer_cmd,
+                            blocked_reason=self.last_blocked_reason,
+                            force=True,
+                        )
+
+                controlRecv = self.controlSubscriber.receive()
+                if controlRecv is not None:
+                    if self.debugger:
+                        self.logger.info(controlRecv)
+                    speed_value = int(controlRecv["Speed"])
+                    steer_value = int(controlRecv["Steer"])
+                    time_value = int(controlRecv["Time"])
+                    self.last_speed_cmd = speed_value
+                    self.last_steer_cmd = steer_value
+                    if self.engineEnabled:
                         command = {
                             "action": "vcd",
-                            "time": int(controlRecv["Time"]),
-                            "speed": int(controlRecv["Speed"]),
-                            "steer": int(controlRecv["Steer"]),
+                            "speed": speed_value,
+                            "steer": steer_value,
+                            "time": time_value,
                         }
-                        self.send_to_serial(command)
+                        sent, raw_command = self.send_to_serial(command)
+                        blocked_reason = None if sent else "serial_disconnected"
+                        self._record_motion_command(
+                            "vcd",
+                            raw_command,
+                            speed_x10=speed_value,
+                            steer_x10=steer_value,
+                            blocked_reason=blocked_reason,
+                            force=True,
+                        )
+                    else:
+                        self.last_blocked_reason = "klem_not_30"
+                        self._record_motion_command(
+                            "vcd",
+                            None,
+                            speed_x10=speed_value,
+                            steer_x10=steer_value,
+                            blocked_reason=self.last_blocked_reason,
+                            force=True,
+                        )
 
-                    controlCalibRecv = self.controlCalibSubscriber.receive()
-                    if controlCalibRecv is not None:
-                        if self.debugger:
-                            self.logger.info(controlCalibRecv) 
+                controlCalibRecv = self.controlCalibSubscriber.receive()
+                if controlCalibRecv is not None:
+                    if self.debugger:
+                        self.logger.info(controlCalibRecv)
+                    speed_value = int(controlCalibRecv["Speed"])
+                    steer_value = int(controlCalibRecv["Steer"])
+                    time_value = int(controlCalibRecv["Time"])
+                    if self.engineEnabled:
                         command = {
                             "action": "vcdCalib",
-                            "time": int(controlCalibRecv["Time"]),
-                            "speed": int(controlCalibRecv["Speed"]),
-                            "steer": int(controlCalibRecv["Steer"]),
+                            "speed": speed_value,
+                            "steer": steer_value,
+                            "time": time_value,
                         }
-                        self.send_to_serial(command)
+                        sent, raw_command = self.send_to_serial(command)
+                        blocked_reason = None if sent else "serial_disconnected"
+                        self._record_motion_command(
+                            "vcdCalib",
+                            raw_command,
+                            speed_x10=speed_value,
+                            steer_x10=steer_value,
+                            blocked_reason=blocked_reason,
+                            force=True,
+                        )
+                    else:
+                        self.last_blocked_reason = "klem_not_30"
+                        self._record_motion_command(
+                            "vcdCalib",
+                            None,
+                            speed_x10=speed_value,
+                            steer_x10=steer_value,
+                            blocked_reason=self.last_blocked_reason,
+                            force=True,
+                        )
 
                 instantRecv = self.instantSubscriber.receive()
                 if instantRecv is not None: 
@@ -274,6 +460,8 @@ class threadWrite(ThreadWithStop):
                         self.logger.info(imuRecv)
                     command = {"action": "imu", "activate": int(imuRecv)}
                     self.send_to_serial(command)
+
+            self._publish_actuator_status()
 
         except Exception as e:
             print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - {e}")

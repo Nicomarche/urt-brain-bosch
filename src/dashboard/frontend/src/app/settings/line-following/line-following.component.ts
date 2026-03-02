@@ -35,6 +35,20 @@ interface DebugStatus {
   view: string;
   active: boolean;
   lstr_available: boolean;
+  computed_steering?: number | null;
+  computed_speed?: number | null;
+  commanded_steering?: number | null;
+  commanded_speed?: number | null;
+  command_source?: string;
+  actual_steering?: number | null;
+  actual_speed?: number | null;
+  serial_connected?: boolean | null;
+  engine_enabled?: boolean | null;
+  klem_mode?: number | null;
+  actuator_command_type?: string | null;
+  actuator_speed_x10?: number | null;
+  actuator_steer_x10?: number | null;
+  actuator_blocked_reason?: string | null;
   local_ai_ready?: boolean;
   local_ai_infer_ms?: number;
   local_ai_fps?: number;
@@ -317,6 +331,32 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       'supercombo': 'Supercombo'
     };
     return names[this.selectedMode] || this.selectedMode;
+  }
+
+  getCommandSourceLabel(): string {
+    const source = this.debugStatus?.command_source;
+    const labels: { [key: string]: string } = {
+      normal: 'Normal',
+      curve_recovery: 'Recovery',
+      sign_override: 'Señal',
+      no_command: 'Sin comando',
+      blocked_klem: 'Bloq. KL',
+      blocked_inactive: 'Inactivo',
+    };
+    return source ? (labels[source] || source) : '--';
+  }
+
+  getActuatorLabel(): string {
+    if (this.debugStatus?.serial_connected === false) {
+      return 'Serial desconectado';
+    }
+    if (this.debugStatus?.engine_enabled === false) {
+      return 'Motor bloqueado';
+    }
+    if (this.debugStatus?.actuator_blocked_reason) {
+      return this.debugStatus.actuator_blocked_reason;
+    }
+    return 'Habilitado';
   }
 
   onLocalAiSettingsChange(): void {
