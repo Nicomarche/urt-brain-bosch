@@ -137,7 +137,8 @@ class StanleyController:
     """Stanley Controller for lateral control (Hoffmann et al., Stanford 2007).
 
     Nonlinear control law with proven global asymptotic stability:
-        δ = ψ + arctan(k · e / (k_soft + v)) + k_d_yaw · (r_meas - r_traj)
+        δ = (ψ - ψ_ss) + arctan(k · e / (k_soft + v))
+            + k_d_yaw · (r_meas - r_traj) + k_d_steer · Δδ_meas
 
     Unlike PID, this controller:
     - Has no integral windup (no integral term)
@@ -148,22 +149,27 @@ class StanleyController:
     Args:
         k: Crosstrack gain. Controls convergence rate toward the path.
            Higher = more aggressive correction. Units: 1/px in pixel-space mode.
-        k_soft: Softening constant. Prevents gain explosion at near-zero speed.
-                In same units as speed (command units). Increase for gentler steering.
+        k_soft: Low-speed softening term added to speed in the denominator.
+                In same units as speed (command units). This matches the
+                Hoffmann paper's low-speed noise softening term.
         k_d_yaw: Yaw rate damping gain. Set >0 to use IMU feedback for stability
                  at high speed. Set 0.0 to disable (no IMU needed).
+        k_d_steer: Steering servo damping gain. Applies lead-like damping based
+                   on measured steering motion.
         max_steering: Maximum output angle in degrees (physical limit).
     """
 
-    def __init__(self, k=0.06, k_soft=1.0, k_d_yaw=0.0, max_steering=25):
+    def __init__(self, k=0.06, k_soft=1.0, k_d_yaw=0.0, k_d_steer=0.0, max_steering=25):
         self.k = k
         self.k_soft = k_soft
         self.k_d_yaw = k_d_yaw
+        self.k_d_steer = k_d_steer
         self.max_steering = max_steering
         self._prev_heading = 0.0
 
     def compute(self, crosstrack_error, heading_error, speed,
-                yaw_rate=0.0, traj_yaw_rate=0.0):
+                yaw_rate=0.0, traj_yaw_rate=0.0,
+                steady_state_heading=0.0, steer_damping_delta=0.0):
         """Compute Stanley steering command.
 
         Args:
@@ -174,16 +180,21 @@ class StanleyController:
             speed: Vehicle speed in command units (same scale as k_soft).
             yaw_rate: Measured yaw rate from IMU (rad/s). 0.0 if unavailable.
             traj_yaw_rate: Expected yaw rate for current trajectory (rad/s).
+            steady_state_heading: Desired non-zero yaw offset (rad) for curved
+                steady-state motion. This is subtracted from heading_error.
+            steer_damping_delta: Measured steering motion term in radians,
+                typically previous_steer - current_steer.
 
         Returns:
             float: Steering angle in degrees, clamped to ±max_steering.
         """
-        heading_term = heading_error
-        crosstrack_term = math.atan2(self.k * crosstrack_error,
-                                     self.k_soft + abs(speed))
+        heading_term = heading_error - steady_state_heading
+        speed_denom = max(self.k_soft + abs(float(speed)), 1e-3)
+        crosstrack_term = math.atan2(self.k * crosstrack_error, speed_denom)
         yaw_damping = self.k_d_yaw * (yaw_rate - traj_yaw_rate)
+        steer_damping = self.k_d_steer * steer_damping_delta
 
-        delta_rad = heading_term + crosstrack_term + yaw_damping
+        delta_rad = heading_term + crosstrack_term + yaw_damping + steer_damping
         delta_deg = math.degrees(delta_rad)
         delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
 
@@ -257,13 +268,19 @@ Args:
         #   Low speed  → aggressive correction (tight curves)
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
-        self.stanley_k = 0.04           # Crosstrack gain (higher = faster convergence)
-        self.stanley_k_soft = 3.0       # Softening at low speed (prevents oscillation near v=0)
+        self.stanley_k = 0.06           # Crosstrack gain (higher = faster convergence)
+        self.stanley_k_soft = 1.0       # Minimum speed floor; keep low to match the paper
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
+        self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
+        self.stanley_k_ag = 0.08        # ψ_ss gain for curved steady-state tracking
+        self.stanley_speed_to_mps = 0.10  # Convert internal speed units to m/s for curve dynamics
+        self.stanley_curve_min_confidence = 0.35  # Ignore weak curve estimates for ψ_ss / r_traj
+        self.stanley_psi_ss_max_deg = 12.0  # Safety cap for steady-state heading bias
         self.stanley = StanleyController(
             k=self.stanley_k,
             k_soft=self.stanley_k_soft,
             k_d_yaw=self.stanley_k_d_yaw,
+            k_d_steer=self.stanley_k_d_steer,
             max_steering=self.max_steering
         )
 
@@ -281,10 +298,14 @@ Args:
         # Sensor feedback state (populated from Nucleo via message queue)
         self._measured_speed = 0.0       # Last speed reading from encoder
         self._measured_steer = 0.0       # Last steering angle feedback
+        self._measured_steer_delta = 0.0 # Previous steer - current steer (deg)
         self._last_yaw = 0.0             # Last IMU yaw reading (degrees)
         self._yaw_rate = 0.0             # Computed yaw rate (rad/s)
         self._last_imu_time = None       # Timestamp of last IMU reading
         self._heading_error = 0.0        # Last computed heading error (rad)
+        self._stanley_last_psi_ss = 0.0  # Last steady-state heading bias (rad)
+        self._stanley_last_traj_yaw_rate = 0.0  # Last reference yaw rate (rad/s)
+        self._stanley_last_steer_damping = 0.0  # Last steering damping input (rad)
         # Kalman filter for crosstrack error (robust when lanes flicker due to glare/shadows)
         self.use_kalman_filter = True
         self.kalman_process_noise = 0.04
@@ -1173,6 +1194,10 @@ Args:
         self._init_error_kalman()
         self._heading_error = 0.0
         self._yaw_rate = 0.0
+        self._measured_steer_delta = 0.0
+        self._stanley_last_psi_ss = 0.0
+        self._stanley_last_traj_yaw_rate = 0.0
+        self._stanley_last_steer_damping = 0.0
         self._single_line_heading_ref_left = 0.0
         self._single_line_heading_ref_right = 0.0
         self.previous_error = 0
@@ -2434,11 +2459,87 @@ Args:
                 pass
 
         steer_msg = self.currentSteerSubscriber.receive()
+        self._measured_steer_delta = 0.0
         if steer_msg is not None:
             try:
-                self._measured_steer = float(steer_msg)
+                new_steer = float(steer_msg)
+                self._measured_steer_delta = self._measured_steer - new_steer
+                self._measured_steer = new_steer
             except (ValueError, TypeError):
                 pass
+
+    def _get_stanley_curve_reference(self, avg_left=None, avg_right=None, img_h=None, img_w=None, fallback_curve=None):
+        """Return the best available curve estimate for ψ_ss and reference yaw rate."""
+        if isinstance(fallback_curve, dict):
+            radius_cm = float(fallback_curve.get('curve_radius_cm', 0.0) or 0.0)
+            turn_direction = int(fallback_curve.get('turn_direction', 0) or 0)
+            confidence = float(fallback_curve.get('confidence', 0.0) or 0.0)
+            if radius_cm > 0.0 and turn_direction != 0:
+                return {
+                    'curve_radius_cm': radius_cm,
+                    'turn_direction': turn_direction,
+                    'confidence': confidence,
+                    'source': fallback_curve.get('source', 'fallback'),
+                }
+
+        if avg_left is not None and avg_right is not None and img_h is not None and img_w is not None:
+            curve = self._estimate_curvature_from_lines(avg_left, avg_right, img_h, img_w)
+            turn_direction = int(curve.get('turn_direction', 0) or 0)
+            best_radius, confidence, source = self._get_best_curve_radius(
+                vp_radius=curve.get('curve_radius_cm', 0.0),
+                vp_confidence=curve.get('confidence', 0.0),
+            )
+            if turn_direction == 0 and self._curve_direction != 0:
+                turn_direction = self._curve_direction
+            if best_radius > 0.0 and turn_direction != 0:
+                return {
+                    'curve_radius_cm': best_radius,
+                    'turn_direction': turn_direction,
+                    'confidence': confidence,
+                    'source': source,
+                }
+
+        if self._curve_direction != 0 and self._curve_radius_estimate > 0.0 and self._curve_confidence > 0.0:
+            return {
+                'curve_radius_cm': float(self._curve_radius_estimate),
+                'turn_direction': int(self._curve_direction),
+                'confidence': float(self._curve_confidence),
+                'source': 'curve_fsm',
+            }
+
+        return None
+
+    def _get_stanley_dynamic_terms(self, speed_value, curve_reference=None):
+        """Compute ψ_ss, trajectory yaw rate and steering damping terms for Stanley."""
+        psi_ss = 0.0
+        traj_yaw_rate = 0.0
+        steer_damping_delta = math.radians(self._measured_steer_delta)
+
+        ref = curve_reference if isinstance(curve_reference, dict) else None
+        if ref is not None:
+            radius_cm = float(ref.get('curve_radius_cm', 0.0) or 0.0)
+            turn_direction = int(ref.get('turn_direction', 0) or 0)
+            confidence = float(ref.get('confidence', 0.0) or 0.0)
+            if (
+                radius_cm > 1.0 and
+                turn_direction != 0 and
+                confidence >= float(self.stanley_curve_min_confidence)
+            ):
+                speed_units = abs(self._measured_speed) if abs(self._measured_speed) > 1e-3 else abs(float(speed_value))
+                speed_mps = max(0.0, speed_units * float(self.stanley_speed_to_mps))
+                radius_m = max(radius_cm / 100.0, 1e-3)
+                traj_yaw_rate_mag = speed_mps / radius_m
+                # Positive steering is RIGHT in this project, so the sign is
+                # inverted from the turn_direction marker (1=right, -1=left).
+                traj_yaw_rate = -turn_direction * traj_yaw_rate_mag
+                psi_ss_mag = float(self.stanley_k_ag) * speed_mps * traj_yaw_rate_mag
+                psi_ss_limit = math.radians(max(0.0, float(self.stanley_psi_ss_max_deg)))
+                psi_ss = -turn_direction * min(psi_ss_mag, psi_ss_limit)
+
+        self._stanley_last_psi_ss = psi_ss
+        self._stanley_last_traj_yaw_rate = traj_yaw_rate
+        self._stanley_last_steer_damping = steer_damping_delta
+        return psi_ss, traj_yaw_rate, steer_damping_delta
 
     def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False):
         """Compute crosstrack error from a single lane line using known lane width.
@@ -3938,6 +4039,8 @@ Returns:
                      'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
                      'wheelbase', 'ff_weight', 'curvature_threshold',
                      'use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw',
+                     'stanley_k_d_steer', 'stanley_k_ag', 'stanley_speed_to_mps',
+                     'stanley_curve_min_confidence', 'stanley_psi_ss_max_deg',
                      'single_line_offset_factor',
                      'roi_height_start', 'roi_height_end',
                      'roi_width_margin_top', 'roi_width_margin_bottom',
@@ -4036,14 +4139,24 @@ Returns:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - Updated: Kp={self.kp} Ki={self.ki} Kd={self.kd} max={self.max_steering}")
             
             # Sync Stanley controller with updated parameters
-            stanley_params = ['use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw', 'max_steering']
+            stanley_params = [
+                'use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw',
+                'stanley_k_d_steer', 'stanley_k_ag', 'stanley_speed_to_mps',
+                'stanley_curve_min_confidence', 'stanley_psi_ss_max_deg', 'max_steering'
+            ]
             if any(p in normalized_config for p in stanley_params):
                 self.stanley.k = self.stanley_k
                 self.stanley.k_soft = self.stanley_k_soft
                 self.stanley.k_d_yaw = self.stanley_k_d_yaw
+                self.stanley.k_d_steer = self.stanley_k_d_steer
                 self.stanley.max_steering = self.max_steering
                 mode_str = "STANLEY" if self.use_stanley else "PID"
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} k_d_yaw={self.stanley_k_d_yaw}")
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
+                    f"Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} "
+                    f"k_d_yaw={self.stanley_k_d_yaw} k_d_steer={self.stanley_k_d_steer} "
+                    f"k_ag={self.stanley_k_ag}"
+                )
 
             # Log feed-forward parameter changes
             ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
@@ -4494,9 +4607,22 @@ Returns:
                 if self.use_stanley:
                     heading = self._compute_heading_error(avg_left, avg_right)
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    curve_reference = self._get_stanley_curve_reference(
+                        avg_left=avg_left,
+                        avg_right=avg_right,
+                        img_h=img_h,
+                        img_w=img_w,
+                        fallback_curve=self._swept_path_info,
+                    )
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, curve_reference
+                    )
                     steering_angle = self.stanley.compute(
                         error, heading, speed_val,
-                        yaw_rate=self._yaw_rate, traj_yaw_rate=0.0
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
                     )
                 else:
                     steering_angle = self.pid.compute(error)
@@ -4579,9 +4705,16 @@ Returns:
 
                 if self.use_stanley:
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    curve_reference = self._get_stanley_curve_reference(fallback_curve=swept)
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, curve_reference
+                    )
                     steering_angle = self.stanley.compute(
                         sl_error, sl_heading, speed_val,
-                        yaw_rate=self._yaw_rate
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
                     )
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                     if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
@@ -4663,9 +4796,16 @@ Returns:
 
                 if self.use_stanley:
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    curve_reference = self._get_stanley_curve_reference(fallback_curve=swept)
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, curve_reference
+                    )
                     steering_angle = self.stanley.compute(
                         sl_error, sl_heading, speed_val,
-                        yaw_rate=self._yaw_rate
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
                     )
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                     if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
@@ -4712,9 +4852,16 @@ Returns:
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
                 if self.use_stanley:
+                    curve_reference = self._get_stanley_curve_reference()
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, curve_reference
+                    )
                     steering_angle = self.stanley.compute(
                         error, heading_pred, speed_val,
-                        yaw_rate=self._yaw_rate, traj_yaw_rate=0.0
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
                     )
                 else:
                     steering_angle = self.pid.compute(error)
@@ -4781,12 +4928,14 @@ Returns:
                 self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
             speed = self._current_speed
 
-            # Speed-dependent steering: attenuate correction at higher speeds
-            # to prevent oscillations. At low speed, full correction is allowed.
-            speed_ratio = speed / eff_max
-            steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
-            steering_angle *= steer_attenuation
-            steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            # Stanley already scales the crosstrack term by speed, so applying an
+            # extra attenuation here weakens correction twice and deviates from
+            # the Hoffmann control law. Keep the attenuation only for PID mode.
+            if not self.use_stanley:
+                speed_ratio = speed / eff_max
+                steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
+                steering_angle *= steer_attenuation
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
 
         if self.show_debug and steering_angle is not None:
             src = "both" if avg_left is not None and avg_right is not None else \
@@ -4794,9 +4943,13 @@ Returns:
                   "right" if avg_right is not None else "none"
             if self.use_stanley:
                 heading_deg = math.degrees(self._heading_error)
+                psi_ss_deg = math.degrees(self._stanley_last_psi_ss)
+                steer_damp_deg = math.degrees(self.stanley.k_d_steer * self._stanley_last_steer_damping)
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
                       f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px "
-                      f"Heading: {heading_deg:.1f}° YawRate: {self._yaw_rate:.2f} Source: {src}")
+                      f"Heading: {heading_deg:.1f}° PsiSS: {psi_ss_deg:.1f}° "
+                      f"YawRate: {self._yaw_rate:.2f}/{self._stanley_last_traj_yaw_rate:.2f} "
+                      f"ServoDamp: {steer_damp_deg:.1f}° Source: {src}")
             else:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - "
                       f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
