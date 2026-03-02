@@ -705,6 +705,38 @@ Args:
 
         return avg_left, avg_right
 
+    def _coerce_explicit_line(self, line_value, img_h, img_w):
+        """Parse an explicitly provided line segment from the local AI payload."""
+        if not isinstance(line_value, (list, tuple)):
+            return None
+
+        values = line_value
+        if len(values) == 1 and isinstance(values[0], (list, tuple, np.ndarray)):
+            values = values[0]
+        if len(values) < 4:
+            return None
+
+        try:
+            x1, y1, x2, y2 = [int(round(float(v))) for v in values[:4]]
+        except (TypeError, ValueError):
+            return None
+
+        return np.array([[
+            max(0, min(img_w - 1, x1)),
+            max(0, min(img_h - 1, y1)),
+            max(0, min(img_w - 1, x2)),
+            max(0, min(img_h - 1, y2)),
+        ]], dtype=np.int32)
+
+    def _lane_side_lines_to_lines(self, lane_side_lines, img_h, img_w):
+        """Use explicit left/right line segments provided by the local AI payload."""
+        if not isinstance(lane_side_lines, dict):
+            return None, None
+        return (
+            self._coerce_explicit_line(lane_side_lines.get('left', []), img_h, img_w),
+            self._coerce_explicit_line(lane_side_lines.get('right', []), img_h, img_w),
+        )
+
     def _fit_remote_lane_line(self, lane_points, img_h, img_w):
         """Convert remote polyline points into a representative line segment."""
         working_points = self._normalize_remote_lane_points(lane_points, img_h)
@@ -1147,6 +1179,9 @@ Args:
 
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
+        lane_side_lines = payload.get('lane_side_lines')
+        explicit_left, explicit_right = self._lane_side_lines_to_lines(lane_side_lines, height, width)
+        has_explicit_side_lines = explicit_left is not None or explicit_right is not None
         has_explicit_side_points = (
             isinstance(lane_side_points, dict) and
             any(lane_side_points.get(side) for side in ('left', 'right'))
@@ -1157,7 +1192,9 @@ Args:
         debug_info['remote_server_time_ms'] = infer_ms
         debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
         debug_info['remote_frame_id'] = frame_id
-        if has_explicit_side_points:
+        if has_explicit_side_lines:
+            debug_info['remote_lane_count'] = int(explicit_left is not None) + int(explicit_right is not None)
+        elif has_explicit_side_points:
             debug_info['remote_lane_count'] = sum(
                 1 for side in ('left', 'right') if lane_side_points.get(side)
             )
@@ -1166,7 +1203,9 @@ Args:
         debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
         debug_info['local_ai_status'] = 'ready'
 
-        if has_explicit_side_points:
+        if has_explicit_side_lines:
+            avg_left, avg_right = explicit_left, explicit_right
+        elif has_explicit_side_points:
             avg_left, avg_right = self._lane_side_points_to_lines(lane_side_points, height, width)
         else:
             avg_left, avg_right = self._lane_points_to_lines(lane_points, height, width)
@@ -2765,8 +2804,12 @@ Args:
         if line is None:
             missing = getattr(self, miss_attr) + 1
             setattr(self, miss_attr, missing)
+            previous = getattr(self, state_attr)
             if missing >= self.line_visual_missing_reset_frames:
                 setattr(self, state_attr, None)
+                return None
+            if previous is not None:
+                return np.rint(previous).astype(np.int32)
             return None
 
         setattr(self, miss_attr, 0)

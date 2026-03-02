@@ -261,6 +261,56 @@ class LocalPerceptionEngine:
                 points.append((int(round(x)), int(y)))
         return points
 
+    def _extract_lane_line(self, mask, start_ratio=0.35):
+        """Fit a representative line directly from the segmented lane mask."""
+        if mask is None or mask.size == 0:
+            return None
+
+        height, width = mask.shape[:2]
+        roi_top = int(height * start_ratio)
+
+        ys, xs = np.where(mask > 0)
+        if xs.size < 2 or ys.size < 2:
+            return None
+
+        roi_keep = ys >= roi_top
+        if np.count_nonzero(roi_keep) >= 2:
+            ys = ys[roi_keep]
+            xs = xs[roi_keep]
+
+        if xs.size < 2 or ys.size < 2:
+            return None
+
+        ys = ys.astype(np.float32)
+        xs = xs.astype(np.float32)
+
+        if np.ptp(ys) < 1.0:
+            order = np.argsort(xs)
+            p1_idx = int(order[0])
+            p2_idx = int(order[-1])
+            return [[
+                int(round(np.clip(xs[p1_idx], 0, width - 1))),
+                int(round(np.clip(ys[p1_idx], roi_top, height - 1))),
+                int(round(np.clip(xs[p2_idx], 0, width - 1))),
+                int(round(np.clip(ys[p2_idx], roi_top, height - 1))),
+            ]]
+
+        fit = np.polyfit(ys, xs, 1)
+        y_bottom = float(min(np.max(ys), height - 1))
+        y_top = float(max(np.min(ys), roi_top))
+        if y_bottom - y_top < 1.0:
+            y_top = max(float(roi_top), y_bottom - 1.0)
+
+        x_bottom = float(np.polyval(fit, y_bottom))
+        x_top = float(np.polyval(fit, y_top))
+
+        return [[
+            int(round(np.clip(x_bottom, 0, width - 1))),
+            int(round(np.clip(y_bottom, 0, height - 1))),
+            int(round(np.clip(x_top, 0, width - 1))),
+            int(round(np.clip(y_top, 0, height - 1))),
+        ]]
+
     def _build_box_payload(self, x1, y1, x2, y2, frame_shape):
         height, width = frame_shape
         return [
@@ -354,17 +404,20 @@ class LocalPerceptionEngine:
         side_masks = {"left": None, "right": None}
         lane_points = []
         lane_side_points = {"left": [], "right": []}
+        lane_side_lines = {"left": [], "right": []}
 
         for side in ("left", "right"):
             merged_mask = self._combine_masks([entry["mask"] for entry in side_candidates[side]])
             side_masks[side] = merged_mask
             points = self._extract_lane_points(merged_mask)
             lane_side_points[side] = [[int(point[0]), int(point[1])] for point in points]
+            line = self._extract_lane_line(merged_mask)
+            lane_side_lines[side] = line[0] if line is not None else []
             if points:
                 lane_points.append(points)
 
         lane_mask = self._combine_masks([side_masks.get("left"), side_masks.get("right")])
-        return side_masks, lane_points, lane_side_points, lane_mask
+        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_mask
 
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
@@ -456,6 +509,7 @@ class LocalPerceptionEngine:
             return {
                 "lane_points": [],
                 "lane_side_points": {"left": [], "right": []},
+                "lane_side_lines": {"left": [], "right": []},
                 "side_masks": {"left": None, "right": None},
                 "lane_mask": None,
                 "detections": [],
@@ -480,7 +534,7 @@ class LocalPerceptionEngine:
                 raise RuntimeError("YOLO returned no results")
 
             side_candidates, detections = self._split_candidates(result, frame_shape)
-            side_masks, lane_points, lane_side_points, lane_mask = self._build_lane_geometry(side_candidates)
+            side_masks, lane_points, lane_side_points, lane_side_lines, lane_mask = self._build_lane_geometry(side_candidates)
             inference_ms = (time.time() - start_time) * 1000
             lane_debug = self._draw_debug_views(frame, side_masks, lane_points, detections, inference_ms)
             with self._vis_lock:
@@ -488,6 +542,7 @@ class LocalPerceptionEngine:
             return {
                 "lane_points": lane_points,
                 "lane_side_points": lane_side_points,
+                "lane_side_lines": lane_side_lines,
                 "side_masks": side_masks,
                 "lane_mask": lane_mask,
                 "detections": detections,
@@ -508,6 +563,7 @@ class LocalPerceptionEngine:
             return {
                 "lane_points": [],
                 "lane_side_points": {"left": [], "right": []},
+                "lane_side_lines": {"left": [], "right": []},
                 "side_masks": {"left": None, "right": None},
                 "lane_mask": None,
                 "detections": [],

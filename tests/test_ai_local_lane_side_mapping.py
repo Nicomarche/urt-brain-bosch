@@ -68,6 +68,30 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(len(debug_info["right_lines"]), 1)
         self.assertEqual(debug_info["remote_lane_count"], 2)
 
+    def test_detect_with_local_ai_prefers_explicit_lane_side_lines(self):
+        self.detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {"left": [], "right": []},
+            "lane_side_lines": {
+                "left": [58, 95, 54, 55],
+                "right": [82, 95, 78, 55],
+            },
+            "inference_time_ms": 12.0,
+            "frame_id": 8,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, _, debug_info = self.detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNotNone(avg_left)
+        self.assertIsNotNone(avg_right)
+        self.assertEqual(avg_left[0].tolist(), [58, 95, 54, 55])
+        self.assertEqual(avg_right[0].tolist(), [82, 95, 78, 55])
+        self.assertEqual(debug_info["remote_lane_count"], 2)
+
     def test_lane_points_fallback_still_works_without_side_metadata(self):
         lane_points = [
             [[22, 95], [26, 75], [30, 55]],
@@ -78,6 +102,24 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
 
         self.assertIsNotNone(avg_left)
         self.assertIsNotNone(avg_right)
+
+    def test_smooth_detected_line_holds_previous_line_for_brief_miss(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.line_visual_smoothing_alpha = 1.0
+        detector.line_visual_missing_reset_frames = 2
+        detector._smoothed_left_line = None
+        detector._left_line_missing_frames = 0
+        detector._smoothed_right_line = None
+        detector._right_line_missing_frames = 0
+
+        line = np.array([[10, 90, 20, 50]], dtype=np.int32)
+        first = detector._smooth_detected_line(line, 'left')
+        held = detector._smooth_detected_line(None, 'left')
+        dropped = detector._smooth_detected_line(None, 'left')
+
+        self.assertEqual(first[0].tolist(), [10, 90, 20, 50])
+        self.assertEqual(held[0].tolist(), [10, 90, 20, 50])
+        self.assertIsNone(dropped)
 
 
 if __name__ == "__main__":
