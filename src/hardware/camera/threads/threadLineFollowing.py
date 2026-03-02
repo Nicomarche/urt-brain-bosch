@@ -666,6 +666,24 @@ Args:
         """Compatibility wrapper for generic AI lane-point geometry."""
         return self._remote_lane_points_to_lines(lane_points, img_h, img_w)
 
+    def _lane_side_points_to_lines(self, lane_side_points, img_h, img_w):
+        """Map explicit left/right lane polylines to representative lines."""
+        if not isinstance(lane_side_points, dict):
+            return None, None
+
+        avg_left = None
+        avg_right = None
+
+        left_points = lane_side_points.get('left', [])
+        right_points = lane_side_points.get('right', [])
+
+        if isinstance(left_points, (list, tuple)):
+            avg_left = self._fit_remote_lane_line(left_points, img_h, img_w)
+        if isinstance(right_points, (list, tuple)):
+            avg_right = self._fit_remote_lane_line(right_points, img_h, img_w)
+
+        return avg_left, avg_right
+
     def _fit_remote_lane_line(self, lane_points, img_h, img_w):
         """Convert remote polyline points into a representative line segment."""
         working_points = self._normalize_remote_lane_points(lane_points, img_h)
@@ -1070,7 +1088,7 @@ Args:
         return avg_left, avg_right, height, width, lane_mask, debug_info
 
     def _detect_with_local_ai(self, frame):
-        """Consume locally inferred lane_points and keep BFMC/Stanley as the controller."""
+        """Consume locally inferred lane geometry and keep BFMC/Stanley as the controller."""
         height, width = frame.shape[:2]
         debug_info = {
             'pipeline_label': 'AI Local + BFMC Control',
@@ -1107,17 +1125,30 @@ Args:
             return None, None, height, width, empty_mask, debug_info
 
         lane_points = payload.get('lane_points', [])
+        lane_side_points = payload.get('lane_side_points')
+        has_explicit_side_points = (
+            isinstance(lane_side_points, dict) and
+            any(lane_side_points.get(side) for side in ('left', 'right'))
+        )
         infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
         frame_id = int(payload.get('frame_id', 0) or 0)
 
         debug_info['remote_server_time_ms'] = infer_ms
         debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
         debug_info['remote_frame_id'] = frame_id
-        debug_info['remote_lane_count'] = len(lane_points)
+        if has_explicit_side_points:
+            debug_info['remote_lane_count'] = sum(
+                1 for side in ('left', 'right') if lane_side_points.get(side)
+            )
+        else:
+            debug_info['remote_lane_count'] = len(lane_points)
         debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
         debug_info['local_ai_status'] = 'ready'
 
-        avg_left, avg_right = self._lane_points_to_lines(lane_points, height, width)
+        if has_explicit_side_points:
+            avg_left, avg_right = self._lane_side_points_to_lines(lane_side_points, height, width)
+        else:
+            avg_left, avg_right = self._lane_points_to_lines(lane_points, height, width)
         avg_left = self._smooth_detected_line(avg_left, 'left')
         avg_right = self._smooth_detected_line(avg_right, 'right')
         debug_info['threshold'] = 'AI'
