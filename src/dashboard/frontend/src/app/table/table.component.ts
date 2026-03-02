@@ -55,6 +55,26 @@ export class TableComponent implements OnInit {
 
   constructor(private webSocketService: WebSocketService) { }
 
+  private formatDisplayValue(value: any): string {
+    if (value === null || value === undefined) {
+      return '';
+    }
+
+    if (typeof value === 'string') {
+      return value;
+    }
+
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+
+    return String(value);
+  }
+
   ngOnInit() {
     this.loadsSubscription = this.webSocketService.receiveLoadTable().subscribe((message) => {
       // New keyed-by-channel format: keep original map and derive UI items
@@ -62,8 +82,8 @@ export class TableComponent implements OnInit {
       const entries = Object.entries(this.loadedMap) as [string, any][];
       this.items = entries.map(([channel, item]) => ({
         channel,
-        value: item?.value !== null && item?.value !== undefined ? String(item.value) : '',
-        initialValue: item?.initialValue !== null && item?.initialValue !== undefined ? String(item.initialValue) : '',
+        value: this.formatDisplayValue(item?.value),
+        initialValue: this.formatDisplayValue(item?.initialValue),
         hasChanged: item?.hasChanged || false,
         checked: item?.checked || false,
         values: item?.values || [],
@@ -88,13 +108,13 @@ export class TableComponent implements OnInit {
     const existingItem = this.items.find(item => item.channel === channel);
 
     if (existingItem) {
-      existingItem.value = value !== null && value !== undefined ? String(value) : '';
+      existingItem.value = this.formatDisplayValue(value);
       existingItem.interval = interval;
 
       // Compare current value to initial value and mark as changed if necessary
       existingItem.hasChanged = existingItem.value !== existingItem.initialValue;
     } else {
-      const stringValue = value !== null && value !== undefined ? String(value) : '';
+      const stringValue = this.formatDisplayValue(value);
       this.items.push({ 
         channel, 
         value: stringValue, 
@@ -153,4 +173,3 @@ export class TableComponent implements OnInit {
   }
   
 }
-

@@ -62,7 +62,12 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
     
     this.enableButtonSubscription = this.webSocketService.receiveEnableButton().subscribe(
       (message) => {
-        this.enableButton = message.value;
+        if (typeof message?.value === 'boolean') {
+          this.enableButton = message.value;
+          return;
+        }
+
+        console.warn('KL Switch: ignoring invalid EnableButton payload', message?.value);
       },
       (error) => {
         console.error('Error receiving enablebutton signal:', error);
@@ -97,10 +102,14 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
       return;
     }
 
+    if (!this.enableButton) {
+      console.warn('KL Switch: Cannot change KL state - backend controls are not ready');
+      return;
+    }
+
     if (this.currentState == '30' && this.currentState != this.states[index]) {
     }
-    if(this.enableButton)
-      this.currentStateIndex = index;
+    this.currentStateIndex = index;
 
     this.clusterService.updateKL(this.states[this.currentStateIndex])
     this.webSocketService.sendMessageToFlask(`{"Name": "Klem", "Value": "${this.states[this.currentStateIndex]}"}`);
@@ -142,4 +151,3 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
     }
   }
 }
-

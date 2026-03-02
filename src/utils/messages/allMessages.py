@@ -229,7 +229,7 @@ class LocalPerceptionStatus(Enum):
 class ActuatorCommandStatus(Enum):
     Queue = "General"
     Owner = "threadWrite"
-    msgID = 1
+    msgID = 2
     msgType = "dict"  # klem, serial state, last movement command, block reason
 
 ################################# From Sign Detection ##################################
