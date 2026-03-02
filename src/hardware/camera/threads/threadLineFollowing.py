@@ -445,6 +445,7 @@ Args:
         self.hybridnets_server_url = "ws://127.0.0.1:8500/ws/steering"
         self.hybridnets_jpeg_quality = 70
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
+        self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
         self._hybridnets_client = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
@@ -626,40 +627,35 @@ Args:
 
     def _fit_remote_lane_line(self, lane_points, img_h, img_w):
         """Convert remote polyline points into a representative line segment."""
-        if not lane_points or len(lane_points) < 2:
+        working_points = self._normalize_remote_lane_points(lane_points, img_h)
+        if len(working_points) < 2:
             return None
 
-        parsed_points = []
-        for point in lane_points:
-            if not isinstance(point, (list, tuple)) or len(point) < 2:
-                continue
-            try:
-                x = float(point[0])
-                y = float(point[1])
-            except (TypeError, ValueError):
-                continue
-            parsed_points.append((x, y))
+        roi_top = max(0, min(img_h - 1, int(self.roi_height_start * img_h)))
+        roi_bottom = max(roi_top, min(img_h - 1, int(self.roi_height_end * img_h) - 1))
 
-        if len(parsed_points) < 2:
-            return None
-
-        xs = np.array([p[0] for p in parsed_points], dtype=np.float32)
-        ys = np.array([p[1] for p in parsed_points], dtype=np.float32)
+        xs = np.array([p[0] for p in working_points], dtype=np.float32)
+        ys = np.array([p[1] for p in working_points], dtype=np.float32)
 
         if np.ptp(ys) < 1.0:
-            order = sorted(parsed_points, key=lambda p: p[0])
+            order = sorted(working_points, key=lambda p: p[0])
             p1 = order[0]
             p2 = order[-1]
             return np.array([[
                 int(round(max(0, min(img_w - 1, p1[0])))),
-                int(round(max(0, min(img_h - 1, p1[1])))),
+                int(round(max(roi_top, min(roi_bottom, p1[1])))),
                 int(round(max(0, min(img_w - 1, p2[0])))),
-                int(round(max(0, min(img_h - 1, p2[1])))),
+                int(round(max(roi_top, min(roi_bottom, p2[1])))),
             ]], dtype=np.int32)
 
         fit = np.polyfit(ys, xs, 1)
-        y_bottom = float(np.max(ys))
-        y_top = float(np.min(ys))
+        y_bottom = float(min(np.max(ys), roi_bottom))
+        y_top = float(max(np.min(ys), roi_top))
+        if y_bottom - y_top < 1.0:
+            if y_bottom >= roi_bottom:
+                y_top = max(float(roi_top), y_bottom - 1.0)
+            else:
+                y_bottom = min(float(roi_bottom), y_top + 1.0)
         x_bottom = float(np.polyval(fit, y_bottom))
         x_top = float(np.polyval(fit, y_top))
 
@@ -675,6 +671,33 @@ Args:
             int(round(y_top)),
         ]], dtype=np.int32)
 
+    def _normalize_remote_lane_points(self, lane_points, img_h):
+        """Use the same lower-image ROI as BFMC before fitting AI lane geometry."""
+        if not lane_points or len(lane_points) < 2:
+            return []
+
+        parsed_points = []
+        for point in lane_points:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            try:
+                x = float(point[0])
+                y = float(point[1])
+            except (TypeError, ValueError):
+                continue
+            parsed_points.append((x, y))
+
+        if len(parsed_points) < 2:
+            return []
+
+        roi_top = float(max(0, min(img_h - 1, int(self.roi_height_start * img_h))))
+        roi_bottom = float(max(roi_top, min(img_h - 1, int(self.roi_height_end * img_h) - 1)))
+        roi_points = [p for p in parsed_points if roi_top <= p[1] <= roi_bottom]
+
+        if len(roi_points) >= 2:
+            return roi_points
+        return parsed_points
+
     def _remote_lane_points_to_lines(self, lane_points, img_h, img_w):
         """Map remote lane polylines to left/right representative lines."""
         if not lane_points:
@@ -684,20 +707,11 @@ Args:
         line_candidates = []
 
         for line_points in lane_points:
-            line = self._fit_remote_lane_line(line_points, img_h, img_w)
+            working_points = self._normalize_remote_lane_points(line_points, img_h)
+            line = self._fit_remote_lane_line(working_points, img_h, img_w)
             if line is None:
                 continue
-            x_values = []
-            for p in line_points:
-                if not isinstance(p, (list, tuple)) or len(p) < 2:
-                    continue
-                try:
-                    x_values.append(float(p[0]))
-                except (TypeError, ValueError):
-                    continue
-            if not x_values:
-                continue
-            mean_x = float(np.mean(x_values))
+            mean_x = float(np.mean([p[0] for p in working_points]))
             line_candidates.append((mean_x, line))
 
         if not line_candidates:
@@ -930,19 +944,41 @@ Args:
             'pipeline_label': 'AI Lanes + BFMC Control',
         }
         empty_mask = np.zeros((height, width), dtype=np.uint8)
+        y_start = int(self.roi_height_start * height)
+        y_end = int(self.roi_height_end * height)
+        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
+        roi_mask = np.zeros_like(empty_mask)
+        cv2.fillPoly(roi_mask, roi_vertices, 255)
+        debug_info['roi_vertices'] = roi_vertices
 
         if self._hybridnets_client is None or not self._hybridnets_client.connected:
             self._start_hybridnets_client()
             if not self._hybridnets_client or not self._hybridnets_client.connected:
+                self._smooth_detected_line(None, 'left')
+                self._smooth_detected_line(None, 'right')
                 debug_info['pipeline_label'] = 'AI Lanes - Connecting'
                 debug_info['remote_status'] = 'connecting'
                 return None, None, height, width, empty_mask, debug_info
 
-        result = self._hybridnets_client.send_frame(frame, block=True)
+        # Non-blocking send keeps the control loop running at camera rate instead
+        # of waiting on network+GPU latency every cycle.
+        result = self._hybridnets_client.send_frame(frame, block=False)
+        last_result_time = getattr(self._hybridnets_client, '_last_result_time', 0.0)
+        result_age = (time.time() - last_result_time) if last_result_time else None
 
         if result is None:
-            debug_info['pipeline_label'] = 'AI Lanes - No response'
-            debug_info['remote_status'] = 'no_response'
+            self._smooth_detected_line(None, 'left')
+            self._smooth_detected_line(None, 'right')
+            debug_info['pipeline_label'] = 'AI Lanes - Waiting first result'
+            debug_info['remote_status'] = 'warming_up'
+            return None, None, height, width, empty_mask, debug_info
+
+        if result_age is None or result_age > self.hybridnets_max_result_age:
+            self._smooth_detected_line(None, 'left')
+            self._smooth_detected_line(None, 'right')
+            debug_info['pipeline_label'] = 'AI Lanes - Stale result'
+            debug_info['remote_status'] = 'stale'
+            debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
             return None, None, height, width, empty_mask, debug_info
 
         lane_points = result.get('lane_points', [])
@@ -954,6 +990,7 @@ Args:
         debug_info['remote_roundtrip_ms'] = roundtrip
         debug_info['remote_frame_id'] = frame_id
         debug_info['remote_lane_count'] = len(lane_points)
+        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
 
         lane_mask = empty_mask
         lane_mask_b64 = result.get('lane_mask_b64')
@@ -965,8 +1002,11 @@ Args:
                     lane_mask = decoded
             except Exception:
                 pass
+        lane_mask = cv2.bitwise_and(lane_mask, roi_mask)
 
         avg_left, avg_right = self._remote_lane_points_to_lines(lane_points, height, width)
+        avg_left = self._smooth_detected_line(avg_left, 'left')
+        avg_right = self._smooth_detected_line(avg_right, 'right')
         debug_info['threshold'] = 'AI'
         debug_info['left_lines'] = [avg_left] if avg_left is not None else []
         debug_info['right_lines'] = [avg_right] if avg_right is not None else []
@@ -2307,31 +2347,10 @@ Args:
         debug_info = {}
         needs_debug = self._needs_debug
 
-        # 1. ROI mask — trapezoid with a center notch.
-        # Keep the hood cut-out from the Stanley detector, but use diagonal side
-        # edges so the ROI follows lane perspective better.
+        # 1. ROI mask — simple rectangular ROI (no hood notch).
         y_start = int(self.roi_height_start * height)
         y_end = int(self.roi_height_end * height)
-        x3 = int(width * (365.0 / 512.0))
-        x4 = int(width * (145.0 / 512.0))
-        y3 = int(height * (230.0 / 270.0))
-        y3 = max(y_start, min(y_end, y3))
-        max_margin = max(0, min(x4, width - x3))
-        top_margin = int(width * max(0.0, min(self.roi_width_margin_top, 0.49)))
-        bottom_margin = int(width * max(0.0, min(self.roi_width_margin_bottom, 0.49)))
-        top_margin = min(top_margin, max_margin)
-        bottom_margin = min(bottom_margin, max_margin)
-
-        roi_vertices = np.array([[
-            (top_margin, y_start),
-            (width - top_margin, y_start),
-            (width - bottom_margin, y_end),
-            (x3, y_end),
-            (x3, y3),
-            (x4, y3),
-            (x4, y_end),
-            (bottom_margin, y_end),
-        ]], dtype=np.int32)
+        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
         mask = np.zeros_like(image)
         cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
         masked_image = cv2.bitwise_and(image, mask)
