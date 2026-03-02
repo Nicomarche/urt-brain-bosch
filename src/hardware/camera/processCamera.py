@@ -35,6 +35,7 @@ import threading
 from cv2 import meanShift
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
+from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
 from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
@@ -94,6 +95,7 @@ class processCamera(WorkerProcess):
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
         self.sign_server_url = sign_server_url
+        self.use_legacy_remote_sign_detection = False  # Deprecated runtime path, kept for future reuse
         self.sign_min_box_area = sign_min_box_area
         self.sign_action_cooldown = sign_action_cooldown
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
@@ -139,6 +141,21 @@ class processCamera(WorkerProcess):
         )
         self.threads.append(camTh)
         
+        # Local AI perception (best.pt) now runs inside the camera process.
+        localPerceptionTh = threadLocalPerception(
+            self.queuesList, self.logging, self.debugging,
+            show_debug=self.show_preview,
+            debug_windows=self.debug_windows,
+            enable_sign_detection=self.enable_sign_detection,
+            enable_actions=self.sign_detection_actions,
+            sign_min_confidence=self.sign_min_confidence,
+            sign_min_box_area=self.sign_min_box_area,
+            action_cooldown=self.sign_action_cooldown,
+            sign_action_event=sign_action_event,
+            highway_mode_event=highway_mode_event,
+        )
+        self.threads.append(localPerceptionTh)
+
         # Add line following thread
         # show_debug=True only when master switch SHOW_CAMERA_PREVIEW is on.
         # Individual window toggles are controlled by debug_windows dict.
@@ -150,8 +167,8 @@ class processCamera(WorkerProcess):
         )
         self.threads.append(lineFollowingTh)
 
-        # Add sign detection thread (optional — requires tflite-runtime + model)
-        if self.enable_sign_detection and SIGN_DETECTION_AVAILABLE:
+        # Legacy remote sign detection path: preserved, but disabled by default.
+        if self.use_legacy_remote_sign_detection and self.enable_sign_detection and SIGN_DETECTION_AVAILABLE:
             signDetTh = threadSignDetection(
                 self.queuesList, self.logging, self.debugging,
                 server_url=self.sign_server_url,
@@ -164,7 +181,7 @@ class processCamera(WorkerProcess):
                 highway_mode_event=highway_mode_event,
             )
             self.threads.append(signDetTh)
-        elif self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:
+        elif self.use_legacy_remote_sign_detection and self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:
             print(
                 f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - "
                 f"Sign detection enabled in config but tflite-runtime not installed"

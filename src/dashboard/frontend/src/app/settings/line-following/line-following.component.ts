@@ -35,6 +35,9 @@ interface DebugStatus {
   view: string;
   active: boolean;
   lstr_available: boolean;
+  local_ai_ready?: boolean;
+  local_ai_infer_ms?: number;
+  local_ai_fps?: number;
   hybridnets_connected?: boolean;
   hybridnets_roundtrip_ms?: number;
   hybridnets_server_fps?: number;
@@ -73,6 +76,14 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   hybridnetsConnected: boolean = false;
   hybridnetsRoundtripMs: number = 0;
   hybridnetsServerFps: number = 0;
+
+  // Local AI settings (runtime path for deprecated remote AI modes)
+  localAiMinConfidence: number = 0.35;
+  localAiInputSize: number = 320;
+  localAiInterval: number = 0.10;
+  localAiReady: boolean = false;
+  localAiFps: number = 0;
+  localAiInferMs: number = 0;
 
   // Supercombo AI Server settings (openpilot model)
   supercomboServerUrl: string = 'ws://127.0.0.1:8500/ws/steering';
@@ -215,6 +226,13 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
 
   constructor(private webSocketService: WebSocketService) {}
 
+  private normalizeMode(mode: string | null | undefined): string {
+    if (mode === 'hybridnets' || mode === 'supercombo') {
+      return 'ai_local';
+    }
+    return mode || 'opencv';
+  }
+
   ngOnInit(): void {
     // Load saved config from localStorage if available
     const savedConfig = localStorage.getItem('lineFollowingConfig');
@@ -241,7 +259,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       .receiveLineFollowingStatus()
       .subscribe((status: DebugStatus) => {
         this.debugStatus = status;
+        this.selectedMode = this.normalizeMode(status?.mode || this.selectedMode);
         this.lstrAvailable = status?.lstr_available ?? false;
+        this.localAiReady = status?.local_ai_ready ?? false;
+        this.localAiInferMs = status?.local_ai_infer_ms ?? 0;
+        this.localAiFps = status?.local_ai_fps ?? 0;
         // Update HybridNets connection status
         if (status?.hybridnets_connected !== undefined) {
           this.hybridnetsConnected = status.hybridnets_connected;
@@ -279,7 +301,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
 
   // Mode methods
   setMode(mode: string): void {
-    // HybridNets is always available (remote server), LSTR/hybrid need local LSTR
+    mode = this.normalizeMode(mode);
     if ((mode === 'lstr' || mode === 'hybrid') && !this.lstrAvailable) return;
     this.selectedMode = mode;
     this.debouncedSendConfig();
@@ -290,10 +312,18 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       'opencv': 'OpenCV',
       'lstr': 'LSTR IA',
       'hybrid': 'Híbrido',
+      'ai_local': 'AI Local',
       'hybridnets': 'HybridNets',
       'supercombo': 'Supercombo'
     };
     return names[this.selectedMode] || this.selectedMode;
+  }
+
+  onLocalAiSettingsChange(): void {
+    this.localAiMinConfidence = Number(this.localAiMinConfidence);
+    this.localAiInputSize = Number(this.localAiInputSize);
+    this.localAiInterval = Number(this.localAiInterval);
+    this.debouncedSendConfig();
   }
 
   // HybridNets methods
@@ -411,7 +441,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     // PID and control params are used by opencv, lstr, and hybrid (local processing)
     const controlSections = ['pid', 'feedforward'];
     if (controlSections.includes(group)) {
-      return this.selectedMode === 'opencv' || this.selectedMode === 'lstr' || this.selectedMode === 'hybrid';
+      return this.selectedMode === 'opencv' || this.selectedMode === 'lstr' || this.selectedMode === 'hybrid' || this.selectedMode === 'ai_local';
     }
 
     // OpenCV-specific image processing (also shown in hybrid mode since it uses OpenCV pipeline)
@@ -447,18 +477,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     const config: { [key: string]: number | string } = {};
     
     // Add mode settings
-    config['detection_mode'] = this.selectedMode;
+    config['detection_mode'] = this.normalizeMode(this.selectedMode);
     config['lstr_model_size'] = this.selectedLstrModel;
-    
-    // Add HybridNets settings
-    config['hybridnets_server_url'] = this.hybridnetsServerUrl;
-    config['hybridnets_jpeg_quality'] = this.hybridnetsJpegQuality;
-    config['hybridnets_timeout'] = this.hybridnetsTimeout;
-    
-    // Add Supercombo settings
-    config['supercombo_server_url'] = this.supercomboServerUrl;
-    config['supercombo_jpeg_quality'] = this.supercomboJpegQuality;
-    config['supercombo_timeout'] = this.supercomboTimeout;
+    config['local_ai_min_confidence'] = Number(this.localAiMinConfidence);
+    config['local_ai_imgsz'] = Number(this.localAiInputSize);
+    config['local_ai_interval'] = Number(this.localAiInterval);
     
     // Add stream settings
     config['stream_debug_view'] = this.selectedDebugView;
@@ -492,10 +515,19 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   applyConfig(config: { [key: string]: any }): void {
     // Apply mode
     if (config['detection_mode']) {
-      this.selectedMode = config['detection_mode'];
+      this.selectedMode = this.normalizeMode(config['detection_mode']);
     }
     if (config['lstr_model_size'] !== undefined) {
       this.selectedLstrModel = config['lstr_model_size'];
+    }
+    if (config['local_ai_min_confidence'] !== undefined) {
+      this.localAiMinConfidence = Number(config['local_ai_min_confidence']);
+    }
+    if (config['local_ai_imgsz'] !== undefined) {
+      this.localAiInputSize = Number(config['local_ai_imgsz']);
+    }
+    if (config['local_ai_interval'] !== undefined) {
+      this.localAiInterval = Number(config['local_ai_interval']);
     }
     
     // Apply HybridNets settings
@@ -560,6 +592,9 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     // Reset mode
     this.selectedMode = 'opencv';
     this.selectedLstrModel = 0;
+    this.localAiMinConfidence = 0.35;
+    this.localAiInputSize = 320;
+    this.localAiInterval = 0.10;
     
     // Reset HybridNets
     this.hybridnetsServerUrl = 'ws://127.0.0.1:8500/ws/steering';

@@ -10,7 +10,7 @@ import time
 import math
 from collections import deque
 from enum import Enum
-from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer
+from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -38,8 +38,9 @@ class DetectionMode(Enum):
     OPENCV = "opencv"           # BFMC-style OpenCV (Threshold + Canny + Hough)
     LSTR = "lstr"              # AI-based LSTR model (local)
     HYBRID = "hybrid"           # Fusion of OpenCV + LSTR (combines both for better accuracy)
-    HYBRIDNETS = "hybridnets"  # Remote HybridNets AI server (GPU offload)
-    SUPERCOMBO = "supercombo"  # Remote Supercombo AI server (openpilot model, GPU offload)
+    AI_LOCAL = "ai_local"      # Local YOLO lane perception (best.pt) + local BFMC/Stanley control
+    HYBRIDNETS = "hybridnets"  # Legacy/deprecated alias preserved for compatibility
+    SUPERCOMBO = "supercombo"  # Legacy/deprecated alias preserved for compatibility
 
 
 class PIDController:
@@ -446,7 +447,10 @@ Args:
         self.hybridnets_jpeg_quality = 70
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
+        self.local_ai_max_result_age = 0.35
         self._hybridnets_client = None
+        self._last_local_lane_payload = None
+        self._last_local_perception_status = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
         self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
@@ -455,8 +459,8 @@ Args:
         self._supercombo_client = None
         
         self._init_lstr_detector()
-        self._init_hybridnets_client()
-        self._init_supercombo_client()
+        # Legacy remote clients stay available, but are now initialized lazily
+        # only if an old code path explicitly requests them.
 
         # Debug streaming parameters
         self.stream_debug_view = 0  # 0=off, 1-10=different views
@@ -541,6 +545,8 @@ Args:
         self.serialCameraSubscriber = messageHandlerSubscriber(self.queuesList, serialCamera, "lastOnly", True)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
+        self.localLanePerceptionSubscriber = messageHandlerSubscriber(self.queuesList, LocalLanePerception, "lastOnly", True)
+        self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
         
         # Sensor feedback subscribers (for Stanley controller)
         self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
@@ -624,6 +630,35 @@ Args:
             base = url.split("/ws/", 1)[0]
             return base + "/ws/inference"
         return url.rstrip("/") + "/ws/inference"
+
+    def _normalize_detection_mode(self, mode):
+        """Map deprecated remote AI modes to the local AI runtime path."""
+        mode_str = str(mode).strip()
+        if mode_str in (DetectionMode.HYBRIDNETS.value, DetectionMode.SUPERCOMBO.value):
+            return DetectionMode.AI_LOCAL.value
+        return mode_str
+
+    def _poll_local_ai_messages(self):
+        """Cache the latest local AI perception payloads."""
+        lane_payload = self.localLanePerceptionSubscriber.receive()
+        if lane_payload is not None:
+            self._last_local_lane_payload = lane_payload
+
+        status_payload = self.localPerceptionStatusSubscriber.receive()
+        if status_payload is not None:
+            self._last_local_perception_status = status_payload
+
+    def _fit_lane_points_line(self, lane_points, img_h, img_w):
+        """Compatibility wrapper for generic AI lane-point geometry."""
+        return self._fit_remote_lane_line(lane_points, img_h, img_w)
+
+    def _normalize_lane_points(self, lane_points, img_h):
+        """Compatibility wrapper for generic AI lane-point geometry."""
+        return self._normalize_remote_lane_points(lane_points, img_h)
+
+    def _lane_points_to_lines(self, lane_points, img_h, img_w):
+        """Compatibility wrapper for generic AI lane-point geometry."""
+        return self._remote_lane_points_to_lines(lane_points, img_h, img_w)
 
     def _fit_remote_lane_line(self, lane_points, img_h, img_w):
         """Convert remote polyline points into a representative line segment."""
@@ -1028,6 +1063,66 @@ Args:
 
         return avg_left, avg_right, height, width, lane_mask, debug_info
 
+    def _detect_with_local_ai(self, frame):
+        """Consume locally inferred lane_points and keep BFMC/Stanley as the controller."""
+        height, width = frame.shape[:2]
+        debug_info = {
+            'pipeline_label': 'AI Local + BFMC Control',
+        }
+        empty_mask = np.zeros((height, width), dtype=np.uint8)
+        y_start = int(self.roi_height_start * height)
+        y_end = int(self.roi_height_end * height)
+        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
+        debug_info['roi_vertices'] = roi_vertices
+
+        payload = self._last_local_lane_payload
+        if not payload:
+            self._smooth_detected_line(None, 'left')
+            self._smooth_detected_line(None, 'right')
+            debug_info['pipeline_label'] = 'AI Local - Waiting first result'
+            debug_info['local_ai_status'] = 'warming_up'
+            return None, None, height, width, empty_mask, debug_info
+
+        if not bool(payload.get('model_ready', False)):
+            self._smooth_detected_line(None, 'left')
+            self._smooth_detected_line(None, 'right')
+            debug_info['pipeline_label'] = 'AI Local - Model not ready'
+            debug_info['local_ai_status'] = 'not_ready'
+            return None, None, height, width, empty_mask, debug_info
+
+        timestamp = float(payload.get('timestamp', 0.0) or 0.0)
+        result_age = (time.time() - timestamp) if timestamp else None
+        if result_age is None or result_age > self.local_ai_max_result_age:
+            self._smooth_detected_line(None, 'left')
+            self._smooth_detected_line(None, 'right')
+            debug_info['pipeline_label'] = 'AI Local - Stale result'
+            debug_info['local_ai_status'] = 'stale'
+            debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
+            return None, None, height, width, empty_mask, debug_info
+
+        lane_points = payload.get('lane_points', [])
+        infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
+        frame_id = int(payload.get('frame_id', 0) or 0)
+
+        debug_info['remote_server_time_ms'] = infer_ms
+        debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
+        debug_info['remote_frame_id'] = frame_id
+        debug_info['remote_lane_count'] = len(lane_points)
+        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
+        debug_info['local_ai_status'] = 'ready'
+
+        avg_left, avg_right = self._lane_points_to_lines(lane_points, height, width)
+        avg_left = self._smooth_detected_line(avg_left, 'left')
+        avg_right = self._smooth_detected_line(avg_right, 'right')
+        debug_info['threshold'] = 'AI'
+        debug_info['left_lines'] = [avg_left] if avg_left is not None else []
+        debug_info['right_lines'] = [avg_right] if avg_right is not None else []
+
+        if avg_left is None and avg_right is None:
+            debug_info['pipeline_label'] = 'AI Local - No lanes'
+
+        return avg_left, avg_right, height, width, empty_mask, debug_info
+
     def _get_effective_speeds(self):
         """Return (max_speed, min_speed) considering highway mode."""
         if self.highway_mode_event and self.highway_mode_event.is_set():
@@ -1156,7 +1251,7 @@ Args:
         # Detection Mode
         y_pos = 70
         cv2.putText(panel, "Mode:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-        mode_colors = {'opencv': (0, 200, 0), 'lstr': (255, 100, 0), 'hybrid': (255, 255, 0)}
+        mode_colors = {'opencv': (0, 200, 0), 'lstr': (255, 100, 0), 'hybrid': (255, 255, 0), 'ai_local': (255, 180, 0)}
         mode_color = mode_colors.get(self.detection_mode, (200, 200, 200))
         cv2.putText(panel, self.detection_mode.upper(), (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
         
@@ -1285,7 +1380,14 @@ Args:
                 'view': view_name,
                 'active': self.is_line_following_active,
                 'lstr_available': self.lstr_detector is not None and self.lstr_detector.is_available,
+                'local_ai_ready': False,
+                'local_ai_infer_ms': None,
+                'local_ai_fps': None,
             }
+            if self._last_local_perception_status:
+                status['local_ai_ready'] = bool(self._last_local_perception_status.get('model_ready', False))
+                status['local_ai_infer_ms'] = self._last_local_perception_status.get('inference_time_ms')
+                status['local_ai_fps'] = self._last_local_perception_status.get('fps')
             self.statusSender.send(status)
             
         except Exception as e:
@@ -3725,6 +3827,10 @@ Returns:
     def _apply_config(self, config):
         """Apply configuration from dashboard sliders."""
         try:
+            normalized_config = dict(config)
+            if 'detection_mode' in normalized_config:
+                normalized_config['detection_mode'] = self._normalize_detection_mode(normalized_config['detection_mode'])
+
             # String parameters (URLs, mode names) - do NOT convert to number
             string_params = {'detection_mode', 'hybridnets_server_url', 'supercombo_server_url'}
             # Integer parameters - must be int for OpenCV kernels, thresholds, etc.
@@ -3786,7 +3892,7 @@ Returns:
                      # Debug streaming
                      'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale',
                      # HybridNets remote AI server
-                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout',
+                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout', 'local_ai_max_result_age',
                      # Supercombo remote AI server
                      'supercombo_server_url', 'supercombo_jpeg_quality', 'supercombo_timeout',
                      # Swept path / car geometry parameters
@@ -3823,8 +3929,8 @@ Returns:
             
             applied = []
             for param in params:
-                if param in config:
-                    value = config[param]
+                if param in normalized_config:
+                    value = normalized_config[param]
                     # Type coercion: frontend range inputs may send strings
                     if param in string_params:
                         value = str(value)
@@ -3845,7 +3951,7 @@ Returns:
             
             # Sync PID controller with updated parameters
             pid_params = ['kp', 'ki', 'kd', 'max_steering', 'dead_zone_ratio', 'integral_reset_interval']
-            if any(p in config for p in pid_params):
+            if any(p in normalized_config for p in pid_params):
                 self.pid.Kp = self.kp
                 self.pid.Ki = self.ki
                 self.pid.Kd = self.kd
@@ -3856,7 +3962,7 @@ Returns:
             
             # Sync Stanley controller with updated parameters
             stanley_params = ['use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw', 'max_steering']
-            if any(p in config for p in stanley_params):
+            if any(p in normalized_config for p in stanley_params):
                 self.stanley.k = self.stanley_k
                 self.stanley.k_soft = self.stanley_k_soft
                 self.stanley.k_d_yaw = self.stanley_k_d_yaw
@@ -3866,14 +3972,14 @@ Returns:
 
             # Log feed-forward parameter changes
             ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
-            if any(p in config for p in ff_params):
+            if any(p in normalized_config for p in ff_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mFF\033[0m - Updated: wheelbase={self.wheelbase} ff_weight={self.ff_weight} curv_thresh={self.curvature_threshold}")
 
             # Sync Kalman filter parameters
             kalman_params = ['use_kalman_filter', 'kalman_process_noise',
                              'kalman_measurement_noise', 'kalman_max_prediction_frames',
                              'kalman_prediction_damping']
-            if any(p in config for p in kalman_params):
+            if any(p in normalized_config for p in kalman_params):
                 self._init_error_kalman()
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mKALMAN\033[0m - "
                       f"enabled={bool(self.use_kalman_filter)} q={self.kalman_process_noise:.4f} "
@@ -3885,7 +3991,7 @@ Returns:
                            'car_front_overhang', 'car_rear_overhang', 'lane_width_cm',
                            'swept_path_margin_cm', 'curve_offset_gain', 'curve_inner_bias_cm',
                            'curve_confidence_threshold', 'min_clearance_warn_cm', 'curve_speed_reduction']
-            if any(p in config for p in swept_params):
+            if any(p in normalized_config for p in swept_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSWEPT PATH\033[0m - Updated: "
                       f"enabled={self.use_swept_path} car={self.car_length}x{self.car_width}cm "
                       f"wb={self.car_wheelbase_cm}cm ovh_f={self.car_front_overhang} ovh_r={self.car_rear_overhang} "
@@ -3899,7 +4005,7 @@ Returns:
                             'curve_vp_threshold', 'curve_vp_confirm_frames',
                             'curve_pre_position_gain', 'curve_exit_gain',
                             'curve_inner_line_steer_factor']
-            if any(p in config for p in hybrid_params):
+            if any(p in normalized_config for p in hybrid_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mHYBRID CURVE\033[0m - Updated: "
                       f"BFMC_R: inner={self.bfmc_inner_lane_radius} outer={self.bfmc_outer_lane_radius} "
                       f"default={self.bfmc_default_curve_radius} "
@@ -3914,7 +4020,7 @@ Returns:
                               'recovery_reverse_speed', 'recovery_reverse_time_min',
                               'recovery_reverse_time_max', 'recovery_reverse_steer_scale',
                               'recovery_realign_time', 'recovery_error_shrink_ratio']
-            if any(p in config for p in recovery_params):
+            if any(p in normalized_config for p in recovery_params):
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mRECOVERY\033[0m - Updated: "
                       f"enabled={self.use_curve_recovery} max_frames={self.recovery_max_steer_frames} "
                       f"rev_speed={self.recovery_reverse_speed} "
@@ -3923,31 +4029,31 @@ Returns:
                       f"shrink_ratio={self.recovery_error_shrink_ratio}")
             
             # Log mode change and reset PID state
-            if 'detection_mode' in config:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mMODE\033[0m - Changed to: {config['detection_mode']}")
+            if 'detection_mode' in normalized_config:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mMODE\033[0m - Changed to: {normalized_config['detection_mode']}")
                 # Reset PID state to prevent corruption between modes
                 self._reset_pid_state()
             
             # Reload LSTR model if size changed
-            if 'lstr_model_size' in config:
+            if 'lstr_model_size' in normalized_config:
                 self._init_lstr_detector()
             
             # Reconnect HybridNets client if server URL changed
-            if 'hybridnets_server_url' in config:
+            if 'hybridnets_server_url' in normalized_config:
                 self._stop_hybridnets_client()
                 self._init_hybridnets_client()
             
             # Reconnect Supercombo client if server URL changed
-            if 'supercombo_server_url' in config:
+            if 'supercombo_server_url' in normalized_config:
                 self._stop_supercombo_client()
                 self._init_supercombo_client()
             
             # Start/stop remote AI clients based on mode
-            if 'detection_mode' in config:
-                if config['detection_mode'] == DetectionMode.HYBRIDNETS.value:
+            if 'detection_mode' in normalized_config:
+                if normalized_config['detection_mode'] == DetectionMode.HYBRIDNETS.value:
                     self._start_hybridnets_client()
                     self._stop_supercombo_client()
-                elif config['detection_mode'] == DetectionMode.SUPERCOMBO.value:
+                elif normalized_config['detection_mode'] == DetectionMode.SUPERCOMBO.value:
                     self._start_supercombo_client()
                     self._stop_hybridnets_client()
                 else:
@@ -3972,6 +4078,7 @@ Returns:
         try:
             self.check_state_change()
             self._check_config()
+            self._poll_local_ai_messages()
             self._read_sensor_data()
             
             camera_message = self.serialCameraSubscriber.receive()
@@ -4039,12 +4146,16 @@ Returns:
         - opencv: Traditional HSV + sliding window (default)
         - lstr: AI-based LSTR transformer model
         - hybrid: FUSION of OpenCV + LSTR (runs both, combines results)
-        - hybridnets: Remote AI lane detection + local BFMC/Stanley control
+        - ai_local: Local YOLO lane detection + local BFMC/Stanley control
+        - hybridnets / supercombo: deprecated aliases mapped to ai_local
 
 Returns:
     tuple: (steering_angle, speed, debug_frame)
 """
         height, width = frame.shape[:2]
+        normalized_mode = self._normalize_detection_mode(self.detection_mode)
+        if normalized_mode != self.detection_mode:
+            self.detection_mode = normalized_mode
         
         if self.show_debug:
             print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
@@ -4102,15 +4213,18 @@ Returns:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 return None, self.min_speed, debug_frame
         
-        using_remote_lanes = self.detection_mode == DetectionMode.HYBRIDNETS.value
+        using_remote_lanes = self.detection_mode in (DetectionMode.AI_LOCAL.value, DetectionMode.HYBRIDNETS.value)
 
         if using_remote_lanes:
             try:
-                avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_hybridnets(frame)
+                if self.detection_mode == DetectionMode.AI_LOCAL.value:
+                    avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_local_ai(frame)
+                else:
+                    avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_hybridnets(frame)
             except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mHYBRIDNETS ERROR\033[0m - {e}")
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mAI LOCAL ERROR\033[0m - {e}")
                 debug_frame = frame.copy()
-                cv2.putText(debug_frame, f"HybridNets Error: {str(e)[:50]}", (10, 30),
+                cv2.putText(debug_frame, f"AI Local Error: {str(e)[:50]}", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                 return None, self.min_speed, debug_frame
         else:
@@ -4712,6 +4826,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
     def stop(self):
         """Stop the thread and cleanup."""
         self._stop_hybridnets_client()
+        self._stop_supercombo_client()
         if self.show_debug:
             cv2.destroyAllWindows()
         super(threadLineFollowing, self).stop()

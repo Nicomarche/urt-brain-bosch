@@ -212,6 +212,19 @@ class LineFollowingStatus(Enum):
     msgID = 2
     msgType = "dict"  # steering, speed, mode, fps, etc.
 
+################################# From Local Perception ##################################
+class LocalLanePerception(Enum):
+    Queue = "General"
+    Owner = "threadLocalPerception"
+    msgID = 1
+    msgType = "dict"  # lane_points, timing, frame metadata
+
+class LocalPerceptionStatus(Enum):
+    Queue = "General"
+    Owner = "threadLocalPerception"
+    msgID = 2
+    msgType = "dict"  # model_ready, fps, last_sign, etc.
+
 ################################# From Sign Detection ##################################
 class SignDetected(Enum):
     Queue = "General"

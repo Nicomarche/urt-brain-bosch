@@ -39,22 +39,22 @@
           <span class="stat-label">Velocidad</span>
           <span class="stat-value">{{ debugStatus?.speed ?? '--' }}</span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode !== 'hybridnets' && selectedMode !== 'supercombo'">
+        <div class="stat-item" *ngIf="selectedMode !== 'ai_local'">
           <span class="stat-label">LSTR</span>
           <span class="stat-value" [class.available]="debugStatus?.lstr_available">
             {{ debugStatus?.lstr_available ? 'Disponible' : 'No disponible' }}
           </span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode === 'hybridnets'">
-          <span class="stat-label">Servidor</span>
-          <span class="stat-value" [class.available]="hybridnetsConnected">
-            {{ hybridnetsConnected ? hybridnetsRoundtripMs.toFixed(0) + 'ms' : 'Desconectado' }}
+        <div class="stat-item" *ngIf="selectedMode === 'ai_local'">
+          <span class="stat-label">Modelo IA</span>
+          <span class="stat-value" [class.available]="localAiReady">
+            {{ localAiReady ? (localAiInferMs | number:'1.0-0') + 'ms' : 'No listo' }}
           </span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode === 'supercombo'">
-          <span class="stat-label">Servidor</span>
-          <span class="stat-value" [class.available]="supercomboConnected">
-            {{ supercomboConnected ? supercomboRoundtripMs.toFixed(0) + 'ms' : 'Desconectado' }}
+        <div class="stat-item" *ngIf="selectedMode === 'ai_local'">
+          <span class="stat-label">FPS IA</span>
+          <span class="stat-value" [class.available]="localAiReady">
+            {{ localAiFps | number:'1.0-1' }}
           </span>
         </div>
       </div>
@@ -97,162 +97,69 @@
       </button>
       <button 
         class="mode-btn hybridnets-btn" 
-        [class.selected]="selectedMode === 'hybridnets'"
-        (click)="setMode('hybridnets')">
-        <span class="mode-icon">🌐</span>
-        <span class="mode-name">HybridNets</span>
-        <span class="mode-desc">GPU remota. Envia frames por red, maxima precision.</span>
-        <span class="mode-badge server-badge" *ngIf="selectedMode === 'hybridnets'">
-          {{ hybridnetsConnected ? 'Conectado' : 'Desconectado' }}
-        </span>
-      </button>
-      <button 
-        class="mode-btn hybridnets-btn" 
-        [class.selected]="selectedMode === 'supercombo'"
-        (click)="setMode('supercombo')">
+        [class.selected]="selectedMode === 'ai_local'"
+        (click)="setMode('ai_local')">
         <span class="mode-icon">🧠</span>
-        <span class="mode-name">Supercombo</span>
-        <span class="mode-desc">Modelo openpilot. Deteccion end-to-end con trayectoria.</span>
-        <span class="mode-badge server-badge" *ngIf="selectedMode === 'supercombo'">
-          {{ supercomboConnected ? 'Conectado' : 'Desconectado' }}
+        <span class="mode-name">AI Local</span>
+        <span class="mode-desc"><code>best.pt</code> corre dentro del auto. Detecta carriles con IA y el giro lo sigue haciendo Stanley local.</span>
+        <span class="mode-badge server-badge" *ngIf="selectedMode === 'ai_local'">
+          {{ localAiReady ? 'Listo' : 'Inicializando' }}
         </span>
       </button>
     </div>
   </div>
 
-  <!-- HybridNets Server Configuration -->
-  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'hybridnets'">
+  <!-- Local AI Configuration -->
+  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'ai_local'">
     <div class="section-header">
-      <h4>Servidor HybridNets</h4>
-      <span class="connection-status" [class.connected]="hybridnetsConnected">
-        {{ hybridnetsConnected ? 'Conectado' : 'Desconectado' }}
+      <h4>AI Local</h4>
+      <span class="connection-status" [class.connected]="localAiReady">
+        {{ localAiReady ? 'Modelo listo' : 'Cargando modelo' }}
       </span>
-    </div>
-
-    <div class="server-url-row">
-      <label>URL del servidor</label>
-      <input type="text" class="server-url-input" 
-             [(ngModel)]="hybridnetsServerUrl" 
-             (change)="setHybridnetsServerUrl(hybridnetsServerUrl)"
-             placeholder="ws://127.0.0.1:8500/ws/steering"/>
     </div>
 
     <div class="server-info-grid">
       <div class="server-info-item">
-        <span class="info-label">Endpoint</span>
+        <span class="info-label">Confianza mínima</span>
         <div class="btn-group-small">
-          <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/steering')"
-                  (click)="setHybridnetsEndpoint('/ws/steering')">
-            Steering
-          </button>
-          <button [class.selected]="hybridnetsServerUrl.endsWith('/ws/inference')"
-                  (click)="setHybridnetsEndpoint('/ws/inference')">
-            Completo
-          </button>
+          <button *ngFor="let conf of [0.2, 0.35, 0.5, 0.65]"
+                  [class.selected]="localAiMinConfidence === conf"
+                  (click)="localAiMinConfidence = conf; onLocalAiSettingsChange()">{{ conf }}</button>
         </div>
       </div>
       <div class="server-info-item">
-        <span class="info-label">Calidad JPEG</span>
+        <span class="info-label">Input</span>
         <div class="btn-group-small">
-          <button *ngFor="let q of [40, 55, 70, 85]"
-                  [class.selected]="hybridnetsJpegQuality === q"
-                  (click)="setHybridnetsJpegQuality(q)">{{ q }}%</button>
+          <button *ngFor="let size of [256, 320, 416, 512]"
+                  [class.selected]="localAiInputSize === size"
+                  (click)="localAiInputSize = size; onLocalAiSettingsChange()">{{ size }}</button>
         </div>
       </div>
       <div class="server-info-item">
-        <span class="info-label">Timeout (s)</span>
+        <span class="info-label">Intervalo (s)</span>
         <div class="btn-group-small">
-          <button *ngFor="let t of [0.5, 1.0, 2.0, 5.0]"
-                  [class.selected]="hybridnetsTimeout === t"
-                  (click)="setHybridnetsTimeout(t)">{{ t }}s</button>
+          <button *ngFor="let interval of [0.05, 0.1, 0.15, 0.2]"
+                  [class.selected]="localAiInterval === interval"
+                  (click)="localAiInterval = interval; onLocalAiSettingsChange()">{{ interval }}s</button>
         </div>
       </div>
     </div>
 
-    <div class="server-stats" *ngIf="hybridnetsConnected">
+    <div class="server-stats" *ngIf="localAiReady">
       <div class="server-stat">
-        <span class="stat-label">Roundtrip</span>
-        <span class="stat-value" [class.good]="hybridnetsRoundtripMs < 50" [class.warn]="hybridnetsRoundtripMs >= 50 && hybridnetsRoundtripMs < 100" [class.bad]="hybridnetsRoundtripMs >= 100">
-          {{ hybridnetsRoundtripMs | number:'1.0-0' }}ms
+        <span class="stat-label">Inferencia</span>
+        <span class="stat-value" [class.good]="localAiInferMs < 80" [class.warn]="localAiInferMs >= 80 && localAiInferMs < 150" [class.bad]="localAiInferMs >= 150">
+          {{ localAiInferMs | number:'1.0-0' }}ms
         </span>
       </div>
       <div class="server-stat">
-        <span class="stat-label">Server FPS</span>
-        <span class="stat-value">{{ hybridnetsServerFps | number:'1.0-0' }}</span>
+        <span class="stat-label">FPS</span>
+        <span class="stat-value">{{ localAiFps | number:'1.0-1' }}</span>
       </div>
     </div>
 
     <p class="hybridnets-hint">
-      El servidor debe estar corriendo <code>python server.py</code> en una maquina con GPU.
-      Conecta ambos dispositivos a la misma red local.
-    </p>
-  </div>
-
-  <!-- Supercombo Server Configuration -->
-  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'supercombo'">
-    <div class="section-header">
-      <h4>Servidor Supercombo (openpilot)</h4>
-      <span class="connection-status" [class.connected]="supercomboConnected">
-        {{ supercomboConnected ? 'Conectado' : 'Desconectado' }}
-      </span>
-    </div>
-
-    <div class="server-url-row">
-      <label>URL del servidor</label>
-      <input type="text" class="server-url-input" 
-             [(ngModel)]="supercomboServerUrl" 
-             (change)="setSupercomboServerUrl(supercomboServerUrl)"
-             placeholder="ws://127.0.0.1:8500/ws/steering"/>
-    </div>
-
-    <div class="server-info-grid">
-      <div class="server-info-item">
-        <span class="info-label">Endpoint</span>
-        <div class="btn-group-small">
-          <button [class.selected]="supercomboServerUrl.endsWith('/ws/steering')"
-                  (click)="setSupercomboEndpoint('/ws/steering')">
-            Steering
-          </button>
-          <button [class.selected]="supercomboServerUrl.endsWith('/ws/inference')"
-                  (click)="setSupercomboEndpoint('/ws/inference')">
-            Completo
-          </button>
-        </div>
-      </div>
-      <div class="server-info-item">
-        <span class="info-label">Calidad JPEG</span>
-        <div class="btn-group-small">
-          <button *ngFor="let q of [40, 55, 70, 85]"
-                  [class.selected]="supercomboJpegQuality === q"
-                  (click)="setSupercomboJpegQuality(q)">{{ q }}%</button>
-        </div>
-      </div>
-      <div class="server-info-item">
-        <span class="info-label">Timeout (s)</span>
-        <div class="btn-group-small">
-          <button *ngFor="let t of [0.5, 1.0, 2.0, 5.0]"
-                  [class.selected]="supercomboTimeout === t"
-                  (click)="setSupercomboTimeout(t)">{{ t }}s</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="server-stats" *ngIf="supercomboConnected">
-      <div class="server-stat">
-        <span class="stat-label">Roundtrip</span>
-        <span class="stat-value" [class.good]="supercomboRoundtripMs < 50" [class.warn]="supercomboRoundtripMs >= 50 && supercomboRoundtripMs < 100" [class.bad]="supercomboRoundtripMs >= 100">
-          {{ supercomboRoundtripMs | number:'1.0-0' }}ms
-        </span>
-      </div>
-      <div class="server-stat">
-        <span class="stat-label">Server FPS</span>
-        <span class="stat-value">{{ supercomboServerFps | number:'1.0-0' }}</span>
-      </div>
-    </div>
-
-    <p class="hybridnets-hint">
-      Modelo Supercombo de openpilot (comma.ai). Requiere <code>supercombo.onnx</code> en el servidor.<br>
-      Setup: <code>cd aiserver && python setup_supercombo.py</code> | Config: <code>ENGINE_TYPE = "supercombo"</code>
+      El modelo corre dentro del proceso de cámara. No hace falta levantar <code>server.py</code> ni configurar red.
     </p>
   </div>
 
@@ -335,7 +242,7 @@
       <span class="toggle-icon">{{ expandedSections['speed'] ? '▼' : '▶' }}</span>
     </div>
     <div class="slider-content" *ngIf="expandedSections['speed']">
-      <p class="section-hint">Limites de velocidad del coche. En modos remotos (HybridNets/Supercombo) la velocidad se calcula segun el angulo de giro.</p>
+      <p class="section-hint">Limites de velocidad del coche. En AI Local y en OpenCV el giro final lo sigue calculando el controlador local segun el angulo de correccion.</p>
       <div class="slider-row" *ngFor="let slider of getSlidersByGroup('speed')">
         <label>{{ slider.label }}</label>
         <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
@@ -539,9 +446,9 @@
     </div>
   </div>
 
-  <!-- Mode-specific hint when in remote modes -->
-  <div class="config-section remote-mode-hint" *ngIf="selectedMode === 'hybridnets' || selectedMode === 'supercombo'">
-    <p>En modo {{ getModeDisplayName() }}, el procesamiento de imagen (brillo, HSV, bordes, etc.) lo hace el servidor remoto. Solo puedes ajustar velocidad y configuracion del servidor desde aqui.</p>
+  <!-- Mode-specific hint when in local AI mode -->
+  <div class="config-section remote-mode-hint" *ngIf="selectedMode === 'ai_local'">
+    <p>En modo AI Local, el modelo detecta carriles y señales dentro del auto. No usa servidor web; el steering sigue saliendo del mismo controlador Stanley/PID local.</p>
   </div>
 
   <div class="config-section remote-mode-hint" *ngIf="selectedMode === 'lstr'">

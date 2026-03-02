@@ -72,7 +72,7 @@ from config import (
     CAMERA_TYPE, USB_DEVICE, USB_RESOLUTION, SHOW_CAMERA_PREVIEW,
     STREAM_CAMERA_TO_DASHBOARD, DEBUG_WINDOWS,
     ENABLE_SIGN_DETECTION, SIGN_DETECTION_ACTIONS, SIGN_MIN_CONFIDENCE,
-    SIGN_SERVER_URL, SIGN_MIN_BOX_AREA, SIGN_ACTION_COOLDOWN,
+    SIGN_MIN_BOX_AREA, SIGN_ACTION_COOLDOWN,
     PICAMERA_HDR_ENABLED, PICAMERA_HDR_ALWAYS_ON, PICAMERA_HDR_GLARE_THRESHOLD,
     JETSON_SENSOR_ID, JETSON_CAPTURE_RESOLUTION, JETSON_OUTPUT_RESOLUTION,
     JETSON_FRAMERATE, JETSON_FLIP_METHOD,
@@ -169,7 +169,6 @@ processCamera = processCamera(queueList, logging, camera_ready, debugging = Fals
                                enable_sign_detection=ENABLE_SIGN_DETECTION,
                                sign_detection_actions=SIGN_DETECTION_ACTIONS,
                                sign_min_confidence=SIGN_MIN_CONFIDENCE,
-                               sign_server_url=SIGN_SERVER_URL,
                                sign_min_box_area=SIGN_MIN_BOX_AREA,
                                sign_action_cooldown=SIGN_ACTION_COOLDOWN)
 
