@@ -80,7 +80,7 @@ class threadCamera(ThreadWithStop):
                  jetson_flip_method=0,
                  picamera_hdr_enabled=True, picamera_hdr_always_on=False,
                  picamera_hdr_glare_threshold=0.04):
-        super(threadCamera, self).__init__(pause=0.1)  # 10 FPS — suficiente para line following a ~5 FPS y dashboard
+        super(threadCamera, self).__init__(pause=0.01)  # Reduce idle latency between captured frames
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
@@ -185,24 +185,26 @@ class threadCamera(ThreadWithStop):
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
         try:
+            need_main_frame = self.recording or self.show_preview
             if self.camera_type in ("usb", "jetson"):
-                mainRequest, serialRequest = self._capture_usb()
+                mainRequest, serialRequest = self._capture_usb(need_main_frame)
             else:
-                mainRequest, serialRequest = self._capture_picamera()
+                mainRequest, serialRequest = self._capture_picamera(need_main_frame)
 
-            if mainRequest is None or serialRequest is None:
+            if serialRequest is None:
                 return
 
             if self.camera_type == "picamera":
                 self._update_picamera_auto_exposure(serialRequest)
                 serialRequest = self._apply_picamera_hdr(serialRequest)
 
-            if self.recording == True:
+            if self.recording == True and mainRequest is not None:
                 self.video_writer.write(mainRequest) # type: ignore
 
             # Show preview window if enabled
             if self.show_preview:
-                preview_frame = cv2.resize(mainRequest, (1024, 540))  # type: ignore
+                preview_source = mainRequest if mainRequest is not None else serialRequest
+                preview_frame = cv2.resize(preview_source, (1024, 540))  # type: ignore
                 cv2.imshow("Camera Preview", preview_frame)  # type: ignore
                 cv2.waitKey(1)  # type: ignore
 
@@ -219,9 +221,9 @@ class threadCamera(ThreadWithStop):
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
-    def _capture_picamera(self):
+    def _capture_picamera(self, need_main_frame=True):
         """Capture frames from PiCamera (CSI). Returns (main_frame, serial_frame)."""
-        mainRequest = self.camera.capture_array("main")
+        mainRequest = self.camera.capture_array("main") if need_main_frame else None
         serialRequest = self.camera.capture_array("lores")
         serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420)  # type: ignore
         return mainRequest, serialRequest
@@ -359,7 +361,7 @@ class threadCamera(ThreadWithStop):
 
         self._apply_picamera_controls()
 
-    def _capture_usb(self):
+    def _capture_usb(self, need_main_frame=True):
         """Wait for a new frame from the USB reader thread, then return it.
         Blocks until the reader thread signals a fresh frame is available,
         so thread_work() runs at the camera's actual FPS (not 1000fps)."""
@@ -373,7 +375,7 @@ class threadCamera(ThreadWithStop):
         if frame is None:
             return None, None
         # main = full resolution frame
-        mainRequest = frame.copy()
+        mainRequest = frame.copy() if need_main_frame else None
         # serial (lores) = resized to 640x384 to match PiCamera lores output
         serialRequest = cv2.resize(frame, (640, 384))  # type: ignore
         return mainRequest, serialRequest

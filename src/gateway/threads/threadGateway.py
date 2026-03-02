@@ -26,8 +26,24 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWITrueSE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 
-from src.templates.threadwithstop import ThreadWithStop
+import queue
 import time
+
+from src.templates.threadwithstop import ThreadWithStop
+from src.utils.messages.allMessages import (
+    ActuatorCommandStatus,
+    CurrentSpeed,
+    CurrentSteer,
+    ImuData,
+    LineFollowingDebug,
+    LineFollowingStatus,
+    LocalLanePerception,
+    LocalPerceptionStatus,
+    SignDetectionDebug,
+    SignDetectionStatus,
+    mainCamera,
+    serialCamera,
+)
 
 class threadGateway(ThreadWithStop):
     """Thread which will handle processGateway functionalities.\n
@@ -40,12 +56,29 @@ class threadGateway(ThreadWithStop):
     # ===================================== INIT =========================================
 
     def __init__(self, queueList, logger, debugging):
-        super(threadGateway, self).__init__(pause=0.02)  # 50Hz — suficiente para enrutar mensajes
+        super(threadGateway, self).__init__(pause=0.005)  # 200Hz — evita backlog en streams de camara/debug
         self.logger = logger
         self.debugging = debugging
         self.sendingList = {}
         self.queuesList = queueList
         self.messageApproved = []
+        self.max_priority_batch = 32
+        self.max_general_batch = 64
+        self.max_config_batch = 32
+        self._latest_only_keys = {
+            (mainCamera.Owner.value, mainCamera.msgID.value),
+            (serialCamera.Owner.value, serialCamera.msgID.value),
+            (LineFollowingDebug.Owner.value, LineFollowingDebug.msgID.value),
+            (LineFollowingStatus.Owner.value, LineFollowingStatus.msgID.value),
+            (LocalLanePerception.Owner.value, LocalLanePerception.msgID.value),
+            (LocalPerceptionStatus.Owner.value, LocalPerceptionStatus.msgID.value),
+            (SignDetectionDebug.Owner.value, SignDetectionDebug.msgID.value),
+            (SignDetectionStatus.Owner.value, SignDetectionStatus.msgID.value),
+            (ActuatorCommandStatus.Owner.value, ActuatorCommandStatus.msgID.value),
+            (ImuData.Owner.value, ImuData.msgID.value),
+            (CurrentSpeed.Owner.value, CurrentSpeed.msgID.value),
+            (CurrentSteer.Owner.value, CurrentSteer.msgID.value),
+        }
 
     # =================================== SUBSCRIBE ======================================
 
@@ -118,27 +151,52 @@ class threadGateway(ThreadWithStop):
 
         self.logger.warning(self.sendingList)
 
+    def _drain_queue(self, queue_name, max_items, collapse_latest=False):
+        """Drain several pending messages in one cycle to avoid queue backlog."""
+        target_queue = self.queuesList[queue_name]
+        messages = []
+        latest_positions = {}
+
+        for _ in range(max_items):
+            try:
+                message = target_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if collapse_latest:
+                key = (message.get("Owner"), message.get("msgID"))
+                if key in self._latest_only_keys:
+                    previous_idx = latest_positions.get(key)
+                    if previous_idx is None:
+                        latest_positions[key] = len(messages)
+                        messages.append(message)
+                    else:
+                        messages[previous_idx] = message
+                    continue
+
+            messages.append(message)
+
+        return messages
+
     # ==================================== RUN ===========================================
 
     def thread_work(self):
         """This function will take the messages in priority order form the queues.\n
         the prioirty is: Critical > Warning > General
         """
-        
-        # while self._running:
-        message = None
-        # We are using "elif" because we are processing one message at a time.
-        # We work with the queues in the priority order( We start from the high priority to low priority)
+
+        messages = []
         if not self.queuesList["Critical"].empty():
-            message = self.queuesList["Critical"].get()
+            messages = self._drain_queue("Critical", self.max_priority_batch)
         elif not self.queuesList["Warning"].empty():
-            message = self.queuesList["Warning"].get()
+            messages = self._drain_queue("Warning", self.max_priority_batch)
         elif not self.queuesList["General"].empty():
-            message = self.queuesList["General"].get()
-        if message is not None:
+            messages = self._drain_queue("General", self.max_general_batch, collapse_latest=True)
+
+        for message in messages:
             self.send(message)
-        if not self.queuesList["Config"].empty():
-            message2 = self.queuesList["Config"].get()
+
+        for message2 in self._drain_queue("Config", self.max_config_batch):
             if str.lower(message2["Subscribe/Unsubscribe"]) == "subscribe":
                 self.subscribe(message2)
             else:
