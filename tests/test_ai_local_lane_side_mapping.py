@@ -121,6 +121,31 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(held[0].tolist(), [10, 90, 20, 50])
         self.assertIsNone(dropped)
 
+    def test_single_line_error_uses_visible_side_geometry(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.single_line_offset_factor = 0.5
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+
+        left_line = np.array([[30, 95, 30, 55]], dtype=np.int32)
+        right_line = np.array([[70, 95, 70, 55]], dtype=np.int32)
+
+        left_error, left_heading = detector._compute_single_line_error(
+            left_line, "left", 100, 100, prefer_center=True
+        )
+        right_error, right_heading = detector._compute_single_line_error(
+            right_line, "right", 100, 100, prefer_center=True
+        )
+
+        self.assertAlmostEqual(left_error, -1.5, places=1)
+        self.assertAlmostEqual(right_error, 1.5, places=1)
+        self.assertEqual(left_heading, 0.0)
+        self.assertEqual(right_heading, 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

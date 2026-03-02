@@ -539,7 +539,7 @@ Args:
         self._last_good_num_lines = 0        # Last accepted line count
 
         # Curve recovery (reverse when curve is impossible)
-        self.use_curve_recovery = True       # Enable reverse recovery
+        self.use_curve_recovery = False      # Disabled: reverse recovery caused incorrect interventions
         self.recovery_max_steer_frames = 8   # Frames at max steering before triggering
         self.recovery_reverse_speed = -5     # Reverse speed (negative = backward)
         self.recovery_reverse_time_min = 0.3 # Minimum reverse time (small error)
@@ -2581,16 +2581,16 @@ Args:
         return psi_ss, traj_yaw_rate, steer_damping_delta
 
     def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False):
-        """Compute crosstrack error from a single lane line using known lane width.
+        """Compute crosstrack error from a single visible lane marking.
 
-        Uses the 35cm lane width to estimate where the lane center should be:
-        - Left line visible  → center is half lane width to the RIGHT of the line
-        - Right line visible → center is half lane width to the LEFT of the line
+        The target is reconstructed from the visible marking side plus the
+        known track geometry:
+        - lane width (inner-edge to inner-edge)
+        - line width
+        - car width (used to derive the body clearance, then the vehicle center)
 
-        The offset_factor controls where in the lane to aim:
-        - 0.50 = exact lane center (17.5cm from line)
-        - 0.40 = slightly toward the visible line (safer, less overshoot)
-        - 0.30 = much closer to visible line (very conservative)
+        This keeps 1-line mode tied to the actual visible side instead of any
+        curve-state heuristic.
 
         Returns:
             tuple: (crosstrack_error_px, heading_error_rad)
@@ -2615,9 +2615,15 @@ Args:
             # Fallback: lane (35cm) typically spans ~45% of image width at bottom
             px_per_cm = (img_w * 0.45) / self.lane_width_cm
 
-        # On a fresh 2→1 transition, target true lane center to avoid steering jumps.
-        offset_factor = 0.5 if prefer_center else self.single_line_offset_factor
-        offset_px = self.lane_width_cm * offset_factor * px_per_cm
+        # Body clearance to the visible line when the vehicle is centered.
+        body_clearance_cm = max(0.0, (self.lane_width_cm - self.car_width) * 0.5)
+        # Distance from the detected marking center to the desired vehicle center.
+        line_to_center_cm = (self.line_width_cm * 0.5) + body_clearance_cm + (self.car_width * 0.5)
+
+        # On a fresh 2→1 transition, aim at the full reconstructed center to
+        # avoid a steering jump. Otherwise keep the configured conservative bias.
+        center_scale = 1.0 if prefer_center else max(0.0, min(1.5, self.single_line_offset_factor / 0.5))
+        offset_px = line_to_center_cm * center_scale * px_per_cm
 
         if side == 'left':
             desired_center = bottom_x + offset_px
@@ -3003,9 +3009,8 @@ Args:
                 dir_str = "RIGHT" if swept['turn_direction'] > 0 else "LEFT"
                 is_single = swept.get('single_line', False)
                 mode_tag = "1L" if is_single else "2L"
-                state_str = swept.get('curve_state', self._curve_state)
                 src_str = swept.get('source', '?')
-                cv2.putText(debug, f"{state_str} {dir_str} [{mode_tag}|{src_str}]  "
+                cv2.putText(debug, f"CURVE {dir_str} [{mode_tag}|{src_str}]  "
                             f"R={swept['curve_radius_cm']:.0f}cm  "
                             f"Clr: {min_clr:.1f}cm ({swept['critical_corner']})",
                             (8, bar_y + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.35, text_color, 1)
@@ -3071,17 +3076,10 @@ Args:
                                        cv2.MARKER_CROSS, 15, 1)
 
             elif swept['turn_direction'] == 0:
-                # Straight road indicator with FSM state
+                # Straight road indicator
                 cv2.rectangle(debug, (0, bar_y), (w, bar_y + 15), (40, 40, 40), -1)
-                state_str = swept.get('curve_state', self._curve_state)
-                cv2.putText(debug, f"{state_str} - No swept path offset",
+                cv2.putText(debug, "No curve offset",
                             (8, bar_y + 11), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (150, 200, 150), 1)
-        elif self.use_swept_path:
-            # No swept info but FSM is active - show state
-            bar_y = 58
-            cv2.rectangle(debug, (0, bar_y), (w, bar_y + 15), (30, 30, 30), -1)
-            cv2.putText(debug, f"FSM: {self._curve_state}  dir={self._curve_direction}",
-                        (8, bar_y + 11), cv2.FONT_HERSHEY_SIMPLEX, 0.3, (120, 120, 120), 1)
 
         return debug
 
@@ -3190,9 +3188,8 @@ Args:
 
         if self.show_debug and self._curve_state != prev_state:
             dir_s = {-1: "LEFT", 0: "-", 1: "RIGHT"}.get(self._curve_direction, "?")
-            print(f"\033[1;97m[ Curve FSM ] :\033[0m \033[1;96m{prev_state} → {self._curve_state}\033[0m "
-                  f"dir={dir_s} R={self._curve_radius_estimate:.0f}cm "
-                  f"frames={self._curve_state_frames}")
+            print(f"\033[1;97m[ Curve Assist ] :\033[0m \033[1;96mdir={dir_s}\033[0m "
+                  f"R={self._curve_radius_estimate:.0f}cm frames={self._curve_state_frames}")
 
     def _quick_vp_check(self, avg_left, avg_right, img_h, img_w):
         """Quick vanishing point check for early curve detection.
@@ -3679,7 +3676,7 @@ Args:
                 offset_px += inner_bias_px
 
             if self.show_debug:
-                print(f"\033[1;97m[ Hybrid 2L ] :\033[0m \033[1;96m{self._curve_state}\033[0m "
+                print(f"\033[1;97m[ Hybrid 2L ] :\033[0m "
                       f"src={source} R={best_radius:.0f}cm dir={'R' if turn_direction > 0 else 'L'} "
                       f"offset={offset_result['offset_cm']:.1f}cm→{offset_px:.0f}px "
                       f"bias={self.curve_inner_bias_cm:.1f}cm "
@@ -4332,22 +4329,7 @@ Returns:
             command_source = "no_command"
             
             if self.is_line_following_active:
-                # Check curve recovery FIRST - overrides normal commands if active
-                rec_steer, rec_speed, is_recovering = self._check_curve_recovery(
-                    steering_angle if steering_angle is not None else 0, 
-                    speed, frame)
-                
-                if is_recovering:
-                    commanded_steering = rec_steer
-                    commanded_speed = rec_speed
-                    command_source = "curve_recovery"
-                    self.send_motor_commands(rec_steer, rec_speed)
-                    self.frames_without_line = 0
-                    # Draw recovery status on debug frame
-                    if debug_frame is not None:
-                        cv2.putText(debug_frame, f"RECOVERY: {self._recovery_state}", 
-                                    (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                elif steering_angle is not None:
+                if steering_angle is not None:
                     commanded_steering = steering_angle
                     commanded_speed = speed
                     command_source = "normal"
@@ -4694,94 +4676,43 @@ Returns:
             self.consecutive_single_left += 1
             self.consecutive_single_right = 0
             self.last_seen_side = "left"
+            self._swept_path_info = None
+            sl_error, sl_heading = self._compute_single_line_error(
+                avg_left, 'left', img_h, img_w,
+                prefer_center=(prev_seen_side == "both")
+            )
+            error = sl_error
 
-            # Check: is this the INNER line of a confirmed curve?
-            # LEFT curve + see LEFT line = seeing INNER line → car went too far inside
-            if self._is_seeing_inner_line('left'):
-                # Car turned too tight (went past inner boundary of a LEFT curve)
-                # DON'T steer more into the curve — ease off, steer gently toward outside
-                steering_angle = self.max_steering * self.curve_inner_line_steer_factor  # Steer RIGHT (away from left curve)
-                speed = self.min_speed
-                self._swept_path_info = None
-                if self.show_debug:
-                    print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mLEFT curve, seeing INNER (left) line\033[0m "
-                          f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
-            else:
-                # Base one-line estimate from visible lane geometry
-                sl_error, sl_heading = self._compute_single_line_error(
-                    avg_left, 'left', img_h, img_w,
-                    prefer_center=(prev_seen_side == "both")
-                )
+            if self.use_kalman_filter:
+                raw_error = sl_error
+                sl_error = self._kalman_correct_error(sl_error)
                 error = sl_error
+                debug_info['kalman_raw_error'] = raw_error
+                debug_info['kalman_error'] = sl_error
+                debug_info['kalman_age'] = self._kalman_age_frames
 
-                # Optional curve-aware correction from swept path
-                swept = None
-                if self.use_swept_path:
-                    swept = self._predict_swept_path_single_line(avg_left, 'left', img_h, img_w)
-                    self._swept_path_info = swept
-                    if swept is not None:
-                        if self._curve_state == "IN_CURVE":
-                            w = self.single_line_swept_weight_in_curve
-                        elif self._curve_state == "EXITING":
-                            w = self.single_line_swept_weight_exiting
-                        elif self._curve_state == "ENTERING":
-                            w = self.single_line_swept_weight_entering
-                        else:
-                            w = 0.35
-                        w = max(0.0, min(1.0, w))
-                        fused_error = (1.0 - w) * sl_error + w * swept['steering_error']
-                        # Single-line heading can be noisy in tight curves, damp it when swept-path is trusted.
-                        fused_heading = sl_heading * (1.0 - 0.6 * w)
-                        sl_error = fused_error
-                        sl_heading = fused_heading
-                        error = sl_error
-                else:
-                    self._swept_path_info = None
+            speed = self.min_speed + 2
+            if self.use_stanley:
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                    speed_val, None
+                )
+                steering_angle = self.stanley.compute(
+                    sl_error, sl_heading, speed_val,
+                    yaw_rate=self._yaw_rate,
+                    traj_yaw_rate=traj_yaw_rate,
+                    steady_state_heading=psi_ss,
+                    steer_damping_delta=steer_damping_delta,
+                )
+            else:
+                steering_angle = self.pid.compute(sl_error)
 
-                if self.use_kalman_filter:
-                    raw_error = sl_error
-                    sl_error = self._kalman_correct_error(sl_error)
-                    error = sl_error
-                    debug_info['kalman_raw_error'] = raw_error
-                    debug_info['kalman_error'] = sl_error
-                    debug_info['kalman_age'] = self._kalman_age_frames
-
-                if self.use_stanley:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    curve_reference = self._get_stanley_curve_reference(fallback_curve=swept)
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, curve_reference
-                    )
-                    steering_angle = self.stanley.compute(
-                        sl_error, sl_heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
-                        speed = self.min_speed
-                    else:
-                        speed = self.min_speed + 3
-                    if self.show_debug:
-                        src = "fused" if swept is not None else "lane"
-                        print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mLEFT\033[0m "
-                              f"src={src} err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
-                              f"steer={steering_angle:.1f}° state={self._curve_state}")
-                elif swept is not None:
-                    steering_angle = self.pid.compute(swept['steering_error'])
-                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
-                        speed = self.min_speed
-                    else:
-                        speed = self.min_speed + 3
-                else:
-                    if self.consecutive_single_left >= 2:
-                        steering_angle = self.max_steering
-                        speed = self.min_speed
-                    else:
-                        steering_angle = self._bfmc_follow_single_line(avg_left, 'left')
+            steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            if self.show_debug:
+                ctrl_label = "Stanley 1L" if self.use_stanley else "PID 1L"
+                print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mLEFT\033[0m "
+                      f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                      f"steer={steering_angle:.1f}°")
 
             self.frames_without_line = 0
 
@@ -4790,89 +4721,43 @@ Returns:
             self.consecutive_single_right += 1
             self.consecutive_single_left = 0
             self.last_seen_side = "right"
+            self._swept_path_info = None
+            sl_error, sl_heading = self._compute_single_line_error(
+                avg_right, 'right', img_h, img_w,
+                prefer_center=(prev_seen_side == "both")
+            )
+            error = sl_error
 
-            if self._is_seeing_inner_line('right'):
-                steering_angle = -self.max_steering * self.curve_inner_line_steer_factor
-                speed = self.min_speed
-                self._swept_path_info = None
-                if self.show_debug:
-                    print(f"\033[1;97m[ Inner Line ] :\033[0m \033[1;93mRIGHT curve, seeing INNER (right) line\033[0m "
-                          f"→ ease off: steer={steering_angle:.1f}° (toward outside)")
-            else:
-                # Base one-line estimate from visible lane geometry
-                sl_error, sl_heading = self._compute_single_line_error(
-                    avg_right, 'right', img_h, img_w,
-                    prefer_center=(prev_seen_side == "both")
-                )
+            if self.use_kalman_filter:
+                raw_error = sl_error
+                sl_error = self._kalman_correct_error(sl_error)
                 error = sl_error
+                debug_info['kalman_raw_error'] = raw_error
+                debug_info['kalman_error'] = sl_error
+                debug_info['kalman_age'] = self._kalman_age_frames
 
-                # Optional curve-aware correction from swept path
-                swept = None
-                if self.use_swept_path:
-                    swept = self._predict_swept_path_single_line(avg_right, 'right', img_h, img_w)
-                    self._swept_path_info = swept
-                    if swept is not None:
-                        if self._curve_state == "IN_CURVE":
-                            w = self.single_line_swept_weight_in_curve
-                        elif self._curve_state == "EXITING":
-                            w = self.single_line_swept_weight_exiting
-                        elif self._curve_state == "ENTERING":
-                            w = self.single_line_swept_weight_entering
-                        else:
-                            w = 0.35
-                        w = max(0.0, min(1.0, w))
-                        fused_error = (1.0 - w) * sl_error + w * swept['steering_error']
-                        fused_heading = sl_heading * (1.0 - 0.6 * w)
-                        sl_error = fused_error
-                        sl_heading = fused_heading
-                        error = sl_error
-                else:
-                    self._swept_path_info = None
+            speed = self.min_speed + 2
+            if self.use_stanley:
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                    speed_val, None
+                )
+                steering_angle = self.stanley.compute(
+                    sl_error, sl_heading, speed_val,
+                    yaw_rate=self._yaw_rate,
+                    traj_yaw_rate=traj_yaw_rate,
+                    steady_state_heading=psi_ss,
+                    steer_damping_delta=steer_damping_delta,
+                )
+            else:
+                steering_angle = self.pid.compute(sl_error)
 
-                if self.use_kalman_filter:
-                    raw_error = sl_error
-                    sl_error = self._kalman_correct_error(sl_error)
-                    error = sl_error
-                    debug_info['kalman_raw_error'] = raw_error
-                    debug_info['kalman_error'] = sl_error
-                    debug_info['kalman_age'] = self._kalman_age_frames
-
-                if self.use_stanley:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    curve_reference = self._get_stanley_curve_reference(fallback_curve=swept)
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, curve_reference
-                    )
-                    steering_angle = self.stanley.compute(
-                        sl_error, sl_heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    if swept is not None and self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
-                        speed = self.min_speed
-                    else:
-                        speed = self.min_speed + 3
-                    if self.show_debug:
-                        src = "fused" if swept is not None else "lane"
-                        print(f"\033[1;97m[ Stanley 1L ] :\033[0m \033[1;95mRIGHT\033[0m "
-                              f"src={src} err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
-                              f"steer={steering_angle:.1f}° state={self._curve_state}")
-                elif swept is not None:
-                    steering_angle = self.pid.compute(swept['steering_error'])
-                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
-                        speed = self.min_speed
-                    else:
-                        speed = self.min_speed + 3
-                else:
-                    if self.consecutive_single_right >= 2:
-                        steering_angle = -self.max_steering
-                        speed = self.min_speed
-                    else:
-                        steering_angle = self._bfmc_follow_single_line(avg_right, 'right')
+            steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            if self.show_debug:
+                ctrl_label = "Stanley 1L" if self.use_stanley else "PID 1L"
+                print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mRIGHT\033[0m "
+                      f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
+                      f"steer={steering_angle:.1f}°")
 
             self.frames_without_line = 0
 
