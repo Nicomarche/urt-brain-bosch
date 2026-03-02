@@ -214,6 +214,43 @@ class threadWrite(ThreadWithStop):
             self.logger.info(f"VCD sent: speed={int(speed_x10)} steer={int(steer_x10)}")
         return sent
 
+    def _handle_continuous_motion_command(self, speed_x10, steer_x10):
+        speed_command = {
+            "action": "speed",
+            "speed": int(speed_x10),
+        }
+        steer_command = {
+            "action": "steer",
+            "steerAngle": int(steer_x10),
+        }
+
+        speed_sent, speed_raw_command = self.send_to_serial(speed_command)
+        steer_sent, steer_raw_command = self.send_to_serial(steer_command)
+
+        raw_parts = []
+        if speed_raw_command:
+            raw_parts.append(speed_raw_command.strip())
+        if steer_raw_command:
+            raw_parts.append(steer_raw_command.strip())
+        raw_command = " | ".join(raw_parts) if raw_parts else None
+
+        blocked_reason = None if (speed_sent and steer_sent) else "serial_disconnected"
+        self._record_motion_command(
+            "speed_steer",
+            raw_command,
+            speed_x10=int(speed_x10),
+            steer_x10=int(steer_x10),
+            blocked_reason=blocked_reason,
+            force=True,
+        )
+
+        if speed_sent and steer_sent and self.debugger:
+            self.logger.info(
+                f"Continuous command sent: speed={int(speed_x10)} steer={int(steer_x10)}"
+            )
+
+        return speed_sent and steer_sent
+
     def _handle_brake_command(self, brake_value):
         command = {"action": "brake", "steerAngle": int(brake_value)}
         sent, raw_command = self.send_to_serial(command)
@@ -275,7 +312,7 @@ class threadWrite(ThreadWithStop):
                     self.send_to_serial(command)
                     self.load_config("sensors")
                     if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
-                        self._handle_vcd_command(self.last_speed_cmd, self.last_steer_cmd)
+                        self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
                     else:
                         self._publish_actuator_status(force=True)
                 elif klRecv == "15":
@@ -349,11 +386,11 @@ class threadWrite(ThreadWithStop):
                 if speed_or_steer_updated and brakeRecv is None:
                     if self.engineEnabled:
                         if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
-                            self._handle_vcd_command(self.last_speed_cmd, self.last_steer_cmd)
+                            self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
                     else:
                         self.last_blocked_reason = "klem_not_30"
                         self._record_motion_command(
-                            "vcd",
+                            "speed_steer",
                             None,
                             speed_x10=self.last_speed_cmd,
                             steer_x10=self.last_steer_cmd,
