@@ -10,7 +10,7 @@ import time
 import math
 from collections import deque
 from enum import Enum
-from src.utils.messages.allMessages import serialCamera, SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus
+from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -215,12 +215,14 @@ Args:
     debugger (bool): A flag for debugging.
 """
 
-    def __init__(self, queuesList, logger, debugger, show_debug=False, debug_windows=None,
-                 sign_action_event=None, highway_mode_event=None):
+    def __init__(self, queuesList, logger, debugger, frame_buffer=None,
+                 show_debug=False, debug_windows=None, sign_action_event=None,
+                 highway_mode_event=None):
         super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
+        self.frame_buffer = frame_buffer
         self.show_debug = show_debug
         self.debug_windows = debug_windows or {}
         self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
@@ -236,6 +238,16 @@ Args:
         self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
         self._current_speed = self.base_speed  # Tracks actual speed for ramping
         self.speed_steer_factor = 0.4  # Steering attenuation at max speed (0=none, 1=full mute)
+        self.max_frame_age_ms = 300.0
+        self._last_frame_age_ms = None
+        self._last_processed_sequence = 0
+        self._last_safe_steering = 0.0
+        self._last_safe_speed = self.min_speed
+        self._debug_log_times = {}
+        self.preview_interval = 1.0 / 5.0
+        self._last_preview_time = 0.0
+        self._preview_frame_due = False
+        self._preview_refresh_pending = False
 
         # PID Controller (values from ricardolopezb/bfmc24-brain configs.py)
         # Error is fed in raw pixels (not normalized). Kp=0.075 → 293px error = 22° max steering.
@@ -568,7 +580,6 @@ Args:
         # Message handlers
         self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
         self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
-        self.serialCameraSubscriber = messageHandlerSubscriber(self.queuesList, serialCamera, "lastOnly", True)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
         self.localLanePerceptionSubscriber = messageHandlerSubscriber(self.queuesList, LocalLanePerception, "lastOnly", True)
@@ -1463,6 +1474,42 @@ Args:
         Returns True if show_debug is on AND the individual window toggle is on."""
         return self.show_debug and self.debug_windows.get(window_key, False)
 
+    def _begin_preview_cycle(self, now=None):
+        """Determine whether local preview windows may refresh this loop."""
+        if not self.show_debug:
+            self._preview_frame_due = False
+            self._preview_refresh_pending = False
+            return
+        current_time = time.time() if now is None else now
+        self._preview_frame_due = (current_time - self._last_preview_time) >= self.preview_interval
+        self._preview_refresh_pending = False
+
+    def _show_preview_window(self, name, image):
+        """Render a preview window only when the refresh budget allows it."""
+        if image is None or not self.show_debug or not self._preview_frame_due:
+            return
+        cv2.imshow(name, image)
+        self._preview_refresh_pending = True
+
+    def _flush_preview_windows(self):
+        """Flush pending preview updates with a single waitKey."""
+        if self._preview_refresh_pending:
+            cv2.waitKey(1)
+            self._last_preview_time = time.time()
+        self._preview_refresh_pending = False
+        self._preview_frame_due = False
+
+    def _debug_log(self, key, message, interval=1.0):
+        """Rate-limit noisy debug logs to keep the control loop responsive."""
+        if not self.show_debug:
+            return
+        now = time.time()
+        last_time = self._debug_log_times.get(key, 0.0)
+        if (now - last_time) < interval:
+            return
+        self._debug_log_times[key] = now
+        print(message)
+
     def _store_debug_image(self, name, image):
         """Store a debug image for potential streaming."""
         if self.stream_debug_view == 0:
@@ -1554,7 +1601,7 @@ Args:
         cv2.putText(panel, f"PID: Kp={self.kp:.2f} Kd={self.kd:.2f}", (15, y_pos), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
         
-        cv2.imshow("Control Panel", panel)
+        self._show_preview_window("Control Panel", panel)
 
     def _overlay_command_status(self, image, computed_steering, computed_speed,
                                 commanded_steering, commanded_speed, command_source):
@@ -1660,6 +1707,7 @@ Args:
                 'actuator_speed_x10': actuator_status.get('speed_x10'),
                 'actuator_steer_x10': actuator_status.get('steer_x10'),
                 'actuator_blocked_reason': actuator_status.get('blocked_reason'),
+                'frame_age_ms': self._last_frame_age_ms,
                 'local_ai_ready': False,
                 'local_ai_infer_ms': None,
                 'local_ai_fps': None,
@@ -1981,8 +2029,7 @@ Args:
                 
                 # Show AI analysis window even when no detection
                 if self._is_window_enabled("ai_analysis"):
-                    cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
-                    cv2.waitKey(1)
+                    self._show_preview_window("AI Analysis - LSTR", ai_analysis_frame)
                 
                 self._store_debug_image('lstr', ai_analysis_frame)
                 return None, None, None, None
@@ -1992,8 +2039,7 @@ Args:
             
             if lane_center is None:
                 if self._is_window_enabled("ai_analysis"):
-                    cv2.imshow("AI Analysis - LSTR", ai_analysis_frame)
-                    cv2.waitKey(1)
+                    self._show_preview_window("AI Analysis - LSTR", ai_analysis_frame)
                 return None, None, None, None
             
             # === CURVE PREDICTION: Estimate curvature from full lane shape ===
@@ -2106,8 +2152,7 @@ Args:
             
             # Show AI analysis window
             if self._is_window_enabled("ai_analysis"):
-                cv2.imshow("AI Analysis - LSTR", debug_frame)
-                cv2.waitKey(1)
+                self._show_preview_window("AI Analysis - LSTR", debug_frame)
             
             # Store LSTR result for streaming
             self._store_debug_image('lstr', debug_frame)
@@ -2288,10 +2333,13 @@ Args:
         cv2.line(debug_frame, (width//2, height - 50), (width//2, height), (255, 255, 255), 2)
         
         if self._is_window_enabled("hybrid_fusion"):
-            cv2.imshow("HYBRID Fusion", debug_frame)
-            cv2.waitKey(1)
+            self._show_preview_window("HYBRID Fusion", debug_frame)
             if final_steering is not None:
-                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;96m{source}\033[0m - Steer: {final_steering:.1f}° (OpenCV:{opencv_steering}, LSTR:{lstr_steering})")
+                self._debug_log(
+                    "hybrid_fusion",
+                    f"\033[1;97m[ HYBRID ] :\033[0m \033[1;96m{source}\033[0m - "
+                    f"Steer: {final_steering:.1f}° (OpenCV:{opencv_steering}, LSTR:{lstr_steering})",
+                )
         
         self._store_debug_image('hybrid', debug_frame)
         self._store_debug_image('final', debug_frame)
@@ -4492,20 +4540,51 @@ Returns:
             self._check_config()
             self._poll_local_ai_messages()
             self._read_sensor_data()
-            
-            camera_message = self.serialCameraSubscriber.receive()
-            if camera_message is None:
-                time.sleep(0.05)
+
+            loop_start = time.time()
+            self._begin_preview_cycle(loop_start)
+
+            if self.frame_buffer is None:
+                time.sleep(0.02)
                 return
-            
-            img_data = base64.b64decode(camera_message)
-            nparr = np.frombuffer(img_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            
+
+            frame, frame_timestamp, frame_sequence = self.frame_buffer.read_latest(copy_frame=True)
             if frame is None:
+                time.sleep(0.02)
                 return
-            
-            steering_angle, speed, debug_frame = self.process_frame(frame)
+
+            if frame_sequence == self._last_processed_sequence:
+                return
+            self._last_processed_sequence = frame_sequence
+
+            frame_age_ms = None
+            if frame_timestamp:
+                frame_age_ms = max(0.0, (time.time() - frame_timestamp) * 1000.0)
+            self._last_frame_age_ms = round(frame_age_ms, 1) if frame_age_ms is not None else None
+            stale_frame = frame_age_ms is not None and frame_age_ms > self.max_frame_age_ms
+
+            if stale_frame:
+                steering_angle = self._last_safe_steering
+                speed = self.min_speed
+                debug_frame = None
+                if self._needs_debug:
+                    debug_frame = frame.copy()
+                    cv2.putText(
+                        debug_frame,
+                        f"STALE FRAME {frame_age_ms:.0f}ms - HOLD",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (0, 0, 255),
+                        2,
+                    )
+            else:
+                steering_angle, speed, debug_frame = self.process_frame(frame)
+                if steering_angle is not None:
+                    self._last_safe_steering = steering_angle
+                    if speed is not None:
+                        self._last_safe_speed = speed
+
             computed_steering = steering_angle
             computed_speed = speed
             commanded_steering = None
@@ -4516,7 +4595,7 @@ Returns:
                 if steering_angle is not None:
                     commanded_steering = steering_angle
                     commanded_speed = speed
-                    command_source = "normal"
+                    command_source = "stale_hold" if stale_frame else "normal"
                     self.send_motor_commands(steering_angle, speed)
                     self.frames_without_line = 0
                 else:
@@ -4538,7 +4617,7 @@ Returns:
                     self._last_inactive_log = True
 
             if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
-                if command_source == "normal":
+                if command_source in ("normal", "stale_hold"):
                     command_source = "sign_override"
                 commanded_speed = None
 
@@ -4553,7 +4632,8 @@ Returns:
             if self.show_debug and (computed_steering is not None or commanded_steering is not None):
                 comp_text = f"{computed_steering:.1f}" if computed_steering is not None else "--"
                 cmd_text = f"{commanded_steering:.1f}" if commanded_steering is not None else "--"
-                print(
+                self._debug_log(
+                    "command_status",
                     f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mCMD\033[0m - "
                     f"computed={comp_text}° commanded={cmd_text}° source={command_source}"
                 )
@@ -4585,12 +4665,12 @@ Returns:
                     status_text = "ACTIVE" if self.is_line_following_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
-                    cv2.imshow("1. Final Result", debug_frame)
+                    self._show_preview_window("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
                 if self._is_window_enabled("control_panel"):
                     self._show_control_panel(display_steering, display_speed)
-                cv2.waitKey(1)
+                self._flush_preview_windows()
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
@@ -4613,7 +4693,11 @@ Returns:
             self.detection_mode = normalized_mode
         
         if self.show_debug:
-            print(f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} Mode: {self.detection_mode}")
+            self._debug_log(
+                "frame_received",
+                f"\033[1;97m[ Line Following ] :\033[0m Frame received: {width}x{height} "
+                f"Mode: {self.detection_mode}",
+            )
         
         # Handle SUPERCOMBO remote AI server mode
         if self.detection_mode == DetectionMode.SUPERCOMBO.value:
@@ -4707,14 +4791,14 @@ Returns:
             # Show debug windows (only enabled ones)
             if self.show_debug:
                 if 'roi' in debug_info:
-                    cv2.imshow("ROI", debug_info['roi'])
+                    self._show_preview_window("ROI", debug_info['roi'])
                 if self._is_window_enabled("binary_threshold") and 'binary' in debug_info:
                     bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
                     cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    cv2.imshow("2. Binary Threshold", bin_display)
+                    self._show_preview_window("2. Binary Threshold", bin_display)
                 if self._is_window_enabled("canny_edges") and 'canny' in debug_info:
-                    cv2.imshow("3. Canny Edges", debug_info['canny'])
+                    self._show_preview_window("3. Canny Edges", debug_info['canny'])
                 self._store_debug_image('canny', cv2.cvtColor(canny, cv2.COLOR_GRAY2BGR))
 
         # Calculate steering based on detected lines

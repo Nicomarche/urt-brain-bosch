@@ -166,6 +166,7 @@ processCamera = processCamera(queueList, logging, camera_ready, debugging = Fals
                                picamera_hdr_enabled=PICAMERA_HDR_ENABLED,
                                picamera_hdr_always_on=PICAMERA_HDR_ALWAYS_ON,
                                picamera_hdr_glare_threshold=PICAMERA_HDR_GLARE_THRESHOLD,
+                               publish_serial_stream=STREAM_CAMERA_TO_DASHBOARD,
                                enable_sign_detection=ENABLE_SIGN_DETECTION,
                                sign_detection_actions=SIGN_DETECTION_ACTIONS,
                                sign_min_confidence=SIGN_MIN_CONFIDENCE,

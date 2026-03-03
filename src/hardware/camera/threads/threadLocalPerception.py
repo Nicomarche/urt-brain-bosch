@@ -1,8 +1,6 @@
-import base64
 import time
 
 import cv2
-import numpy as np
 
 import config
 from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEngine
@@ -16,7 +14,6 @@ from src.utils.messages.allMessages import (
     SignDetected,
     SignDetectionStatus,
     StateChange,
-    serialCamera,
 )
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -25,7 +22,8 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 class threadLocalPerception(ThreadWithStop):
     """Runs the local `best.pt` model and publishes lane/sign perception."""
 
-    def __init__(self, queuesList, logger, debugger, show_debug=False, debug_windows=None,
+    def __init__(self, queuesList, logger, debugger, frame_buffer=None,
+                 show_debug=False, debug_windows=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
                  action_cooldown=15.0, sign_action_event=None,
@@ -34,6 +32,7 @@ class threadLocalPerception(ThreadWithStop):
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
+        self.frame_buffer = frame_buffer
         self.show_debug = show_debug
         self.debug_windows = debug_windows or {}
 
@@ -57,10 +56,10 @@ class threadLocalPerception(ThreadWithStop):
         self.detection_count = 0
         self.last_sign_name = ""
         self._last_result = None
+        self._last_frame_sequence = 0
+        self._preview_interval = 1.0 / 5.0
+        self._last_preview_time = 0.0
 
-        self.serialCameraSubscriber = messageHandlerSubscriber(
-            self.queuesList, serialCamera, "lastOnly", True
-        )
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
         )
@@ -97,6 +96,16 @@ class threadLocalPerception(ThreadWithStop):
 
     def _is_window_enabled(self, window_key):
         return self.show_debug and self.debug_windows.get(window_key, False)
+
+    def _should_build_debug(self, now):
+        if not self.show_debug:
+            return False
+        if not any(
+            self._is_window_enabled(window_key)
+            for window_key in ("ai_local_overlay", "ai_local_masks", "ai_local_signs")
+        ):
+            return False
+        return (now - self._last_preview_time) >= self._preview_interval
 
     def state_change_handler(self):
         message = self.stateChangeSubscriber.receive()
@@ -204,46 +213,54 @@ class threadLocalPerception(ThreadWithStop):
             "local_model_ready": model_ready,
         })
 
-    def _show_debug_windows(self, result):
+    def _show_debug_windows(self, result, now):
         if not self.show_debug or not result:
             return
 
         lane_debug = result.get("lane_debug", {})
+        rendered = False
         if self._is_window_enabled("ai_local_overlay"):
             overlay = lane_debug.get("overlay")
             if overlay is not None:
                 cv2.imshow("AI Local - Overlay", overlay)
+                rendered = True
         if self._is_window_enabled("ai_local_masks"):
             masks = lane_debug.get("masks")
             if masks is not None:
                 cv2.imshow("AI Local - Masks", masks)
+                rendered = True
         if self._is_window_enabled("ai_local_signs"):
             signs = lane_debug.get("signs")
             if signs is not None:
                 cv2.imshow("AI Local - Signs", signs)
-        cv2.waitKey(1)
+                rendered = True
+        if rendered:
+            cv2.waitKey(1)
+            self._last_preview_time = now
 
     def thread_work(self):
         self.state_change_handler()
         self._check_config()
-        camera_message = self.serialCameraSubscriber.receive()
-        if camera_message is None:
+        if self.frame_buffer is None:
             time.sleep(0.02)
+            return
+
+        frame, frame_timestamp, frame_sequence = self.frame_buffer.read_latest(copy_frame=True)
+        if frame is None:
+            time.sleep(0.02)
+            return
+        if frame_sequence == self._last_frame_sequence:
             return
 
         now = time.time()
         if now - self.last_infer_time < self.local_ai_interval:
             return
         self.last_infer_time = now
+        self._last_frame_sequence = frame_sequence
 
         try:
-            img_data = base64.b64decode(camera_message)
-            nparr = np.frombuffer(img_data, np.uint8)
-            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if frame is None:
-                return
-
-            result = self.engine.infer(frame)
+            build_debug = self._should_build_debug(now)
+            result = self.engine.infer(frame, build_debug=build_debug)
             self._last_result = result
             self.frame_counter += 1
 
@@ -264,14 +281,15 @@ class threadLocalPerception(ThreadWithStop):
                 "lane_side_sources": lane_side_sources,
                 "inference_time_ms": float(result.get("inference_time_ms", 0.0)),
                 "frame_id": int(result.get("frame_id", 0)),
-                "timestamp": now,
+                "timestamp": frame_timestamp or now,
                 "lane_count": len(lane_points),
                 "model_ready": bool(result.get("model_ready", False)),
             })
 
             self._publish_sign(result.get("detections", []), now)
             self._publish_status(result, now)
-            self._show_debug_windows(result)
+            if build_debug:
+                self._show_debug_windows(result, now)
         except Exception as e:
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 

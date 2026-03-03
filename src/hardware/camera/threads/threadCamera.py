@@ -74,6 +74,7 @@ class threadCamera(ThreadWithStop):
 
     # ================================ INIT ===============================================
     def __init__(self, queuesList, logger, debugger, show_preview=False,
+                 frame_buffer=None, publish_serial_stream=True,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
                  jetson_sensor_id=0, jetson_capture_resolution=(1920, 1080),
                  jetson_output_resolution=(960, 720), jetson_framerate=30,
@@ -87,6 +88,8 @@ class threadCamera(ThreadWithStop):
         self.frame_rate = 5
         self.recording = False
         self.show_preview = show_preview
+        self.frame_buffer = frame_buffer
+        self.publish_serial_stream = bool(publish_serial_stream)
         self.camera_type = camera_type
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
@@ -198,6 +201,9 @@ class threadCamera(ThreadWithStop):
                 self._update_picamera_auto_exposure(serialRequest)
                 serialRequest = self._apply_picamera_hdr(serialRequest)
 
+            if self.frame_buffer is not None:
+                self.frame_buffer.write(serialRequest)
+
             if self.recording == True and mainRequest is not None:
                 self.video_writer.write(mainRequest) # type: ignore
 
@@ -208,16 +214,17 @@ class threadCamera(ThreadWithStop):
                 cv2.imshow("Camera Preview", preview_frame)  # type: ignore
                 cv2.waitKey(1)  # type: ignore
 
-            # Only encode serialCamera (640x384) — used by line following, sign detection, and dashboard.
-            # mainCamera (2048x1080) is not consumed by any subscriber, so we skip encoding it entirely.
-            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
-            _, serialEncodedImg = cv2.imencode(".jpg", serialRequest, encode_params) # type: ignore
-            serialEncodedImageData = base64.b64encode(serialEncodedImg).decode("utf-8") # type: ignore
+            if self.publish_serial_stream:
+                # Keep the dashboard stream compatible, but do not encode frames that
+                # are only needed by local control threads.
+                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+                _, serialEncodedImg = cv2.imencode(".jpg", serialRequest, encode_params) # type: ignore
+                serialEncodedImageData = base64.b64encode(serialEncodedImg).decode("utf-8") # type: ignore
 
-            if self._blocker.is_set():
-                return
+                if self._blocker.is_set():
+                    return
 
-            self.serialCameraSender.send(serialEncodedImageData)
+                self.serialCameraSender.send(serialEncodedImageData)
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 

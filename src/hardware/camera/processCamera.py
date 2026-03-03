@@ -31,6 +31,7 @@ if __name__ == "__main__":
     sys.path.insert(0, "../../..")
 
 import threading
+import time
 
 from cv2 import meanShift
 from src.templates.workerprocess import WorkerProcess
@@ -49,6 +50,33 @@ try:
 except ImportError as e:
     SIGN_DETECTION_AVAILABLE = False
     print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Sign detection not available: {e}")
+
+
+class LatestFrameBuffer:
+    """Thread-safe container that always exposes the newest lores BGR frame."""
+
+    def __init__(self):
+        self.frame_bgr = None
+        self.timestamp = 0.0
+        self.sequence = 0
+        self.lock = threading.Lock()
+
+    def write(self, frame):
+        """Replace the buffered frame with the latest capture."""
+        if frame is None:
+            return
+        with self.lock:
+            self.frame_bgr = frame
+            self.timestamp = time.time()
+            self.sequence += 1
+
+    def read_latest(self, copy_frame=True):
+        """Return the latest frame, timestamp, and sequence number."""
+        with self.lock:
+            if self.frame_bgr is None:
+                return None, 0.0, 0
+            frame = self.frame_bgr.copy() if copy_frame else self.frame_bgr
+            return frame, self.timestamp, self.sequence
 
 
 class processCamera(WorkerProcess):
@@ -71,6 +99,7 @@ class processCamera(WorkerProcess):
                  show_preview=False, debug_windows=None,
                  picamera_hdr_enabled=True, picamera_hdr_always_on=False,
                  picamera_hdr_glare_threshold=0.04,
+                 publish_serial_stream=True,
                  enable_sign_detection=True, sign_detection_actions=False,
                  sign_min_confidence=0.50, sign_server_url="ws://127.0.0.1:8500/ws/signs",
                  sign_min_box_area=0.01,
@@ -91,6 +120,7 @@ class processCamera(WorkerProcess):
         self.picamera_hdr_enabled = picamera_hdr_enabled
         self.picamera_hdr_always_on = picamera_hdr_always_on
         self.picamera_hdr_glare_threshold = picamera_hdr_glare_threshold
+        self.publish_serial_stream = bool(publish_serial_stream)
         self.enable_sign_detection = enable_sign_detection
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
@@ -98,6 +128,7 @@ class processCamera(WorkerProcess):
         self.use_legacy_remote_sign_detection = False  # Deprecated runtime path, kept for future reuse
         self.sign_min_box_area = sign_min_box_area
         self.sign_action_cooldown = sign_action_cooldown
+        self.frame_buffer = LatestFrameBuffer()
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
@@ -128,6 +159,8 @@ class processCamera(WorkerProcess):
         camTh = threadCamera(
          self.queuesList, self.logging, self.debugging,
          show_preview=show_cam_preview,
+         frame_buffer=self.frame_buffer,
+         publish_serial_stream=self.publish_serial_stream,
          camera_type=self.camera_type, usb_device=self.usb_device,
          usb_resolution=self.usb_resolution,
          jetson_sensor_id=self.jetson_sensor_id,
@@ -144,6 +177,7 @@ class processCamera(WorkerProcess):
         # Local AI perception (best.pt) now runs inside the camera process.
         localPerceptionTh = threadLocalPerception(
             self.queuesList, self.logging, self.debugging,
+            frame_buffer=self.frame_buffer,
             show_debug=self.show_preview,
             debug_windows=self.debug_windows,
             enable_sign_detection=self.enable_sign_detection,
@@ -160,7 +194,8 @@ class processCamera(WorkerProcess):
         # show_debug=True only when master switch SHOW_CAMERA_PREVIEW is on.
         # Individual window toggles are controlled by debug_windows dict.
         lineFollowingTh = threadLineFollowing(
-            self.queuesList, self.logging, self.debugging, show_debug=self.show_preview,
+            self.queuesList, self.logging, self.debugging, frame_buffer=self.frame_buffer,
+            show_debug=self.show_preview,
             debug_windows=self.debug_windows,
             sign_action_event=sign_action_event,
             highway_mode_event=highway_mode_event

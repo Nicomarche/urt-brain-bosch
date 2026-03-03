@@ -508,7 +508,7 @@ class LocalPerceptionEngine:
             "signs": signs,
         }
 
-    def infer(self, frame):
+    def infer(self, frame, build_debug=False):
         """Run local perception. Never raises; degrades to an empty payload."""
         start_time = time.time()
         self.frame_count += 1
@@ -547,9 +547,11 @@ class LocalPerceptionEngine:
             side_candidates, detections = self._split_candidates(result, frame_shape)
             side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = self._build_lane_geometry(side_candidates)
             inference_ms = (time.time() - start_time) * 1000
-            lane_debug = self._draw_debug_views(frame, side_masks, lane_points, detections, inference_ms)
-            with self._vis_lock:
-                self._last_debug = lane_debug
+            lane_debug = {}
+            if build_debug:
+                lane_debug = self._draw_debug_views(frame, side_masks, lane_points, detections, inference_ms)
+                with self._vis_lock:
+                    self._last_debug = lane_debug
             return {
                 "lane_points": lane_points,
                 "lane_side_points": lane_side_points,
