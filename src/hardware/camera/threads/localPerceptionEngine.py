@@ -365,6 +365,7 @@ class LocalPerceptionEngine:
                             "mask": left_component["mask"],
                             "x_center": left_component["x_center"],
                             "confidence": conf,
+                            "side_source": "split_component",
                         }
                     )
                     side_candidates["right"].append(
@@ -372,6 +373,7 @@ class LocalPerceptionEngine:
                             "mask": right_component["mask"],
                             "x_center": right_component["x_center"],
                             "confidence": conf,
+                            "side_source": "split_component",
                         }
                     )
                     continue
@@ -379,14 +381,19 @@ class LocalPerceptionEngine:
                     mask = components[0]["mask"]
                     x_center = components[0]["x_center"]
                     role = "left" if x_center < frame_center else "right"
+                    side_source = "guessed_single"
                 else:
                     role = "left" if x_center < frame_center else "right"
+                    side_source = "guessed_single"
+            else:
+                side_source = "explicit_class"
 
             side_candidates[role].append(
                 {
                     "mask": mask,
                     "x_center": x_center,
                     "confidence": conf,
+                    "side_source": side_source,
                 }
             )
 
@@ -405,10 +412,13 @@ class LocalPerceptionEngine:
         lane_points = []
         lane_side_points = {"left": [], "right": []}
         lane_side_lines = {"left": [], "right": []}
+        lane_side_sources = {"left": "none", "right": "none"}
 
         for side in ("left", "right"):
             merged_mask = self._combine_masks([entry["mask"] for entry in side_candidates[side]])
             side_masks[side] = merged_mask
+            if side_candidates[side]:
+                lane_side_sources[side] = str(side_candidates[side][0].get("side_source", "none") or "none")
             points = self._extract_lane_points(merged_mask)
             lane_side_points[side] = [[int(point[0]), int(point[1])] for point in points]
             line = self._extract_lane_line(merged_mask)
@@ -417,7 +427,7 @@ class LocalPerceptionEngine:
                 lane_points.append(points)
 
         lane_mask = self._combine_masks([side_masks.get("left"), side_masks.get("right")])
-        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_mask
+        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask
 
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
@@ -510,6 +520,7 @@ class LocalPerceptionEngine:
                 "lane_points": [],
                 "lane_side_points": {"left": [], "right": []},
                 "lane_side_lines": {"left": [], "right": []},
+                "lane_side_sources": {"left": "none", "right": "none"},
                 "side_masks": {"left": None, "right": None},
                 "lane_mask": None,
                 "detections": [],
@@ -534,7 +545,7 @@ class LocalPerceptionEngine:
                 raise RuntimeError("YOLO returned no results")
 
             side_candidates, detections = self._split_candidates(result, frame_shape)
-            side_masks, lane_points, lane_side_points, lane_side_lines, lane_mask = self._build_lane_geometry(side_candidates)
+            side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = self._build_lane_geometry(side_candidates)
             inference_ms = (time.time() - start_time) * 1000
             lane_debug = self._draw_debug_views(frame, side_masks, lane_points, detections, inference_ms)
             with self._vis_lock:
@@ -543,6 +554,7 @@ class LocalPerceptionEngine:
                 "lane_points": lane_points,
                 "lane_side_points": lane_side_points,
                 "lane_side_lines": lane_side_lines,
+                "lane_side_sources": lane_side_sources,
                 "side_masks": side_masks,
                 "lane_mask": lane_mask,
                 "detections": detections,
@@ -564,6 +576,7 @@ class LocalPerceptionEngine:
                 "lane_points": [],
                 "lane_side_points": {"left": [], "right": []},
                 "lane_side_lines": {"left": [], "right": []},
+                "lane_side_sources": {"left": "none", "right": "none"},
                 "side_masks": {"left": None, "right": None},
                 "lane_mask": None,
                 "detections": [],

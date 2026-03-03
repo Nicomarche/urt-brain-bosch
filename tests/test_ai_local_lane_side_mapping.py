@@ -146,6 +146,145 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(left_heading, 0.0)
         self.assertEqual(right_heading, 0.0)
 
+    def test_local_ai_ignores_guessed_single_side_and_re_resolves_from_history(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.roi_height_start = 0.0
+        detector.roi_height_end = 1.0
+        detector.local_ai_max_result_age = 1.0
+        detector.last_seen_side = "both"
+        detector._smooth_detected_line = lambda line, side: line
+        detector._last_two_line_left = np.array([[18, 95, 18, 55]], dtype=np.int32)
+        detector._last_two_line_right = np.array([[74, 95, 74, 55]], dtype=np.int32)
+        detector._last_two_line_ts = time.time()
+        detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {"left": [[72, 95], [70, 75], [68, 55]], "right": []},
+            "lane_side_lines": {"left": [72, 95, 68, 55], "right": []},
+            "lane_side_sources": {"left": "guessed_single", "right": "none"},
+            "inference_time_ms": 12.0,
+            "frame_id": 9,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, _, debug_info = detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNone(avg_left)
+        self.assertIsNotNone(avg_right)
+        self.assertEqual(debug_info["single_line_side_source"], "guessed_single:history")
+
+    def test_ambiguous_single_lane_prefers_last_two_line_boundary_over_frame_center(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.lookahead = 0.4
+        detector.local_ai_max_result_age = 1.0
+        detector._last_two_line_left = np.array([[10, 95, 10, 55]], dtype=np.int32)
+        detector._last_two_line_right = np.array([[48, 95, 48, 55]], dtype=np.int32)
+        detector._last_two_line_ts = time.time()
+
+        side, source = detector._resolve_ambiguous_local_lane(
+            np.array([[46, 95, 46, 55]], dtype=np.int32),
+            100,
+            100,
+            prev_seen_side="both",
+        )
+
+        self.assertEqual(side, "right")
+        self.assertEqual(source, "history")
+
+    def test_physical_single_line_error_uses_lookahead_row_not_image_bottom(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.single_line_offset_factor = 0.5
+        detector.lookahead = 0.4
+        detector.camera_to_front_axle = 0.0
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+
+        line = np.array([[30, 95, 10, 55]], dtype=np.int32)
+
+        physical_error, _ = detector._compute_single_line_error(
+            line, "left", 100, 100, prefer_center=True, physical_projection=True
+        )
+        self.assertEqual(detector._last_single_line_projection_debug["single_line_reference_y"], 60)
+        self.assertEqual(detector._last_single_line_projection_debug["single_line_mode"], "physical")
+        legacy_error, _ = detector._compute_single_line_error(
+            line, "left", 100, 100, prefer_center=True, physical_projection=False
+        )
+
+        self.assertAlmostEqual(physical_error, -19.0, places=1)
+        self.assertAlmostEqual(legacy_error, 1.0, places=1)
+        self.assertEqual(detector._last_single_line_projection_debug["single_line_mode"], "legacy")
+
+    def test_physical_single_line_error_applies_camera_to_front_axle_compensation(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.single_line_offset_factor = 0.5
+        detector.lookahead = 0.4
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+
+        line = np.array([[30, 95, 10, 55]], dtype=np.int32)
+
+        detector.camera_to_front_axle = 0.0
+        no_shift_error, _ = detector._compute_single_line_error(
+            line, "left", 100, 100, prefer_center=True, physical_projection=True
+        )
+        detector.camera_to_front_axle = 10.0
+        shifted_error, _ = detector._compute_single_line_error(
+            line, "left", 100, 100, prefer_center=True, physical_projection=True
+        )
+
+        self.assertAlmostEqual(shifted_error - no_shift_error, 5.0, places=1)
+        self.assertAlmostEqual(
+            detector._last_single_line_projection_debug["single_line_camera_shift_px"],
+            -5.0,
+            places=1,
+        )
+
+    def test_ai_local_single_line_uses_geometric_center_not_single_line_offset_factor(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.detection_mode = "ai_local"
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.lookahead = 0.4
+        detector.camera_to_front_axle = 0.0
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+
+        line = np.array([[30, 95, 30, 55]], dtype=np.int32)
+
+        detector.single_line_offset_factor = 0.1
+        error_low_bias, _ = detector._compute_single_line_error(
+            line,
+            "left",
+            100,
+            100,
+            prefer_center=(detector.detection_mode == "ai_local"),
+            physical_projection=(detector.detection_mode == "ai_local"),
+        )
+        detector.single_line_offset_factor = 0.9
+        error_high_bias, _ = detector._compute_single_line_error(
+            line,
+            "left",
+            100,
+            100,
+            prefer_center=(detector.detection_mode == "ai_local"),
+            physical_projection=(detector.detection_mode == "ai_local"),
+        )
+
+        self.assertAlmostEqual(error_low_bias, -1.5, places=1)
+        self.assertAlmostEqual(error_high_bias, -1.5, places=1)
+
 
 if __name__ == "__main__":
     unittest.main()

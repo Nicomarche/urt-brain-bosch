@@ -256,10 +256,12 @@ class threadLocalPerception(ThreadWithStop):
             lane_points = result.get("lane_points", [])
             lane_side_points = result.get("lane_side_points", {"left": [], "right": []})
             lane_side_lines = result.get("lane_side_lines", {"left": [], "right": []})
+            lane_side_sources = result.get("lane_side_sources", {"left": "none", "right": "none"})
             self.localLaneSender.send({
                 "lane_points": lane_points,
                 "lane_side_points": lane_side_points,
                 "lane_side_lines": lane_side_lines,
+                "lane_side_sources": lane_side_sources,
                 "inference_time_ms": float(result.get("inference_time_ms", 0.0)),
                 "frame_id": int(result.get("frame_id", 0)),
                 "timestamp": now,

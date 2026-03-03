@@ -473,6 +473,10 @@ Args:
         self._last_local_lane_payload = None
         self._last_local_perception_status = None
         self._last_actuator_status = None
+        self._last_two_line_left = None
+        self._last_two_line_right = None
+        self._last_two_line_ts = 0.0
+        self._last_single_line_projection_debug = {}
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
         self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
@@ -736,6 +740,88 @@ Args:
             self._coerce_explicit_line(lane_side_lines.get('left', []), img_h, img_w),
             self._coerce_explicit_line(lane_side_lines.get('right', []), img_h, img_w),
         )
+
+    def _normalize_lane_side_sources(self, lane_side_sources):
+        """Normalize side-source metadata coming from the local AI payload."""
+        normalized = {'left': 'none', 'right': 'none'}
+        if not isinstance(lane_side_sources, dict):
+            return normalized
+        for side in ('left', 'right'):
+            value = lane_side_sources.get(side, 'none')
+            normalized[side] = str(value or 'none')
+        return normalized
+
+    @staticmethod
+    def _prefer_local_lane_line(explicit_line, fitted_line):
+        """Prefer explicit local-AI geometry when both a line and polyline exist."""
+        return explicit_line if explicit_line is not None else fitted_line
+
+    def _line_x_at_y(self, line, y_target):
+        """Project a representative line segment to a specific image row."""
+        if line is None:
+            return None
+        x1, y1, x2, y2 = [float(v) for v in line[0]]
+        dy = y2 - y1
+        if abs(dy) < 1e-6:
+            return (x1 + x2) * 0.5
+        t = (float(y_target) - y1) / dy
+        return x1 + t * (x2 - x1)
+
+    def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
+        """Resolve a guessed single local-AI lane into left/right using temporal geometry."""
+        if line is None:
+            return None, 'none'
+
+        y_ref = int(max(0, min(img_h - 1, round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))))
+        line_x = self._line_x_at_y(line, y_ref)
+        reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+        last_two_line_ts = float(getattr(self, '_last_two_line_ts', 0.0) or 0.0)
+        if last_two_line_ts and (time.time() - last_two_line_ts) <= reference_ttl:
+            left_ref = getattr(self, '_last_two_line_left', None)
+            right_ref = getattr(self, '_last_two_line_right', None)
+            left_x = self._line_x_at_y(left_ref, y_ref)
+            right_x = self._line_x_at_y(right_ref, y_ref)
+            distances = []
+            if left_x is not None and line_x is not None:
+                distances.append(('left', abs(line_x - left_x)))
+            if right_x is not None and line_x is not None:
+                distances.append(('right', abs(line_x - right_x)))
+            if distances:
+                distances.sort(key=lambda item: item[1])
+                return distances[0][0], 'history'
+
+        if prev_seen_side in ('left', 'right'):
+            return prev_seen_side, 'prev_seen_side'
+
+        reference_error = None
+        if (
+            bool(getattr(self, 'use_kalman_filter', False)) and
+            (bool(getattr(self, '_kalman_initialized', False)) or int(getattr(self, '_kalman_age_frames', 0)) > 0)
+        ):
+            reference_error = float(getattr(self, '_kalman_prediction', 0.0))
+        elif getattr(self, '_last_good_error', None) is not None:
+            reference_error = float(self._last_good_error)
+
+        if reference_error is not None:
+            best_side = None
+            best_delta = None
+            for side in ('left', 'right'):
+                error, _ = self._compute_single_line_error(
+                    line, side, img_h, img_w,
+                    prefer_center=True,
+                    physical_projection=True,
+                )
+                delta = abs(float(error) - reference_error)
+                if best_delta is None or delta < best_delta:
+                    best_side = side
+                    best_delta = delta
+            if best_side is not None:
+                return best_side, 'error_match'
+
+        if line_x is not None:
+            return ('left' if line_x < (img_w / 2.0) else 'right'), 'frame_center'
+
+        return None, 'none'
 
     def _fit_remote_lane_line(self, lane_points, img_h, img_w):
         """Convert remote polyline points into a representative line segment."""
@@ -1180,6 +1266,7 @@ Args:
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
         lane_side_lines = payload.get('lane_side_lines')
+        lane_side_sources = self._normalize_lane_side_sources(payload.get('lane_side_sources'))
         explicit_left, explicit_right = self._lane_side_lines_to_lines(lane_side_lines, height, width)
         has_explicit_side_lines = explicit_left is not None or explicit_right is not None
         has_explicit_side_points = (
@@ -1203,14 +1290,64 @@ Args:
         debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
         debug_info['local_ai_status'] = 'ready'
 
-        if has_explicit_side_lines:
-            avg_left, avg_right = explicit_left, explicit_right
-        elif has_explicit_side_points:
-            avg_left, avg_right = self._lane_side_points_to_lines(lane_side_points, height, width)
-        else:
-            avg_left, avg_right = self._lane_points_to_lines(lane_points, height, width)
-        avg_left = self._smooth_detected_line(avg_left, 'left')
-        avg_right = self._smooth_detected_line(avg_right, 'right')
+        fitted_left = None
+        fitted_right = None
+        if has_explicit_side_points:
+            fitted_left, fitted_right = self._lane_side_points_to_lines(lane_side_points, height, width)
+
+        side_lines = {
+            'left': self._prefer_local_lane_line(explicit_left, fitted_left),
+            'right': self._prefer_local_lane_line(explicit_right, fitted_right),
+        }
+        side_sources = {
+            'left': lane_side_sources.get('left', 'none'),
+            'right': lane_side_sources.get('right', 'none'),
+        }
+        for side in ('left', 'right'):
+            if side_lines[side] is not None and side_sources[side] == 'none':
+                side_sources[side] = 'explicit_class'
+
+        avg_left_raw = None
+        avg_right_raw = None
+        available_sides = [side for side in ('left', 'right') if side_lines[side] is not None]
+        trusted_sources = {'explicit_class', 'split_component'}
+
+        if len(available_sides) == 2:
+            avg_left_raw = side_lines['left']
+            avg_right_raw = side_lines['right']
+        elif len(available_sides) == 1:
+            only_side = available_sides[0]
+            only_line = side_lines[only_side]
+            only_source = side_sources[only_side]
+            if only_source in trusted_sources:
+                if only_side == 'left':
+                    avg_left_raw = only_line
+                else:
+                    avg_right_raw = only_line
+                debug_info['single_line_side_source'] = only_source
+            elif only_source == 'guessed_single':
+                resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
+                    only_line,
+                    height,
+                    width,
+                    prev_seen_side=getattr(self, 'last_seen_side', None),
+                )
+                if resolved_side == 'left':
+                    avg_left_raw = only_line
+                elif resolved_side == 'right':
+                    avg_right_raw = only_line
+                debug_info['single_line_side_source'] = f"guessed_single:{resolution_source}"
+
+        if avg_left_raw is None and avg_right_raw is None:
+            avg_left_raw, avg_right_raw = self._lane_points_to_lines(lane_points, height, width)
+
+        if avg_left_raw is not None and avg_right_raw is not None:
+            self._last_two_line_left = avg_left_raw.copy()
+            self._last_two_line_right = avg_right_raw.copy()
+            self._last_two_line_ts = time.time()
+
+        avg_left = self._smooth_detected_line(avg_left_raw, 'left')
+        avg_right = self._smooth_detected_line(avg_right_raw, 'right')
         debug_info['threshold'] = 'AI'
         debug_info['left_lines'] = [avg_left] if avg_left is not None else []
         debug_info['right_lines'] = [avg_right] if avg_right is not None else []
@@ -1239,6 +1376,10 @@ Args:
         self._stanley_last_steer_damping = 0.0
         self._single_line_heading_ref_left = 0.0
         self._single_line_heading_ref_right = 0.0
+        self._last_two_line_left = None
+        self._last_two_line_right = None
+        self._last_two_line_ts = 0.0
+        self._last_single_line_projection_debug = {}
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
             del self.last_steering
@@ -2580,7 +2721,7 @@ Args:
         self._stanley_last_steer_damping = steer_damping_delta
         return psi_ss, traj_yaw_rate, steer_damping_delta
 
-    def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False):
+    def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False, physical_projection=False):
         """Compute crosstrack error from a single visible lane marking.
 
         The target is reconstructed from the visible marking side plus the
@@ -2598,6 +2739,7 @@ Args:
                    heading_error: from single line angle (dampened)
         """
         x1, y1, x2, y2 = line[0]
+        self._last_single_line_projection_debug = {}
 
         if y1 < y2:
             x1, y1, x2, y2 = x2, y2, x1, y1
@@ -2609,35 +2751,77 @@ Args:
         bottom_x = x1 + (img_h - y1) * (x2 - x1) / dy_line
 
         # Pixel-to-cm ratio: prefer cached value from last two-line detection
-        if self._last_px_per_cm is not None and self._last_px_per_cm > 0.5:
-            px_per_cm = self._last_px_per_cm
+        cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
+        if cached_px_per_cm is not None and cached_px_per_cm > 0.5:
+            px_per_cm = cached_px_per_cm
         else:
             # Fallback: lane (35cm) typically spans ~45% of image width at bottom
             px_per_cm = (img_w * 0.45) / self.lane_width_cm
 
-        # Body clearance to the visible line when the vehicle is centered.
-        body_clearance_cm = max(0.0, (self.lane_width_cm - self.car_width) * 0.5)
-        # Distance from the detected marking center to the desired vehicle center.
-        line_to_center_cm = (self.line_width_cm * 0.5) + body_clearance_cm + (self.car_width * 0.5)
-
         # On a fresh 2→1 transition, aim at the full reconstructed center to
         # avoid a steering jump. Otherwise keep the configured conservative bias.
-        center_scale = 1.0 if prefer_center else max(0.0, min(1.5, self.single_line_offset_factor / 0.5))
-        offset_px = line_to_center_cm * center_scale * px_per_cm
+        center_scale = 1.0 if prefer_center else max(
+            0.0,
+            min(1.5, float(getattr(self, 'single_line_offset_factor', 0.5)) / 0.5)
+        )
+        heading_raw = self._compute_raw_line_heading(line)
+        ref_angle = float(getattr(
+            self,
+            '_single_line_heading_ref_left' if side == 'left' else '_single_line_heading_ref_right',
+            0.0,
+        ))
 
-        if side == 'left':
-            desired_center = bottom_x + offset_px
+        if physical_projection:
+            reference_y = int(max(0, min(
+                img_h - 1,
+                round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4))))
+            )))
+            reference_x = self._line_x_at_y(line, reference_y)
+            if reference_x is None:
+                reference_x = bottom_x
+
+            line_to_center_cm = ((self.line_width_cm * 0.5) + (self.lane_width_cm * 0.5)) * center_scale
+            offset_px = line_to_center_cm * px_per_cm
+            if side == 'left':
+                desired_center = reference_x + offset_px
+            else:
+                desired_center = reference_x - offset_px
+
+            heading_delta = heading_raw - ref_angle
+            camera_shift_cm = math.tan(heading_delta) * float(getattr(self, 'camera_to_front_axle', 0.0))
+            camera_shift_px = camera_shift_cm * px_per_cm
+            desired_center -= camera_shift_px
+            mode = 'physical'
         else:
-            desired_center = bottom_x - offset_px
+            # Body clearance to the visible line when the vehicle is centered.
+            body_clearance_cm = max(0.0, (self.lane_width_cm - self.car_width) * 0.5)
+            # Distance from the detected marking center to the desired vehicle center.
+            line_to_center_cm = (self.line_width_cm * 0.5) + body_clearance_cm + (self.car_width * 0.5)
+            offset_px = line_to_center_cm * center_scale * px_per_cm
+
+            if side == 'left':
+                desired_center = bottom_x + offset_px
+            else:
+                desired_center = bottom_x - offset_px
+
+            reference_y = img_h
+            camera_shift_px = 0.0
+            mode = 'legacy'
 
         error = desired_center - (img_w / 2.0)
 
         # Heading from single line (dampened — less reliable than two-line)
-        raw_angle = self._compute_raw_line_heading(line)
-        ref_angle = self._single_line_heading_ref_left if side == 'left' else self._single_line_heading_ref_right
         # Remove static perspective bias from single-line heading.
         heading_gain = 0.2 if prefer_center else 0.3
-        heading = (raw_angle - ref_angle) * heading_gain
+        heading = (heading_raw - ref_angle) * heading_gain
+
+        self._last_single_line_projection_debug = {
+            'single_line_reference_y': int(reference_y),
+            'single_line_px_per_cm': float(px_per_cm),
+            'single_line_target_x': float(desired_center),
+            'single_line_camera_shift_px': float(camera_shift_px),
+            'single_line_mode': mode,
+        }
 
         return error, heading
 
@@ -4677,10 +4861,15 @@ Returns:
             self.consecutive_single_right = 0
             self.last_seen_side = "left"
             self._swept_path_info = None
+            use_physical_single_line = (self.detection_mode == DetectionMode.AI_LOCAL.value)
             sl_error, sl_heading = self._compute_single_line_error(
                 avg_left, 'left', img_h, img_w,
-                prefer_center=(prev_seen_side == "both")
+                prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
+                physical_projection=use_physical_single_line,
             )
+            debug_info['single_line_resolved_side'] = 'left'
+            debug_info.setdefault('single_line_side_source', 'legacy')
+            debug_info.update(self._last_single_line_projection_debug)
             error = sl_error
 
             if self.use_kalman_filter:
@@ -4722,10 +4911,15 @@ Returns:
             self.consecutive_single_left = 0
             self.last_seen_side = "right"
             self._swept_path_info = None
+            use_physical_single_line = (self.detection_mode == DetectionMode.AI_LOCAL.value)
             sl_error, sl_heading = self._compute_single_line_error(
                 avg_right, 'right', img_h, img_w,
-                prefer_center=(prev_seen_side == "both")
+                prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
+                physical_projection=use_physical_single_line,
             )
+            debug_info['single_line_resolved_side'] = 'right'
+            debug_info.setdefault('single_line_side_source', 'legacy')
+            debug_info.update(self._last_single_line_projection_debug)
             error = sl_error
 
             if self.use_kalman_filter:

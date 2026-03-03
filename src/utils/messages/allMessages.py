@@ -217,7 +217,7 @@ class LocalLanePerception(Enum):
     Queue = "General"
     Owner = "threadLocalPerception"
     msgID = 1
-    msgType = "dict"  # lane_points, timing, frame metadata
+    msgType = "dict"  # lane_points, lane_side_*, timing, frame metadata
 
 class LocalPerceptionStatus(Enum):
     Queue = "General"
