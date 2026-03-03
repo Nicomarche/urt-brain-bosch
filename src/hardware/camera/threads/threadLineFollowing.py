@@ -2791,12 +2791,11 @@ Args:
 
         if y1 < y2:
             x1, y1, x2, y2 = x2, y2, x1, y1
+        segment_top_y = int(max(0, min(img_h - 1, min(y1, y2))))
+        segment_bottom_y = int(max(0, min(img_h - 1, max(y1, y2))))
 
-        # Line position at bottom of image (closest to the car)
-        dy_line = y2 - y1
-        if abs(dy_line) < 0.01:
-            dy_line = -0.01
-        bottom_x = x1 + (img_h - y1) * (x2 - x1) / dy_line
+        def _clamp_reference_y(y_target):
+            return int(max(segment_top_y, min(segment_bottom_y, int(round(y_target)))))
 
         # Pixel-to-cm ratio: prefer cached value from last two-line detection
         cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
@@ -2818,15 +2817,25 @@ Args:
             '_single_line_heading_ref_left' if side == 'left' else '_single_line_heading_ref_right',
             0.0,
         ))
+        abs_heading_deg = abs(math.degrees(heading_raw))
+        heading_fade_start_deg = 35.0
+        heading_fade_end_deg = 75.0
+        if abs_heading_deg <= heading_fade_start_deg:
+            heading_reliability = 1.0
+        elif abs_heading_deg >= heading_fade_end_deg:
+            heading_reliability = 0.0
+        else:
+            fade_span = max(1.0, heading_fade_end_deg - heading_fade_start_deg)
+            heading_reliability = (heading_fade_end_deg - abs_heading_deg) / fade_span
+        heading_delta = (heading_raw - ref_angle) * heading_reliability
 
         if physical_projection:
-            reference_y = int(max(0, min(
-                img_h - 1,
-                round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4))))
-            )))
+            reference_y = _clamp_reference_y(
+                img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))
+            )
             reference_x = self._line_x_at_y(line, reference_y)
             if reference_x is None:
-                reference_x = bottom_x
+                reference_x = x1
 
             line_to_center_cm = ((self.line_width_cm * 0.5) + (self.lane_width_cm * 0.5)) * center_scale
             offset_px = line_to_center_cm * px_per_cm
@@ -2835,12 +2844,20 @@ Args:
             else:
                 desired_center = reference_x - offset_px
 
-            heading_delta = heading_raw - ref_angle
-            camera_shift_cm = math.tan(heading_delta) * float(getattr(self, 'camera_to_front_axle', 0.0))
+            safe_heading_delta = max(
+                -math.radians(45.0),
+                min(math.radians(45.0), heading_delta)
+            )
+            camera_shift_cm = math.tan(safe_heading_delta) * float(getattr(self, 'camera_to_front_axle', 0.0))
             camera_shift_px = camera_shift_cm * px_per_cm
             desired_center -= camera_shift_px
             mode = 'physical'
         else:
+            reference_y = _clamp_reference_y(img_h - 1)
+            reference_x = self._line_x_at_y(line, reference_y)
+            if reference_x is None:
+                reference_x = x1
+
             # Body clearance to the visible line when the vehicle is centered.
             body_clearance_cm = max(0.0, (self.lane_width_cm - self.car_width) * 0.5)
             # Distance from the detected marking center to the desired vehicle center.
@@ -2848,11 +2865,10 @@ Args:
             offset_px = line_to_center_cm * center_scale * px_per_cm
 
             if side == 'left':
-                desired_center = bottom_x + offset_px
+                desired_center = reference_x + offset_px
             else:
-                desired_center = bottom_x - offset_px
+                desired_center = reference_x - offset_px
 
-            reference_y = img_h
             camera_shift_px = 0.0
             mode = 'legacy'
 
@@ -2861,13 +2877,15 @@ Args:
         # Heading from single line (dampened — less reliable than two-line)
         # Remove static perspective bias from single-line heading.
         heading_gain = 0.2 if prefer_center else 0.3
-        heading = (heading_raw - ref_angle) * heading_gain
+        heading = heading_delta * heading_gain
 
         self._last_single_line_projection_debug = {
             'single_line_reference_y': int(reference_y),
             'single_line_px_per_cm': float(px_per_cm),
             'single_line_target_x': float(desired_center),
             'single_line_camera_shift_px': float(camera_shift_px),
+            'single_line_heading_raw_deg': float(math.degrees(heading_raw)),
+            'single_line_heading_reliability': float(heading_reliability),
             'single_line_mode': mode,
         }
 
