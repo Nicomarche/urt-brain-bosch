@@ -301,6 +301,9 @@ Args:
         # If the car overshoots past center and hits the opposite line, lower this.
         # If the car hugs the visible line too closely, raise this.
         self.single_line_offset_factor = 0.42
+        # Extra bias when only the OUTER curve line is visible.
+        # Higher = stronger negative correction as the car gets closer to that line.
+        self.single_line_outer_bias_gain = 0.60
         # Single-line heading calibration: compensates perspective bias so 1-line mode
         # stays close to 0 steering when the car is centered on straight segments.
         self.single_line_heading_ref_alpha = 0.15
@@ -2874,6 +2877,34 @@ Args:
 
         error = desired_center - (img_w / 2.0)
 
+        curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
+        curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+        is_outer_curve_line = (
+            curve_state in ("ENTERING", "IN_CURVE", "EXITING") and
+            (
+                (curve_direction == 1 and side == 'left') or
+                (curve_direction == -1 and side == 'right')
+            )
+        )
+        outer_line_bias_px = 0.0
+        outer_line_proximity = 0.0
+        if is_outer_curve_line:
+            lane_width_px = max(1.0, self.lane_width_cm * px_per_cm)
+            line_gap_px = abs(float(reference_x) - (img_w / 2.0))
+            outer_line_proximity = 1.0 - min(1.0, line_gap_px / lane_width_px)
+            outer_line_weight = max(0.0, 1.0 - heading_reliability)
+            outer_line_bias_px = (
+                -lane_width_px *
+                max(0.0, float(getattr(self, 'single_line_outer_bias_gain', 0.0))) *
+                outer_line_proximity *
+                outer_line_weight
+            )
+            if outer_line_bias_px < 0.0:
+                # Outer line means the car is running wide in the curve.
+                # Force the 1-line correction to stay negative and intensify it
+                # as the visible outer line gets closer to the vehicle center.
+                error = min(error, 0.0) + outer_line_bias_px
+
         # Heading from single line (dampened — less reliable than two-line)
         # Remove static perspective bias from single-line heading.
         heading_gain = 0.2 if prefer_center else 0.3
@@ -2886,6 +2917,9 @@ Args:
             'single_line_camera_shift_px': float(camera_shift_px),
             'single_line_heading_raw_deg': float(math.degrees(heading_raw)),
             'single_line_heading_reliability': float(heading_reliability),
+            'single_line_outer_curve_line': bool(is_outer_curve_line),
+            'single_line_outer_proximity': float(outer_line_proximity),
+            'single_line_outer_bias_px': float(outer_line_bias_px),
             'single_line_mode': mode,
         }
 
