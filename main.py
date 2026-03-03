@@ -127,7 +127,7 @@ def main():
         "Config": Queue(),
         "Log": Queue(),
     }
-    logging = logging.getLogger()
+    logger = logging.getLogger()
 
     original_stdout = sys.stdout
     original_stderr = sys.stderr
@@ -142,19 +142,19 @@ def main():
     StateMachine.initialize_shared_state(queueList)
 
     # Initializing gateway
-    processGatewayInstance = processGateway(queueList, logging)
+    processGatewayInstance = processGateway(queueList, logger)
     processGatewayInstance.start()
 
     # ===================================== INITIALIZE PROCESSES ==================================
 
     # Initializing dashboard
     dashboard_ready = Event()
-    processDashboardInstance = processDashboard(queueList, logging, dashboard_ready, debugging = False,
+    processDashboardInstance = processDashboard(queueList, logger, dashboard_ready, debugging = False,
                                                 stream_camera=STREAM_CAMERA_TO_DASHBOARD)
 
     # Initializing camera
     camera_ready = Event()
-    processCameraInstance = processCamera(queueList, logging, camera_ready, debugging = False,
+    processCameraInstance = processCamera(queueList, logger, camera_ready, debugging = False,
                                           camera_type=CAMERA_TYPE, usb_device=USB_DEVICE,
                                           usb_resolution=USB_RESOLUTION,
                                           jetson_sensor_id=JETSON_SENSOR_ID,
@@ -184,7 +184,7 @@ def main():
 
     # Initializing serial connection NUCLEO - > PI
     serial_handler_ready = Event()
-    processSerialHandlerInstance = processSerialHandler(queueList, logging, serial_handler_ready, dashboard_ready, debugging = False)
+    processSerialHandlerInstance = processSerialHandler(queueList, logger, serial_handler_ready, dashboard_ready, debugging = False)
 
     # Adding all processes to the list
     #allProcesses.extend([processCamera, processSemaphore, processTrafficCom, processSerialHandler, processDashboard])
