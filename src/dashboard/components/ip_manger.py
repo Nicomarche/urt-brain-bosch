@@ -1,17 +1,30 @@
 import subprocess
 import re
+import socket
 
 class IpManager:
     @staticmethod
     def get_ip_address():
         """Retrieve the current IP address of the machine."""
+        sock = None
         try:
-            ip_output = subprocess.check_output("hostname -I", shell=True)
-            ip_address = ip_output.decode('utf-8').strip().split()[0]
-            return ip_address
-        except subprocess.CalledProcessError:
-            print("\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m - Could not retrieve IP address.")
-            return None
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("10.255.255.255", 1))
+            return sock.getsockname()[0]
+        except OSError:
+            try:
+                ip_output = subprocess.check_output("hostname -I", shell=True)
+                ip_address = ip_output.decode('utf-8').strip().split()[0]
+                return ip_address
+            except (subprocess.CalledProcessError, IndexError):
+                try:
+                    return socket.gethostbyname(socket.gethostname())
+                except OSError:
+                    print("\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m - Could not retrieve IP address.")
+                    return None
+        finally:
+            if sock is not None:
+                sock.close()
 
 
     @staticmethod
@@ -57,4 +70,4 @@ class IpManager:
                 
                 print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m - Updated to \033[94m{new_ip}\033[0m")
         else:
-            print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m - No IP found")
+            return

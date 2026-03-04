@@ -96,9 +96,12 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
     if (this.currentState == '30' && this.currentState != this.states[index]) {
     }
     this.currentStateIndex = index;
+    const nextState = this.states[this.currentStateIndex];
 
-    this.clusterService.updateKL(this.states[this.currentStateIndex])
-    this.webSocketService.sendMessageToFlask(`{"Name": "Klem", "Value": "${this.states[this.currentStateIndex]}"}`);
+    console.info('[KL] Sending state:', nextState);
+
+    this.clusterService.updateKL(nextState)
+    this.webSocketService.sendMessageToFlask(`{"Name": "Klem", "Value": "${nextState}"}`);
   }
 
   get currentState() {

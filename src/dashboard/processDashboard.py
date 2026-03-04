@@ -275,6 +275,11 @@ class processDashboard(WorkerProcess):
             elif dataName == "GetCurrentSerialConnectionState":
                 self.handle_get_current_serial_connection_state(socketId)
             else:
+                if dataName == "Klem":
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m"
+                        f" - Received Klem \033[94m{dataDict.get('Value')}\033[0m from \033[94m{socketId}\033[0m"
+                    )
                 self.send_message_to_brain(dataName, dataDict)
                 # When the kl-switch component loads it sends Klem="0" before it
                 # subscribes to EnableButton — reply immediately so the toggle

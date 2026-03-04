@@ -72,10 +72,13 @@ export class WebSocketService {
   ]);
 
   constructor() {
+    const backendUrl = this.buildBackendUrl();
     this.webSocket = new Socket({
-      url: "http://192.168.80.14:5005",
+      url: backendUrl,
       options: {},
     });
+
+    console.info('[WS] Connecting to backend:', backendUrl);
 
     // Listen for all messages from the WebSocket server
     this.webSocket.onAny((eventName: string, data: any) => {
@@ -93,6 +96,7 @@ export class WebSocketService {
     });
 
     this.webSocket.ioSocket.on('connect_error', (error: any) => {
+      console.error('[WS] Connection error:', error);
       this.connectionStatusSubject.next('error');
     });
 
@@ -104,12 +108,23 @@ export class WebSocketService {
     });
 
     this.webSocket.ioSocket.on('reconnect_error', (error: any) => {
+      console.error('[WS] Reconnect error:', error);
       this.connectionStatusSubject.next('error');
     });
   }
 
+  private buildBackendUrl(): string {
+    const protocol = window.location.protocol === 'https:' ? 'https' : 'http';
+    const hostname = window.location.hostname || 'localhost';
+    return `${protocol}://${hostname}:5005`;
+  }
+
   // Method to start connection/handshake with the server
   sendMessageToFlask(message: any) {
+    if (!this.webSocket.ioSocket.connected) {
+      console.warn('[WS] Emit requested while socket is disconnected:', message);
+    }
+
     this.webSocket.emit('message', message);
   }
 
