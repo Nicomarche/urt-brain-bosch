@@ -247,6 +247,32 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertIsNone(debug_info["render_side_masks"]["left"])
         self.assertIsNotNone(debug_info["render_side_masks"]["right"])
 
+    def test_collapse_duplicate_local_ai_sides_uses_line_gap_when_masks_are_sparse(self):
+        left_mask = self._mask_from_points([(62, 95), (61, 94), (60, 93)])
+        right_mask = self._mask_from_points([(63, 40), (62, 39), (61, 38)])
+        side_masks = {"left": left_mask.copy(), "right": right_mask.copy()}
+        side_lines = {
+            "left": np.array([[62, 95, 54, 55]], dtype=np.int32),
+            "right": np.array([[64, 95, 56, 55]], dtype=np.int32),
+        }
+        lane_side_sources = {"left": "explicit_class", "right": "explicit_class"}
+
+        collapse = self.detector._collapse_duplicate_local_ai_sides(
+            side_masks,
+            side_lines,
+            lane_side_sources,
+            100,
+            100,
+        )
+
+        self.assertIsNotNone(collapse)
+        self.assertIsNotNone(collapse["line_gap_px"])
+        self.assertLess(collapse["line_gap_px"], 6.0)
+        kept_side = collapse["kept_side"]
+        dropped_side = "right" if kept_side == "left" else "left"
+        self.assertIsNotNone(side_masks[kept_side])
+        self.assertIsNone(side_masks[dropped_side])
+
     def test_detect_with_local_ai_prefers_explicit_lane_side_lines(self):
         self.detector._last_local_lane_payload = {
             "lane_points": [],

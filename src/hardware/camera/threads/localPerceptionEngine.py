@@ -469,6 +469,57 @@ class LocalPerceptionEngine:
             return None
         return sum(gaps) / len(gaps)
 
+    @staticmethod
+    def _coerce_lane_line_values(line_value):
+        """Normalize a lane line payload into [x1, y1, x2, y2] floats."""
+        if not isinstance(line_value, (list, tuple, np.ndarray)):
+            return None
+
+        values = line_value
+        if len(values) == 1 and isinstance(values[0], (list, tuple, np.ndarray)):
+            values = values[0]
+        if len(values) < 4:
+            return None
+
+        try:
+            return [float(values[idx]) for idx in range(4)]
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _line_x_at_y(line_values, y_target):
+        """Project a normalized [x1,y1,x2,y2] segment to the requested y row."""
+        if line_values is None:
+            return None
+        x1, y1, x2, y2 = line_values
+        dy = y2 - y1
+        if abs(dy) < 1e-6:
+            return (x1 + x2) * 0.5
+        t = (float(y_target) - y1) / dy
+        return x1 + t * (x2 - x1)
+
+    def _lane_line_gap_px(self, left_line, right_line, img_h):
+        """Estimate left/right separation from explicit line segments when masks are sparse."""
+        left_values = self._coerce_lane_line_values(left_line)
+        right_values = self._coerce_lane_line_values(right_line)
+        if left_values is None or right_values is None:
+            return None
+
+        sample_rows = [
+            max(0, min(img_h - 1, int(round(img_h * ratio))))
+            for ratio in (0.95, 0.75, 0.6)
+        ]
+        gaps = []
+        for row in sample_rows:
+            left_x = self._line_x_at_y(left_values, row)
+            right_x = self._line_x_at_y(right_values, row)
+            if left_x is not None and right_x is not None:
+                gaps.append(abs(float(right_x) - float(left_x)))
+
+        if not gaps:
+            return None
+        return sum(gaps) / len(gaps)
+
     def _collapse_duplicate_lane_sides(
         self,
         side_masks,
@@ -487,10 +538,18 @@ class LocalPerceptionEngine:
 
         overlap_ratio = self._lane_mask_overlap_ratio(left_mask, right_mask)
         mean_gap_px = self._lane_mask_gap_px(left_mask, right_mask)
+        line_gap_px = self._lane_line_gap_px(
+            lane_side_lines.get("left"),
+            lane_side_lines.get("right"),
+            left_mask.shape[0],
+        )
         duplicate_gap_limit = max(6.0, float(left_mask.shape[1]) * 0.04)
+        duplicate_line_gap_limit = max(4.0, float(left_mask.shape[1]) * 0.02)
         is_duplicate = overlap_ratio >= 0.35
         if mean_gap_px is not None:
             is_duplicate = is_duplicate or mean_gap_px <= duplicate_gap_limit
+        if line_gap_px is not None:
+            is_duplicate = is_duplicate or line_gap_px <= duplicate_line_gap_limit
         if not is_duplicate:
             return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
 

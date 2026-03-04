@@ -50,6 +50,7 @@ DEBUG_WINDOWS = {
     "binary_threshold": True,  # Vista del threshold binario
     "canny_edges":      True,  # Vista de bordes Canny
     "control_panel":    False,  # Panel de control con PID, velocidad, steering
+    "steering_angle":   True,  # Angulo final de giro (calculado/comandado) en tiempo real
     "ai_analysis":      False,  # Analisis de LSTR / AI
     "hybrid_fusion":    False,  # Fusion hibrida OpenCV + LSTR
     "ai_local_overlay": True,  # Visualizacion local del modelo de IA (carriles + senales)

@@ -1058,10 +1058,26 @@ Args:
                 gaps.append(abs(float(right_x) - float(left_x)))
 
         mean_gap_px = (sum(gaps) / len(gaps)) if gaps else None
+        line_gap_px = None
+        left_line = side_lines.get('left')
+        right_line = side_lines.get('right')
+        if left_line is not None and right_line is not None:
+            line_gaps = []
+            for row in sample_rows:
+                left_line_x = self._line_x_at_y(left_line, row)
+                right_line_x = self._line_x_at_y(right_line, row)
+                if left_line_x is not None and right_line_x is not None:
+                    line_gaps.append(abs(float(right_line_x) - float(left_line_x)))
+            if line_gaps:
+                line_gap_px = sum(line_gaps) / len(line_gaps)
+
         duplicate_gap_limit = max(6.0, float(img_w) * 0.04)
+        duplicate_line_gap_limit = max(4.0, float(img_w) * 0.02)
         is_duplicate = overlap_ratio >= 0.35
         if mean_gap_px is not None:
             is_duplicate = is_duplicate or mean_gap_px <= duplicate_gap_limit
+        if line_gap_px is not None:
+            is_duplicate = is_duplicate or line_gap_px <= duplicate_line_gap_limit
         if not is_duplicate:
             return None
 
@@ -1120,6 +1136,7 @@ Args:
             'resolution_source': resolution_source,
             'overlap_ratio': float(overlap_ratio),
             'mean_gap_px': None if mean_gap_px is None else float(mean_gap_px),
+            'line_gap_px': None if line_gap_px is None else float(line_gap_px),
         }
 
     def _sample_mask_boundary(self, mask, y_rows):
@@ -2420,6 +2437,83 @@ Args:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (120, 120, 120), 1)
         
         self._show_preview_window("Control Panel", panel)
+
+    def _show_final_steering_preview(self, computed_steering, commanded_steering, command_source):
+        """Render a compact preview that always shows the final steering angle in use."""
+        panel_width = 420
+        panel_height = 130
+        panel = np.zeros((panel_height, panel_width, 3), dtype=np.uint8)
+        panel[:] = (22, 22, 30)
+
+        cv2.rectangle(panel, (0, 0), (panel_width, 34), (36, 36, 52), -1)
+        cv2.putText(
+            panel,
+            "FINAL STEERING ANGLE",
+            (10, 23),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.62,
+            (0, 255, 255),
+            2,
+        )
+
+        final_angle = commanded_steering if commanded_steering is not None else computed_steering
+        if final_angle is None:
+            value_text = "--"
+            steer_color = (160, 160, 160)
+        else:
+            value_text = f"{float(final_angle):+.1f} deg"
+            abs_angle = abs(float(final_angle))
+            steer_color = (
+                (0, 255, 0)
+                if abs_angle < 10
+                else (0, 165, 255)
+                if abs_angle < 20
+                else (0, 0, 255)
+            )
+
+        cv2.putText(panel, "Final:", (14, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
+        cv2.putText(panel, value_text, (85, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, steer_color, 2)
+        cv2.putText(
+            panel,
+            f"Computed: {'--' if computed_steering is None else f'{float(computed_steering):+.1f} deg'}",
+            (14, 86),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (160, 230, 255),
+            1,
+        )
+        cv2.putText(
+            panel,
+            f"Commanded: {'--' if commanded_steering is None else f'{float(commanded_steering):+.1f} deg'}",
+            (14, 106),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+        )
+        cv2.putText(
+            panel,
+            f"Source: {command_source}",
+            (230, 106),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 220, 255),
+            1,
+        )
+
+        bar_x1 = 14
+        bar_x2 = panel_width - 14
+        bar_y = panel_height - 18
+        cv2.rectangle(panel, (bar_x1, bar_y - 4), (bar_x2, bar_y + 4), (55, 55, 70), -1)
+        center_x = (bar_x1 + bar_x2) // 2
+        cv2.line(panel, (center_x, bar_y - 7), (center_x, bar_y + 7), (140, 140, 160), 1)
+        if final_angle is not None and self.max_steering > 0:
+            clamped = max(-self.max_steering, min(self.max_steering, float(final_angle)))
+            offset = int((clamped / float(self.max_steering)) * ((bar_x2 - bar_x1) / 2.0))
+            marker_x = max(bar_x1, min(bar_x2, center_x + offset))
+            cv2.circle(panel, (marker_x, bar_y), 7, steer_color, -1, cv2.LINE_AA)
+
+        self._show_preview_window("2. Final Steering Angle", panel)
 
     def _overlay_command_status(self, image, computed_steering, computed_speed,
                                 commanded_steering, commanded_speed, command_source):
@@ -6004,6 +6098,12 @@ Returns:
                 # Show control panel with current status
                 if self._is_window_enabled("control_panel"):
                     self._show_control_panel(display_steering, display_speed)
+                if self._is_window_enabled("steering_angle"):
+                    self._show_final_steering_preview(
+                        computed_steering,
+                        commanded_steering,
+                        command_source,
+                    )
                 self._flush_preview_windows()
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
