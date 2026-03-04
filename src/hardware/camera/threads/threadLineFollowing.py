@@ -5424,9 +5424,9 @@ Returns:
                 command_source = "blocked_inactive"
                 # Line following not active - need to be in AUTO mode
                 if steering_angle is not None:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mBLOCKED\033[0m - Steering={steering_angle:.1f}° but is_line_following_active=False! Put system in AUTO mode.")
+                    #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mBLOCKED\033[0m - Steering={steering_angle:.1f}° but is_line_following_active=False! Put system in AUTO mode.")
                 if hasattr(self, '_last_inactive_log') == False:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
+                    #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
                     self._last_inactive_log = True
 
             if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
