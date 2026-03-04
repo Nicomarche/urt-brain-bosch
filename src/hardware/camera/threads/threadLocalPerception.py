@@ -20,7 +20,7 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 
 
 class threadLocalPerception(ThreadWithStop):
-    """Runs the local `best.pt` model and publishes lane/sign perception."""
+    """Runs the local lane/sign model and publishes perception outputs."""
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  show_debug=False, debug_windows=None,
@@ -43,9 +43,11 @@ class threadLocalPerception(ThreadWithStop):
         self.is_sign_actions_active = False
 
         self.local_ai_interval = float(getattr(config, "LOCAL_AI_INTERVAL", 0.10))
-        self.local_ai_model_path = str(getattr(config, "LOCAL_AI_MODEL_PATH", "models/lane_segmentation/best.pt"))
+        self.local_ai_model_path = str(
+            getattr(config, "LOCAL_AI_MODEL_PATH", "models/lane_segmentation/Best416px.engine")
+        )
         self.local_ai_min_confidence = float(getattr(config, "LOCAL_AI_MIN_CONFIDENCE", 0.35))
-        self.local_ai_imgsz = int(getattr(config, "LOCAL_AI_IMGSZ", 320))
+        self.local_ai_imgsz = int(getattr(config, "LOCAL_AI_IMGSZ", 416))
         self.local_ai_device = str(getattr(config, "LOCAL_AI_DEVICE", "auto"))
 
         self.last_infer_time = 0.0
@@ -190,6 +192,8 @@ class threadLocalPerception(ThreadWithStop):
         self.last_status_time = now
 
         infer_ms = float(result.get("inference_time_ms", 0.0)) if result else 0.0
+        processing_fps = (1000.0 / infer_ms) if infer_ms > 0.0 else 0.0
+        target_fps = (1.0 / self.local_ai_interval) if self.local_ai_interval > 0.0 else 0.0
         frame_id = int(result.get("frame_id", 0)) if result else 0
         model_ready = bool(result.get("model_ready", False)) if result else False
         detections = result.get("detections", []) if result else []
@@ -198,6 +202,8 @@ class threadLocalPerception(ThreadWithStop):
             "enabled": True,
             "model_ready": model_ready,
             "fps": round(self.current_fps, 1),
+            "processing_fps": round(processing_fps, 1),
+            "target_fps": round(target_fps, 1),
             "inference_time_ms": round(infer_ms, 1),
             "last_frame_id": frame_id,
             "last_sign": self.last_sign_name,
@@ -207,11 +213,53 @@ class threadLocalPerception(ThreadWithStop):
         self.signStatusSender.send({
             "enabled": self.is_sign_actions_active,
             "fps": round(self.current_fps, 1),
+            "processing_fps": round(processing_fps, 1),
+            "target_fps": round(target_fps, 1),
             "last_sign": self.last_sign_name,
             "total_detections": self.detection_count,
             "server_connected": False,
             "local_model_ready": model_ready,
         })
+
+    def _annotate_debug_frame(self, frame, result):
+        if frame is None or result is None or not hasattr(frame, "shape"):
+            return frame
+
+        height, width = frame.shape[:2]
+        header_height = 54
+        infer_ms = float(result.get("inference_time_ms", 0.0) or 0.0)
+        processing_fps = (1000.0 / infer_ms) if infer_ms > 0.0 else 0.0
+        throughput_fps = max(0.0, float(self.current_fps or 0.0))
+        target_fps = (1.0 / self.local_ai_interval) if self.local_ai_interval > 0.0 else 0.0
+        lane_count = len(result.get("lane_points", []) or [])
+        sign_count = len(result.get("detections", []) or [])
+        frame_id = int(result.get("frame_id", 0) or 0)
+
+        cv2.rectangle(frame, (0, 0), (width, header_height), (0, 0, 0), -1)
+        cv2.putText(
+            frame,
+            (
+                f"AI LOCAL | infer:{infer_ms:.0f}ms | proc:{processing_fps:.1f} FPS "
+                f"| thr:{throughput_fps:.1f} FPS"
+            ),
+            (8, 20),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            f"cap:{target_fps:.1f} FPS | lanes:{lane_count} | signs:{sign_count} | frame:{frame_id}",
+            (8, min(height - 6, 40)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (235, 235, 235),
+            1,
+            cv2.LINE_AA,
+        )
+        return frame
 
     def _show_debug_windows(self, result, now):
         if not self.show_debug or not result:
@@ -222,16 +270,19 @@ class threadLocalPerception(ThreadWithStop):
         if self._is_window_enabled("ai_local_overlay"):
             overlay = lane_debug.get("overlay")
             if overlay is not None:
+                overlay = self._annotate_debug_frame(overlay, result)
                 cv2.imshow("AI Local - Overlay", overlay)
                 rendered = True
         if self._is_window_enabled("ai_local_masks"):
             masks = lane_debug.get("masks")
             if masks is not None:
+                masks = self._annotate_debug_frame(masks, result)
                 cv2.imshow("AI Local - Masks", masks)
                 rendered = True
         if self._is_window_enabled("ai_local_signs"):
             signs = lane_debug.get("signs")
             if signs is not None:
+                signs = self._annotate_debug_frame(signs, result)
                 cv2.imshow("AI Local - Signs", signs)
                 rendered = True
         if rendered:

@@ -89,9 +89,10 @@ SIGN_MIN_BOX_AREA = 0.01
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
-LOCAL_AI_MODEL_PATH = "models/lane_segmentation/best.pt"
+# En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.
+LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best416px.engine"
 LOCAL_AI_MIN_CONFIDENCE = 0.35
-LOCAL_AI_IMGSZ = 320
+LOCAL_AI_IMGSZ = 416
 LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
 LOCAL_AI_INTERVAL = 0.10
 LOCAL_AI_MAX_RESULT_AGE = 0.35

@@ -123,7 +123,7 @@
         (click)="setMode('ai_local')">
         <span class="mode-icon">🧠</span>
         <span class="mode-name">AI Local</span>
-        <span class="mode-desc"><code>best.pt</code> corre dentro del auto. Detecta carriles con IA y el giro lo sigue haciendo Stanley local.</span>
+        <span class="mode-desc"><code>Best416px.engine</code> corre dentro del auto con TensorRT. Detecta carriles con IA y el giro lo sigue haciendo Stanley local.</span>
         <span class="mode-badge server-badge" *ngIf="selectedMode === 'ai_local'">
           {{ localAiReady ? 'Listo' : 'Inicializando' }}
         </span>

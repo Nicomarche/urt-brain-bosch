@@ -637,6 +637,31 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
             detector._should_apply_single_line_protective_stop(local_mask_guidance, -25.0, -80.0)
         )
 
+    def test_progressive_speed_respects_safety_cap(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.highway_mode_event = None
+        detector.max_speed = 20.0
+        detector.min_speed = 10.0
+        detector.max_steering = 25.0
+        detector.speed_ramp_step = 0.5
+        detector._current_speed = 18.0
+
+        updated_speed = detector._update_progressive_speed(steering_angle=0.0, speed_cap=12.0)
+
+        self.assertEqual(updated_speed, 12.0)
+        self.assertEqual(detector._current_speed, 12.0)
+
+    def test_no_lane_hold_uses_last_good_steering_for_initial_blind_frames(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.max_steering = 25.0
+        detector.frames_without_line = 2
+        detector._last_good_steering = -18.0
+
+        self.assertEqual(detector._get_no_lane_hold_steering(), -18.0)
+
+        detector.frames_without_line = 5
+        self.assertIsNone(detector._get_no_lane_hold_steering())
+
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
         engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)

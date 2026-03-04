@@ -174,7 +174,7 @@ class processCamera(WorkerProcess):
         )
         self.threads.append(camTh)
         
-        # Local AI perception (best.pt) now runs inside the camera process.
+        # Local AI perception (TensorRT engine) now runs inside the camera process.
         localPerceptionTh = threadLocalPerception(
             self.queuesList, self.logging, self.debugging,
             frame_buffer=self.frame_buffer,

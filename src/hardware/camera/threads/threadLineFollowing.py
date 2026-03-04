@@ -318,6 +318,8 @@ Args:
         # pushing forward into a curve the chassis cannot physically close.
         self.single_line_stop_max_steer_frames = 6
         self.single_line_stop_error_scale = 1.5
+        # Briefly hold the last good steering when vision drops both lines.
+        self.no_lane_hold_steering_frames = 4
         # Single-line heading calibration: compensates perspective bias so 1-line mode
         # stays close to 0 steering when the car is centered on straight segments.
         self.single_line_heading_ref_alpha = 0.15
@@ -1861,11 +1863,23 @@ Args:
 
         infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
         frame_id = int(payload.get('frame_id', 0) or 0)
+        local_status = self._last_local_perception_status if isinstance(self._last_local_perception_status, dict) else {}
+        throughput_fps = local_status.get('fps')
+        processing_fps = local_status.get('processing_fps')
+        target_fps = local_status.get('target_fps')
+        if processing_fps is None and infer_ms > 0.0:
+            processing_fps = 1000.0 / infer_ms
         debug_info['remote_server_time_ms'] = infer_ms
         debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
         debug_info['remote_frame_id'] = frame_id
         debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
         debug_info['local_ai_status'] = 'ready'
+        if throughput_fps is not None:
+            debug_info['local_ai_throughput_fps'] = float(throughput_fps)
+        if processing_fps is not None:
+            debug_info['local_ai_processing_fps'] = float(processing_fps)
+        if target_fps is not None:
+            debug_info['local_ai_target_fps'] = float(target_fps)
 
         side_masks = payload.get('side_masks')
         lane_side_lines = payload.get('lane_side_lines')
@@ -2070,6 +2084,36 @@ Args:
         if self.highway_mode_event and self.highway_mode_event.is_set():
             return self.highway_max_speed, self.highway_min_speed
         return self.max_speed, self.min_speed
+
+    def _update_progressive_speed(self, steering_angle, speed_cap=None):
+        """Update `_current_speed` from steering, respecting an optional safety cap."""
+        eff_max, eff_min = self._get_effective_speeds()
+        abs_steer = abs(float(steering_angle))
+        steer_ratio = min(abs_steer / max(float(self.max_steering), 1e-3), 1.0)
+        target_speed = eff_max - steer_ratio * (eff_max - eff_min)
+        if speed_cap is not None:
+            target_speed = min(target_speed, float(speed_cap))
+
+        if target_speed <= self._current_speed:
+            self._current_speed = target_speed
+        else:
+            self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
+        return self._current_speed
+
+    def _get_no_lane_hold_steering(self):
+        """Hold the last good steering briefly when both lane lines disappear."""
+        hold_frames = max(0, int(getattr(self, 'no_lane_hold_steering_frames', 4) or 0))
+        frames_without_line = int(getattr(self, 'frames_without_line', 0) or 0)
+        if hold_frames == 0 or frames_without_line <= 0 or frames_without_line > hold_frames:
+            return None
+
+        candidate = getattr(self, '_last_good_steering', None)
+        if candidate is None:
+            candidate = getattr(self, 'last_steering', None)
+        if candidate is None:
+            return None
+
+        return max(-self.max_steering, min(self.max_steering, float(candidate)))
 
     def _reset_pid_state(self):
         """Reset PID/Stanley state when changing modes to prevent corrupted values."""
@@ -4109,8 +4153,22 @@ Args:
         remote_server_ms = debug_info.get('remote_server_time_ms')
         if remote_server_ms is not None:
             remote_rt_ms = debug_info.get('remote_roundtrip_ms', 0.0)
+            perf_x = max(8, w - 250)
             cv2.putText(debug, f"AI:{remote_server_ms:.0f}ms RT:{remote_rt_ms:.0f}ms",
-                        (w - 135, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (120, 220, 255), 1)
+                        (perf_x, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (120, 220, 255), 1)
+            perf_parts = []
+            local_ai_processing_fps = debug_info.get('local_ai_processing_fps')
+            if local_ai_processing_fps is not None:
+                perf_parts.append(f"Proc:{float(local_ai_processing_fps):.1f}FPS")
+            local_ai_throughput_fps = debug_info.get('local_ai_throughput_fps')
+            if local_ai_throughput_fps is not None:
+                perf_parts.append(f"Thr:{float(local_ai_throughput_fps):.1f}FPS")
+            local_ai_target_fps = debug_info.get('local_ai_target_fps')
+            if local_ai_target_fps is not None:
+                perf_parts.append(f"Cap:{float(local_ai_target_fps):.1f}FPS")
+            if perf_parts:
+                cv2.putText(debug, " ".join(perf_parts),
+                            (perf_x, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.33, (200, 240, 255), 1)
         kalman_error = debug_info.get('kalman_error')
         if kalman_error is not None:
             k_age = int(debug_info.get('kalman_age', 0))
@@ -5919,6 +5977,7 @@ Returns:
         # Calculate steering based on detected lines
         steering_angle = None
         speed = self.base_speed
+        speed_cap = None
         error = None
         midpoint_x = None
         bottom_left_x = None
@@ -6036,6 +6095,7 @@ Returns:
                 debug_info['single_line_resolved_side'] = 'left'
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
+                speed_cap = speed
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
@@ -6051,6 +6111,7 @@ Returns:
                 debug_info['single_line_resolved_side'] = 'right'
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
+                speed_cap = speed
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
@@ -6100,6 +6161,7 @@ Returns:
                         # Speed reduction when clearance is tight
                         if self.curve_speed_reduction and swept['min_clearance_cm'] < self.min_clearance_warn_cm:
                             speed = self.min_speed
+                            speed_cap = speed
                 else:
                     self._swept_path_info = None
 
@@ -6169,6 +6231,7 @@ Returns:
                 debug_info['kalman_age'] = self._kalman_age_frames
 
             speed = self.min_speed + 2
+            speed_cap = speed
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
                 sl_error, sl_heading, speed_val, curve_reference=None
@@ -6209,6 +6272,7 @@ Returns:
                 debug_info['kalman_age'] = self._kalman_age_frames
 
             speed = self.min_speed + 2
+            speed_cap = speed
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
                 sl_error, sl_heading, speed_val, curve_reference=None
@@ -6227,6 +6291,7 @@ Returns:
             # ---- NO LINES ----
             self._swept_path_info = None  # Reset swept path
             self.frames_without_line += 1
+            blind_hold_steering = self._get_no_lane_hold_steering()
 
             if self.show_debug:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
@@ -6239,27 +6304,45 @@ Returns:
             )
             if can_use_kalman_pred:
                 error = kalman_pred_error
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
-                curve_reference = self._get_stanley_curve_reference()
-                steering_angle = self._compute_lateral_control(
-                    error, heading_pred, speed_val, curve_reference=curve_reference
-                )
-                steering_angle *= 0.9  # conservative while running on prediction only
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                 kalman_prediction_used = True
                 debug_info['kalman_error'] = error
                 debug_info['kalman_age'] = self._kalman_age_frames
                 debug_info['kalman_predicted'] = True
-                if self.show_debug:
-                    print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mPREDICT\033[0m - "
-                          f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
-                          f"steer={steering_angle:.1f}°")
+                if blind_hold_steering is not None:
+                    steering_angle = blind_hold_steering
+                    debug_info['blind_steer_hold'] = True
+                    debug_info['blind_steer_source'] = (
+                        'last_good' if getattr(self, '_last_good_steering', None) is not None else 'last'
+                    )
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mHOLD\033[0m - "
+                              f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
+                              f"steer={steering_angle:.1f}°")
+                else:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
+                    curve_reference = self._get_stanley_curve_reference()
+                    steering_angle = self._compute_lateral_control(
+                        error, heading_pred, speed_val, curve_reference=curve_reference
+                    )
+                    steering_angle *= 0.9  # conservative while running on prediction only
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mPREDICT\033[0m - "
+                              f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
+                              f"steer={steering_angle:.1f}°")
+            elif blind_hold_steering is not None:
+                steering_angle = blind_hold_steering
+                debug_info['blind_steer_hold'] = True
+                debug_info['blind_steer_source'] = (
+                    'last_good' if getattr(self, '_last_good_steering', None) is not None else 'last'
+                )
             elif hasattr(self, 'last_steering') and self.frames_without_line < 5:
                 steering_angle = self.last_steering * 0.95
             else:
                 steering_angle = None
             speed = self.min_speed
+            speed_cap = speed
 
         # === POST-CHECK: Reject steering if it looks like a noise spike ===
         if steering_angle is not None and self.use_noise_filter:
@@ -6281,6 +6364,7 @@ Returns:
                               f"reason={_post_reason} steer={steering_angle:.1f}→{self._last_good_steering:.1f}")
                     steering_angle = self._last_good_steering
                     speed = max(speed, self.min_speed)  # Don't accelerate on rejected frame
+                    speed_cap = speed
                 else:
                     # Good frame - update reference
                     self._accept_frame(error, steering_angle, num_lines)
@@ -6321,24 +6405,15 @@ Returns:
                 if abs(steering_angle) > 8:
                     self.last_turn_direction = 1 if steering_angle > 0 else -1
 
-                # Progressive speed: linearly map steering magnitude to speed range.
-                # steer=0° → max speed, steer=max° → min speed (no hard steps).
-                eff_max, eff_min = self._get_effective_speeds()
-                abs_steer = abs(steering_angle)
-                steer_ratio = min(abs_steer / self.max_steering, 1.0)
-                target_speed = eff_max - steer_ratio * (eff_max - eff_min)
-
-                # Speed ramping: instant decrease, gradual increase
-                if target_speed <= self._current_speed:
-                    self._current_speed = target_speed
-                else:
-                    self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
-                speed = self._current_speed
+                # Progressive speed: linearly map steering magnitude to speed range,
+                # but never exceed any safety cap set earlier in the control path.
+                speed = self._update_progressive_speed(steering_angle, speed_cap=speed_cap)
 
                 # Stanley already scales the crosstrack term by speed, so applying an
                 # extra attenuation here weakens correction twice and deviates from
                 # the Hoffmann control law. Keep the attenuation only for PID mode.
                 if not self._should_use_stanley_controller():
+                    eff_max, _ = self._get_effective_speeds()
                     speed_ratio = speed / eff_max
                     steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
                     steering_angle *= steer_attenuation

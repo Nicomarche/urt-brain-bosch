@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 import time
 
@@ -13,7 +14,7 @@ class LocalPerceptionEngine:
 
     def __init__(self, model_path=None, min_confidence=None, imgsz=None, device=None):
         self.model_path = model_path or getattr(
-            config, "LOCAL_AI_MODEL_PATH", "models/lane_segmentation/best.pt"
+            config, "LOCAL_AI_MODEL_PATH", "models/lane_segmentation/Best416px.engine"
         )
         self.min_confidence = float(
             min_confidence
@@ -21,12 +22,12 @@ class LocalPerceptionEngine:
             else getattr(config, "LOCAL_AI_MIN_CONFIDENCE", 0.35)
         )
         self.imgsz = int(
-            imgsz if imgsz is not None else getattr(config, "LOCAL_AI_IMGSZ", 320)
+            imgsz if imgsz is not None else getattr(config, "LOCAL_AI_IMGSZ", 416)
         )
-        requested_device = (
+        self.requested_device = (
             device if device is not None else getattr(config, "LOCAL_AI_DEVICE", "auto")
         )
-        self.device = self._resolve_device(requested_device)
+        self.device = "cpu"
 
         self.left_aliases = self._normalize_aliases(
             getattr(config, "LOCAL_AI_LEFT_CLASS_ALIASES", [])
@@ -69,9 +70,12 @@ class LocalPerceptionEngine:
             )
             return
 
+        model_ext = os.path.splitext(model_full_path)[1].lower()
+        self.device = self._resolve_device(self.requested_device, model_ext)
+        self._sync_engine_imgsz(model_full_path, model_ext)
+
         try:
             self.model = YOLO(model_full_path)
-            model_ext = os.path.splitext(model_full_path)[1].lower()
             if self.device != "cpu" and model_ext in (".pt", ".pth"):
                 self.model.to(self.device)
             self.labels = getattr(self.model, "names", {})
@@ -111,7 +115,12 @@ class LocalPerceptionEngine:
 
         return primary
 
-    def _resolve_device(self, requested_device):
+    def _resolve_device(self, requested_device, model_ext=None):
+        normalized_device = str(requested_device).strip().lower()
+        if model_ext == ".engine":
+            if normalized_device in ("auto", "cpu", "mps"):
+                return "cuda"
+            return requested_device
         if requested_device != "auto":
             return requested_device
         try:
@@ -124,6 +133,29 @@ class LocalPerceptionEngine:
         if torch.cuda.is_available():
             return "cuda"
         return "cpu"
+
+    def _infer_engine_imgsz(self, model_full_path):
+        match = re.search(r"(\d+)px\.engine$", os.path.basename(model_full_path), re.IGNORECASE)
+        if match is None:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    def _sync_engine_imgsz(self, model_full_path, model_ext):
+        if model_ext != ".engine":
+            return
+
+        engine_imgsz = self._infer_engine_imgsz(model_full_path)
+        if engine_imgsz is None or self.imgsz == engine_imgsz:
+            return
+
+        print(
+            f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWARNING\033[0m - "
+            f"imgsz={self.imgsz} no coincide con el engine TensorRT; usando {engine_imgsz}"
+        )
+        self.imgsz = engine_imgsz
 
     def _warmup(self):
         if not self.model_ready or self.model is None:
