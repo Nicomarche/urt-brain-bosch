@@ -603,6 +603,8 @@ Args:
         self._smoothed_right_line = None
         self._left_line_missing_frames = 0
         self._right_line_missing_frames = 0
+        self.single_line_transition_blend_frames = 2
+        self.duplicate_line_gap_ratio = 0.18
 
         # Sliding window parameters
         self.nwindows = 12
@@ -1291,11 +1293,6 @@ Args:
         if len(detected_sides) == 0:
             return None
 
-        lane_observation = self._record_lane_observation(
-            tuple(detected_sides),
-            duplicate_collapse=getattr(self, '_last_local_ai_duplicate_collapse', None),
-        )
-
         visible_side = detected_sides[0] if len(detected_sides) == 1 else None
         visible_line = None
         if visible_side is not None and isinstance(side_lines, dict):
@@ -1318,25 +1315,70 @@ Args:
         if width_samples:
             lane_width_px = sum(width_samples) / len(width_samples)
         else:
-            cached_lane_width = getattr(self, '_last_local_ai_lane_width_px', None)
-            cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
-            if cached_lane_width is not None and cached_lane_width > 1.0:
-                lane_width_px = float(cached_lane_width)
-            elif cached_px_per_cm is not None and cached_px_per_cm > 0.5:
-                lane_width_px = float(cached_px_per_cm) * float(self.lane_width_cm)
-            else:
-                lane_width_px = float(img_w) * 0.45
+            lane_width_px = self._resolve_nominal_lane_width_px(img_w)
 
+        narrow_width_collapse = None
         if len(detected_sides) >= 2 and width_samples:
             cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
             min_lane_width_px = max(10.0, float(img_w) * 0.10)
             if cached_lane_width > 1.0:
                 min_lane_width_px = max(min_lane_width_px, cached_lane_width * 0.45)
             if float(lane_width_px) < min_lane_width_px:
-                self._last_local_ai_mask_reject_reason = (
-                    f"lane_width_too_small({float(lane_width_px):.1f}<{min_lane_width_px:.1f})"
+                overlap_x_values = [
+                    samples['left']['reference'],
+                    samples['right']['reference'],
+                    samples['left']['bottom'],
+                    samples['right']['bottom'],
+                ]
+                overlap_x_values = [float(x) for x in overlap_x_values if x is not None]
+                if not overlap_x_values:
+                    self._last_local_ai_mask_reject_reason = (
+                        f"lane_width_too_small({float(lane_width_px):.1f}<{min_lane_width_px:.1f})"
+                    )
+                    return None
+
+                overlap_x = float(sum(overlap_x_values) / len(overlap_x_values))
+                overlap_top_y = max(0, min(reference_y, roi_bottom - 1))
+                overlap_line = np.array([[
+                    int(round(max(0.0, min(float(img_w - 1), overlap_x)))),
+                    int(roi_bottom),
+                    int(round(max(0.0, min(float(img_w - 1), overlap_x)))),
+                    int(overlap_top_y),
+                ]], dtype=np.int32)
+                resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
+                    overlap_line,
+                    img_h,
+                    img_w,
+                    prev_seen_side=getattr(self, 'last_seen_side', None),
                 )
-                return None
+                if resolved_side not in ('left', 'right'):
+                    resolved_side = 'left' if overlap_x < (img_w / 2.0) else 'right'
+                    resolution_source = 'frame_center'
+
+                dropped_side = 'right' if resolved_side == 'left' else 'left'
+                samples[dropped_side]['bottom'] = None
+                samples[dropped_side]['reference'] = None
+                detected_sides = [resolved_side]
+                visible_side = resolved_side
+                visible_line = None
+                if isinstance(side_lines, dict):
+                    candidate_line = side_lines.get(visible_side)
+                    if (
+                        isinstance(candidate_line, np.ndarray) and
+                        candidate_line.ndim == 2 and
+                        candidate_line.shape[1] >= 4
+                    ):
+                        visible_line = candidate_line
+                lane_width_px = max(float(min_lane_width_px), float(self._resolve_nominal_lane_width_px(img_w)))
+                narrow_width_collapse = {
+                    'kept_side': resolved_side,
+                    'dropped_side': dropped_side,
+                    'resolution_source': resolution_source,
+                    'line_gap_px': float(lane_width_px if not width_samples else sum(width_samples) / len(width_samples)),
+                    'line_gap_limit_px': float(min_lane_width_px),
+                    'trigger': 'lane_width_too_small',
+                }
+                self._last_local_ai_mask_reject_reason = None
 
         used_virtual_boundary = False
         if len(detected_sides) == 1:
@@ -1352,6 +1394,15 @@ Args:
                     img_w,
                 )
             used_virtual_boundary = True
+
+        lane_observation = self._record_lane_observation(
+            tuple(detected_sides),
+            duplicate_collapse=(
+                narrow_width_collapse
+                if narrow_width_collapse is not None
+                else getattr(self, '_last_local_ai_duplicate_collapse', None)
+            ),
+        )
 
         left_bottom_x = samples['left']['bottom']
         right_bottom_x = samples['right']['bottom']
@@ -1448,6 +1499,8 @@ Args:
         }
         if single_line_projection_debug is not None:
             guidance['single_line_projection_debug'] = single_line_projection_debug
+        if narrow_width_collapse is not None:
+            guidance['duplicate_line_collapse'] = narrow_width_collapse
         return guidance
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
@@ -2041,6 +2094,13 @@ Args:
                 single_line_projection_debug = local_mask_guidance.get('single_line_projection_debug')
                 if isinstance(single_line_projection_debug, dict):
                     debug_info.update(single_line_projection_debug)
+                guidance_duplicate_collapse = local_mask_guidance.get('duplicate_line_collapse')
+                if isinstance(guidance_duplicate_collapse, dict):
+                    debug_info['duplicate_line_collapse'] = guidance_duplicate_collapse
+                    debug_info['single_line_side_source'] = (
+                        f"duplicate_overlap:{guidance_duplicate_collapse.get('resolution_source', 'unknown')}"
+                    )
+                    debug_info['single_line_resolved_side'] = guidance_duplicate_collapse.get('kept_side')
                 if mask_side_resolution is not None:
                     debug_info['single_line_side_source'] = (
                         f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
@@ -2149,6 +2209,20 @@ Args:
         if avg_left_raw is None and avg_right_raw is None:
             avg_left_raw, avg_right_raw = self._lane_points_to_lines(lane_points, height, width)
 
+        avg_left_raw, avg_right_raw, overlap_collapse = self._collapse_overlapping_two_lines(
+            avg_left_raw,
+            avg_right_raw,
+            height,
+            width,
+            prev_seen_side=getattr(self, 'last_seen_side', None),
+        )
+        if overlap_collapse is not None:
+            debug_info['duplicate_line_collapse'] = overlap_collapse
+            debug_info['single_line_side_source'] = (
+                f"duplicate_overlap:{overlap_collapse.get('resolution_source', 'unknown')}"
+            )
+            debug_info['single_line_resolved_side'] = overlap_collapse.get('kept_side')
+
         if avg_left_raw is not None and avg_right_raw is not None:
             self._last_two_line_left = avg_left_raw.copy()
             self._last_two_line_right = avg_right_raw.copy()
@@ -2200,6 +2274,113 @@ Args:
             return None
 
         return max(-self.max_steering, min(self.max_steering, float(candidate)))
+
+    def _resolve_nominal_lane_width_px(self, img_w):
+        """Estimate nominal lane width in pixels from cache or frame fallback."""
+        cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+        if cached_lane_width > 1.0:
+            return cached_lane_width
+
+        cached_px_per_cm = float(getattr(self, '_last_px_per_cm', 0.0) or 0.0)
+        lane_width_cm = float(getattr(self, 'lane_width_cm', 35.0) or 35.0)
+        if cached_px_per_cm > 0.5 and lane_width_cm > 1e-3:
+            return cached_px_per_cm * lane_width_cm
+
+        return max(10.0, float(img_w) * 0.45)
+
+    def _collapse_overlapping_two_lines(self, avg_left, avg_right, img_h, img_w, prev_seen_side=None):
+        """Treat near-overlapping two-line detections as a single visible lane line."""
+        if avg_left is None or avg_right is None:
+            return avg_left, avg_right, None
+
+        y_ref = int(max(0, min(img_h - 1, round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))))
+        left_x = self._line_x_at_y(avg_left, y_ref)
+        right_x = self._line_x_at_y(avg_right, y_ref)
+        if left_x is None or right_x is None:
+            return avg_left, avg_right, None
+
+        line_gap_px = abs(float(right_x) - float(left_x))
+        nominal_lane_width_px = self._resolve_nominal_lane_width_px(img_w)
+        gap_ratio = max(0.05, min(0.35, float(getattr(self, 'duplicate_line_gap_ratio', 0.18) or 0.18)))
+        overlap_gap_limit_px = max(6.0, nominal_lane_width_px * gap_ratio, float(img_w) * 0.02)
+        if line_gap_px > overlap_gap_limit_px:
+            return avg_left, avg_right, None
+
+        merged_line = np.rint(
+            (avg_left.astype(np.float32) + avg_right.astype(np.float32)) * 0.5
+        ).astype(np.int32)
+
+        resolved_side = None
+        resolution_source = "unknown"
+        try:
+            resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
+                merged_line,
+                img_h,
+                img_w,
+                prev_seen_side=prev_seen_side,
+            )
+        except Exception:
+            resolved_side = None
+            resolution_source = "resolution_error"
+
+        if resolved_side not in ('left', 'right'):
+            center_x = (float(left_x) + float(right_x)) * 0.5
+            resolved_side = 'left' if center_x < (img_w / 2.0) else 'right'
+            resolution_source = "frame_center"
+
+        if resolved_side == 'left':
+            collapsed_left = merged_line
+            collapsed_right = None
+        else:
+            collapsed_left = None
+            collapsed_right = merged_line
+
+        collapse_info = {
+            'kept_side': resolved_side,
+            'dropped_side': ('right' if resolved_side == 'left' else 'left'),
+            'resolution_source': resolution_source,
+            'line_gap_px': float(line_gap_px),
+            'line_gap_limit_px': float(overlap_gap_limit_px),
+            'nominal_lane_width_px': float(nominal_lane_width_px),
+        }
+        return collapsed_left, collapsed_right, collapse_info
+
+    def _blend_single_line_transition_steering(self, steering_angle, side, prev_seen_side, streak):
+        """Blend single-line steering briefly after side/mode transitions to avoid spikes."""
+        if steering_angle is None:
+            return steering_angle, None
+        if side not in ('left', 'right'):
+            return steering_angle, None
+
+        blend_frames = max(0, int(getattr(self, 'single_line_transition_blend_frames', 2) or 0))
+        streak = max(0, int(streak or 0))
+        if blend_frames <= 0 or streak <= 0 or streak > blend_frames:
+            return steering_angle, None
+
+        prev_mode = prev_seen_side if prev_seen_side in ('left', 'right', 'both') else 'none'
+        if prev_mode == side:
+            return steering_angle, None
+
+        previous_steering = getattr(self, 'last_steering', None)
+        if previous_steering is None:
+            previous_steering = getattr(self, '_last_good_steering', None)
+        if previous_steering is None:
+            return steering_angle, None
+
+        alpha = min(1.0, float(streak) / float(blend_frames + 1))
+        blended = ((1.0 - alpha) * float(previous_steering)) + (alpha * float(steering_angle))
+        max_steer = float(getattr(self, 'max_steering', 25.0) or 25.0)
+        blended = max(-max_steer, min(max_steer, blended))
+        return blended, {
+            'applied': True,
+            'alpha': float(alpha),
+            'prev_seen_side': prev_mode,
+            'resolved_side': side,
+            'streak': int(streak),
+            'blend_frames': int(blend_frames),
+            'input_steering': float(steering_angle),
+            'base_steering': float(previous_steering),
+        }
 
     def _reset_pid_state(self):
         """Reset PID/Stanley state when changing modes to prevent corrupted values."""
@@ -6295,6 +6476,24 @@ Returns:
         self._is_stabilization_frame = False  # Reset each frame; set True by just_seen_two_lines logic
         kalman_pred_error = self._kalman_predict_error()
 
+        avg_left, avg_right, overlap_collapse = self._collapse_overlapping_two_lines(
+            avg_left,
+            avg_right,
+            img_h,
+            img_w,
+            prev_seen_side=getattr(self, 'last_seen_side', None),
+        )
+        if overlap_collapse is not None:
+            debug_info['duplicate_line_collapse'] = overlap_collapse
+            debug_info['single_line_side_source'] = (
+                f"duplicate_overlap:{overlap_collapse.get('resolution_source', 'unknown')}"
+            )
+            debug_info['single_line_resolved_side'] = overlap_collapse.get('kept_side')
+            debug_info['left_lines'] = [avg_left] if avg_left is not None else []
+            debug_info['right_lines'] = [avg_right] if avg_right is not None else []
+            if debug_info.get('control_mode') != 'mask_guidance':
+                debug_info['remote_lane_count'] = 1
+
         # === PRE-CHECK: Reject obviously noisy frames (reflection/glare) ===
         local_mask_guidance = debug_info.get('local_mask_guidance')
         num_lines = (1 if avg_left is not None else 0) + (1 if avg_right is not None else 0)
@@ -6414,6 +6613,14 @@ Returns:
                 )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                    steering_angle,
+                    'left',
+                    prev_seen_side,
+                    self.consecutive_single_left,
+                )
+                if transition_blend is not None:
+                    debug_info['single_line_transition_blend'] = transition_blend
                 self.frames_without_line = 0
             elif 'right' in detected_sides:
                 self.consecutive_single_right += 1
@@ -6431,6 +6638,14 @@ Returns:
                 )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                    steering_angle,
+                    'right',
+                    prev_seen_side,
+                    self.consecutive_single_right,
+                )
+                if transition_blend is not None:
+                    debug_info['single_line_transition_blend'] = transition_blend
                 self.frames_without_line = 0
 
         elif avg_left is not None and avg_right is not None:
@@ -6553,6 +6768,14 @@ Returns:
             )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                steering_angle,
+                'left',
+                prev_seen_side,
+                self.consecutive_single_left,
+            )
+            if transition_blend is not None:
+                debug_info['single_line_transition_blend'] = transition_blend
             if self.show_debug:
                 ctrl_label = "Stanley 1L" if self._should_use_stanley_controller() else "PID 1L"
                 print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mLEFT\033[0m "
@@ -6595,6 +6818,14 @@ Returns:
             )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                steering_angle,
+                'right',
+                prev_seen_side,
+                self.consecutive_single_right,
+            )
+            if transition_blend is not None:
+                debug_info['single_line_transition_blend'] = transition_blend
             if self.show_debug:
                 ctrl_label = "Stanley 1L" if self._should_use_stanley_controller() else "PID 1L"
                 print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mRIGHT\033[0m "

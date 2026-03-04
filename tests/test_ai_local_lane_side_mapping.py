@@ -145,7 +145,7 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
             delta=0.1,
         )
 
-    def test_build_local_mask_guidance_rejects_implausibly_narrow_two_line_width(self):
+    def test_build_local_mask_guidance_collapses_implausibly_narrow_two_line_width(self):
         self.detector._last_local_ai_lane_width_px = 90.0
         left_mask = self._mask_from_points([(40, 95), (40, 85), (40, 75), (40, 65), (40, 55)])
         right_mask = self._mask_from_points([(60, 95), (60, 85), (60, 75), (60, 65), (60, 55)])
@@ -156,11 +156,57 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
             100,
         )
 
-        self.assertIsNone(guidance)
-        self.assertEqual(
-            self.detector._last_local_ai_mask_reject_reason,
-            "lane_width_too_small(20.0<40.5)",
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["detected_sides"], ("right",))
+        self.assertTrue(guidance["used_virtual_boundary"])
+        self.assertIn("duplicate_line_collapse", guidance)
+        self.assertEqual(guidance["duplicate_line_collapse"]["trigger"], "lane_width_too_small")
+
+    def test_collapse_overlapping_two_lines_treats_detection_as_single_line(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.lookahead = 0.4
+        detector.lane_width_cm = 35.0
+        detector._last_local_ai_lane_width_px = 80.0
+        detector._last_px_per_cm = None
+        detector.last_seen_side = "both"
+        detector._line_x_at_y = threadLineFollowing._line_x_at_y.__get__(detector, threadLineFollowing)
+        detector._resolve_nominal_lane_width_px = threadLineFollowing._resolve_nominal_lane_width_px.__get__(
+            detector, threadLineFollowing
         )
+        detector._resolve_ambiguous_local_lane = (
+            lambda line, img_h, img_w, prev_seen_side=None: ("right", "history")
+        )
+
+        avg_left = np.array([[50, 95, 50, 55]], dtype=np.int32)
+        avg_right = np.array([[53, 95, 53, 55]], dtype=np.int32)
+
+        collapsed_left, collapsed_right, info = detector._collapse_overlapping_two_lines(
+            avg_left, avg_right, 100, 100, prev_seen_side="both"
+        )
+
+        self.assertIsNone(collapsed_left)
+        self.assertIsNotNone(collapsed_right)
+        self.assertIsNotNone(info)
+        self.assertEqual(info["kept_side"], "right")
+        self.assertLess(info["line_gap_px"], info["line_gap_limit_px"])
+
+    def test_single_line_transition_blend_softens_side_switch_spike(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.single_line_transition_blend_frames = 2
+        detector.max_steering = 25.0
+        detector.last_steering = 20.0
+        detector._last_good_steering = 20.0
+
+        blended, info = detector._blend_single_line_transition_steering(
+            steering_angle=-20.0,
+            side="left",
+            prev_seen_side="right",
+            streak=1,
+        )
+
+        self.assertIsNotNone(info)
+        self.assertTrue(info["applied"])
+        self.assertAlmostEqual(blended, 6.6667, places=3)
 
     def test_build_local_mask_guidance_single_line_uses_conservative_center_after_streak(self):
         self.detector.consecutive_single_right = 4
