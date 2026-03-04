@@ -3,6 +3,7 @@ import unittest
 
 import numpy as np
 
+from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEngine
 from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
 
 
@@ -29,6 +30,9 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.detector.ai_local_use_mask_geometry = True
         self.detector.lookahead = 0.4
         self.detector.lane_width_cm = 35.0
+        self.detector.line_width_cm = 2.0
+        self.detector.car_width = 19.0
+        self.detector.camera_to_front_axle = 0.0
         self.detector._last_local_ai_lane_width_px = None
         self.detector._last_px_per_cm = None
         self.detector.show_debug = False
@@ -153,6 +157,38 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(debug_info["right_lines"], [])
         self.assertIn("local_mask_guidance", debug_info)
         self.assertTrue(np.array_equal(returned_mask, lane_mask))
+
+    def test_detect_with_local_ai_collapses_overlapping_mask_sides_to_one_lane(self):
+        duplicate_mask = self._mask_from_points([(62, 95), (60, 85), (58, 75), (56, 65), (54, 55)])
+        self.detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {"left": [], "right": []},
+            "lane_side_lines": {
+                "left": [62, 95, 54, 55],
+                "right": [61, 95, 53, 55],
+            },
+            "lane_side_sources": {"left": "explicit_class", "right": "explicit_class"},
+            "side_masks": {"left": duplicate_mask, "right": duplicate_mask.copy()},
+            "lane_mask": duplicate_mask.copy(),
+            "inference_time_ms": 12.0,
+            "frame_id": 19,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, _, debug_info = self.detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNone(avg_left)
+        self.assertIsNone(avg_right)
+        self.assertEqual(debug_info["control_mode"], "mask_guidance")
+        self.assertEqual(debug_info["remote_lane_count"], 1)
+        self.assertEqual(debug_info["local_mask_guidance"]["detected_sides"], ("right",))
+        self.assertEqual(debug_info["single_line_side_source"], "guessed_single:frame_center")
+        self.assertEqual(debug_info["single_line_resolved_side"], "right")
+        self.assertIsNone(debug_info["render_side_masks"]["left"])
+        self.assertIsNotNone(debug_info["render_side_masks"]["right"])
 
     def test_detect_with_local_ai_prefers_explicit_lane_side_lines(self):
         self.detector._last_local_lane_payload = {
@@ -333,7 +369,7 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(physical_error, -19.0, places=1)
-        self.assertAlmostEqual(legacy_error, 1.0, places=1)
+        self.assertAlmostEqual(legacy_error, -1.5, places=1)
         self.assertEqual(detector._last_single_line_projection_debug["single_line_mode"], "legacy")
 
     def test_physical_single_line_error_applies_camera_to_front_axle_compensation(self):
@@ -400,6 +436,69 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
 
         self.assertAlmostEqual(error_low_bias, -1.5, places=1)
         self.assertAlmostEqual(error_high_bias, -1.5, places=1)
+
+    def test_single_line_error_adds_curve_heading_bias_for_shallow_lane(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.single_line_offset_factor = 0.5
+        detector.lookahead = 0.4
+        detector.camera_to_front_axle = 0.0
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+        detector._curve_state = "STRAIGHT"
+        detector._curve_direction = 0
+
+        curve_like_left = np.array([[60, 95, 20, 75]], dtype=np.int32)
+
+        _, heading = detector._compute_single_line_error(
+            curve_like_left, "left", 100, 100, prefer_center=True, physical_projection=True
+        )
+
+        self.assertGreater(heading, 0.1)
+        self.assertTrue(detector._last_single_line_projection_debug["single_line_curve_like"])
+        self.assertGreater(detector._last_single_line_projection_debug["single_line_curve_strength"], 0.0)
+
+
+class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
+    def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        duplicate_mask = AILocalLaneSideMappingTests._mask_from_points(
+            [(62, 95), (60, 85), (58, 75), (56, 65), (54, 55)]
+        )
+        side_candidates = {
+            "left": [
+                {
+                    "mask": duplicate_mask,
+                    "x_center": 58.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "right": [
+                {
+                    "mask": duplicate_mask.copy(),
+                    "x_center": 58.0,
+                    "confidence": 0.94,
+                    "side_source": "explicit_class",
+                }
+            ],
+        }
+
+        side_masks, lane_points, lane_side_points, _, lane_side_sources, lane_mask = engine._build_lane_geometry(
+            side_candidates
+        )
+
+        self.assertIsNone(side_masks["left"])
+        self.assertIsNotNone(side_masks["right"])
+        self.assertEqual(len(lane_points), 1)
+        self.assertEqual(lane_side_points["left"], [])
+        self.assertTrue(lane_side_points["right"])
+        self.assertEqual(lane_side_sources["left"], "none")
+        self.assertEqual(lane_side_sources["right"], "guessed_single")
+        self.assertTrue(np.array_equal(lane_mask, side_masks["right"]))
 
 
 if __name__ == "__main__":

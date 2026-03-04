@@ -789,6 +789,14 @@ Args:
             normalized_lines['left'] = self._coerce_explicit_line(lane_side_lines.get('left', []), img_h, img_w)
             normalized_lines['right'] = self._coerce_explicit_line(lane_side_lines.get('right', []), img_h, img_w)
 
+        self._collapse_duplicate_local_ai_sides(
+            normalized_masks,
+            normalized_lines,
+            lane_side_sources,
+            img_h,
+            img_w,
+        )
+
         left_line = normalized_lines['left']
         right_line = normalized_lines['right']
 
@@ -868,6 +876,84 @@ Args:
                 if xs.size > 0:
                     return float(xs.mean())
         return None
+
+    def _collapse_duplicate_local_ai_sides(self, side_masks, side_lines, lane_side_sources, img_h, img_w):
+        """Collapse duplicate left/right local-AI masks that map to one physical line."""
+        left_mask = side_masks.get('left')
+        right_mask = side_masks.get('right')
+        if not isinstance(left_mask, np.ndarray) or not isinstance(right_mask, np.ndarray):
+            return None
+        if left_mask.size == 0 or right_mask.size == 0:
+            return None
+        if left_mask.shape[:2] != right_mask.shape[:2]:
+            return None
+
+        left_pixels = int(np.count_nonzero(left_mask))
+        right_pixels = int(np.count_nonzero(right_mask))
+        if left_pixels == 0 or right_pixels == 0:
+            return None
+
+        overlap_pixels = int(np.count_nonzero((left_mask > 0) & (right_mask > 0)))
+        overlap_ratio = float(overlap_pixels) / float(min(left_pixels, right_pixels)) if overlap_pixels else 0.0
+
+        sample_rows = [
+            max(0, min(img_h - 1, int(round(img_h * ratio))))
+            for ratio in (0.95, 0.75, 0.6)
+        ]
+        gaps = []
+        for row in sample_rows:
+            left_x = self._mask_x_at_y(left_mask, row, search_radius=6)
+            right_x = self._mask_x_at_y(right_mask, row, search_radius=6)
+            if left_x is not None and right_x is not None:
+                gaps.append(abs(float(right_x) - float(left_x)))
+
+        mean_gap_px = (sum(gaps) / len(gaps)) if gaps else None
+        duplicate_gap_limit = max(6.0, float(img_w) * 0.04)
+        is_duplicate = overlap_ratio >= 0.35
+        if mean_gap_px is not None:
+            is_duplicate = is_duplicate or mean_gap_px <= duplicate_gap_limit
+        if not is_duplicate:
+            return None
+
+        merged_mask = cv2.bitwise_or(left_mask, right_mask)
+        left_source = str(lane_side_sources.get('left', 'none') or 'none')
+        right_source = str(lane_side_sources.get('right', 'none') or 'none')
+
+        keep_side = None
+        keep_source = 'guessed_single'
+        if left_source != 'guessed_single' and right_source == 'guessed_single':
+            keep_side = 'left'
+            keep_source = left_source
+        elif right_source != 'guessed_single' and left_source == 'guessed_single':
+            keep_side = 'right'
+            keep_source = right_source
+
+        if keep_side is None:
+            y_ref = int(max(0, min(img_h - 1, round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))))
+            merged_x = self._mask_x_at_y(merged_mask, y_ref, search_radius=8)
+            if merged_x is None:
+                merged_x = float(img_w) / 2.0
+            keep_side = 'left' if merged_x < (img_w / 2.0) else 'right'
+
+        drop_side = 'right' if keep_side == 'left' else 'left'
+        keep_line = side_lines.get(keep_side)
+        drop_line = side_lines.get(drop_side)
+        if keep_line is None and drop_line is not None:
+            keep_line = drop_line
+
+        side_masks[keep_side] = merged_mask
+        side_masks[drop_side] = None
+        side_lines[keep_side] = keep_line
+        side_lines[drop_side] = None
+        lane_side_sources[keep_side] = keep_source
+        lane_side_sources[drop_side] = 'none'
+
+        return {
+            'kept_side': keep_side,
+            'dropped_side': drop_side,
+            'overlap_ratio': float(overlap_ratio),
+            'mean_gap_px': None if mean_gap_px is None else float(mean_gap_px),
+        }
 
     def _sample_mask_boundary(self, mask, y_rows):
         """Sample a lane mask boundary at the requested rows."""
@@ -1628,22 +1714,22 @@ Args:
 
                 return None, None, height, width, render_lane_mask, debug_info
 
-            # Mask guidance failed (no usable geometry from AI masks).
-            # Do NOT fall back to line fitting — hold the last good steering via
-            # the no-lines path in process_frame (Kalman / last_steering).
-            debug_info['pipeline_label'] = 'AI Local - No Mask Guidance'
-            debug_info['local_ai_status'] = 'mask_failed'
-            debug_info['left_lines'] = []
-            debug_info['right_lines'] = []
-            if mask_side_resolution is not None:
-                debug_info['single_line_side_source'] = (
-                    f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
-                )
-                debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
-                debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
+            # If we do have raw masks but can't extract usable geometry, treat it as
+            # a bad mask frame and hold the previous steering. When there are no masks
+            # at all, fall back to explicit line metadata from the payload.
             if has_any_mask:
+                debug_info['pipeline_label'] = 'AI Local - No Mask Guidance'
+                debug_info['local_ai_status'] = 'mask_failed'
+                debug_info['left_lines'] = []
+                debug_info['right_lines'] = []
+                if mask_side_resolution is not None:
+                    debug_info['single_line_side_source'] = (
+                        f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
+                    )
+                    debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
+                    debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
                 debug_info['render_side_masks'] = render_side_masks
-            return None, None, height, width, empty_mask, debug_info
+                return None, None, height, width, empty_mask, debug_info
 
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
@@ -3215,6 +3301,18 @@ Args:
             fade_span = max(1.0, heading_fade_end_deg - heading_fade_start_deg)
             heading_reliability = (heading_fade_end_deg - abs_heading_deg) / fade_span
         heading_delta = (heading_raw - ref_angle) * heading_reliability
+        ref_abs_heading_deg = abs(math.degrees(ref_angle))
+        curve_bias_start_deg = max(20.0, ref_abs_heading_deg + 8.0)
+        curve_bias_full_deg = max(curve_bias_start_deg + 12.0, ref_abs_heading_deg + 28.0)
+        curve_strength = 0.0
+        curve_heading_bias = 0.0
+        if abs_heading_deg > curve_bias_start_deg:
+            curve_span = max(1.0, curve_bias_full_deg - curve_bias_start_deg)
+            curve_strength = min(1.0, (abs_heading_deg - curve_bias_start_deg) / curve_span)
+            curve_sign = 1.0 if side == 'left' else -1.0
+            curve_heading_bias = curve_sign * math.radians(
+                float(getattr(self, 'single_line_curve_heading_max_deg', 14.0))
+            ) * curve_strength
 
         if physical_projection:
             reference_y = _clamp_reference_y(
@@ -3292,7 +3390,7 @@ Args:
         # Heading from single line (dampened — less reliable than two-line)
         # Remove static perspective bias from single-line heading.
         heading_gain = 0.2 if prefer_center else 0.3
-        heading = heading_delta * heading_gain
+        heading = (heading_delta * heading_gain) + curve_heading_bias
 
         self._last_single_line_projection_debug = {
             'single_line_reference_y': int(reference_y),
@@ -3301,6 +3399,10 @@ Args:
             'single_line_camera_shift_px': float(camera_shift_px),
             'single_line_heading_raw_deg': float(math.degrees(heading_raw)),
             'single_line_heading_reliability': float(heading_reliability),
+            'single_line_angle_from_vertical_deg': float(abs_heading_deg),
+            'single_line_curve_like': bool(curve_strength > 0.0),
+            'single_line_curve_strength': float(curve_strength),
+            'single_line_curve_heading_bias_deg': float(math.degrees(curve_heading_bias)),
             'single_line_outer_curve_line': bool(is_outer_curve_line),
             'single_line_outer_proximity': float(outer_line_proximity),
             'single_line_outer_bias_px': float(outer_line_bias_px),

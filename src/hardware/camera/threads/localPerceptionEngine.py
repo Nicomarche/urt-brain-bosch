@@ -311,6 +311,113 @@ class LocalPerceptionEngine:
             int(round(np.clip(y_top, 0, height - 1))),
         ]]
 
+    def _lane_mask_overlap_ratio(self, mask_a, mask_b):
+        """Return how much two lane masks overlap relative to the smaller mask."""
+        if mask_a is None or mask_b is None:
+            return 0.0
+        if mask_a.shape[:2] != mask_b.shape[:2]:
+            return 0.0
+
+        a = mask_a > 0
+        b = mask_b > 0
+        a_count = int(np.count_nonzero(a))
+        b_count = int(np.count_nonzero(b))
+        if a_count == 0 or b_count == 0:
+            return 0.0
+
+        overlap = int(np.count_nonzero(a & b))
+        if overlap == 0:
+            return 0.0
+        return float(overlap) / float(min(a_count, b_count))
+
+    def _lane_mask_gap_px(self, left_mask, right_mask):
+        """Estimate average horizontal separation between two lane masks."""
+        if left_mask is None or right_mask is None:
+            return None
+        if left_mask.shape[:2] != right_mask.shape[:2]:
+            return None
+
+        height = left_mask.shape[0]
+        sample_rows = [
+            max(0, min(height - 1, int(round(height * ratio))))
+            for ratio in (0.95, 0.75, 0.6)
+        ]
+        gaps = []
+        for row in sample_rows:
+            left_x = self._mask_x_at_y(left_mask, row, search_radius=6)
+            right_x = self._mask_x_at_y(right_mask, row, search_radius=6)
+            if left_x is not None and right_x is not None:
+                gaps.append(abs(float(right_x) - float(left_x)))
+
+        if not gaps:
+            return None
+        return sum(gaps) / len(gaps)
+
+    def _collapse_duplicate_lane_sides(
+        self,
+        side_masks,
+        lane_points,
+        lane_side_points,
+        lane_side_lines,
+        lane_side_sources,
+    ):
+        """Collapse overlapping left/right detections that are really one physical line."""
+        left_mask = side_masks.get("left")
+        right_mask = side_masks.get("right")
+        if left_mask is None or right_mask is None:
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+        if not np.any(left_mask) or not np.any(right_mask):
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        overlap_ratio = self._lane_mask_overlap_ratio(left_mask, right_mask)
+        mean_gap_px = self._lane_mask_gap_px(left_mask, right_mask)
+        duplicate_gap_limit = max(6.0, float(left_mask.shape[1]) * 0.04)
+        is_duplicate = overlap_ratio >= 0.35
+        if mean_gap_px is not None:
+            is_duplicate = is_duplicate or mean_gap_px <= duplicate_gap_limit
+        if not is_duplicate:
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        merged_mask = self._combine_masks([left_mask, right_mask])
+        if merged_mask is None or not np.any(merged_mask):
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        left_source = str(lane_side_sources.get("left", "none") or "none")
+        right_source = str(lane_side_sources.get("right", "none") or "none")
+        keep_side = None
+        keep_source = "guessed_single"
+        if left_source != "guessed_single" and right_source == "guessed_single":
+            keep_side = "left"
+            keep_source = left_source
+        elif right_source != "guessed_single" and left_source == "guessed_single":
+            keep_side = "right"
+            keep_source = right_source
+
+        if keep_side is None:
+            bbox = self._mask_bbox(merged_mask)
+            if bbox is not None:
+                x1, _, x2, _ = bbox
+                merged_center_x = (x1 + x2) / 2.0
+            else:
+                merged_center_x = float(merged_mask.shape[1]) / 2.0
+            keep_side = "left" if merged_center_x < (merged_mask.shape[1] / 2.0) else "right"
+
+        drop_side = "right" if keep_side == "left" else "left"
+        merged_points = self._extract_lane_points(merged_mask)
+        merged_line = self._extract_lane_line(merged_mask)
+
+        side_masks[keep_side] = merged_mask
+        side_masks[drop_side] = None
+        lane_side_points[keep_side] = [[int(point[0]), int(point[1])] for point in merged_points]
+        lane_side_points[drop_side] = []
+        lane_side_lines[keep_side] = merged_line[0] if merged_line is not None else []
+        lane_side_lines[drop_side] = []
+        lane_side_sources[keep_side] = keep_source
+        lane_side_sources[drop_side] = "none"
+
+        lane_points = [merged_points] if merged_points else []
+        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
     def _build_box_payload(self, x1, y1, x2, y2, frame_shape):
         height, width = frame_shape
         return [
@@ -425,6 +532,16 @@ class LocalPerceptionEngine:
             lane_side_lines[side] = line[0] if line is not None else []
             if points:
                 lane_points.append(points)
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources = (
+            self._collapse_duplicate_lane_sides(
+                side_masks,
+                lane_points,
+                lane_side_points,
+                lane_side_lines,
+                lane_side_sources,
+            )
+        )
 
         lane_mask = self._combine_masks([side_masks.get("left"), side_masks.get("right")])
         return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask
