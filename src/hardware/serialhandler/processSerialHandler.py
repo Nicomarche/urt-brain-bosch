@@ -104,17 +104,42 @@ class processSerialHandler(WorkerProcess):
                 # clean up existing connection safely
                 self._safe_close_serial()
 
-                self.serialDevice = next((port.device for port in serial.tools.list_ports.comports() if re.match(r"/dev/ttyACM\d+", port.device)), None)
+                # Match /dev/ttyACM* (Nucleo via USB) or /dev/ttyUSB* (USB-serial adapter)
+                self.serialDevice = next(
+                    (
+                        port.device
+                        for port in serial.tools.list_ports.comports()
+                        if re.match(r"/dev/tty(ACM|USB)\d+", port.device)
+                    ),
+                    None,
+                )
+
+                if self.serialDevice is None:
+                    self.serialConnected = False
+                    return
+
                 self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0.1)
                 self.serialCon.reset_input_buffer()
                 self.serialCon.reset_output_buffer()
                 self.serialConnected = True
                 print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m - Connected to \033[94m{self.serialDevice}\033[0m")
 
-            except (serial.SerialException, FileNotFoundError):
+            except PermissionError as e:
                 self._safe_close_serial()
                 self.serialCon = None
                 self.serialConnected = False
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                    f" - Permission denied on \033[94m{self.serialDevice}\033[0m: {e}"
+                    f"\n  → Run: \033[1msudo usermod -a -G dialout $USER\033[0m then logout/login"
+                    f"\n  → Or run the program with: \033[1msudo ./run.sh\033[0m"
+                )
+            except (serial.SerialException, FileNotFoundError, OSError) as e:
+                self._safe_close_serial()
+                self.serialCon = None
+                self.serialConnected = False
+                if self.debugging:
+                    print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Serial connect failed: {e}")
 
     def _try_reconnect(self):
         """Try to reconnect to serial device (called by timer)."""

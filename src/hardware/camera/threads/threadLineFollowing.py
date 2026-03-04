@@ -466,7 +466,7 @@ Args:
         self._auto_threshold_val = self.binary_threshold  # Valor suavizado inicial
 
         # Detection mode parameters
-        self.detection_mode = DetectionMode.OPENCV.value  # "opencv", "lstr", or "hybrid"
+        self.detection_mode = DetectionMode.AI_LOCAL.value # "opencv", "lstr", or "hybrid"
         self.lstr_model_size = 0  # 0=180x320, 1=240x320, 2=360x640, 3=480x640, 4=720x1280
         self.lstr_detector = None
         self.lstr_fallback_threshold = 0.01  # Switch to LSTR if detection < 1% of pixels
@@ -930,7 +930,7 @@ Args:
         return {
             'midpoint_x': float(midpoint_x),
             'midpoint_bottom_x': float(midpoint_bottom_x),
-            'error_px': float(midpoint_x - (img_w / 2.0)),
+            'error_px': float(midpoint_bottom_x - (img_w / 2.0)),
             'heading_rad': float(heading_rad),
             'left_x': float(left_ref_x),
             'right_x': float(right_ref_x),
@@ -1450,18 +1450,28 @@ Args:
 
         side_masks = payload.get('side_masks')
         lane_mask_payload = payload.get('lane_mask')
+
+        def _collect_render_masks(s_masks, h, w):
+            """Build {left, right} dict of 2-D uint8 masks for rendering."""
+            result = {'left': None, 'right': None}
+            if not isinstance(s_masks, dict):
+                return result
+            for side in ('left', 'right'):
+                m = s_masks.get(side)
+                if not isinstance(m, np.ndarray) or m.size == 0:
+                    continue
+                m2d = m if m.ndim == 2 else m[..., 0]
+                if m2d.ndim == 2 and m2d.shape[:2] == (h, w) and np.any(m2d):
+                    result[side] = m2d
+            return result
+
         if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
             local_mask_guidance = self._build_local_mask_guidance(side_masks, height, width)
-            if local_mask_guidance is not None:
-                render_side_masks = {'left': None, 'right': None}
-                if isinstance(side_masks, dict):
-                    for side in ('left', 'right'):
-                        mask = side_masks.get(side)
-                        if isinstance(mask, np.ndarray) and mask.size > 0:
-                            mask_2d = mask if mask.ndim == 2 else mask[..., 0]
-                            if mask_2d.ndim == 2 and mask_2d.shape[:2] == (height, width) and np.any(mask_2d):
-                                render_side_masks[side] = mask_2d
 
+            render_side_masks = _collect_render_masks(side_masks, height, width)
+            has_any_mask = any(v is not None for v in render_side_masks.values())
+
+            if local_mask_guidance is not None:
                 render_lane_mask = empty_mask
                 if isinstance(lane_mask_payload, np.ndarray) and lane_mask_payload.size > 0:
                     lane_mask_2d = lane_mask_payload if lane_mask_payload.ndim == 2 else lane_mask_payload[..., 0]
@@ -1490,6 +1500,17 @@ Args:
                 debug_info['right_lines'] = []
 
                 return None, None, height, width, render_lane_mask, debug_info
+
+            # Mask guidance failed (no usable geometry from AI masks).
+            # Do NOT fall back to line fitting — hold the last good steering via
+            # the no-lines path in process_frame (Kalman / last_steering).
+            debug_info['pipeline_label'] = 'AI Local - No Mask Guidance'
+            debug_info['local_ai_status'] = 'mask_failed'
+            debug_info['left_lines'] = []
+            debug_info['right_lines'] = []
+            if has_any_mask:
+                debug_info['render_side_masks'] = render_side_masks
+            return None, None, height, width, empty_mask, debug_info
 
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
@@ -3430,6 +3451,9 @@ Args:
             for side in ('left', 'right')
         )
 
+        is_ai_local_mode = debug_info.get('control_mode') == 'mask_guidance' or \
+            'AI Local' in str(debug_info.get('pipeline_label', ''))
+
         if using_raw_mask:
             mask_overlay = np.zeros_like(debug)
             left_mask = render_side_masks.get('left')
@@ -3440,12 +3464,10 @@ Args:
                 mask_overlay[right_mask > 0] = (0, 200, 255)
             if np.any(mask_overlay):
                 debug = cv2.addWeighted(debug, 1.0, mask_overlay, 0.35, 0)
-        else:
-            # Draw averaged left line (red, extended)
+        elif not is_ai_local_mode:
+            # Red lines: only in OpenCV/BFMC mode, never in AI_LOCAL mask mode
             if avg_left is not None:
                 self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2, top_y=roi_top)
-
-            # Draw averaged right line (red, extended)
             if avg_right is not None:
                 self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2, top_y=roi_top)
 
@@ -5150,13 +5172,13 @@ Returns:
             error = float(local_mask_guidance.get('error_px', 0.0) or 0.0)
             heading = float(local_mask_guidance.get('heading_rad', 0.0) or 0.0)
             self._heading_error = heading
-            midpoint_x = int(round(local_mask_guidance.get('midpoint_x', img_w / 2.0)))
+            midpoint_x = int(round(local_mask_guidance.get('midpoint_bottom_x', img_w / 2.0)))
             midpoint_x = max(0, min(img_w - 1, midpoint_x))
             bottom_left_x = int(round(local_mask_guidance.get('bottom_left_x', 0.0) or 0.0))
             bottom_right_x = int(round(local_mask_guidance.get('bottom_right_x', img_w - 1) or (img_w - 1)))
             bottom_left_x = max(0, min(img_w - 1, bottom_left_x))
             bottom_right_x = max(0, min(img_w - 1, bottom_right_x))
-            debug_info['midpoint_draw_y'] = int(local_mask_guidance.get('reference_y', img_h - 1))
+            debug_info['midpoint_draw_y'] = int(local_mask_guidance.get('bottom_y', img_h - 1))
             self._swept_path_info = None
             self.just_seen_two_lines = False
 

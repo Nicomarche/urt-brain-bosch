@@ -45,7 +45,7 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
   
   public isMobile: boolean = false;
 
-  public enableButton : Boolean = false;
+  public enableButton : Boolean = true;
   public serialConnected: Boolean = true;  // Track serial connection status
   private enableButtonSubscription: Subscription | undefined;
 
@@ -87,25 +87,11 @@ export class KlSwitchComponent implements OnInit, OnDestroy {
     });
   }
 
-  // Prevent interaction when serial is disconnected without changing visual styles
-  blockIfDisconnected(event: Event) {
-    if (!this.serialConnected) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
+  blockIfDisconnected(_event: Event) {
+    // Serial state is informational only; hardware blocks at the serial/threadWrite level
   }
 
   setState(index: number) {
-    // Don't allow KL changes if serial is disconnected
-    if (!this.serialConnected) {
-      console.warn('KL Switch: Cannot change KL state - serial connection is lost');
-      return;
-    }
-
-    if (!this.enableButton) {
-      console.warn('KL Switch: Cannot change KL state - backend controls are not ready');
-      return;
-    }
 
     if (this.currentState == '30' && this.currentState != this.states[index]) {
     }

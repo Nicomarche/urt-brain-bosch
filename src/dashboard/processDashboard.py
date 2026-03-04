@@ -46,8 +46,10 @@ from enum import Enum
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.templates.workerprocess import WorkerProcess
-from src.utils.messages.allMessages import Semaphores
+from src.utils.messages.allMessages import Semaphores, StateChange
 from src.statemachine.stateMachine import StateMachine
+from src.statemachine.transitionTable import TransitionTable
+from src.statemachine.systemMode import SystemMode
 from src.dashboard.components.calibration import Calibration
 from src.dashboard.components.ip_manger import IpManager
 
@@ -76,6 +78,13 @@ class processDashboard(WorkerProcess):
 
         # state machine
         self.stateMachine = StateMachine.get_instance()
+
+        # direct StateChange sender: bypasses the Manager proxy (which breaks under
+        # eventlet monkey-patching).  Used as primary path for driving mode changes.
+        self.stateChangeSender = messageHandlerSender(queueList, StateChange)
+
+        # local state tracker so we can validate transitions without the Manager
+        self._current_mode = SystemMode.DEFAULT
 
         # message handling
         self.messages = {}
@@ -117,7 +126,8 @@ class processDashboard(WorkerProcess):
         # initialize message handling
         self._initialize_messages()
         self._setup_websocket_handlers()
-        self._start_background_tasks()
+        # NOTE: _start_background_tasks() is called from run() (after fork),
+        # NOT here, to avoid green-thread/eventlet issues across fork boundaries.
 
         super(processDashboard, self).__init__(self.queueList, ready_event)
     
@@ -146,14 +156,18 @@ class processDashboard(WorkerProcess):
     
     
     def _start_background_tasks(self):
-        """Start background monitoring tasks."""
-        psutil.cpu_percent(interval=1, percpu=False) # warm up
+        """Start background monitoring tasks inside the child process.
 
-        eventlet.spawn(self.update_hardware_data)
-        eventlet.spawn(self.send_continuous_messages)
-        eventlet.spawn(self.send_hardware_data_to_frontend)
-        eventlet.spawn(self.send_heartbeat)
-        eventlet.spawn(self.stream_console_logs)
+        Must be called from run() (after fork) using socketio.start_background_task()
+        so the green threads belong to the correct eventlet hub.
+        """
+        psutil.cpu_percent(interval=1, percpu=False)  # warm up
+
+        self.socketio.start_background_task(self.update_hardware_data)
+        self.socketio.start_background_task(self.send_continuous_messages)
+        self.socketio.start_background_task(self.send_hardware_data_to_frontend)
+        self.socketio.start_background_task(self.send_heartbeat)
+        self.socketio.start_background_task(self.stream_console_logs)
 
     def stream_console_logs(self):
         """Monitor the Log queue and emit messages to frontend."""
@@ -187,6 +201,18 @@ class processDashboard(WorkerProcess):
     # ===================================== RUN ==========================================
     def run(self):
         """Apply the initializing method."""
+        # Register connect handler: enables the KL-switch button on the frontend as
+        # soon as any client connects.
+        @self.socketio.on('connect')
+        def on_client_connect():
+            self.socketio.emit('EnableButton', {'value': True})
+            if self.debugging:
+                self.logger.info("Client connected — EnableButton sent")
+
+        # Start background tasks here (in the child process, after fork) so that
+        # the eventlet green threads belong to the correct hub.
+        self._start_background_tasks()
+
         if self.ready_event:
             self.ready_event.set()
 
@@ -226,6 +252,7 @@ class processDashboard(WorkerProcess):
         if self.debugging:
             self.logger.info("Received message: " + str(data))
 
+        socketId = None
         try:
             dataDict = json.loads(data)
             dataName = dataDict["Name"]
@@ -249,11 +276,25 @@ class processDashboard(WorkerProcess):
                 self.handle_get_current_serial_connection_state(socketId)
             else:
                 self.send_message_to_brain(dataName, dataDict)
+                # When the kl-switch component loads it sends Klem="0" before it
+                # subscribes to EnableButton — reply immediately so the toggle
+                # unlocks as soon as the subscription is set up.
+                if dataName == "Klem":
+                    self.socketio.emit('EnableButton', {'value': True}, room=socketId)
 
             self.socketio.emit('response', {'data': 'Message received: ' + str(data)}, room=socketId) # type: ignore
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to parse JSON message: {e}")
-            self.socketio.emit('response', {'error': 'Invalid JSON format'}, room=socketId) # type: ignore
+            if socketId:
+                self.socketio.emit('response', {'error': 'Invalid JSON format'}, room=socketId) # type: ignore
+        except Exception as e:
+            import traceback
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;91mERROR\033[0m"
+                f" - Unhandled exception in handle_message: {e}\n{traceback.format_exc()}"
+            )
+            if socketId:
+                self.socketio.emit('response', {'error': str(e)}, room=socketId) # type: ignore
 
 
     def handle_heartbeat(self):
@@ -264,8 +305,51 @@ class processDashboard(WorkerProcess):
 
 
     def handle_driving_mode(self, dataDict):
-        """Handle driving mode change."""
-        self.stateMachine.request_mode(f"dashboard_{dataDict['Value']}_button")
+        """Handle driving mode change.
+
+        Uses a direct StateChange sender as primary path to avoid the
+        multiprocessing.Manager proxy that breaks under eventlet monkey-patching.
+        Falls back to the Manager-based StateMachine only if the direct path fails.
+        """
+        requested_value = dataDict.get('Value', '').lower()
+        action = f"dashboard_{requested_value}_button"
+
+        # Validate transition locally (no Manager proxy needed)
+        transition = TransitionTable.get_next_mode(self._current_mode, action)
+        if not transition['transition_valid']:
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m"
+                f" - Invalid transition from \033[1;94m{self._current_mode.name}\033[0m"
+                f" with action \033[1;94m{action}\033[0m"
+            )
+            return
+
+        next_mode = transition['next_mode']
+
+        # Self-transition: nothing to do
+        if next_mode == self._current_mode:
+            return
+
+        self._current_mode = next_mode
+        mode_name = next_mode.name
+
+        # Send via direct queue (works even when Manager proxy is broken)
+        try:
+            self.stateChangeSender.send(mode_name)
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m"
+                f" - Mode \033[1;94m{mode_name}\033[0m sent to brain"
+            )
+            # Also update the Manager-based shared state so other processes stay in sync
+            try:
+                self.stateMachine._shared_state['mode'] = next_mode
+            except Exception:
+                pass  # Manager proxy optional; local state is the source of truth
+        except Exception as e:
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;91mERROR\033[0m"
+                f" - Failed to send StateChange: {e}"
+            )
 
 
     def handle_calibration(self, dataDict, socketId):
@@ -385,6 +469,12 @@ class processDashboard(WorkerProcess):
             if resp is not None:
                 if msg == "SerialConnectionState":
                     self.serialConnected = resp
+                elif msg == "StateChange":
+                    # Keep local mode tracker in sync with whatever the brain reports
+                    try:
+                        self._current_mode = SystemMode[resp]
+                    except (KeyError, Exception):
+                        pass
 
                 self.socketio.emit(msg, {"value": resp})
                 if self.debugging:
@@ -405,5 +495,9 @@ class processDashboard(WorkerProcess):
                 'temp': self.cpuTemperature
             }
         })
+        # Re-broadcast EnableButton every second so every client gets it even if
+        # the initial connect-event emit arrived before the Angular component
+        # subscribed its observable.
+        self.socketio.emit('EnableButton', {'value': True})
 
         eventlet.spawn_after(1.0, self.send_hardware_data_to_frontend)
