@@ -125,6 +125,43 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertTrue(guidance["used_virtual_boundary"])
         self.assertAlmostEqual(guidance["right_x"] - guidance["left_x"], 36.0, delta=1.5)
 
+    def test_build_local_mask_guidance_clamps_single_side_error_to_lane_window(self):
+        self.detector._last_local_ai_lane_width_px = 36.0
+        left_mask = self._mask_from_points([(4, 95), (4, 85), (4, 75), (4, 65), (4, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": None},
+            100,
+            100,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["guidance_mode"], "midpoint")
+        self.assertIsNotNone(guidance["single_side_error_limit_px"])
+        self.assertLess(guidance["raw_error_px"], -guidance["single_side_error_limit_px"])
+        self.assertAlmostEqual(
+            abs(guidance["error_px"]),
+            guidance["single_side_error_limit_px"],
+            delta=0.1,
+        )
+
+    def test_build_local_mask_guidance_rejects_implausibly_narrow_two_line_width(self):
+        self.detector._last_local_ai_lane_width_px = 90.0
+        left_mask = self._mask_from_points([(40, 95), (40, 85), (40, 75), (40, 65), (40, 55)])
+        right_mask = self._mask_from_points([(60, 95), (60, 85), (60, 75), (60, 65), (60, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            100,
+        )
+
+        self.assertIsNone(guidance)
+        self.assertEqual(
+            self.detector._last_local_ai_mask_reject_reason,
+            "lane_width_too_small(20.0<40.5)",
+        )
+
     def test_detect_with_local_ai_prefers_raw_masks_when_enabled(self):
         left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
         right_mask = self._mask_from_points([(70, 95), (71, 85), (72, 75), (74, 65), (76, 55)])
@@ -541,6 +578,38 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertIn("FRAME 0001", first_log)
         self.assertIn("AUTO RUN RESET", second_log)
         self.assertNotIn("FRAME 0001", second_log)
+
+    def test_curve_recovery_can_trigger_in_ai_local_single_side_context(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.use_curve_recovery = True
+        detector.detection_mode = "ai_local"
+        detector.last_seen_side = "left"
+        detector._curve_state = "STRAIGHT"
+        detector._curve_direction = 0
+        detector._noise_reject_count = 0
+        detector._recovery_state = "NONE"
+        detector._recovery_start_time = 0.0
+        detector._recovery_actual_rev_time = 0.0
+        detector._recovery_reverse_steer_angle = 0.0
+        detector._recovery_curve_sign = 0
+        detector._max_steer_consecutive = 2
+        detector._error_at_max_steer_start = 100.0
+        detector._last_good_error = 100.0
+        detector.max_steering = 25.0
+        detector.max_error_px = 40.0
+        detector.recovery_max_steer_frames = 3
+        detector.recovery_reverse_time_min = 0.3
+        detector.recovery_reverse_time_max = 1.5
+        detector.recovery_reverse_steer_scale = 1.5
+        detector.recovery_error_shrink_ratio = 0.85
+
+        steer, speed, active = detector._check_curve_recovery(-25.0, 10.0, None)
+
+        self.assertTrue(active)
+        self.assertEqual(steer, 0)
+        self.assertEqual(speed, 0)
+        self.assertEqual(detector._recovery_state, "STOPPING")
+        self.assertEqual(detector._recovery_curve_sign, -1)
 
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):

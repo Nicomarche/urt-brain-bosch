@@ -1166,6 +1166,7 @@ Args:
 
     def _build_local_mask_guidance(self, side_masks, img_h, img_w, side_lines=None):
         """Build direct steering guidance from the raw local-AI lane masks."""
+        self._last_local_ai_mask_reject_reason = None
         if not isinstance(side_masks, dict):
             return None
 
@@ -1249,6 +1250,17 @@ Args:
             else:
                 lane_width_px = float(img_w) * 0.45
 
+        if len(detected_sides) >= 2 and width_samples:
+            cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+            min_lane_width_px = max(10.0, float(img_w) * 0.10)
+            if cached_lane_width > 1.0:
+                min_lane_width_px = max(min_lane_width_px, cached_lane_width * 0.45)
+            if float(lane_width_px) < min_lane_width_px:
+                self._last_local_ai_mask_reject_reason = (
+                    f"lane_width_too_small({float(lane_width_px):.1f}<{min_lane_width_px:.1f})"
+                )
+                return None
+
         used_virtual_boundary = False
         if len(detected_sides) == 1:
             missing_side = 'right' if visible_side == 'left' else 'left'
@@ -1277,6 +1289,7 @@ Args:
         dy = max(1.0, float(roi_bottom - reference_y))
         heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
         error_px = midpoint_bottom_x - (img_w / 2.0)
+        raw_error_px = float(error_px)
         draw_y = roi_bottom
         guidance_mode = 'midpoint'
         single_line_projection_debug = None
@@ -1297,9 +1310,19 @@ Args:
             midpoint_x = desired_center
             heading_rad = float(single_heading)
             error_px = float(single_error)
+            raw_error_px = float(single_error)
             draw_y = int(single_line_projection_debug.get('single_line_reference_y', reference_y))
             draw_y = max(0, min(img_h - 1, draw_y))
             guidance_mode = 'single_line_physical'
+
+        single_side_error_limit_px = None
+        if len(detected_sides) == 1:
+            limit_factor = 0.85 if guidance_mode == 'single_line_physical' else 0.60
+            single_side_error_limit_px = max(8.0, float(lane_width_px) * limit_factor)
+            error_px = max(
+                -single_side_error_limit_px,
+                min(single_side_error_limit_px, float(error_px))
+            )
 
         if len(detected_sides) == 2:
             mask_label = 'BOTH'
@@ -1312,6 +1335,10 @@ Args:
             'midpoint_x': float(midpoint_x),
             'midpoint_bottom_x': float(midpoint_bottom_x),
             'error_px': float(error_px),
+            'raw_error_px': float(raw_error_px),
+            'single_side_error_limit_px': (
+                float(single_side_error_limit_px) if single_side_error_limit_px is not None else None
+            ),
             'heading_rad': float(heading_rad),
             'left_x': float(left_ref_x),
             'right_x': float(right_ref_x),
@@ -1929,6 +1956,9 @@ Args:
             if has_any_mask:
                 debug_info['pipeline_label'] = 'AI Local - No Mask Guidance'
                 debug_info['local_ai_status'] = 'mask_failed'
+                reject_reason = getattr(self, '_last_local_ai_mask_reject_reason', None)
+                if reject_reason:
+                    debug_info['mask_reject_reason'] = reject_reason
                 debug_info['left_lines'] = []
                 debug_info['right_lines'] = []
                 if mask_side_resolution is not None:
@@ -3186,8 +3216,14 @@ Args:
             return 0, 0, True
 
         # === DETECT IF RECOVERY IS NEEDED ===
-        # Guard 1: Only consider recovery when in a curve, never on straights
-        if self._curve_state not in ("ENTERING", "IN_CURVE"):
+        # Guard 1: Prefer recovery in confirmed curves. In AI_LOCAL, a sustained
+        # single-side track is also enough evidence that the car is in a turn or
+        # already off the intended line, even if the legacy curve FSM is idle.
+        in_curve_context = self._curve_state in ("ENTERING", "IN_CURVE")
+        if not in_curve_context and self._is_ai_local_active():
+            in_curve_context = getattr(self, 'last_seen_side', None) in ("left", "right")
+
+        if not in_curve_context:
             self._max_steer_consecutive = 0
             self._error_at_max_steer_start = 0.0
             return steering_angle, speed, False
@@ -6207,37 +6243,49 @@ Returns:
                     # Good frame - update reference
                     self._accept_frame(error, steering_angle, num_lines)
 
+        recovery_active = False
+        if steering_angle is not None or self._recovery_state != "NONE":
+            steering_angle, speed, recovery_active = self._check_curve_recovery(
+                steering_angle, speed, frame
+            )
+        if recovery_active:
+            debug_info['control_override'] = 'curve_recovery'
+        debug_info['recovery_state'] = self._recovery_state
+
         # Update state
         if steering_angle is not None:
-            self.last_steering = steering_angle
-            self._last_steering_angle = steering_angle  # For hybrid curve system
-
-            # Update turn direction
-            if abs(steering_angle) > 8:
-                self.last_turn_direction = 1 if steering_angle > 0 else -1
-
-            # Progressive speed: linearly map steering magnitude to speed range.
-            # steer=0° → max speed, steer=max° → min speed (no hard steps).
-            eff_max, eff_min = self._get_effective_speeds()
-            abs_steer = abs(steering_angle)
-            steer_ratio = min(abs_steer / self.max_steering, 1.0)
-            target_speed = eff_max - steer_ratio * (eff_max - eff_min)
-
-            # Speed ramping: instant decrease, gradual increase
-            if target_speed <= self._current_speed:
-                self._current_speed = target_speed
+            if recovery_active:
+                self._last_steering_angle = steering_angle
             else:
-                self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
-            speed = self._current_speed
+                self.last_steering = steering_angle
+                self._last_steering_angle = steering_angle  # For hybrid curve system
 
-            # Stanley already scales the crosstrack term by speed, so applying an
-            # extra attenuation here weakens correction twice and deviates from
-            # the Hoffmann control law. Keep the attenuation only for PID mode.
-            if not self._should_use_stanley_controller():
-                speed_ratio = speed / eff_max
-                steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
-                steering_angle *= steer_attenuation
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                # Update turn direction
+                if abs(steering_angle) > 8:
+                    self.last_turn_direction = 1 if steering_angle > 0 else -1
+
+                # Progressive speed: linearly map steering magnitude to speed range.
+                # steer=0° → max speed, steer=max° → min speed (no hard steps).
+                eff_max, eff_min = self._get_effective_speeds()
+                abs_steer = abs(steering_angle)
+                steer_ratio = min(abs_steer / self.max_steering, 1.0)
+                target_speed = eff_max - steer_ratio * (eff_max - eff_min)
+
+                # Speed ramping: instant decrease, gradual increase
+                if target_speed <= self._current_speed:
+                    self._current_speed = target_speed
+                else:
+                    self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
+                speed = self._current_speed
+
+                # Stanley already scales the crosstrack term by speed, so applying an
+                # extra attenuation here weakens correction twice and deviates from
+                # the Hoffmann control law. Keep the attenuation only for PID mode.
+                if not self._should_use_stanley_controller():
+                    speed_ratio = speed / eff_max
+                    steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
+                    steering_angle *= steer_attenuation
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
 
         if self.show_debug and steering_angle is not None:
             if isinstance(local_mask_guidance, dict):
@@ -6285,6 +6333,8 @@ Returns:
             "steering_deg": steering_angle,
             "speed": speed,
             "kalman_prediction_used": bool(kalman_prediction_used),
+            "recovery_active": bool(recovery_active),
+            "recovery_state": self._recovery_state,
             "avg_left_line": avg_left[0].tolist() if avg_left is not None else None,
             "avg_right_line": avg_right[0].tolist() if avg_right is not None else None,
             "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
