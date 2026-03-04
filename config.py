@@ -16,9 +16,9 @@ USB_RESOLUTION = (640, 480)  # (ancho, alto)
 # Configuracion Jetson CSI (solo aplica si CAMERA_TYPE = "jetson")
 # Equivale al pipeline probado con `gst-launch-1.0 nvarguscamerasrc ...`.
 JETSON_SENSOR_ID = 0         # CAM0=0, CAM1=1
-JETSON_CAPTURE_RESOLUTION = (1920, 1080)  # Resolucion nativa del sensor
-JETSON_OUTPUT_RESOLUTION = (960, 720)     # Resolucion final entregada a OpenCV
-JETSON_FRAMERATE = 30
+JETSON_CAPTURE_RESOLUTION = (1280, 720)   # IMX219: 1280x720 solo soporta 60fps
+JETSON_OUTPUT_RESOLUTION = (640, 480)     # Resolucion final entregada a OpenCV
+JETSON_FRAMERATE = 60
 JETSON_FLIP_METHOD = 2       # 2 = rotacion 180° (imagen invertida). 0 = sin flip
 
 # HDR por fusion de exposiciones (Mertens) para PiCamera.

@@ -450,7 +450,7 @@ class threadCamera(ThreadWithStop):
         return (
             f"nvarguscamerasrc sensor-id={self.jetson_sensor_id} ! "
             f"video/x-raw(memory:NVMM), width=(int){cap_w}, height=(int){cap_h}, "
-            f"framerate=(fraction){self.jetson_framerate}/1, format=(string)NV12 ! "
+            f"framerate=(fraction){self.jetson_framerate}/1 ! "
             f"nvvidconv flip-method={self.jetson_flip_method} ! "
             f"video/x-raw, width=(int){out_w}, height=(int){out_h}, format=(string)BGRx ! "
             "videoconvert ! "
