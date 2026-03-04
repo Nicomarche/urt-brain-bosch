@@ -98,9 +98,9 @@ class threadWrite(ThreadWithStop):
         self.last_error_time = None
         self.error_cooldown = timedelta(seconds=3)
 
-        self.load_config("init")
-        self._init_subscribers()
         self._init_senders()
+        self._init_subscribers()
+        self.load_config("init")
 
         if example:
             self.i = 0.0

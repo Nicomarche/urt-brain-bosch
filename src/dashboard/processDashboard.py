@@ -425,6 +425,31 @@ class processDashboard(WorkerProcess):
             self.logger.error(f"Failed to load table state: {e}")
             self.socketio.emit('response', {'error': 'Failed to load table state'})
 
+    def _make_json_safe(self, value):
+        """Convert nested values to Socket.IO/JSON-safe primitives."""
+        if isinstance(value, dict):
+            return {str(key): self._make_json_safe(item) for key, item in value.items()}
+
+        if isinstance(value, (list, tuple, set)):
+            return [self._make_json_safe(item) for item in value]
+
+        if hasattr(value, "tolist"):
+            try:
+                return self._make_json_safe(value.tolist())
+            except Exception:
+                pass
+
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except Exception:
+                pass
+
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+
+        return str(value)
+
 
     def update_hardware_data(self):
         """Monitor and update hardware metrics periodically."""
@@ -470,8 +495,11 @@ class processDashboard(WorkerProcess):
             return
 
         for msg, subscriber in self.messages.items():
-            resp = subscriber["obj"].receive()
-            if resp is not None:
+            try:
+                resp = subscriber["obj"].receive()
+                if resp is None:
+                    continue
+
                 if msg == "SerialConnectionState":
                     self.serialConnected = resp
                 elif msg == "StateChange":
@@ -481,9 +509,15 @@ class processDashboard(WorkerProcess):
                     except (KeyError, Exception):
                         pass
 
-                self.socketio.emit(msg, {"value": resp})
+                safe_resp = self._make_json_safe(resp)
+                self.socketio.emit(msg, {"value": safe_resp})
                 if self.debugging:
-                    self.logger.info(f"{msg}: {resp}")
+                    self.logger.info(f"{msg}: {safe_resp}")
+            except Exception as e:
+                print(
+                    f"\033[1;97m[ Dashboard ] :\033[0m \033[1;91mERROR\033[0m"
+                    f" - Failed to forward \033[94m{msg}\033[0m ({e})"
+                )
 
         eventlet.spawn_after(0.15, self.send_continuous_messages)  # 150ms (~7Hz) — balance entre CPU y fluidez del stream
 
