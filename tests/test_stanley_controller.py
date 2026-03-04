@@ -42,6 +42,40 @@ class StanleyControllerTests(unittest.TestCase):
         expected = math.degrees(0.2 - 0.1 + 0.5 * 0.04)
         self.assertAlmostEqual(result, expected, places=4)
 
+    def test_applies_deadbands_to_avoid_micro_corrections(self):
+        controller = StanleyController(
+            k=0.2,
+            k_soft=1.0,
+            max_steering=25,
+            crosstrack_deadband_px=5.0,
+            heading_deadband_rad=math.radians(2.0),
+            output_deadband_deg=1.0,
+        )
+
+        result = controller.compute(
+            crosstrack_error=3.0,
+            heading_error=math.radians(1.0),
+            speed=10.0,
+        )
+
+        self.assertEqual(result, 0.0)
+
+    def test_output_deadband_does_not_cancel_meaningful_commands(self):
+        controller = StanleyController(
+            k=0.2,
+            k_soft=1.0,
+            max_steering=25,
+            output_deadband_deg=1.0,
+        )
+
+        result = controller.compute(
+            crosstrack_error=40.0,
+            heading_error=0.0,
+            speed=10.0,
+        )
+
+        self.assertGreater(result, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

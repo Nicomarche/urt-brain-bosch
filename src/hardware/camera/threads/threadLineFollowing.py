@@ -159,14 +159,37 @@ class StanleyController:
         k_d_steer: Steering servo damping gain. Applies lead-like damping based
                    on measured steering motion.
         max_steering: Maximum output angle in degrees (physical limit).
+        crosstrack_deadband: Ignore very small lateral errors in the same units
+            as `crosstrack_error` (meters in physical mode).
+        crosstrack_deadband_px: Legacy alias for crosstrack_deadband.
+        heading_deadband_rad: Ignore tiny heading offsets around zero.
+        output_deadband_deg: Zero tiny output commands to avoid servo chatter.
     """
 
-    def __init__(self, k=0.06, k_soft=1.0, k_d_yaw=0.0, k_d_steer=0.0, max_steering=25):
+    def __init__(
+        self,
+        k=0.06,
+        k_soft=1.0,
+        k_d_yaw=0.0,
+        k_d_steer=0.0,
+        max_steering=25,
+        crosstrack_deadband=0.0,
+        crosstrack_deadband_px=None,
+        heading_deadband_rad=0.0,
+        output_deadband_deg=0.0,
+    ):
         self.k = k
         self.k_soft = k_soft
         self.k_d_yaw = k_d_yaw
         self.k_d_steer = k_d_steer
         self.max_steering = max_steering
+        if crosstrack_deadband_px is not None:
+            crosstrack_deadband = crosstrack_deadband_px
+        self.crosstrack_deadband = max(0.0, float(crosstrack_deadband))
+        # Legacy alias preserved for backward compatibility with older callers/tests.
+        self.crosstrack_deadband_px = self.crosstrack_deadband
+        self.heading_deadband_rad = max(0.0, float(heading_deadband_rad))
+        self.output_deadband_deg = max(0.0, float(output_deadband_deg))
         self._prev_heading = 0.0
 
     def compute(self, crosstrack_error, heading_error, speed,
@@ -190,7 +213,14 @@ class StanleyController:
         Returns:
             float: Steering angle in degrees, clamped to ±max_steering.
         """
-        heading_term = heading_error - steady_state_heading
+        crosstrack_error = float(crosstrack_error)
+        if abs(crosstrack_error) < self.crosstrack_deadband:
+            crosstrack_error = 0.0
+
+        heading_term = float(heading_error) - float(steady_state_heading)
+        if abs(heading_term) < self.heading_deadband_rad:
+            heading_term = 0.0
+
         speed_denom = max(self.k_soft + abs(float(speed)), 1e-3)
         crosstrack_term = math.atan2(self.k * crosstrack_error, speed_denom)
         yaw_damping = self.k_d_yaw * (yaw_rate - traj_yaw_rate)
@@ -198,6 +228,8 @@ class StanleyController:
 
         delta_rad = heading_term + crosstrack_term + yaw_damping + steer_damping
         delta_deg = math.degrees(delta_rad)
+        if abs(delta_deg) < self.output_deadband_deg:
+            delta_deg = 0.0
         delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
 
         self._prev_heading = heading_error
@@ -272,7 +304,7 @@ Args:
         self.previous_error = 0  # Keep for compatibility
 
         # Feed-forward curve prediction parameters
-        self.wheelbase = 0.265       # Distance between axles in meters (BFMC 1:10 car ~26.5cm)
+        self.wheelbase = 0.260       # Distance between axles in meters (TC-04: 260mm)
         self.ff_weight = 0.6         # Weight of feed-forward vs PID (0=pure PID, 1=pure FF)
         self.curvature_threshold = 0.5  # Min curvature to activate feed-forward (1/pixels)
 
@@ -282,20 +314,34 @@ Args:
         #   Low speed  → aggressive correction (tight curves)
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
-        self.stanley_k = 0.06           # Crosstrack gain (higher = faster convergence)
-        self.stanley_k_soft = 1.0       # Minimum speed floor; keep low to match the paper
+        self.stanley_k = 2.2            # Crosstrack gain [1/s] in physical Stanley form
+        self.stanley_k_soft = 1.0       # Low-speed softening term [m/s]
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
         self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
         self.stanley_k_ag = 0.08        # ψ_ss gain for curved steady-state tracking
-        self.stanley_speed_to_mps = 0.10  # Convert internal speed units to m/s for curve dynamics
+        # Speed scale for command speed units (controller speed variable) to m/s.
+        # Controller speed uses cm/s internally, so 1 cm/s = 0.01 m/s.
+        self.stanley_speed_to_mps = 0.01
+        # Nucleo CurrentSpeed is sent in x10 cm/s (same as speed_x10 command feedback):
+        # 1 unit => 0.1 cm/s => 0.001 m/s.
+        self.stanley_measured_speed_to_mps = 0.001
+        self.stanley_use_measured_speed = True
+        self.stanley_measured_speed_timeout = 0.4
         self.stanley_curve_min_confidence = 0.35  # Ignore weak curve estimates for ψ_ss / r_traj
         self.stanley_psi_ss_max_deg = 12.0  # Safety cap for steady-state heading bias
+        self.stanley_deadband_crosstrack_m = 0.01
+        self.stanley_deadband_crosstrack_px = 4.0
+        self.stanley_deadband_heading_deg = 1.0
+        self.stanley_deadband_output_deg = 1.2
         self.stanley = StanleyController(
             k=self.stanley_k,
             k_soft=self.stanley_k_soft,
             k_d_yaw=self.stanley_k_d_yaw,
             k_d_steer=self.stanley_k_d_steer,
-            max_steering=self.max_steering
+            max_steering=self.max_steering,
+            crosstrack_deadband=self.stanley_deadband_crosstrack_m,
+            heading_deadband_rad=math.radians(self.stanley_deadband_heading_deg),
+            output_deadband_deg=self.stanley_deadband_output_deg,
         )
 
         # Single-line lane centering: how far from the visible line to aim.
@@ -329,7 +375,8 @@ Args:
         self._single_line_heading_ref_right = 0.0
 
         # Sensor feedback state (populated from Nucleo via message queue)
-        self._measured_speed = 0.0       # Last speed reading from encoder
+        self._measured_speed = 0.0       # Last CurrentSpeed from Nucleo (x10 cm/s)
+        self._last_speed_time = None     # Timestamp of last speed reading
         self._measured_steer = 0.0       # Last steering angle feedback
         self._measured_steer_delta = 0.0 # Previous steer - current steer (deg)
         self._last_yaw = 0.0             # Last IMU yaw reading (degrees)
@@ -339,6 +386,10 @@ Args:
         self._stanley_last_psi_ss = 0.0  # Last steady-state heading bias (rad)
         self._stanley_last_traj_yaw_rate = 0.0  # Last reference yaw rate (rad/s)
         self._stanley_last_steer_damping = 0.0  # Last steering damping input (rad)
+        self._stanley_last_speed_mps = 0.0
+        self._stanley_last_speed_source = "none"
+        self._stanley_last_error_m = 0.0
+        self._stanley_last_px_per_cm = 0.0
         # Kalman filter for crosstrack error (robust when lanes flicker due to glare/shadows)
         self.use_kalman_filter = True
         self.kalman_process_noise = 0.04
@@ -356,11 +407,11 @@ Args:
         # Measured from the actual BFMC 1:10 scale car (Bosch)
         self.car_length = 36.5           # Total car length (cm)
         self.car_width = 19.0            # Total car width (cm)
-        self.car_wheelbase_cm = 27.5     # Measured distance between axles (cm)
+        self.car_wheelbase_cm = 26.0     # Wheelbase (TC-04 spec, cm)
         self.car_front_overhang = 7.2    # Front axle to front bumper (cm)
         self.car_rear_overhang = 1.8     # Rear axle to rear of car (cm)
         self.camera_to_front_axle = 11.5 # Camera position ahead of front axle (cm)
-        self.camera_to_rear_axle = 39.0  # Camera to rear axle (11.5 + 27.5) (cm)
+        self.camera_to_rear_axle = 37.5  # Camera to rear axle (11.5 + 26.0) (cm)
 
         # Track dimensions (cm) - BFMC standard track
         self.lane_width_cm = 35.0        # Lane width between line inner edges (cm)
@@ -2141,9 +2192,14 @@ Args:
         self._heading_error = 0.0
         self._yaw_rate = 0.0
         self._measured_steer_delta = 0.0
+        self._last_speed_time = None
         self._stanley_last_psi_ss = 0.0
         self._stanley_last_traj_yaw_rate = 0.0
         self._stanley_last_steer_damping = 0.0
+        self._stanley_last_speed_mps = 0.0
+        self._stanley_last_speed_source = "none"
+        self._stanley_last_error_m = 0.0
+        self._stanley_last_px_per_cm = 0.0
         self._single_line_heading_ref_left = 0.0
         self._single_line_heading_ref_right = 0.0
         self._last_two_line_left = None
@@ -2462,6 +2518,13 @@ Args:
                 'command_source': command_source,
                 'actual_steering': round(self._measured_steer, 2),
                 'actual_speed': round(self._measured_speed, 2),
+                'actual_speed_mps': round(
+                    abs(float(self._measured_speed)) * float(self.stanley_measured_speed_to_mps), 4
+                ),
+                'stanley_speed_mps': round(float(self._stanley_last_speed_mps), 4),
+                'stanley_speed_source': self._stanley_last_speed_source,
+                'stanley_error_m': round(float(self._stanley_last_error_m), 4),
+                'stanley_px_per_cm': round(float(self._stanley_last_px_per_cm), 4),
                 'serial_connected': actuator_status.get('serial_connected'),
                 'engine_enabled': actuator_status.get('engine_enabled'),
                 'klem_mode': actuator_status.get('klem_mode'),
@@ -3488,6 +3551,7 @@ Args:
         if speed_msg is not None:
             try:
                 self._measured_speed = float(speed_msg)
+                self._last_speed_time = time.time()
             except (ValueError, TypeError):
                 pass
 
@@ -3542,8 +3606,66 @@ Args:
 
         return None
 
-    def _get_stanley_dynamic_terms(self, speed_value, curve_reference=None):
-        """Compute ψ_ss, trajectory yaw rate and steering damping terms for Stanley."""
+    def _resolve_px_per_cm(self, lane_width_px=None, img_w=None):
+        """Estimate pixel density using lane width calibration, cache, or frame fallback."""
+        if lane_width_px is not None:
+            try:
+                lane_width_px = float(lane_width_px)
+                if lane_width_px > 1.0 and float(self.lane_width_cm) > 1e-3:
+                    return lane_width_px / float(self.lane_width_cm)
+            except (TypeError, ValueError):
+                pass
+
+        cached_px_per_cm = float(getattr(self, '_last_px_per_cm', 0.0) or 0.0)
+        if cached_px_per_cm > 0.5:
+            return cached_px_per_cm
+
+        cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+        if cached_lane_width > 1.0 and float(self.lane_width_cm) > 1e-3:
+            return cached_lane_width / float(self.lane_width_cm)
+
+        if img_w is not None and float(img_w) > 1.0 and float(self.lane_width_cm) > 1e-3:
+            return (float(img_w) * 0.45) / float(self.lane_width_cm)
+
+        return 0.0
+
+    def _convert_error_px_to_m(self, error_px, lane_width_px=None, img_w=None):
+        """Convert lateral error from pixels to meters using current lane scale."""
+        px_per_cm = max(1e-6, float(self._resolve_px_per_cm(lane_width_px=lane_width_px, img_w=img_w)))
+        error_cm = float(error_px) / px_per_cm
+        error_m = error_cm / 100.0
+        return error_m, px_per_cm
+
+    def _resolve_stanley_speed_mps(self, speed_value, speed_cap=None):
+        """Resolve Stanley speed in m/s, preferring fresh measured speed from Nucleo."""
+        command_speed = abs(float(speed_value))
+        if speed_cap is not None:
+            command_speed = min(command_speed, abs(float(speed_cap)))
+        command_speed_mps = command_speed * float(self.stanley_speed_to_mps)
+
+        measured_speed_mps = abs(float(getattr(self, '_measured_speed', 0.0) or 0.0)) * float(
+            self.stanley_measured_speed_to_mps
+        )
+        speed_age = None
+        if getattr(self, '_last_speed_time', None) is not None:
+            speed_age = time.time() - float(self._last_speed_time)
+
+        use_measured = (
+            bool(getattr(self, 'stanley_use_measured_speed', True)) and
+            measured_speed_mps > 1e-4 and
+            (speed_age is None or speed_age <= float(getattr(self, 'stanley_measured_speed_timeout', 0.4)))
+        )
+
+        if use_measured:
+            return measured_speed_mps, "measured"
+        return command_speed_mps, "command"
+
+    def _get_stanley_dynamic_terms(self, speed_mps, curve_reference=None):
+        """Compute ψ_ss, trajectory yaw rate and steering damping terms for Stanley.
+
+        Args:
+            speed_mps: Vehicle speed in m/s.
+        """
         psi_ss = 0.0
         traj_yaw_rate = 0.0
         steer_damping_delta = math.radians(self._measured_steer_delta)
@@ -3558,8 +3680,7 @@ Args:
                 turn_direction != 0 and
                 confidence >= float(self.stanley_curve_min_confidence)
             ):
-                speed_units = abs(self._measured_speed) if abs(self._measured_speed) > 1e-3 else abs(float(speed_value))
-                speed_mps = max(0.0, speed_units * float(self.stanley_speed_to_mps))
+                speed_mps = max(0.0, float(speed_mps))
                 radius_m = max(radius_cm / 100.0, 1e-3)
                 traj_yaw_rate_mag = speed_mps / radius_m
                 # Positive steering is RIGHT in this project, so the sign is
@@ -3583,15 +3704,50 @@ Args:
         """AI Local is always Stanley; other modes follow the dashboard toggle."""
         return self._is_ai_local_active() or bool(self.use_stanley)
 
-    def _compute_lateral_control(self, error, heading, speed_value, curve_reference=None):
-        """Compute steering with the active controller policy for the current mode."""
+    def _compute_lateral_control(
+        self,
+        error,
+        heading,
+        speed_value,
+        curve_reference=None,
+        speed_cap=None,
+        lane_width_px=None,
+        img_w=None,
+    ):
+        """Compute steering with the active controller policy for the current mode.
+
+        For Stanley, inputs are converted to physical units:
+        - crosstrack error: pixels -> meters (using lane-width scale)
+        - speed: controller units / measured Nucleo speed -> m/s
+        """
         self._heading_error = float(heading)
         if self._should_use_stanley_controller():
-            psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                speed_value, curve_reference
+            error_m, px_per_cm = self._convert_error_px_to_m(
+                error, lane_width_px=lane_width_px, img_w=img_w
             )
+            speed_mps, speed_source = self._resolve_stanley_speed_mps(
+                speed_value, speed_cap=speed_cap
+            )
+            # Preserve legacy px deadband behavior while using physical-state Stanley.
+            if float(getattr(self, 'stanley_deadband_crosstrack_m', 0.0) or 0.0) > 0.0:
+                crosstrack_deadband = float(self.stanley_deadband_crosstrack_m)
+            else:
+                crosstrack_deadband = (
+                    float(getattr(self, 'stanley_deadband_crosstrack_px', 0.0) or 0.0) /
+                    max(px_per_cm, 1e-6) / 100.0
+                )
+            self.stanley.crosstrack_deadband = max(0.0, float(crosstrack_deadband))
+            self.stanley.crosstrack_deadband_px = self.stanley.crosstrack_deadband
+
+            psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                speed_mps, curve_reference
+            )
+            self._stanley_last_speed_mps = float(speed_mps)
+            self._stanley_last_speed_source = str(speed_source)
+            self._stanley_last_error_m = float(error_m)
+            self._stanley_last_px_per_cm = float(px_per_cm)
             return self.stanley.compute(
-                error, heading, speed_value,
+                error_m, heading, speed_mps,
                 yaw_rate=self._yaw_rate,
                 traj_yaw_rate=traj_yaw_rate,
                 steady_state_heading=psi_ss,
@@ -5284,14 +5440,19 @@ Returns:
                          'noise_max_reject_frames',
                          'use_curve_recovery', 'recovery_max_steer_frames',
                          'use_kalman_filter', 'kalman_max_prediction_frames',
-                         'ai_local_use_mask_geometry'}
+                         'ai_local_use_mask_geometry', 'stanley_use_measured_speed'}
             
             params = ['base_speed', 'max_speed', 'min_speed', 'max_error_px', 'kp', 'ki', 'kd', 'smoothing_factor',
                      'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
                      'wheelbase', 'ff_weight', 'curvature_threshold',
                      'use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw',
                      'stanley_k_d_steer', 'stanley_k_ag', 'stanley_speed_to_mps',
+                     'stanley_measured_speed_to_mps', 'stanley_measured_speed_timeout',
+                     'stanley_use_measured_speed',
                      'stanley_curve_min_confidence', 'stanley_psi_ss_max_deg',
+                     'stanley_deadband_crosstrack_m',
+                     'stanley_deadband_crosstrack_px', 'stanley_deadband_heading_deg',
+                     'stanley_deadband_output_deg',
                      'single_line_offset_factor',
                      'roi_height_start', 'roi_height_end',
                      'roi_width_margin_top', 'roi_width_margin_bottom',
@@ -5394,7 +5555,12 @@ Returns:
             stanley_params = [
                 'use_stanley', 'stanley_k', 'stanley_k_soft', 'stanley_k_d_yaw',
                 'stanley_k_d_steer', 'stanley_k_ag', 'stanley_speed_to_mps',
-                'stanley_curve_min_confidence', 'stanley_psi_ss_max_deg', 'max_steering'
+                'stanley_measured_speed_to_mps', 'stanley_measured_speed_timeout',
+                'stanley_use_measured_speed',
+                'stanley_curve_min_confidence', 'stanley_psi_ss_max_deg',
+                'stanley_deadband_crosstrack_m',
+                'stanley_deadband_crosstrack_px', 'stanley_deadband_heading_deg',
+                'stanley_deadband_output_deg', 'max_steering'
             ]
             if any(p in normalized_config for p in stanley_params):
                 self.stanley.k = self.stanley_k
@@ -5402,6 +5568,21 @@ Returns:
                 self.stanley.k_d_yaw = self.stanley_k_d_yaw
                 self.stanley.k_d_steer = self.stanley_k_d_steer
                 self.stanley.max_steering = self.max_steering
+                if float(getattr(self, 'stanley_deadband_crosstrack_m', 0.0) or 0.0) > 0.0:
+                    self.stanley.crosstrack_deadband = max(
+                        0.0, float(self.stanley_deadband_crosstrack_m)
+                    )
+                else:
+                    # Legacy fallback: if only px deadband is configured, preserve it
+                    # for compatibility until a lane scale is available.
+                    self.stanley.crosstrack_deadband = max(
+                        0.0, float(self.stanley_deadband_crosstrack_px)
+                    )
+                self.stanley.crosstrack_deadband_px = self.stanley.crosstrack_deadband
+                self.stanley.heading_deadband_rad = math.radians(
+                    max(0.0, float(self.stanley_deadband_heading_deg))
+                )
+                self.stanley.output_deadband_deg = max(0.0, float(self.stanley_deadband_output_deg))
                 mode_str = "STANLEY" if self._should_use_stanley_controller() else "PID"
                 if self._is_ai_local_active():
                     mode_str = "STANLEY (forced in AI_LOCAL)"
@@ -5409,7 +5590,10 @@ Returns:
                     f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
                     f"Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} "
                     f"k_d_yaw={self.stanley_k_d_yaw} k_d_steer={self.stanley_k_d_steer} "
-                    f"k_ag={self.stanley_k_ag}"
+                    f"k_ag={self.stanley_k_ag} v_cmd={self.stanley_speed_to_mps} "
+                    f"v_meas={self.stanley_measured_speed_to_mps} use_meas={bool(self.stanley_use_measured_speed)} "
+                    f"db_cte_m={self.stanley_deadband_crosstrack_m} db_cte_px={self.stanley_deadband_crosstrack_px} "
+                    f"db_heading={self.stanley_deadband_heading_deg} db_out={self.stanley_deadband_output_deg}"
                 )
 
             # Log feed-forward parameter changes
@@ -5644,8 +5828,15 @@ Returns:
                 "traj_yaw_rate": round(float(self._stanley_last_traj_yaw_rate), 5),
                 "measured_yaw_rate": round(float(self._yaw_rate), 5),
                 "measured_speed": round(float(self._measured_speed), 3),
+                "measured_speed_mps": round(
+                    abs(float(self._measured_speed)) * float(self.stanley_measured_speed_to_mps), 4
+                ),
                 "measured_steer": round(float(self._measured_steer), 3),
                 "measured_steer_delta": round(float(self._measured_steer_delta), 3),
+                "stanley_speed_mps": round(float(self._stanley_last_speed_mps), 4),
+                "stanley_speed_source": self._stanley_last_speed_source,
+                "stanley_error_m": round(float(self._stanley_last_error_m), 4),
+                "stanley_px_per_cm": round(float(self._stanley_last_px_per_cm), 4),
                 "current_speed_target": round(float(self._current_speed), 3),
                 "frames_without_line": int(self.frames_without_line),
                 "last_seen_side": self.last_seen_side,
@@ -6100,7 +6291,8 @@ Returns:
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None
+                    error, heading, speed_val, curve_reference=None,
+                    lane_width_px=lane_width_px, img_w=img_w
                 )
 
                 self.steer_history.append(steering_angle)
@@ -6117,7 +6309,8 @@ Returns:
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None
+                    error, heading, speed_val, curve_reference=None, speed_cap=speed_cap,
+                    lane_width_px=lane_width_px, img_w=img_w
                 )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -6133,7 +6326,8 @@ Returns:
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None
+                    error, heading, speed_val, curve_reference=None, speed_cap=speed_cap,
+                    lane_width_px=lane_width_px, img_w=img_w
                 )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -6201,7 +6395,9 @@ Returns:
                     fallback_curve=self._swept_path_info,
                 )
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=curve_reference
+                    error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
+                    lane_width_px=abs(float(bottom_right_x) - float(bottom_left_x)),
+                    img_w=img_w,
                 )
 
                 # Moving average of last N steering values (smooths erratic readings from lighting)
@@ -6252,7 +6448,8 @@ Returns:
             speed_cap = speed
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
-                sl_error, sl_heading, speed_val, curve_reference=None
+                sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
+                img_w=img_w
             )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -6293,7 +6490,8 @@ Returns:
             speed_cap = speed
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
-                sl_error, sl_heading, speed_val, curve_reference=None
+                sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
+                img_w=img_w
             )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -6341,7 +6539,8 @@ Returns:
                     heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
                     curve_reference = self._get_stanley_curve_reference()
                     steering_angle = self._compute_lateral_control(
-                        error, heading_pred, speed_val, curve_reference=curve_reference
+                        error, heading_pred, speed_val, curve_reference=curve_reference,
+                        speed_cap=self.min_speed, img_w=img_w
                     )
                     steering_angle *= 0.9  # conservative while running on prediction only
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -6451,10 +6650,12 @@ Returns:
                 steer_damp_deg = math.degrees(self.stanley.k_d_steer * self._stanley_last_steer_damping)
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
                       f"Mode: {control_mode} "
-                      f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px "
+                      f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px/{self._stanley_last_error_m:.3f}m "
                       f"Heading: {heading_deg:.1f}° PsiSS: {psi_ss_deg:.1f}° "
                       f"YawRate: {self._yaw_rate:.2f}/{self._stanley_last_traj_yaw_rate:.2f} "
-                      f"ServoDamp: {steer_damp_deg:.1f}° Source: {src}")
+                      f"ServoDamp: {steer_damp_deg:.1f}° "
+                      f"v={self._stanley_last_speed_mps:.3f}m/s({self._stanley_last_speed_source}) "
+                      f"scale={self._stanley_last_px_per_cm:.2f}px/cm Source: {src}")
             else:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - "
                       f"Mode: {control_mode} "
@@ -6477,11 +6678,15 @@ Returns:
             "control_mode": debug_info.get("control_mode", "legacy_line_fit"),
             "num_lines": int(num_lines),
             "error_px": error,
+            "error_m": self._stanley_last_error_m if self._should_use_stanley_controller() else None,
             "midpoint_x": midpoint_x,
             "bottom_left_x": bottom_left_x,
             "bottom_right_x": bottom_right_x,
             "steering_deg": steering_angle,
             "speed": speed,
+            "stanley_speed_mps": self._stanley_last_speed_mps if self._should_use_stanley_controller() else None,
+            "stanley_speed_source": self._stanley_last_speed_source if self._should_use_stanley_controller() else None,
+            "stanley_px_per_cm": self._stanley_last_px_per_cm if self._should_use_stanley_controller() else None,
             "kalman_prediction_used": bool(kalman_prediction_used),
             "recovery_active": bool(recovery_active),
             "recovery_state": self._recovery_state,

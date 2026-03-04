@@ -168,7 +168,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     { key: 'dead_zone_ratio', label: 'Zona Muerta (px)', min: 0, max: 100, step: 5, value: 50, group: 'pid' },
     { key: 'integral_reset_interval', label: 'Reset Integral (cada N frames)', min: 1, max: 50, step: 1, value: 10, group: 'pid' },
     // Feed-Forward curve prediction
-    { key: 'wheelbase', label: 'Distancia entre ejes (m)', min: 0.15, max: 0.35, step: 0.005, value: 0.265, group: 'feedforward' },
+    { key: 'wheelbase', label: 'Distancia entre ejes (m)', min: 0.15, max: 0.35, step: 0.005, value: 0.260, group: 'feedforward' },
     { key: 'ff_weight', label: 'Peso Feed-Forward', min: 0.0, max: 1.0, step: 0.05, value: 0.6, group: 'feedforward' },
     { key: 'curvature_threshold', label: 'Umbral Curvatura', min: 0.1, max: 2.0, step: 0.1, value: 0.5, group: 'feedforward' },
     // ROI
@@ -662,7 +662,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       base_speed: 15, max_speed: 25, min_speed: 8,
       max_error_px: 40, kp: 0.08, ki: 0.05, kd: 0.05, smoothing_factor: 0.5,
       max_steering: 25, lookahead: 0.4, dead_zone_ratio: 50, integral_reset_interval: 10,
-      wheelbase: 0.265, ff_weight: 0.6, curvature_threshold: 0.5,
+      wheelbase: 0.260, ff_weight: 0.6, curvature_threshold: 0.5,
       roi_height_start: 0.35, roi_height_end: 1.0, roi_width_margin_top: 0.35, roi_width_margin_bottom: 0.15,
       white_h_min: 81, white_h_max: 180, white_s_min: 0, white_s_max: 98, white_v_min: 200, white_v_max: 255,
       yellow_h_min: 173, yellow_h_max: 86, yellow_s_min: 100, yellow_s_max: 255, yellow_v_min: 100, yellow_v_max: 255,
