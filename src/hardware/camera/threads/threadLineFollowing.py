@@ -767,6 +767,69 @@ Args:
             normalized[side] = str(value or 'none')
         return normalized
 
+    def _prepare_local_ai_side_masks(self, side_masks, lane_side_sources, lane_side_lines, img_h, img_w):
+        """Normalize local-AI masks/lines and resolve ambiguous single-lane assignments."""
+        normalized_masks = {'left': None, 'right': None}
+        normalized_lines = {'left': None, 'right': None}
+        resolution = None
+
+        if isinstance(side_masks, dict):
+            for side in ('left', 'right'):
+                mask = side_masks.get(side)
+                if not isinstance(mask, np.ndarray) or mask.size == 0:
+                    continue
+                mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+                if mask_2d.ndim != 2 or mask_2d.shape[:2] != (img_h, img_w):
+                    continue
+                if not np.any(mask_2d):
+                    continue
+                normalized_masks[side] = mask_2d
+
+        if isinstance(lane_side_lines, dict):
+            normalized_lines['left'] = self._coerce_explicit_line(lane_side_lines.get('left', []), img_h, img_w)
+            normalized_lines['right'] = self._coerce_explicit_line(lane_side_lines.get('right', []), img_h, img_w)
+
+        left_line = normalized_lines['left']
+        right_line = normalized_lines['right']
+
+        if left_line is not None and right_line is not None:
+            self._last_two_line_left = left_line.copy()
+            self._last_two_line_right = right_line.copy()
+            self._last_two_line_ts = time.time()
+
+        detected_sides = [side for side in ('left', 'right') if normalized_masks[side] is not None]
+        if len(detected_sides) != 1:
+            return normalized_masks, normalized_lines, resolution
+
+        detected_side = detected_sides[0]
+        detected_source = str(lane_side_sources.get(detected_side, 'none') or 'none')
+        if not detected_source.startswith('guessed_single'):
+            return normalized_masks, normalized_lines, resolution
+
+        candidate_line = left_line if detected_side == 'left' else right_line
+        if candidate_line is None:
+            return normalized_masks, normalized_lines, resolution
+
+        resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
+            candidate_line,
+            img_h,
+            img_w,
+            prev_seen_side=getattr(self, 'last_seen_side', None),
+        )
+        if resolved_side in ('left', 'right') and resolved_side != detected_side:
+            normalized_masks[resolved_side] = normalized_masks[detected_side]
+            normalized_masks[detected_side] = None
+            normalized_lines[resolved_side] = normalized_lines[detected_side]
+            normalized_lines[detected_side] = None
+
+        resolution = {
+            'detected_side': detected_side,
+            'resolved_side': resolved_side or detected_side,
+            'source': detected_source,
+            'resolution_source': resolution_source,
+        }
+        return normalized_masks, normalized_lines, resolution
+
     @staticmethod
     def _prefer_local_lane_line(explicit_line, fitted_line):
         """Prefer explicit local-AI geometry when both a line and polyline exist."""
@@ -823,7 +886,7 @@ Args:
 
         return max(0.0, min(float(img_w - 1), virtual_x))
 
-    def _build_local_mask_guidance(self, side_masks, img_h, img_w):
+    def _build_local_mask_guidance(self, side_masks, img_h, img_w, side_lines=None):
         """Build direct steering guidance from the raw local-AI lane masks."""
         if not isinstance(side_masks, dict):
             return None
@@ -872,6 +935,18 @@ Args:
         if len(detected_sides) == 0:
             return None
 
+        visible_side = detected_sides[0] if len(detected_sides) == 1 else None
+        visible_line = None
+        if visible_side is not None and isinstance(side_lines, dict):
+            candidate_line = side_lines.get(visible_side)
+            if isinstance(candidate_line, np.ndarray) and candidate_line.ndim == 2 and candidate_line.shape[1] >= 4:
+                visible_line = candidate_line
+                for row_key, y_value in (('bottom', roi_bottom), ('reference', reference_y)):
+                    if samples[visible_side][row_key] is None:
+                        projected_x = self._line_x_at_y(visible_line, y_value)
+                        if projected_x is not None:
+                            samples[visible_side][row_key] = float(projected_x)
+
         width_samples = []
         for row_key in ('bottom', 'reference'):
             left_x = samples['left'][row_key]
@@ -893,7 +968,6 @@ Args:
 
         used_virtual_boundary = False
         if len(detected_sides) == 1:
-            visible_side = detected_sides[0]
             missing_side = 'right' if visible_side == 'left' else 'left'
             for row_key in ('bottom', 'reference'):
                 visible_x = samples[visible_side][row_key]
@@ -919,6 +993,30 @@ Args:
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
         dy = max(1.0, float(roi_bottom - reference_y))
         heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
+        error_px = midpoint_bottom_x - (img_w / 2.0)
+        draw_y = roi_bottom
+        guidance_mode = 'midpoint'
+        single_line_projection_debug = None
+
+        if visible_side is not None and visible_line is not None:
+            single_error, single_heading = self._compute_single_line_error(
+                visible_line,
+                visible_side,
+                img_h,
+                img_w,
+                prefer_center=True,
+                physical_projection=True,
+            )
+            single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
+            desired_center = float(single_line_projection_debug.get('single_line_target_x', midpoint_x))
+            desired_center = max(0.0, min(float(img_w - 1), desired_center))
+            midpoint_bottom_x = desired_center
+            midpoint_x = desired_center
+            heading_rad = float(single_heading)
+            error_px = float(single_error)
+            draw_y = int(single_line_projection_debug.get('single_line_reference_y', reference_y))
+            draw_y = max(0, min(img_h - 1, draw_y))
+            guidance_mode = 'single_line_physical'
 
         if len(detected_sides) == 2:
             mask_label = 'BOTH'
@@ -927,10 +1025,10 @@ Args:
         else:
             mask_label = 'RIGHT'
 
-        return {
+        guidance = {
             'midpoint_x': float(midpoint_x),
             'midpoint_bottom_x': float(midpoint_bottom_x),
-            'error_px': float(midpoint_bottom_x - (img_w / 2.0)),
+            'error_px': float(error_px),
             'heading_rad': float(heading_rad),
             'left_x': float(left_ref_x),
             'right_x': float(right_ref_x),
@@ -940,9 +1038,14 @@ Args:
             'detected_sides': tuple(detected_sides),
             'reference_y': int(reference_y),
             'bottom_y': int(roi_bottom),
+            'draw_y': int(draw_y),
             'used_virtual_boundary': bool(used_virtual_boundary),
+            'guidance_mode': guidance_mode,
             'mask_label': mask_label,
         }
+        if single_line_projection_debug is not None:
+            guidance['single_line_projection_debug'] = single_line_projection_debug
+        return guidance
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
         """Resolve a guessed single local-AI lane into left/right using temporal geometry."""
@@ -1449,6 +1552,8 @@ Args:
         debug_info['local_ai_status'] = 'ready'
 
         side_masks = payload.get('side_masks')
+        lane_side_lines = payload.get('lane_side_lines')
+        lane_side_sources = self._normalize_lane_side_sources(payload.get('lane_side_sources'))
         lane_mask_payload = payload.get('lane_mask')
 
         def _collect_render_masks(s_masks, h, w):
@@ -1465,10 +1570,23 @@ Args:
                     result[side] = m2d
             return result
 
-        if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
-            local_mask_guidance = self._build_local_mask_guidance(side_masks, height, width)
+        prepared_side_masks, prepared_side_lines, mask_side_resolution = self._prepare_local_ai_side_masks(
+            side_masks,
+            lane_side_sources,
+            lane_side_lines,
+            height,
+            width,
+        )
 
-            render_side_masks = _collect_render_masks(side_masks, height, width)
+        if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
+            local_mask_guidance = self._build_local_mask_guidance(
+                prepared_side_masks,
+                height,
+                width,
+                side_lines=prepared_side_lines,
+            )
+
+            render_side_masks = _collect_render_masks(prepared_side_masks, height, width)
             has_any_mask = any(v is not None for v in render_side_masks.values())
 
             if local_mask_guidance is not None:
@@ -1498,6 +1616,15 @@ Args:
                 debug_info['mask_label'] = local_mask_guidance.get('mask_label', 'NONE')
                 debug_info['left_lines'] = []
                 debug_info['right_lines'] = []
+                single_line_projection_debug = local_mask_guidance.get('single_line_projection_debug')
+                if isinstance(single_line_projection_debug, dict):
+                    debug_info.update(single_line_projection_debug)
+                if mask_side_resolution is not None:
+                    debug_info['single_line_side_source'] = (
+                        f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
+                    )
+                    debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
+                    debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
 
                 return None, None, height, width, render_lane_mask, debug_info
 
@@ -1508,14 +1635,18 @@ Args:
             debug_info['local_ai_status'] = 'mask_failed'
             debug_info['left_lines'] = []
             debug_info['right_lines'] = []
+            if mask_side_resolution is not None:
+                debug_info['single_line_side_source'] = (
+                    f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
+                )
+                debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
+                debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
             if has_any_mask:
                 debug_info['render_side_masks'] = render_side_masks
             return None, None, height, width, empty_mask, debug_info
 
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
-        lane_side_lines = payload.get('lane_side_lines')
-        lane_side_sources = self._normalize_lane_side_sources(payload.get('lane_side_sources'))
         explicit_left, explicit_right = self._lane_side_lines_to_lines(lane_side_lines, height, width)
         has_explicit_side_lines = explicit_left is not None or explicit_right is not None
         has_explicit_side_points = (
@@ -2999,6 +3130,31 @@ Args:
         self._stanley_last_traj_yaw_rate = traj_yaw_rate
         self._stanley_last_steer_damping = steer_damping_delta
         return psi_ss, traj_yaw_rate, steer_damping_delta
+
+    def _is_ai_local_active(self):
+        """Return True when the current detection runtime is the local AI path."""
+        current_mode = self._normalize_detection_mode(getattr(self, 'detection_mode', DetectionMode.OPENCV.value))
+        return current_mode == DetectionMode.AI_LOCAL.value
+
+    def _should_use_stanley_controller(self):
+        """AI Local is always Stanley; other modes follow the dashboard toggle."""
+        return self._is_ai_local_active() or bool(self.use_stanley)
+
+    def _compute_lateral_control(self, error, heading, speed_value, curve_reference=None):
+        """Compute steering with the active controller policy for the current mode."""
+        self._heading_error = float(heading)
+        if self._should_use_stanley_controller():
+            psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                speed_value, curve_reference
+            )
+            return self.stanley.compute(
+                error, heading, speed_value,
+                yaw_rate=self._yaw_rate,
+                traj_yaw_rate=traj_yaw_rate,
+                steady_state_heading=psi_ss,
+                steer_damping_delta=steer_damping_delta,
+            )
+        return self.pid.compute(error)
 
     def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False, physical_projection=False):
         """Compute crosstrack error from a single visible lane marking.
@@ -4736,7 +4892,9 @@ Returns:
                 self.stanley.k_d_yaw = self.stanley_k_d_yaw
                 self.stanley.k_d_steer = self.stanley_k_d_steer
                 self.stanley.max_steering = self.max_steering
-                mode_str = "STANLEY" if self.use_stanley else "PID"
+                mode_str = "STANLEY" if self._should_use_stanley_controller() else "PID"
+                if self._is_ai_local_active():
+                    mode_str = "STANLEY (forced in AI_LOCAL)"
                 print(
                     f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
                     f"Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} "
@@ -5178,7 +5336,9 @@ Returns:
             bottom_right_x = int(round(local_mask_guidance.get('bottom_right_x', img_w - 1) or (img_w - 1)))
             bottom_left_x = max(0, min(img_w - 1, bottom_left_x))
             bottom_right_x = max(0, min(img_w - 1, bottom_right_x))
-            debug_info['midpoint_draw_y'] = int(local_mask_guidance.get('bottom_y', img_h - 1))
+            debug_info['midpoint_draw_y'] = int(
+                local_mask_guidance.get('draw_y', local_mask_guidance.get('bottom_y', img_h - 1))
+            )
             self._swept_path_info = None
             self.just_seen_two_lines = False
 
@@ -5195,20 +5355,10 @@ Returns:
                 self.frames_without_line = 0
                 self.last_seen_side = "both"
 
-                if self.use_stanley:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, None
-                    )
-                    steering_angle = self.stanley.compute(
-                        error, heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                else:
-                    steering_angle = self.pid.compute(error)
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                steering_angle = self._compute_lateral_control(
+                    error, heading, speed_val, curve_reference=None
+                )
 
                 self.steer_history.append(steering_angle)
                 steering_angle = sum(self.steer_history) / len(self.steer_history)
@@ -5221,20 +5371,10 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
 
-                if self.use_stanley:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, None
-                    )
-                    steering_angle = self.stanley.compute(
-                        error, heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                else:
-                    steering_angle = self.pid.compute(error)
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                steering_angle = self._compute_lateral_control(
+                    error, heading, speed_val, curve_reference=None
+                )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                 self.frames_without_line = 0
@@ -5246,20 +5386,10 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
 
-                if self.use_stanley:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, None
-                    )
-                    steering_angle = self.stanley.compute(
-                        error, heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                else:
-                    steering_angle = self.pid.compute(error)
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                steering_angle = self._compute_lateral_control(
+                    error, heading, speed_val, curve_reference=None
+                )
 
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                 self.frames_without_line = 0
@@ -5315,28 +5445,18 @@ Returns:
                     debug_info['kalman_age'] = self._kalman_age_frames
 
                 # Compute steering from crosstrack error
-                if self.use_stanley:
-                    heading = self._compute_heading_error(avg_left, avg_right)
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    curve_reference = self._get_stanley_curve_reference(
-                        avg_left=avg_left,
-                        avg_right=avg_right,
-                        img_h=img_h,
-                        img_w=img_w,
-                        fallback_curve=self._swept_path_info,
-                    )
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, curve_reference
-                    )
-                    steering_angle = self.stanley.compute(
-                        error, heading, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                else:
-                    steering_angle = self.pid.compute(error)
+                heading = self._compute_heading_error(avg_left, avg_right)
+                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                curve_reference = self._get_stanley_curve_reference(
+                    avg_left=avg_left,
+                    avg_right=avg_right,
+                    img_h=img_h,
+                    img_w=img_w,
+                    fallback_curve=self._swept_path_info,
+                )
+                steering_angle = self._compute_lateral_control(
+                    error, heading, speed_val, curve_reference=curve_reference
+                )
 
                 # Moving average of last N steering values (smooths erratic readings from lighting)
                 self.steer_history.append(steering_angle)
@@ -5383,24 +5503,14 @@ Returns:
                 debug_info['kalman_age'] = self._kalman_age_frames
 
             speed = self.min_speed + 2
-            if self.use_stanley:
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                    speed_val, None
-                )
-                steering_angle = self.stanley.compute(
-                    sl_error, sl_heading, speed_val,
-                    yaw_rate=self._yaw_rate,
-                    traj_yaw_rate=traj_yaw_rate,
-                    steady_state_heading=psi_ss,
-                    steer_damping_delta=steer_damping_delta,
-                )
-            else:
-                steering_angle = self.pid.compute(sl_error)
+            speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+            steering_angle = self._compute_lateral_control(
+                sl_error, sl_heading, speed_val, curve_reference=None
+            )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
             if self.show_debug:
-                ctrl_label = "Stanley 1L" if self.use_stanley else "PID 1L"
+                ctrl_label = "Stanley 1L" if self._should_use_stanley_controller() else "PID 1L"
                 print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mLEFT\033[0m "
                       f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
                       f"steer={steering_angle:.1f}°")
@@ -5433,24 +5543,14 @@ Returns:
                 debug_info['kalman_age'] = self._kalman_age_frames
 
             speed = self.min_speed + 2
-            if self.use_stanley:
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                    speed_val, None
-                )
-                steering_angle = self.stanley.compute(
-                    sl_error, sl_heading, speed_val,
-                    yaw_rate=self._yaw_rate,
-                    traj_yaw_rate=traj_yaw_rate,
-                    steady_state_heading=psi_ss,
-                    steer_damping_delta=steer_damping_delta,
-                )
-            else:
-                steering_angle = self.pid.compute(sl_error)
+            speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+            steering_angle = self._compute_lateral_control(
+                sl_error, sl_heading, speed_val, curve_reference=None
+            )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
             if self.show_debug:
-                ctrl_label = "Stanley 1L" if self.use_stanley else "PID 1L"
+                ctrl_label = "Stanley 1L" if self._should_use_stanley_controller() else "PID 1L"
                 print(f"\033[1;97m[ {ctrl_label} ] :\033[0m \033[1;95mRIGHT\033[0m "
                       f"err={sl_error:.0f}px head={math.degrees(sl_heading):.1f}° "
                       f"steer={steering_angle:.1f}°")
@@ -5475,20 +5575,10 @@ Returns:
                 error = kalman_pred_error
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
-                if self.use_stanley:
-                    curve_reference = self._get_stanley_curve_reference()
-                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                        speed_val, curve_reference
-                    )
-                    steering_angle = self.stanley.compute(
-                        error, heading_pred, speed_val,
-                        yaw_rate=self._yaw_rate,
-                        traj_yaw_rate=traj_yaw_rate,
-                        steady_state_heading=psi_ss,
-                        steer_damping_delta=steer_damping_delta,
-                    )
-                else:
-                    steering_angle = self.pid.compute(error)
+                curve_reference = self._get_stanley_curve_reference()
+                steering_angle = self._compute_lateral_control(
+                    error, heading_pred, speed_val, curve_reference=curve_reference
+                )
                 steering_angle *= 0.9  # conservative while running on prediction only
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                 kalman_prediction_used = True
@@ -5555,7 +5645,7 @@ Returns:
             # Stanley already scales the crosstrack term by speed, so applying an
             # extra attenuation here weakens correction twice and deviates from
             # the Hoffmann control law. Keep the attenuation only for PID mode.
-            if not self.use_stanley:
+            if not self._should_use_stanley_controller():
                 speed_ratio = speed / eff_max
                 steer_attenuation = 1.0 - self.speed_steer_factor * min(speed_ratio, 1.0)
                 steering_angle *= steer_attenuation
@@ -5569,7 +5659,7 @@ Returns:
                       "left" if avg_left is not None else \
                       "right" if avg_right is not None else "none"
             control_mode = debug_info.get('control_mode', 'legacy_line_fit')
-            if self.use_stanley:
+            if self._should_use_stanley_controller():
                 heading_deg = math.degrees(self._heading_error)
                 psi_ss_deg = math.degrees(self._stanley_last_psi_ss)
                 steer_damp_deg = math.degrees(self.stanley.k_d_steer * self._stanley_last_steer_damping)
