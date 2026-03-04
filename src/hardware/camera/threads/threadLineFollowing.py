@@ -304,6 +304,14 @@ Args:
         # Extra bias when only the OUTER curve line is visible.
         # Higher = stronger negative correction as the car gets closer to that line.
         self.single_line_outer_bias_gain = 0.60
+        # Outer-line correction is capped to avoid sudden 1-line steering spikes.
+        self.single_line_outer_bias_limit_factor = 0.18
+        # A single line must look curve-like before we trust outer-line heuristics.
+        self.single_line_curve_confirm_threshold = 0.35
+        # Require at least this many consecutive 1-line frames for continuity-based confirmation.
+        self.single_line_outer_confirm_frames = 2
+        # Slope-only heading hint stays intentionally bounded in 1-line mode.
+        self.single_line_curve_heading_max_deg = 10.0
         # Single-line heading calibration: compensates perspective bias so 1-line mode
         # stays close to 0 steering when the car is centered on straight segments.
         self.single_line_heading_ref_alpha = 0.15
@@ -958,6 +966,74 @@ Args:
     def _sample_mask_boundary(self, mask, y_rows):
         """Sample a lane mask boundary at the requested rows."""
         return [self._mask_x_at_y(mask, y_value) for y_value in y_rows]
+
+    def _confirm_single_line_outer_curve(self, line, side, img_h, img_w, curve_strength):
+        """Confirm that a curve-like single line is likely the outer boundary."""
+        result = {
+            'confirmed': False,
+            'sources': [],
+            'state_confirmed': False,
+            'history_confirmed': False,
+            'continuity_confirmed': False,
+        }
+        if line is None or side not in ('left', 'right'):
+            return result
+
+        min_curve_strength = max(0.0, float(getattr(self, 'single_line_curve_confirm_threshold', 0.35)))
+        if curve_strength < min_curve_strength:
+            return result
+
+        curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
+        curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+        state_confirmed = (
+            curve_state in ("ENTERING", "IN_CURVE", "EXITING") and
+            (
+                (curve_direction == 1 and side == 'left') or
+                (curve_direction == -1 and side == 'right')
+            )
+        )
+        if state_confirmed:
+            result['state_confirmed'] = True
+            result['sources'].append('curve_state')
+
+        y_ref = int(max(0, min(img_h - 1, round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))))
+        line_x = self._line_x_at_y(line, y_ref)
+        if line_x is not None:
+            reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+            last_two_line_ts = float(getattr(self, '_last_two_line_ts', 0.0) or 0.0)
+            if last_two_line_ts and (time.time() - last_two_line_ts) <= reference_ttl:
+                ref_line = getattr(
+                    self,
+                    '_last_two_line_left' if side == 'left' else '_last_two_line_right',
+                    None,
+                )
+                ref_x = self._line_x_at_y(ref_line, y_ref)
+                if ref_x is not None:
+                    cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+                    cached_px_per_cm = float(getattr(self, '_last_px_per_cm', 0.0) or 0.0)
+                    lane_width_px = cached_lane_width if cached_lane_width > 1.0 else 0.0
+                    if lane_width_px <= 1.0 and cached_px_per_cm > 0.5:
+                        lane_width_px = cached_px_per_cm * float(self.lane_width_cm)
+                    if lane_width_px <= 1.0:
+                        lane_width_px = float(img_w) * 0.45
+
+                    history_match_limit_px = max(8.0, lane_width_px * 0.45)
+                    if abs(float(line_x) - float(ref_x)) <= history_match_limit_px:
+                        result['history_confirmed'] = True
+                        result['sources'].append('history')
+
+        continuity_frames = int(getattr(
+            self,
+            'consecutive_single_left' if side == 'left' else 'consecutive_single_right',
+            0,
+        ) or 0)
+        min_continuity_frames = max(1, int(getattr(self, 'single_line_outer_confirm_frames', 2)))
+        if continuity_frames >= min_continuity_frames:
+            result['continuity_confirmed'] = True
+            result['sources'].append('continuity')
+
+        result['confirmed'] = bool(result['sources'])
+        return result
 
     def _estimate_virtual_boundary_from_single_side(self, side, visible_x, lane_width_px, img_w):
         """Estimate the missing lane boundary from one visible side."""
@@ -3311,7 +3387,7 @@ Args:
             curve_strength = min(1.0, (abs_heading_deg - curve_bias_start_deg) / curve_span)
             curve_sign = 1.0 if side == 'left' else -1.0
             curve_heading_bias = curve_sign * math.radians(
-                float(getattr(self, 'single_line_curve_heading_max_deg', 14.0))
+                float(getattr(self, 'single_line_curve_heading_max_deg', 10.0))
             ) * curve_strength
 
         if physical_projection:
@@ -3374,18 +3450,53 @@ Args:
             lane_width_px = max(1.0, self.lane_width_cm * px_per_cm)
             line_gap_px = abs(float(reference_x) - (img_w / 2.0))
             outer_line_proximity = 1.0 - min(1.0, line_gap_px / lane_width_px)
-            outer_line_weight = max(0.0, 1.0 - heading_reliability)
-            outer_line_bias_px = (
-                -lane_width_px *
-                max(0.0, float(getattr(self, 'single_line_outer_bias_gain', 0.0))) *
-                outer_line_proximity *
-                outer_line_weight
+            outer_confirmation = self._confirm_single_line_outer_curve(
+                line, side, img_h, img_w, curve_strength
             )
-            if outer_line_bias_px < 0.0:
-                # Outer line means the car is running wide in the curve.
-                # Force the 1-line correction to stay negative and intensify it
-                # as the visible outer line gets closer to the vehicle center.
-                error = min(error, 0.0) + outer_line_bias_px
+            if outer_confirmation.get('confirmed', False):
+                outer_line_weight = max(curve_strength, max(0.0, 1.0 - heading_reliability))
+                target_negative_mag = (
+                    lane_width_px *
+                    max(0.0, float(getattr(self, 'single_line_outer_bias_gain', 0.0))) *
+                    outer_line_proximity *
+                    outer_line_weight
+                )
+                target_negative_mag = min(
+                    target_negative_mag,
+                    lane_width_px * max(0.0, float(getattr(self, 'single_line_outer_bias_limit_factor', 0.18))),
+                )
+                if target_negative_mag > 0.0:
+                    current_negative_mag = max(0.0, -float(error))
+                    if current_negative_mag < target_negative_mag:
+                        error = -target_negative_mag
+                    outer_line_bias_px = float(error) + current_negative_mag
+            else:
+                is_outer_curve_line = False
+        else:
+            outer_confirmation = self._confirm_single_line_outer_curve(
+                line, side, img_h, img_w, curve_strength
+            )
+            if outer_confirmation.get('confirmed', False):
+                lane_width_px = max(1.0, self.lane_width_cm * px_per_cm)
+                line_gap_px = abs(float(reference_x) - (img_w / 2.0))
+                outer_line_proximity = 1.0 - min(1.0, line_gap_px / lane_width_px)
+                outer_line_weight = max(curve_strength, max(0.0, 1.0 - heading_reliability))
+                target_negative_mag = (
+                    lane_width_px *
+                    max(0.0, float(getattr(self, 'single_line_outer_bias_gain', 0.0))) *
+                    outer_line_proximity *
+                    outer_line_weight
+                )
+                target_negative_mag = min(
+                    target_negative_mag,
+                    lane_width_px * max(0.0, float(getattr(self, 'single_line_outer_bias_limit_factor', 0.18))),
+                )
+                if target_negative_mag > 0.0:
+                    current_negative_mag = max(0.0, -float(error))
+                    if current_negative_mag < target_negative_mag:
+                        error = -target_negative_mag
+                    outer_line_bias_px = float(error) + current_negative_mag
+                is_outer_curve_line = True
 
         # Heading from single line (dampened — less reliable than two-line)
         # Remove static perspective bias from single-line heading.
@@ -3404,6 +3515,8 @@ Args:
             'single_line_curve_strength': float(curve_strength),
             'single_line_curve_heading_bias_deg': float(math.degrees(curve_heading_bias)),
             'single_line_outer_curve_line': bool(is_outer_curve_line),
+            'single_line_outer_confirmed': bool(outer_confirmation.get('confirmed', False)),
+            'single_line_outer_confirm_sources': ",".join(outer_confirmation.get('sources', [])),
             'single_line_outer_proximity': float(outer_line_proximity),
             'single_line_outer_bias_px': float(outer_line_bias_px),
             'single_line_mode': mode,

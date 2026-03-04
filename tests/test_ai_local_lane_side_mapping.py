@@ -461,6 +461,40 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertTrue(detector._last_single_line_projection_debug["single_line_curve_like"])
         self.assertGreater(detector._last_single_line_projection_debug["single_line_curve_strength"], 0.0)
 
+    def test_single_line_error_forces_negative_when_outer_curve_is_confirmed_by_history(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._last_px_per_cm = 1.0
+        detector.lane_width_cm = 35.0
+        detector.line_width_cm = 2.0
+        detector.car_width = 19.0
+        detector.single_line_offset_factor = 0.5
+        detector.single_line_outer_bias_gain = 0.6
+        detector.lookahead = 0.4
+        detector.camera_to_front_axle = 0.0
+        detector.local_ai_max_result_age = 1.0
+        detector._single_line_heading_ref_left = 0.0
+        detector._single_line_heading_ref_right = 0.0
+        detector._curve_state = "STRAIGHT"
+        detector._curve_direction = 0
+        detector._last_two_line_left = np.array([[50, 95, 50, 55]], dtype=np.int32)
+        detector._last_two_line_right = np.array([[80, 95, 80, 55]], dtype=np.int32)
+        detector._last_two_line_ts = time.time()
+        detector.consecutive_single_left = 0
+        detector.consecutive_single_right = 0
+
+        curve_like_left = np.array([[120, 95, 40, 55]], dtype=np.int32)
+
+        error, _ = detector._compute_single_line_error(
+            curve_like_left, "left", 100, 100, prefer_center=True, physical_projection=True
+        )
+
+        self.assertLess(error, 0.0)
+        self.assertGreater(error, -7.5)
+        self.assertTrue(detector._last_single_line_projection_debug["single_line_outer_confirmed"])
+        self.assertEqual(
+            detector._last_single_line_projection_debug["single_line_outer_confirm_sources"],
+            "history",
+        )
 
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
