@@ -484,10 +484,12 @@ Args:
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
         self.local_ai_max_result_age = 0.35
+        self.ai_local_use_mask_geometry = True
         self._hybridnets_client = None
         self._last_local_lane_payload = None
         self._last_local_perception_status = None
         self._last_actuator_status = None
+        self._last_local_ai_lane_width_px = None
         self._last_two_line_left = None
         self._last_two_line_right = None
         self._last_two_line_ts = 0.0
@@ -780,6 +782,167 @@ Args:
             return (x1 + x2) * 0.5
         t = (float(y_target) - y1) / dy
         return x1 + t * (x2 - x1)
+
+    def _mask_x_at_y(self, mask, y_target, search_radius=4):
+        """Return the average x coordinate of a binary mask at a given row."""
+        if not isinstance(mask, np.ndarray) or mask.size == 0:
+            return None
+
+        mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+        if mask_2d.ndim != 2 or mask_2d.size == 0:
+            return None
+
+        height, _ = mask_2d.shape[:2]
+        y_target = int(np.clip(y_target, 0, height - 1))
+        search_radius = max(0, int(search_radius))
+
+        for delta in range(search_radius + 1):
+            rows = [y_target] if delta == 0 else [y_target - delta, y_target + delta]
+            for row in rows:
+                if row < 0 or row >= height:
+                    continue
+                xs = np.where(mask_2d[row] > 0)[0]
+                if xs.size > 0:
+                    return float(xs.mean())
+        return None
+
+    def _sample_mask_boundary(self, mask, y_rows):
+        """Sample a lane mask boundary at the requested rows."""
+        return [self._mask_x_at_y(mask, y_value) for y_value in y_rows]
+
+    def _estimate_virtual_boundary_from_single_side(self, side, visible_x, lane_width_px, img_w):
+        """Estimate the missing lane boundary from one visible side."""
+        if visible_x is None:
+            return None
+
+        lane_width_px = max(1.0, float(lane_width_px))
+        if side == 'left':
+            virtual_x = float(visible_x) + lane_width_px
+        else:
+            virtual_x = float(visible_x) - lane_width_px
+
+        return max(0.0, min(float(img_w - 1), virtual_x))
+
+    def _build_local_mask_guidance(self, side_masks, img_h, img_w):
+        """Build direct steering guidance from the raw local-AI lane masks."""
+        if not isinstance(side_masks, dict):
+            return None
+
+        normalized_masks = {'left': None, 'right': None}
+        for side in ('left', 'right'):
+            mask = side_masks.get(side)
+            if not isinstance(mask, np.ndarray) or mask.size == 0:
+                continue
+            mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+            if mask_2d.ndim != 2 or mask_2d.shape[:2] != (img_h, img_w):
+                continue
+            if not np.any(mask_2d):
+                continue
+            normalized_masks[side] = mask_2d
+
+        roi_bottom = max(0, min(img_h - 1, int(self.roi_height_end * img_h) - 1))
+        reference_y = max(0, min(
+            roi_bottom,
+            int(round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))
+        ))
+        if roi_bottom - reference_y < 1:
+            reference_y = max(0, roi_bottom - max(1, img_h // 8))
+        y_rows = [roi_bottom, reference_y]
+
+        samples = {
+            'left': {'bottom': None, 'reference': None},
+            'right': {'bottom': None, 'reference': None},
+        }
+        detected_sides = []
+        for side in ('left', 'right'):
+            mask = normalized_masks[side]
+            if mask is None:
+                continue
+            bottom_x, reference_x = self._sample_mask_boundary(mask, y_rows)
+            if reference_x is None:
+                reference_x = bottom_x
+            if bottom_x is None:
+                bottom_x = reference_x
+            if bottom_x is None and reference_x is None:
+                continue
+            samples[side]['bottom'] = float(bottom_x) if bottom_x is not None else None
+            samples[side]['reference'] = float(reference_x) if reference_x is not None else None
+            detected_sides.append(side)
+
+        if len(detected_sides) == 0:
+            return None
+
+        width_samples = []
+        for row_key in ('bottom', 'reference'):
+            left_x = samples['left'][row_key]
+            right_x = samples['right'][row_key]
+            if left_x is not None and right_x is not None and right_x > left_x:
+                width_samples.append(float(right_x - left_x))
+
+        if width_samples:
+            lane_width_px = sum(width_samples) / len(width_samples)
+        else:
+            cached_lane_width = getattr(self, '_last_local_ai_lane_width_px', None)
+            cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
+            if cached_lane_width is not None and cached_lane_width > 1.0:
+                lane_width_px = float(cached_lane_width)
+            elif cached_px_per_cm is not None and cached_px_per_cm > 0.5:
+                lane_width_px = float(cached_px_per_cm) * float(self.lane_width_cm)
+            else:
+                lane_width_px = float(img_w) * 0.45
+
+        used_virtual_boundary = False
+        if len(detected_sides) == 1:
+            visible_side = detected_sides[0]
+            missing_side = 'right' if visible_side == 'left' else 'left'
+            for row_key in ('bottom', 'reference'):
+                visible_x = samples[visible_side][row_key]
+                if visible_x is None:
+                    continue
+                samples[missing_side][row_key] = self._estimate_virtual_boundary_from_single_side(
+                    visible_side,
+                    visible_x,
+                    lane_width_px,
+                    img_w,
+                )
+            used_virtual_boundary = True
+
+        left_bottom_x = samples['left']['bottom']
+        right_bottom_x = samples['right']['bottom']
+        left_ref_x = samples['left']['reference']
+        right_ref_x = samples['right']['reference']
+        required_values = [left_bottom_x, right_bottom_x, left_ref_x, right_ref_x]
+        if any(value is None for value in required_values):
+            return None
+
+        midpoint_bottom_x = (float(left_bottom_x) + float(right_bottom_x)) / 2.0
+        midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
+        dy = max(1.0, float(roi_bottom - reference_y))
+        heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
+
+        if len(detected_sides) == 2:
+            mask_label = 'BOTH'
+        elif detected_sides[0] == 'left':
+            mask_label = 'LEFT'
+        else:
+            mask_label = 'RIGHT'
+
+        return {
+            'midpoint_x': float(midpoint_x),
+            'midpoint_bottom_x': float(midpoint_bottom_x),
+            'error_px': float(midpoint_x - (img_w / 2.0)),
+            'heading_rad': float(heading_rad),
+            'left_x': float(left_ref_x),
+            'right_x': float(right_ref_x),
+            'bottom_left_x': float(left_bottom_x),
+            'bottom_right_x': float(right_bottom_x),
+            'lane_width_px': float(lane_width_px),
+            'detected_sides': tuple(detected_sides),
+            'reference_y': int(reference_y),
+            'bottom_y': int(roi_bottom),
+            'used_virtual_boundary': bool(used_virtual_boundary),
+            'mask_label': mask_label,
+        }
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
         """Resolve a guessed single local-AI lane into left/right using temporal geometry."""
@@ -1277,6 +1440,57 @@ Args:
             debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
             return None, None, height, width, empty_mask, debug_info
 
+        infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
+        frame_id = int(payload.get('frame_id', 0) or 0)
+        debug_info['remote_server_time_ms'] = infer_ms
+        debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
+        debug_info['remote_frame_id'] = frame_id
+        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
+        debug_info['local_ai_status'] = 'ready'
+
+        side_masks = payload.get('side_masks')
+        lane_mask_payload = payload.get('lane_mask')
+        if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
+            local_mask_guidance = self._build_local_mask_guidance(side_masks, height, width)
+            if local_mask_guidance is not None:
+                render_side_masks = {'left': None, 'right': None}
+                if isinstance(side_masks, dict):
+                    for side in ('left', 'right'):
+                        mask = side_masks.get(side)
+                        if isinstance(mask, np.ndarray) and mask.size > 0:
+                            mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+                            if mask_2d.ndim == 2 and mask_2d.shape[:2] == (height, width) and np.any(mask_2d):
+                                render_side_masks[side] = mask_2d
+
+                render_lane_mask = empty_mask
+                if isinstance(lane_mask_payload, np.ndarray) and lane_mask_payload.size > 0:
+                    lane_mask_2d = lane_mask_payload if lane_mask_payload.ndim == 2 else lane_mask_payload[..., 0]
+                    if lane_mask_2d.ndim == 2 and lane_mask_2d.shape[:2] == (height, width):
+                        render_lane_mask = lane_mask_2d
+                elif render_side_masks['left'] is not None or render_side_masks['right'] is not None:
+                    render_lane_mask = np.zeros((height, width), dtype=np.uint8)
+                    for side in ('left', 'right'):
+                        if render_side_masks[side] is not None:
+                            render_lane_mask = cv2.bitwise_or(render_lane_mask, render_side_masks[side])
+
+                self._smoothed_left_line = None
+                self._smoothed_right_line = None
+                self._left_line_missing_frames = 0
+                self._right_line_missing_frames = 0
+
+                debug_info['pipeline_label'] = 'AI Local + Mask Guidance'
+                debug_info['threshold'] = 'AI MASK'
+                debug_info['remote_lane_count'] = len(local_mask_guidance.get('detected_sides', ()))
+                debug_info['control_mode'] = 'mask_guidance'
+                debug_info['local_mask_guidance'] = local_mask_guidance
+                debug_info['render_side_masks'] = render_side_masks
+                debug_info['render_lane_mask'] = render_lane_mask
+                debug_info['mask_label'] = local_mask_guidance.get('mask_label', 'NONE')
+                debug_info['left_lines'] = []
+                debug_info['right_lines'] = []
+
+                return None, None, height, width, render_lane_mask, debug_info
+
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
         lane_side_lines = payload.get('lane_side_lines')
@@ -1287,12 +1501,6 @@ Args:
             isinstance(lane_side_points, dict) and
             any(lane_side_points.get(side) for side in ('left', 'right'))
         )
-        infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
-        frame_id = int(payload.get('frame_id', 0) or 0)
-
-        debug_info['remote_server_time_ms'] = infer_ms
-        debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
-        debug_info['remote_frame_id'] = frame_id
         if has_explicit_side_lines:
             debug_info['remote_lane_count'] = int(explicit_left is not None) + int(explicit_right is not None)
         elif has_explicit_side_points:
@@ -1301,8 +1509,7 @@ Args:
             )
         else:
             debug_info['remote_lane_count'] = len(lane_points)
-        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
-        debug_info['local_ai_status'] = 'ready'
+        debug_info['control_mode'] = 'legacy_line_fit'
 
         fitted_left = None
         fitted_right = None
@@ -3217,22 +3424,42 @@ Args:
             cv2.polylines(debug, roi_vertices, True, (255, 255, 0), 2)
             roi_top = int(np.min(roi_vertices[0][:, 1]))
 
-        # Draw averaged left line (red, extended)
-        if avg_left is not None:
-            self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2, top_y=roi_top)
+        render_side_masks = debug_info.get('render_side_masks')
+        using_raw_mask = isinstance(render_side_masks, dict) and any(
+            isinstance(render_side_masks.get(side), np.ndarray) and render_side_masks.get(side).size > 0
+            for side in ('left', 'right')
+        )
 
-        # Draw averaged right line (red, extended)
-        if avg_right is not None:
-            self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2, top_y=roi_top)
+        if using_raw_mask:
+            mask_overlay = np.zeros_like(debug)
+            left_mask = render_side_masks.get('left')
+            right_mask = render_side_masks.get('right')
+            if isinstance(left_mask, np.ndarray) and left_mask.size > 0:
+                mask_overlay[left_mask > 0] = (255, 120, 0)
+            if isinstance(right_mask, np.ndarray) and right_mask.size > 0:
+                mask_overlay[right_mask > 0] = (0, 200, 255)
+            if np.any(mask_overlay):
+                debug = cv2.addWeighted(debug, 1.0, mask_overlay, 0.35, 0)
+        else:
+            # Draw averaged left line (red, extended)
+            if avg_left is not None:
+                self._bfmc_draw_extended_line(debug, avg_left, h, (0, 0, 255), 2, top_y=roi_top)
+
+            # Draw averaged right line (red, extended)
+            if avg_right is not None:
+                self._bfmc_draw_extended_line(debug, avg_right, h, (0, 0, 255), 2, top_y=roi_top)
 
         # Draw midpoint and center
         if midpoint_x is not None:
-            cv2.circle(debug, (midpoint_x, h), 8, (0, 255, 255), -1)  # Cyan = midpoint
-            cv2.circle(debug, (w // 2, h), 8, (0, 255, 0), -1)       # Green = center
-            cv2.line(debug, (midpoint_x, h), (w // 2, h), (0, 165, 255), 2)  # Orange = error
+            midpoint_y = int(debug_info.get('midpoint_draw_y', h - 1))
+            midpoint_y = max(0, min(h - 1, midpoint_y))
+            cv2.circle(debug, (midpoint_x, midpoint_y), 8, (0, 255, 255), -1)  # Cyan = midpoint
+            cv2.circle(debug, (w // 2, midpoint_y), 8, (0, 255, 0), -1)       # Green = center
+            cv2.line(debug, (midpoint_x, midpoint_y), (w // 2, midpoint_y), (0, 165, 255), 2)  # Orange = error
 
         # Header panel
-        cv2.rectangle(debug, (0, 0), (w, 55), (20, 20, 40), -1)
+        header_height = 70 if using_raw_mask else 55
+        cv2.rectangle(debug, (0, 0), (w, header_height), (20, 20, 40), -1)
         pipeline_label = debug_info.get('pipeline_label', "OpenCV - BFMC Pipeline")
         cv2.putText(debug, pipeline_label, (8, 18),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
@@ -3255,8 +3482,18 @@ Args:
         th = debug_info.get('threshold', self.binary_threshold)
         l_count = len(debug_info.get('left_lines', []))
         r_count = len(debug_info.get('right_lines', []))
-        cv2.putText(debug, f"Thr:{th} L:{l_count} R:{r_count}", (8, 52),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
+        if using_raw_mask:
+            local_mask_guidance = debug_info.get('local_mask_guidance', {})
+            mask_label = debug_info.get('mask_label', 'NONE')
+            lane_width_px = local_mask_guidance.get('lane_width_px')
+            width_text = "--"
+            if lane_width_px is not None:
+                width_text = f"{float(lane_width_px):.0f}px"
+            cv2.putText(debug, f"Mode: RAW MASK  Mask: {mask_label}  Width: {width_text}", (8, 54),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.33, (180, 180, 180), 1)
+        else:
+            cv2.putText(debug, f"Thr:{th} L:{l_count} R:{r_count}", (8, 52),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 180, 180), 1)
         remote_server_ms = debug_info.get('remote_server_time_ms')
         if remote_server_ms is not None:
             remote_rt_ms = debug_info.get('remote_roundtrip_ms', 0.0)
@@ -3266,13 +3503,14 @@ Args:
         if kalman_error is not None:
             k_age = int(debug_info.get('kalman_age', 0))
             k_mode = "P" if bool(debug_info.get('kalman_predicted', False)) else "C"
-            cv2.putText(debug, f"K:{k_mode} e={kalman_error:.0f}px a={k_age}", (165, 52),
+            kalman_y = 66 if using_raw_mask else 52
+            cv2.putText(debug, f"K:{k_mode} e={kalman_error:.0f}px a={k_age}", (165, kalman_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 255, 180), 1)
 
         # === SWEPT PATH VISUALIZATION ===
         swept = self._swept_path_info
         if swept is not None and self.use_swept_path:
-            bar_y = 58  # Below the header panel
+            bar_y = max(58, header_height + 3)  # Below the header panel
 
             if swept['turn_direction'] != 0 and swept['curve_radius_cm'] > 0:
                 # Curve detected - show info bar
@@ -4357,7 +4595,8 @@ Returns:
                          'use_noise_filter', 'noise_max_hough_lines',
                          'noise_max_reject_frames',
                          'use_curve_recovery', 'recovery_max_steer_frames',
-                         'use_kalman_filter', 'kalman_max_prediction_frames'}
+                         'use_kalman_filter', 'kalman_max_prediction_frames',
+                         'ai_local_use_mask_geometry'}
             
             params = ['base_speed', 'max_speed', 'min_speed', 'max_error_px', 'kp', 'ki', 'kd', 'smoothing_factor',
                      'dead_zone_ratio', 'max_steering', 'lookahead', 'integral_reset_interval',
@@ -4395,6 +4634,7 @@ Returns:
                      'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale',
                      # HybridNets remote AI server
                      'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout', 'local_ai_max_result_age',
+                     'ai_local_use_mask_geometry',
                      # Supercombo remote AI server
                      'supercombo_server_url', 'supercombo_jpeg_quality', 'supercombo_timeout',
                      # Swept path / car geometry parameters
@@ -4865,7 +5105,10 @@ Returns:
         kalman_pred_error = self._kalman_predict_error()
 
         # === PRE-CHECK: Reject obviously noisy frames (reflection/glare) ===
+        local_mask_guidance = debug_info.get('local_mask_guidance')
         num_lines = (1 if avg_left is not None else 0) + (1 if avg_right is not None else 0)
+        if isinstance(local_mask_guidance, dict):
+            num_lines = len(local_mask_guidance.get('detected_sides', ()))
         _pre_noisy, _pre_reason = self._is_frame_noisy(debug_info, None, None, num_lines)
         if _pre_noisy:
             # Frame is noisy (e.g. too many Hough lines from reflections)
@@ -4893,12 +5136,113 @@ Returns:
             return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
-        if self.use_swept_path:
+        if self.use_swept_path and not isinstance(local_mask_guidance, dict):
             self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
         prev_seen_side = self.last_seen_side
 
-        if avg_left is not None and avg_right is not None:
+        if isinstance(local_mask_guidance, dict):
+            detected_sides = tuple(local_mask_guidance.get('detected_sides', ()))
+            lane_width_px = float(local_mask_guidance.get('lane_width_px', 0.0) or 0.0)
+            if len(detected_sides) >= 2 and lane_width_px > 1.0:
+                self._last_local_ai_lane_width_px = lane_width_px
+
+            error = float(local_mask_guidance.get('error_px', 0.0) or 0.0)
+            heading = float(local_mask_guidance.get('heading_rad', 0.0) or 0.0)
+            self._heading_error = heading
+            midpoint_x = int(round(local_mask_guidance.get('midpoint_x', img_w / 2.0)))
+            midpoint_x = max(0, min(img_w - 1, midpoint_x))
+            bottom_left_x = int(round(local_mask_guidance.get('bottom_left_x', 0.0) or 0.0))
+            bottom_right_x = int(round(local_mask_guidance.get('bottom_right_x', img_w - 1) or (img_w - 1)))
+            bottom_left_x = max(0, min(img_w - 1, bottom_left_x))
+            bottom_right_x = max(0, min(img_w - 1, bottom_right_x))
+            debug_info['midpoint_draw_y'] = int(local_mask_guidance.get('reference_y', img_h - 1))
+            self._swept_path_info = None
+            self.just_seen_two_lines = False
+
+            if self.use_kalman_filter:
+                raw_error = error
+                error = self._kalman_correct_error(error)
+                debug_info['kalman_raw_error'] = raw_error
+                debug_info['kalman_error'] = error
+                debug_info['kalman_age'] = self._kalman_age_frames
+
+            if len(detected_sides) >= 2:
+                self.consecutive_single_left = 0
+                self.consecutive_single_right = 0
+                self.frames_without_line = 0
+                self.last_seen_side = "both"
+
+                if self.use_stanley:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, None
+                    )
+                    steering_angle = self.stanley.compute(
+                        error, heading, speed_val,
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
+                    )
+                else:
+                    steering_angle = self.pid.compute(error)
+
+                self.steer_history.append(steering_angle)
+                steering_angle = sum(self.steer_history) / len(self.steer_history)
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+            elif 'left' in detected_sides:
+                self.consecutive_single_left += 1
+                self.consecutive_single_right = 0
+                self.last_seen_side = "left"
+                debug_info['single_line_resolved_side'] = 'left'
+                debug_info['single_line_side_source'] = 'mask'
+                speed = self.min_speed + 2
+
+                if self.use_stanley:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, None
+                    )
+                    steering_angle = self.stanley.compute(
+                        error, heading, speed_val,
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
+                    )
+                else:
+                    steering_angle = self.pid.compute(error)
+
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                self.frames_without_line = 0
+            elif 'right' in detected_sides:
+                self.consecutive_single_right += 1
+                self.consecutive_single_left = 0
+                self.last_seen_side = "right"
+                debug_info['single_line_resolved_side'] = 'right'
+                debug_info['single_line_side_source'] = 'mask'
+                speed = self.min_speed + 2
+
+                if self.use_stanley:
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
+                        speed_val, None
+                    )
+                    steering_angle = self.stanley.compute(
+                        error, heading, speed_val,
+                        yaw_rate=self._yaw_rate,
+                        traj_yaw_rate=traj_yaw_rate,
+                        steady_state_heading=psi_ss,
+                        steer_damping_delta=steer_damping_delta,
+                    )
+                else:
+                    steering_angle = self.pid.compute(error)
+
+                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                self.frames_without_line = 0
+
+        elif avg_left is not None and avg_right is not None:
             # ---- BOTH LINES DETECTED ----
             # BFMC logic: if just_seen_two_lines was False, skip this frame (stabilize)
             if self.just_seen_two_lines:
@@ -5196,20 +5540,26 @@ Returns:
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
 
         if self.show_debug and steering_angle is not None:
-            src = "both" if avg_left is not None and avg_right is not None else \
-                  "left" if avg_left is not None else \
-                  "right" if avg_right is not None else "none"
+            if isinstance(local_mask_guidance, dict):
+                src = f"mask:{local_mask_guidance.get('mask_label', 'NONE').lower()}"
+            else:
+                src = "both" if avg_left is not None and avg_right is not None else \
+                      "left" if avg_left is not None else \
+                      "right" if avg_right is not None else "none"
+            control_mode = debug_info.get('control_mode', 'legacy_line_fit')
             if self.use_stanley:
                 heading_deg = math.degrees(self._heading_error)
                 psi_ss_deg = math.degrees(self._stanley_last_psi_ss)
                 steer_damp_deg = math.degrees(self.stanley.k_d_steer * self._stanley_last_steer_damping)
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
+                      f"Mode: {control_mode} "
                       f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px "
                       f"Heading: {heading_deg:.1f}° PsiSS: {psi_ss_deg:.1f}° "
                       f"YawRate: {self._yaw_rate:.2f}/{self._stanley_last_traj_yaw_rate:.2f} "
                       f"ServoDamp: {steer_damp_deg:.1f}° Source: {src}")
             else:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - "
+                      f"Mode: {control_mode} "
                       f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px Source: {src}")
 
         # Create debug frame only when needed (saves frame.copy() + draw operations per frame)

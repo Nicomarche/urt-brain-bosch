@@ -7,11 +7,31 @@ from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
 
 
 class AILocalLaneSideMappingTests(unittest.TestCase):
+    @staticmethod
+    def _mask_from_points(points, shape=(100, 100)):
+        mask = np.zeros(shape, dtype=np.uint8)
+        height, width = shape
+        for x, y in points:
+            x = int(x)
+            y = int(y)
+            x1 = max(0, x - 1)
+            x2 = min(width, x + 2)
+            y1 = max(0, y - 1)
+            y2 = min(height, y + 2)
+            mask[y1:y2, x1:x2] = 255
+        return mask
+
     def setUp(self):
         self.detector = threadLineFollowing.__new__(threadLineFollowing)
         self.detector.roi_height_start = 0.0
         self.detector.roi_height_end = 1.0
         self.detector.local_ai_max_result_age = 1.0
+        self.detector.ai_local_use_mask_geometry = True
+        self.detector.lookahead = 0.4
+        self.detector.lane_width_cm = 35.0
+        self.detector._last_local_ai_lane_width_px = None
+        self.detector._last_px_per_cm = None
+        self.detector.show_debug = False
         self.detector._smooth_detected_line = lambda line, side: line
 
     def test_lane_side_points_preserve_both_lanes_even_on_same_half(self):
@@ -68,6 +88,72 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(len(debug_info["right_lines"]), 1)
         self.assertEqual(debug_info["remote_lane_count"], 2)
 
+    def test_build_local_mask_guidance_uses_raw_masks(self):
+        left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
+        right_mask = self._mask_from_points([(70, 95), (71, 85), (72, 75), (74, 65), (76, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            100,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["detected_sides"], ("left", "right"))
+        self.assertFalse(guidance["used_virtual_boundary"])
+        self.assertGreater(guidance["lane_width_px"], 0.0)
+        self.assertAlmostEqual(guidance["midpoint_x"], 50.0, delta=5.0)
+
+    def test_build_local_mask_guidance_estimates_virtual_boundary_for_single_side(self):
+        self.detector._last_local_ai_lane_width_px = 36.0
+        left_mask = self._mask_from_points([(32, 95), (31, 85), (30, 75), (29, 65), (28, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": None},
+            100,
+            100,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["detected_sides"], ("left",))
+        self.assertTrue(guidance["used_virtual_boundary"])
+        self.assertAlmostEqual(guidance["right_x"] - guidance["left_x"], 36.0, delta=1.5)
+
+    def test_detect_with_local_ai_prefers_raw_masks_when_enabled(self):
+        left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
+        right_mask = self._mask_from_points([(70, 95), (71, 85), (72, 75), (74, 65), (76, 55)])
+        lane_mask = np.bitwise_or(left_mask, right_mask)
+        self.detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {
+                "left": [[58, 95], [56, 75], [54, 55]],
+                "right": [[82, 95], [80, 75], [78, 55]],
+            },
+            "lane_side_lines": {
+                "left": [58, 95, 54, 55],
+                "right": [82, 95, 78, 55],
+            },
+            "side_masks": {"left": left_mask, "right": right_mask},
+            "lane_mask": lane_mask,
+            "inference_time_ms": 12.0,
+            "frame_id": 17,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, returned_mask, debug_info = self.detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNone(avg_left)
+        self.assertIsNone(avg_right)
+        self.assertEqual(debug_info["control_mode"], "mask_guidance")
+        self.assertEqual(debug_info["remote_lane_count"], 2)
+        self.assertEqual(debug_info["left_lines"], [])
+        self.assertEqual(debug_info["right_lines"], [])
+        self.assertIn("local_mask_guidance", debug_info)
+        self.assertTrue(np.array_equal(returned_mask, lane_mask))
+
     def test_detect_with_local_ai_prefers_explicit_lane_side_lines(self):
         self.detector._last_local_lane_payload = {
             "lane_points": [],
@@ -91,6 +177,36 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(avg_left[0].tolist(), [58, 95, 54, 55])
         self.assertEqual(avg_right[0].tolist(), [82, 95, 78, 55])
         self.assertEqual(debug_info["remote_lane_count"], 2)
+
+    def test_detect_with_local_ai_flag_disabled_falls_back_to_legacy_lines(self):
+        self.detector.ai_local_use_mask_geometry = False
+        left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
+        right_mask = self._mask_from_points([(70, 95), (71, 85), (72, 75), (74, 65), (76, 55)])
+        self.detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {"left": [], "right": []},
+            "lane_side_lines": {
+                "left": [58, 95, 54, 55],
+                "right": [82, 95, 78, 55],
+            },
+            "side_masks": {"left": left_mask, "right": right_mask},
+            "lane_mask": np.bitwise_or(left_mask, right_mask),
+            "inference_time_ms": 12.0,
+            "frame_id": 18,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, _, debug_info = self.detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNotNone(avg_left)
+        self.assertIsNotNone(avg_right)
+        self.assertEqual(debug_info["control_mode"], "legacy_line_fit")
+        self.assertNotIn("local_mask_guidance", debug_info)
+        self.assertEqual(len(debug_info["left_lines"]), 1)
+        self.assertEqual(len(debug_info["right_lines"]), 1)
 
     def test_lane_points_fallback_still_works_without_side_metadata(self):
         lane_points = [
