@@ -1,3 +1,5 @@
+import os
+import tempfile
 import time
 import unittest
 
@@ -512,6 +514,33 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(debug_fields["visible_lane_side"], "left")
         self.assertEqual(debug_fields["lost_lane_side"], "right")
         self.assertIn("transition_lost_right", debug_fields["lane_context_sources"])
+
+    def test_auto_run_log_resets_when_auto_is_reentered(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.auto_run_log_path = os.path.join(
+            tempfile.gettempdir(),
+            "line_following_auto_last_run_test.txt",
+        )
+        detector.detection_mode = "ai_local"
+        detector._auto_run_log_enabled = False
+        detector._auto_run_log_frame_idx = 0
+        detector._last_frame_trace = {}
+
+        detector._reset_auto_run_log("AUTO")
+        detector._append_auto_run_log_entry("FRAME 0001", {"frame": 1})
+
+        with open(detector.auto_run_log_path, "r", encoding="utf-8") as log_file:
+            first_log = log_file.read()
+
+        detector._reset_auto_run_log("AUTO")
+
+        with open(detector.auto_run_log_path, "r", encoding="utf-8") as log_file:
+            second_log = log_file.read()
+
+        self.assertIn("AUTO RUN RESET", first_log)
+        self.assertIn("FRAME 0001", first_log)
+        self.assertIn("AUTO RUN RESET", second_log)
+        self.assertNotIn("FRAME 0001", second_log)
 
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):

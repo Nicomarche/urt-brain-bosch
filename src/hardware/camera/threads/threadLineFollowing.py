@@ -8,6 +8,8 @@ import numpy as np
 import base64
 import time
 import math
+import json
+import os
 from collections import deque
 from enum import Enum
 from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus
@@ -504,6 +506,19 @@ Args:
         self._lane_observation_history = deque(maxlen=12)
         self._last_local_ai_duplicate_collapse = None
         self._last_single_line_projection_debug = {}
+        self.auto_run_log_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..", "..",
+                "temp",
+                "line_following_auto_last_run.txt",
+            )
+        )
+        self._auto_run_log_enabled = False
+        self._auto_run_log_frame_idx = 0
+        self._last_frame_trace = {}
+        self._last_requested_motor_command = None
+        self._last_state_change_message = None
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
         self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
@@ -5346,6 +5361,149 @@ Returns:
         if config is not None:
             self._apply_config(config)
 
+    def _sanitize_log_value(self, value, depth=0):
+        """Convert runtime state into JSON-safe, compact log values."""
+        if depth > 4:
+            return str(type(value).__name__)
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, np.ndarray):
+            return {
+                "type": "ndarray",
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+            }
+        if isinstance(value, dict):
+            sanitized = {}
+            for key, item in value.items():
+                sanitized[str(key)] = self._sanitize_log_value(item, depth + 1)
+            return sanitized
+        if isinstance(value, (list, tuple, deque)):
+            return [self._sanitize_log_value(item, depth + 1) for item in value]
+        return str(value)
+
+    def _set_frame_trace(self, trace):
+        """Store the latest per-frame reasoning snapshot for auto-run logging."""
+        trace_dict = trace if isinstance(trace, dict) else {"value": trace}
+        self._last_frame_trace = self._sanitize_log_value(trace_dict)
+
+    def _reset_auto_run_log(self, state_message):
+        """Reset the persistent auto-run text log when entering AUTO mode."""
+        log_dir = os.path.dirname(self.auto_run_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        self._auto_run_log_enabled = True
+        self._auto_run_log_frame_idx = 0
+        self._last_frame_trace = {}
+        header = {
+            "log": "line_following_auto_last_run",
+            "reset_timestamp": round(time.time(), 3),
+            "state_message": str(state_message),
+            "detection_mode": str(getattr(self, "detection_mode", "")),
+        }
+        with open(self.auto_run_log_path, "w", encoding="utf-8") as log_file:
+            log_file.write("=== AUTO RUN RESET ===\n")
+            log_file.write(json.dumps(header, indent=2, sort_keys=True))
+            log_file.write("\n\n")
+
+    def _append_auto_run_log_entry(self, title, payload):
+        """Append one human-readable JSON block to the current auto-run log."""
+        if not self._auto_run_log_enabled:
+            return
+        log_dir = os.path.dirname(self.auto_run_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(self.auto_run_log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(f"=== {title} ===\n")
+            log_file.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
+            log_file.write("\n\n")
+
+    def _build_local_lane_payload_log(self):
+        """Return a compact summary of the latest local lane payload."""
+        payload = self._last_local_lane_payload
+        if not isinstance(payload, dict):
+            return None
+        lane_side_points = payload.get("lane_side_points") or {}
+        lane_side_lines = payload.get("lane_side_lines") or {}
+        return {
+            "frame_id": payload.get("frame_id"),
+            "timestamp": payload.get("timestamp"),
+            "inference_time_ms": payload.get("inference_time_ms"),
+            "lane_count": payload.get("lane_count"),
+            "model_ready": payload.get("model_ready"),
+            "lane_side_sources": payload.get("lane_side_sources"),
+            "lane_side_point_counts": {
+                "left": len(lane_side_points.get("left", []) or []),
+                "right": len(lane_side_points.get("right", []) or []),
+            },
+            "lane_side_lines": lane_side_lines,
+        }
+
+    def _log_auto_run_frame(
+        self,
+        frame_sequence,
+        frame_timestamp,
+        stale_frame,
+        computed_steering,
+        computed_speed,
+        commanded_steering,
+        commanded_speed,
+        command_source,
+    ):
+        """Append a detailed per-frame auto-mode trace to disk."""
+        if not self._auto_run_log_enabled:
+            return
+
+        self._auto_run_log_frame_idx += 1
+        latest_observation = None
+        if self._lane_observation_history:
+            latest_observation = self._lane_observation_history[-1]
+
+        payload = {
+            "frame_index": self._auto_run_log_frame_idx,
+            "frame_sequence": frame_sequence,
+            "wall_time": round(time.time(), 3),
+            "frame_timestamp": round(frame_timestamp, 3) if frame_timestamp else None,
+            "frame_age_ms": self._last_frame_age_ms,
+            "stale_frame": bool(stale_frame),
+            "state_change_message": self._last_state_change_message,
+            "line_following_active": bool(self.is_line_following_active),
+            "detection_mode": str(self.detection_mode),
+            "computed": {
+                "steering_deg": computed_steering,
+                "speed": computed_speed,
+            },
+            "commanded": {
+                "steering_deg": commanded_steering,
+                "speed": commanded_speed,
+                "source": command_source,
+            },
+            "nucleo_request": self._last_requested_motor_command,
+            "actuator_status": self._last_actuator_status,
+            "local_perception_status": self._last_local_perception_status,
+            "local_lane_payload": self._build_local_lane_payload_log(),
+            "lane_observation": latest_observation,
+            "frame_trace": self._last_frame_trace,
+            "controller_state": {
+                "heading_error_deg": round(math.degrees(self._heading_error), 3),
+                "psi_ss_deg": round(math.degrees(self._stanley_last_psi_ss), 3),
+                "traj_yaw_rate": round(float(self._stanley_last_traj_yaw_rate), 5),
+                "measured_yaw_rate": round(float(self._yaw_rate), 5),
+                "measured_speed": round(float(self._measured_speed), 3),
+                "measured_steer": round(float(self._measured_steer), 3),
+                "measured_steer_delta": round(float(self._measured_steer_delta), 3),
+                "current_speed_target": round(float(self._current_speed), 3),
+                "frames_without_line": int(self.frames_without_line),
+                "last_seen_side": self.last_seen_side,
+                "curve_state": self._curve_state,
+                "curve_direction": self._curve_direction,
+            },
+        }
+        self._append_auto_run_log_entry(
+            f"FRAME {self._auto_run_log_frame_idx:04d}",
+            payload,
+        )
+
     def thread_work(self):
         """Main loop for line following."""
         try:
@@ -5379,6 +5537,12 @@ Returns:
             if stale_frame:
                 steering_angle = self._last_safe_steering
                 speed = self.min_speed
+                self._set_frame_trace({
+                    "status": "stale_frame_hold",
+                    "frame_age_ms": self._last_frame_age_ms,
+                    "steering_deg": steering_angle,
+                    "speed": speed,
+                })
                 debug_frame = None
                 if self._needs_debug:
                     debug_frame = frame.copy()
@@ -5403,6 +5567,7 @@ Returns:
             commanded_steering = None
             commanded_speed = None
             command_source = "no_command"
+            self._last_requested_motor_command = None
             
             if self.is_line_following_active:
                 if steering_angle is not None:
@@ -5424,7 +5589,7 @@ Returns:
                 command_source = "blocked_inactive"
                 # Line following not active - need to be in AUTO mode
                 if steering_angle is not None:
-                    #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mBLOCKED\033[0m - Steering={steering_angle:.1f}° but is_line_following_active=False! Put system in AUTO mode.")
+                    pass
                 if hasattr(self, '_last_inactive_log') == False:
                     #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
                     self._last_inactive_log = True
@@ -5441,6 +5606,17 @@ Returns:
                 and actuator_status.get("engine_enabled") is False
             ):
                 command_source = "blocked_klem"
+
+            self._log_auto_run_frame(
+                frame_sequence=frame_sequence,
+                frame_timestamp=frame_timestamp,
+                stale_frame=stale_frame,
+                computed_steering=computed_steering,
+                computed_speed=computed_speed,
+                commanded_steering=commanded_steering,
+                commanded_speed=commanded_speed,
+                command_source=command_source,
+            )
 
             if self.show_debug and (computed_steering is not None or commanded_steering is not None):
                 comp_text = f"{computed_steering:.1f}" if computed_steering is not None else "--"
@@ -5504,6 +5680,11 @@ Returns:
         normalized_mode = self._normalize_detection_mode(self.detection_mode)
         if normalized_mode != self.detection_mode:
             self.detection_mode = normalized_mode
+        self._set_frame_trace({
+            "status": "processing",
+            "detection_mode": self.detection_mode,
+            "frame_size": {"height": int(height), "width": int(width)},
+        })
         
         if self.show_debug:
             self._debug_log(
@@ -5518,12 +5699,23 @@ Returns:
                 steering, speed, debug = self._detect_with_supercombo(frame)
                 if steering is not None:
                     self.frames_without_line = 0
+                self._set_frame_trace({
+                    "status": "supercombo",
+                    "detection_mode": self.detection_mode,
+                    "steering_deg": steering,
+                    "speed": speed,
+                })
                 return steering, speed, debug
             except Exception as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mSUPERCOMBO ERROR\033[0m - {e}")
                 debug_frame = frame.copy()
                 cv2.putText(debug_frame, f"Supercombo Error: {str(e)[:50]}", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                self._set_frame_trace({
+                    "status": "supercombo_error",
+                    "detection_mode": self.detection_mode,
+                    "error": str(e),
+                })
                 return None, self.min_speed, debug_frame
         
         # Handle HYBRID fusion mode (runs both detectors and combines)
@@ -5532,12 +5724,23 @@ Returns:
                 steering, speed, debug = self._detect_hybrid_fusion(frame)
                 if steering is not None:
                     self.frames_without_line = 0
+                self._set_frame_trace({
+                    "status": "hybrid",
+                    "detection_mode": self.detection_mode,
+                    "steering_deg": steering,
+                    "speed": speed,
+                })
                 return steering, speed, debug
             except Exception as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mHYBRID ERROR\033[0m - {e}")
                 debug_frame = frame.copy()
                 cv2.putText(debug_frame, f"HYBRID Error: {str(e)[:50]}", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                self._set_frame_trace({
+                    "status": "hybrid_error",
+                    "detection_mode": self.detection_mode,
+                    "error": str(e),
+                })
                 return None, self.min_speed, debug_frame
         
         # Handle LSTR-only mode
@@ -5549,6 +5752,13 @@ Returns:
                     self.last_steering = steering
                     if self.show_debug:
                         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mLSTR\033[0m - Steer: {steering:.1f}° Speed: {speed:.1f}")
+                    self._set_frame_trace({
+                        "status": "lstr",
+                        "detection_mode": self.detection_mode,
+                        "steering_deg": steering,
+                        "speed": speed,
+                        "lane_center_x": center,
+                    })
                     return steering, speed, debug
                 else:
                     # LSTR failed, return no detection
@@ -5557,12 +5767,21 @@ Returns:
                     debug_frame = frame.copy()
                     cv2.putText(debug_frame, "LSTR: No lanes detected", (10, 30), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    self._set_frame_trace({
+                        "status": "lstr_no_lanes",
+                        "detection_mode": self.detection_mode,
+                    })
                     return None, self.min_speed, debug_frame
             except Exception as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mLSTR ERROR\033[0m - {e}")
                 debug_frame = frame.copy()
                 cv2.putText(debug_frame, f"LSTR Error: {str(e)[:50]}", (10, 30), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                self._set_frame_trace({
+                    "status": "lstr_error",
+                    "detection_mode": self.detection_mode,
+                    "error": str(e),
+                })
                 return None, self.min_speed, debug_frame
         
         using_remote_lanes = self.detection_mode in (DetectionMode.AI_LOCAL.value, DetectionMode.HYBRIDNETS.value)
@@ -5578,6 +5797,11 @@ Returns:
                 debug_frame = frame.copy()
                 cv2.putText(debug_frame, f"AI Local Error: {str(e)[:50]}", (10, 30),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                self._set_frame_trace({
+                    "status": "ai_local_error",
+                    "detection_mode": self.detection_mode,
+                    "error": str(e),
+                })
                 return None, self.min_speed, debug_frame
         else:
             # Match bfmc24-brain StanleyLaneDetector.image_processing(): raw frame goes
@@ -5654,6 +5878,15 @@ Returns:
                 self._store_debug_image('final', debug_frame)
             else:
                 debug_frame = None
+            self._set_frame_trace({
+                "status": "noise_reject",
+                "detection_mode": self.detection_mode,
+                "reason": _pre_reason,
+                "steering_deg": steering_angle,
+                "speed": speed,
+                "noise_reject_count": self._noise_reject_count,
+                "debug": debug_info,
+            })
             return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
@@ -6039,6 +6272,27 @@ Returns:
         else:
             debug_frame = None
 
+        self._set_frame_trace({
+            "status": "processed",
+            "detection_mode": self.detection_mode,
+            "pipeline_label": debug_info.get("pipeline_label"),
+            "control_mode": debug_info.get("control_mode", "legacy_line_fit"),
+            "num_lines": int(num_lines),
+            "error_px": error,
+            "midpoint_x": midpoint_x,
+            "bottom_left_x": bottom_left_x,
+            "bottom_right_x": bottom_right_x,
+            "steering_deg": steering_angle,
+            "speed": speed,
+            "kalman_prediction_used": bool(kalman_prediction_used),
+            "avg_left_line": avg_left[0].tolist() if avg_left is not None else None,
+            "avg_right_line": avg_right[0].tolist() if avg_right is not None else None,
+            "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
+            "single_line_projection": self._last_single_line_projection_debug,
+            "swept_path": self._swept_path_info,
+            "debug": debug_info,
+        })
+
         return steering_angle, speed, debug_frame
 
     def draw_rounded_rectangle(self, img, pt1, pt2, color, thickness, radius):
@@ -6129,12 +6383,23 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         try:
             steer_value = int(round(steering_angle * 10))
             speed_value = int(round(speed * 10))
+            self._last_requested_motor_command = {
+                "timestamp": round(time.time(), 3),
+                "steering_deg": float(steering_angle),
+                "speed": float(speed),
+                "steer_x10": int(steer_value),
+                "speed_x10": int(speed_value),
+                "sign_action_blocked_speed": False,
+                "speed_sent": True,
+            }
 
             # If a sign action (stop, crosswalk, etc.) is active:
             # - STEER: keep sending so the car aligns with the lane while stopped
             # - SPEED: block to not override the sign action's speed=0
             if self.sign_action_event and self.sign_action_event.is_set():
                 self._sign_action_was_active = True
+                self._last_requested_motor_command["sign_action_blocked_speed"] = True
+                self._last_requested_motor_command["speed_sent"] = False
                 self.steerMotorSender.send(str(steer_value))
                 if self.show_debug:
                     print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
@@ -6146,6 +6411,8 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 self._sign_action_was_active = False
                 self._current_speed = self.min_speed
                 speed_value = int(round(self.min_speed * 10))
+                self._last_requested_motor_command["speed"] = float(self.min_speed)
+                self._last_requested_motor_command["speed_x10"] = int(speed_value)
                 print(
                     f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mRESUME\033[0m - "
                     f"Speed reset to min ({self.min_speed}) after sign action"
@@ -6166,6 +6433,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         """Check for state changes and enable/disable line following accordingly."""
         message = self.stateChangeSubscriber.receive()
         if message is not None:
+            self._last_state_change_message = str(message)
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - Received: {message}")
             
             try:
@@ -6175,9 +6443,12 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 if mode_dict.get("enabled", False):
                     self.is_line_following_active = True
                     self._last_inactive_log = False  # Reset inactive log flag
+                    if str(message) == "AUTO":
+                        self._reset_auto_run_log(message)
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
                 else:
                     self.is_line_following_active = False
+                    self._auto_run_log_enabled = False
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mDEACTIVATED\033[0m - Line following is now INACTIVE")
             except KeyError as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
