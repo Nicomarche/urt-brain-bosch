@@ -42,6 +42,20 @@ class LocalPerceptionEngine:
             self._normalize(key): value
             for key, value in getattr(config, "LOCAL_AI_SIGN_CLASS_MAP", {}).items()
         }
+        self.nms_iou = max(0.1, min(0.9, float(getattr(config, "LOCAL_AI_NMS_IOU", 0.45))))
+        self.max_detections = max(1, int(getattr(config, "LOCAL_AI_MAX_DETECTIONS", 80)))
+        self.sign_min_confidence = max(
+            self.min_confidence,
+            min(1.0, float(getattr(config, "LOCAL_AI_SIGN_MIN_CONFIDENCE", 0.55))),
+        )
+        self.sign_max_detections = max(1, int(getattr(config, "LOCAL_AI_SIGN_MAX_DETECTIONS", 20)))
+        self.sign_debug_max_detections = max(
+            1, int(getattr(config, "LOCAL_AI_SIGN_DEBUG_MAX_DETECTIONS", 8))
+        )
+        self.drop_unknown_classes = bool(getattr(config, "LOCAL_AI_DROP_UNKNOWN_CLASSES", True))
+        self.class_id_name_map = self._parse_class_id_name_map(
+            getattr(config, "LOCAL_AI_CLASS_ID_NAME_MAP", {})
+        )
 
         self.frame_count = 0
         self.labels = {}
@@ -50,6 +64,7 @@ class LocalPerceptionEngine:
         self.init_error = None
         self._vis_lock = threading.Lock()
         self._last_debug = {}
+        self._warned_fallback_labels = False
 
         try:
             from ultralytics import YOLO
@@ -83,6 +98,11 @@ class LocalPerceptionEngine:
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Modelo: {model_full_path}")
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Device: {self.device}")
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Input: {self.imgsz}x{self.imgsz} conf={self.min_confidence}")
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - "
+                f"NMS iou={self.nms_iou} max_det={self.max_detections} sign_conf={self.sign_min_confidence}"
+            )
+            self._warn_if_fallback_labels()
             self._warmup()
         except Exception as e:
             self.model_ready = False
@@ -99,6 +119,64 @@ class LocalPerceptionEngine:
 
     def _normalize_aliases(self, aliases):
         return {self._normalize(alias) for alias in aliases if alias}
+
+    def _parse_class_id_name_map(self, raw_mapping):
+        parsed = {}
+        if not isinstance(raw_mapping, dict):
+            return parsed
+        for key, value in raw_mapping.items():
+            try:
+                cls_idx = int(key)
+            except (TypeError, ValueError):
+                continue
+            if value is None:
+                continue
+            parsed[cls_idx] = str(value)
+        return parsed
+
+    @staticmethod
+    def _is_fallback_class_name(class_name):
+        return re.match(r"^class_?\d+$", str(class_name).strip().lower()) is not None
+
+    def _label_from_index(self, cls_idx):
+        if isinstance(self.labels, dict):
+            return self.labels.get(cls_idx)
+        if isinstance(self.labels, (list, tuple)) and 0 <= cls_idx < len(self.labels):
+            return self.labels[cls_idx]
+        return None
+
+    def _resolve_class_name(self, cls_idx):
+        class_name = self._label_from_index(cls_idx)
+        if class_name is None:
+            class_name = f"class_{cls_idx}"
+        class_name = str(class_name)
+
+        if self._is_fallback_class_name(class_name):
+            mapped_name = self.class_id_name_map.get(cls_idx)
+            if mapped_name:
+                return mapped_name
+            if self.drop_unknown_classes:
+                return None
+        return class_name
+
+    def _warn_if_fallback_labels(self):
+        if self._warned_fallback_labels:
+            return
+
+        samples = []
+        if isinstance(self.labels, dict):
+            for key in sorted(self.labels.keys())[:6]:
+                samples.append(str(self.labels[key]))
+        elif isinstance(self.labels, (list, tuple)):
+            samples = [str(item) for item in list(self.labels)[:6]]
+
+        if samples and all(self._is_fallback_class_name(name) for name in samples):
+            self._warned_fallback_labels = True
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWARNING\033[0m - "
+                "El engine reporta etiquetas classXX. Recomendado: exportar con "
+                "Ultralytics (YOLO.export format=engine, nms=True) en la misma Jetson."
+            )
 
     def _resolve_model_path(self, model_path):
         if os.path.isabs(model_path):
@@ -166,7 +244,9 @@ class LocalPerceptionEngine:
             self.model.predict(
                 dummy,
                 conf=self.min_confidence,
+                iou=self.nms_iou,
                 imgsz=self.imgsz,
+                max_det=self.max_detections,
                 device=self.device,
                 verbose=False,
             )
@@ -459,6 +539,83 @@ class LocalPerceptionEngine:
             round(float(x2) / max(width, 1), 4),
         ]
 
+    def _apply_classwise_nms(self, boxes):
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        entries = []
+        for idx in range(len(boxes)):
+            conf = float(boxes.conf[idx])
+            if conf < self.min_confidence:
+                continue
+            x1, y1, x2, y2 = [float(v) for v in boxes.xyxy[idx].tolist()]
+            entries.append(
+                {
+                    "idx": idx,
+                    "cls": int(boxes.cls[idx]),
+                    "conf": conf,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+            )
+
+        if not entries:
+            return []
+
+        by_class = {}
+        for entry in entries:
+            by_class.setdefault(entry["cls"], []).append(entry)
+
+        keep_indices = []
+        conf_by_index = {entry["idx"]: entry["conf"] for entry in entries}
+
+        for class_entries in by_class.values():
+            class_entries.sort(key=lambda item: item["conf"], reverse=True)
+            bboxes = []
+            scores = []
+            for item in class_entries:
+                width = max(1.0, item["x2"] - item["x1"])
+                height = max(1.0, item["y2"] - item["y1"])
+                bboxes.append(
+                    [
+                        int(round(item["x1"])),
+                        int(round(item["y1"])),
+                        int(round(width)),
+                        int(round(height)),
+                    ]
+                )
+                scores.append(float(item["conf"]))
+
+            keep_local = []
+            try:
+                keep_local = cv2.dnn.NMSBoxes(
+                    bboxes,
+                    scores,
+                    score_threshold=self.min_confidence,
+                    nms_threshold=self.nms_iou,
+                )
+            except Exception:
+                keep_local = []
+
+            if keep_local is None or len(keep_local) == 0:
+                keep_indices.extend([item["idx"] for item in class_entries])
+                continue
+
+            flat_local = np.array(keep_local).reshape(-1).tolist()
+            for local_idx in flat_local:
+                local_idx = int(local_idx)
+                if 0 <= local_idx < len(class_entries):
+                    keep_indices.append(class_entries[local_idx]["idx"])
+
+        keep_indices = sorted(
+            set(keep_indices),
+            key=lambda idx: conf_by_index.get(idx, 0.0),
+            reverse=True,
+        )
+        return keep_indices[: self.max_detections]
+
     def _split_candidates(self, result, frame_shape):
         height, width = frame_shape
         boxes = getattr(result, "boxes", None)
@@ -472,11 +629,14 @@ class LocalPerceptionEngine:
         side_candidates = {"left": [], "right": []}
         sign_detections = []
         frame_center = width / 2.0
+        keep_indices = self._apply_classwise_nms(boxes)
 
-        for idx in range(len(boxes)):
+        for idx in keep_indices:
             conf = float(boxes.conf[idx])
             cls_idx = int(boxes.cls[idx])
-            class_name = str(self.labels.get(cls_idx, f"class_{cls_idx}"))
+            class_name = self._resolve_class_name(cls_idx)
+            if class_name is None:
+                continue
             role = self._class_to_role(class_name)
             x1, y1, x2, y2 = [float(v) for v in boxes.xyxy[idx].tolist()]
             x_center = (x1 + x2) / 2.0
@@ -484,6 +644,8 @@ class LocalPerceptionEngine:
             mask = self._segments_to_mask(segments, (height, width))
 
             if role is None:
+                if conf < self.sign_min_confidence:
+                    continue
                 sign_detections.append(
                     {
                         "class": self._normalize_sign_name(class_name),
@@ -544,6 +706,7 @@ class LocalPerceptionEngine:
                 side_candidates[side] = [side_candidates[side][0]]
 
         sign_detections.sort(key=lambda item: item["confidence"], reverse=True)
+        sign_detections = sign_detections[: self.sign_max_detections]
         return side_candidates, sign_detections
 
     def _build_lane_geometry(self, side_candidates):
@@ -614,11 +777,12 @@ class LocalPerceptionEngine:
             cv2.line(overlay, (frame_center, lookahead_y), (lane_center_x, lookahead_y), (0, 255, 0), 2, cv2.LINE_AA)
 
         signs = frame.copy()
-        for det in detections:
+        rendered_detections = detections[: self.sign_debug_max_detections]
+        for det_idx, det in enumerate(rendered_detections):
             y1, x1, y2, x2 = det["box"]
             pt1 = (int(round(x1 * width)), int(round(y1 * height)))
             pt2 = (int(round(x2 * width)), int(round(y2 * height)))
-            color = (0, 255, 0) if det is detections[0] else (0, 180, 255)
+            color = (0, 255, 0) if det_idx == 0 else (0, 180, 255)
             cv2.rectangle(overlay, pt1, pt2, color, 2)
             cv2.rectangle(signs, pt1, pt2, color, 2)
             label = f"{det['class']} {det['confidence']:.0%}"
@@ -685,7 +849,9 @@ class LocalPerceptionEngine:
             results = self.model.predict(
                 frame,
                 conf=self.min_confidence,
+                iou=self.nms_iou,
                 imgsz=self.imgsz,
+                max_det=self.max_detections,
                 device=self.device,
                 verbose=False,
             )

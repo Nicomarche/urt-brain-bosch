@@ -96,6 +96,34 @@ LOCAL_AI_IMGSZ = 416
 LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
 LOCAL_AI_INTERVAL = 0.10
 LOCAL_AI_MAX_RESULT_AGE = 0.35
+# Filtro post-proceso para evitar explosiones de cajas en engines TensorRT.
+LOCAL_AI_NMS_IOU = 0.45
+LOCAL_AI_MAX_DETECTIONS = 80
+# Señales: umbral y limites de salida/debug.
+LOCAL_AI_SIGN_MIN_CONFIDENCE = 0.55
+LOCAL_AI_SIGN_MAX_DETECTIONS = 20
+LOCAL_AI_SIGN_DEBUG_MAX_DETECTIONS = 8
+# Si el engine devuelve etiquetas fallback ("class40"), las descarta salvo que
+# exista un nombre en LOCAL_AI_CLASS_ID_NAME_MAP para ese ID.
+LOCAL_AI_DROP_UNKNOWN_CLASSES = True
+# Mapa esperado para Best416px.engine (si se perdio metadata de nombres).
+LOCAL_AI_CLASS_ID_NAME_MAP = {
+    0: "car",
+    1: "closed-road-stand",
+    2: "crosswalk-sign",
+    3: "highway-entry-sign",
+    4: "highway-exit-sign",
+    5: "no-entry-road-sign",
+    6: "one-way-road-sign",
+    7: "parking-sign",
+    8: "parking-spot",
+    9: "pedestrian",
+    10: "priority-sign",
+    11: "round-about-sign",
+    12: "stop-line",
+    13: "stop-sign",
+    14: "traffic-light",
+}
 
 # Alias de clases de carril del modelo local.
 LOCAL_AI_LEFT_CLASS_ALIASES = [
