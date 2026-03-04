@@ -195,7 +195,7 @@ class processCamera(WorkerProcess):
         # Individual window toggles are controlled by debug_windows dict.
         lineFollowingTh = threadLineFollowing(
             self.queuesList, self.logging, self.debugging, frame_buffer=self.frame_buffer,
-            show_debug=self.show_preview,
+            show_debug=False,
             debug_windows=self.debug_windows,
             sign_action_event=sign_action_event,
             highway_mode_event=highway_mode_event

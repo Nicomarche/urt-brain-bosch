@@ -154,7 +154,6 @@ class processSerialHandler(WorkerProcess):
             # reset thread error states after successful reconnection
             self.serialConnectedSender.send(True)
             self._reset_thread_error_states()
-            self.resume_threads()
             self.reconnecting = False
         else:
             # schedule next attempt
@@ -192,9 +191,6 @@ class processSerialHandler(WorkerProcess):
             self._safe_close_serial()
 
             self.serialCon = None
-
-            if self.threads:
-                self.pause_threads()
 
             threading.Timer(1, self._try_reconnect).start()
 
@@ -255,9 +251,6 @@ class processSerialHandler(WorkerProcess):
         readTh = threadRead(self, self.historyFile, self.queuesList, self.logger, self.debugging)
         writeTh = threadWrite(self, self.historyFile, self.queuesList, self.logger, self.debugging, self.example)
         self.threads.extend([readTh, writeTh])
-
-        if not self.serialConnected:
-            self.pause_threads()
 
 
 # =================================== EXAMPLE =========================================

@@ -130,6 +130,7 @@ class threadWrite(ThreadWithStop):
     # ==================================== SENDING =======================================
 
     def send_to_serial(self, msg):
+        action = msg.get("action")
         command_msg = self.messageConverter.get_command(**msg)
         if command_msg != "error":
             try:
@@ -138,14 +139,29 @@ class threadWrite(ThreadWithStop):
                     if serialCon and self.process.serialConnected and serialCon.is_open:
                         serialCon.write(command_msg.encode("ascii"))
                         self.logFile.write(command_msg)
+                        if action == "kl":
+                            print(
+                                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
+                                f" - Sent KL command \033[94m{command_msg.strip()}\033[0m"
+                            )
                         return True, command_msg
+
+                if action == "kl" or self._should_send_error():
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m"
+                        f" - Cannot send \033[94m{action.upper() if action else 'UNKNOWN'}\033[0m"
+                        f" ({command_msg.strip()}) because serial is disconnected"
+                    )
                 self.last_blocked_reason = "serial_disconnected"
                 self._publish_actuator_status(force=True)
 
             except Exception as e:
-                if self._should_send_error():
+                if action == "kl" or self._should_send_error():
                     self.serialConnectionStateSender.send(False)
-                    print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Failed to write to serial ({e})")
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                        f" - Failed to write \033[94m{action.upper() if action else 'UNKNOWN'}\033[0m to serial ({e})"
+                    )
                 self.last_blocked_reason = "serial_disconnected"
                 self._publish_actuator_status(force=True)
                 return False, command_msg
@@ -301,6 +317,10 @@ class threadWrite(ThreadWithStop):
         try:
             klRecv = self.klSubscriber.receive()
             if klRecv is not None:
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
+                    f" - threadWrite received Klem \033[94m{klRecv}\033[0m"
+                )
                 if self.debugger:
                     self.logger.info(klRecv)
                 if klRecv == "30":
