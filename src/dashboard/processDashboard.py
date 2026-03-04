@@ -141,8 +141,20 @@ class processDashboard(WorkerProcess):
     def _initialize_messages(self):
         """Initialize message handling systems."""
         self.get_name_and_vals()
-        self.messagesAndVals.pop("mainCamera", None)
-        self.messagesAndVals.pop("Semaphores", None)
+        ignored_channels = {
+            "mainCamera",
+            "Semaphores",
+            # Internal high-volume/debug channels not consumed by the Angular dashboard.
+            # Subscribing the dashboard to them can block the gateway and starve control
+            # messages such as Klem/Speed/Steer when the pipe backs up.
+            "LocalLanePerception",
+            "LocalPerceptionStatus",
+            "SignDetectionDebug",
+            "SignDetectionStatus",
+            "ActuatorCommandStatus",
+        }
+        for channel in ignored_channels:
+            self.messagesAndVals.pop(channel, None)
         if not self.stream_camera:
             self.messagesAndVals.pop("serialCamera", None)
         self.subscribe()

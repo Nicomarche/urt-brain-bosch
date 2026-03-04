@@ -35,6 +35,7 @@ from src.utils.messages.allMessages import (
     CurrentSpeed,
     CurrentSteer,
     ImuData,
+    Klem,
     LineFollowingDebug,
     LineFollowingStatus,
     LocalLanePerception,
@@ -65,6 +66,7 @@ class threadGateway(ThreadWithStop):
         self.max_priority_batch = 32
         self.max_general_batch = 64
         self.max_config_batch = 32
+        self._klem_key = (Klem.Owner.value, Klem.msgID.value)
         self._latest_only_keys = {
             (mainCamera.Owner.value, mainCamera.msgID.value),
             (serialCamera.Owner.value, serialCamera.msgID.value),
@@ -100,6 +102,11 @@ class threadGateway(ThreadWithStop):
         if not To in self.sendingList[Owner][Id].keys():
             self.sendingList[Owner][Id][To] = Pipe
         self.messageApproved.append((Owner, Id))
+        if (Owner, Id) == self._klem_key:
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
+                f" - Klem subscribed by \033[94m{To}\033[0m"
+            )
         # Debugging( you can comment this):
         if self.debugging:
             self.print_list()
@@ -119,6 +126,11 @@ class threadGateway(ThreadWithStop):
         # We delete the value from Dictionary
         del self.sendingList[Owner][Id][To]
         self.messageApproved.remove((Owner, Id))
+        if (Owner, Id) == self._klem_key:
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
+                f" - Klem unsubscribed by \033[94m{To}\033[0m"
+            )
         if self.debugging:
             self.print_list()
 
@@ -134,14 +146,32 @@ class threadGateway(ThreadWithStop):
         Id = message["msgID"]
         Type = message["msgType"]
         Value = message["msgValue"]
-        if (Owner, Id) in self.messageApproved:
+        message_key = (Owner, Id)
+        if message_key == self._klem_key:
+            receivers = list(self.sendingList.get(Owner, {}).get(Id, {}).keys())
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
+                f" - Dispatching Klem \033[94m{Value}\033[0m to \033[94m{len(receivers)}\033[0m subscriber(s)"
+            )
+
+        if message_key in self.messageApproved:
             for element in self.sendingList[Owner][Id]:
                 # We send a dictionary that contain the type of the message and message
                 self.sendingList[Owner][Id][element].send(
                     {"Type": Type, "value": Value, "id": Id, "Owner": Owner}
                 )
+                if message_key == self._klem_key:
+                    print(
+                        f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
+                        f" - Delivered Klem \033[94m{Value}\033[0m to \033[94m{element}\033[0m"
+                    )
                 if self.debugging:
                     self.logger.warning(message)
+        elif message_key == self._klem_key:
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;93mWARNING\033[0m"
+                f" - Klem \033[94m{Value}\033[0m has no approved subscribers"
+            )
 
     # ====================================================================================
 
@@ -186,14 +216,23 @@ class threadGateway(ThreadWithStop):
         """
 
         messages = []
+        source_queue = None
         if not self.queuesList["Critical"].empty():
             messages = self._drain_queue("Critical", self.max_priority_batch)
+            source_queue = "Critical"
         elif not self.queuesList["Warning"].empty():
             messages = self._drain_queue("Warning", self.max_priority_batch)
+            source_queue = "Warning"
         elif not self.queuesList["General"].empty():
             messages = self._drain_queue("General", self.max_general_batch, collapse_latest=True)
+            source_queue = "General"
 
         for message in messages:
+            if (message.get("Owner"), message.get("msgID")) == self._klem_key:
+                print(
+                    f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
+                    f" - Received Klem \033[94m{message.get('msgValue')}\033[0m from \033[94m{source_queue}\033[0m queue"
+                )
             self.send(message)
 
         for message2 in self._drain_queue("Config", self.max_config_batch):
