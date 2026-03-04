@@ -105,25 +105,9 @@ LOCAL_AI_SIGN_MAX_DETECTIONS = 20
 LOCAL_AI_SIGN_DEBUG_MAX_DETECTIONS = 8
 # Si el engine devuelve etiquetas fallback ("class40"), las descarta salvo que
 # exista un nombre en LOCAL_AI_CLASS_ID_NAME_MAP para ese ID.
-LOCAL_AI_DROP_UNKNOWN_CLASSES = True
-# Mapa esperado para Best416px.engine (si se perdio metadata de nombres).
-LOCAL_AI_CLASS_ID_NAME_MAP = {
-    0: "car",
-    1: "closed-road-stand",
-    2: "crosswalk-sign",
-    3: "highway-entry-sign",
-    4: "highway-exit-sign",
-    5: "no-entry-road-sign",
-    6: "one-way-road-sign",
-    7: "parking-sign",
-    8: "parking-spot",
-    9: "pedestrian",
-    10: "priority-sign",
-    11: "round-about-sign",
-    12: "stop-line",
-    13: "stop-sign",
-    14: "traffic-light",
-}
+LOCAL_AI_DROP_UNKNOWN_CLASSES = False
+# Mapa opcional id->nombre para engines sin metadata. Dejar vacio por defecto.
+LOCAL_AI_CLASS_ID_NAME_MAP = {}
 
 # Alias de clases de carril del modelo local.
 LOCAL_AI_LEFT_CLASS_ALIASES = [

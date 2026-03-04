@@ -90,7 +90,11 @@ class LocalPerceptionEngine:
         self._sync_engine_imgsz(model_full_path, model_ext)
 
         try:
-            self.model = YOLO(model_full_path)
+            # Engines TensorRT a veces no conservan metadata de task.
+            # Forzamos segment para evitar fallback a detect (sin mascaras).
+            self.model = YOLO(model_full_path, task="segment")
+            if getattr(self.model, "task", None) != "segment":
+                self.model.task = "segment"
             if self.device != "cpu" and model_ext in (".pt", ".pth"):
                 self.model.to(self.device)
             self.labels = getattr(self.model, "names", {})
@@ -642,6 +646,12 @@ class LocalPerceptionEngine:
             x_center = (x1 + x2) / 2.0
             segments = masks_xy[idx] if idx < len(masks_xy) else None
             mask = self._segments_to_mask(segments, (height, width))
+            has_mask = bool(mask is not None and np.any(mask))
+
+            # Cuando el engine viene sin nombres y devuelve classXX,
+            # si trae mascara lo tratamos como carril generico.
+            if role is None and self._is_fallback_class_name(class_name) and has_mask:
+                role = "generic"
 
             if role is None:
                 if conf < self.sign_min_confidence:
