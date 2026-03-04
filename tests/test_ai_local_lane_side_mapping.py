@@ -496,6 +496,23 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
             "history",
         )
 
+    def test_lane_observation_history_tracks_visible_and_lost_side(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.local_ai_max_result_age = 1.0
+        detector._last_two_line_left = np.array([[20, 95, 20, 55]], dtype=np.int32)
+        detector._last_two_line_right = np.array([[80, 95, 80, 55]], dtype=np.int32)
+        detector._last_two_line_ts = time.time()
+
+        detector._record_lane_observation(("left", "right"))
+        entry = detector._record_lane_observation(("left",))
+        debug_fields = detector._lane_observation_debug_fields(entry)
+
+        self.assertEqual(entry["visible_side"], "left")
+        self.assertEqual(entry["inferred_lost_side"], "right")
+        self.assertEqual(debug_fields["visible_lane_side"], "left")
+        self.assertEqual(debug_fields["lost_lane_side"], "right")
+        self.assertIn("transition_lost_right", debug_fields["lane_context_sources"])
+
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
         engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)

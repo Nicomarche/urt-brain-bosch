@@ -501,6 +501,8 @@ Args:
         self._last_two_line_left = None
         self._last_two_line_right = None
         self._last_two_line_ts = 0.0
+        self._lane_observation_history = deque(maxlen=12)
+        self._last_local_ai_duplicate_collapse = None
         self._last_single_line_projection_debug = {}
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
@@ -797,13 +799,14 @@ Args:
             normalized_lines['left'] = self._coerce_explicit_line(lane_side_lines.get('left', []), img_h, img_w)
             normalized_lines['right'] = self._coerce_explicit_line(lane_side_lines.get('right', []), img_h, img_w)
 
-        self._collapse_duplicate_local_ai_sides(
+        duplicate_collapse = self._collapse_duplicate_local_ai_sides(
             normalized_masks,
             normalized_lines,
             lane_side_sources,
             img_h,
             img_w,
         )
+        self._last_local_ai_duplicate_collapse = duplicate_collapse
 
         left_line = normalized_lines['left']
         right_line = normalized_lines['right']
@@ -861,6 +864,70 @@ Args:
             return (x1 + x2) * 0.5
         t = (float(y_target) - y1) / dy
         return x1 + t * (x2 - x1)
+
+    def _record_lane_observation(self, observed_sides, duplicate_collapse=None):
+        """Store short-term lane visibility history for line-loss context."""
+        if not hasattr(self, '_lane_observation_history') or self._lane_observation_history is None:
+            self._lane_observation_history = deque(maxlen=12)
+        sides = tuple(side for side in ('left', 'right') if side in tuple(observed_sides or ()))
+        visible_side = sides[0] if len(sides) == 1 else None
+        inferred_lost_side = None
+        inferred_curve_direction = 0
+        context_sources = []
+
+        last_two_line_ts = float(getattr(self, '_last_two_line_ts', 0.0) or 0.0)
+        reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+        has_recent_two_line_reference = (
+            len(sides) == 1 and
+            last_two_line_ts and
+            (time.time() - last_two_line_ts) <= reference_ttl and
+            getattr(self, '_last_two_line_left', None) is not None and
+            getattr(self, '_last_two_line_right', None) is not None
+        )
+        if has_recent_two_line_reference:
+            inferred_lost_side = 'right' if visible_side == 'left' else 'left'
+            inferred_curve_direction = 1 if visible_side == 'left' else -1
+            context_sources.append(f"lost_{inferred_lost_side}")
+
+        previous = self._lane_observation_history[-1] if self._lane_observation_history else None
+        if previous is not None:
+            previous_sides = set(previous.get('sides', ()))
+            current_sides = set(sides)
+            delta_lost = tuple(sorted(previous_sides - current_sides))
+            if len(delta_lost) == 1 and delta_lost[0] not in context_sources:
+                context_sources.append(f"transition_lost_{delta_lost[0]}")
+
+        entry = {
+            'timestamp': time.time(),
+            'sides': sides,
+            'visible_side': visible_side,
+            'count': len(sides),
+            'inferred_lost_side': inferred_lost_side,
+            'inferred_curve_direction': inferred_curve_direction,
+            'duplicate_collapse': bool(isinstance(duplicate_collapse, dict)),
+            'context_sources': tuple(context_sources),
+        }
+        if isinstance(duplicate_collapse, dict):
+            entry['duplicate_keep_side'] = duplicate_collapse.get('kept_side')
+            entry['duplicate_resolution_source'] = duplicate_collapse.get('resolution_source')
+
+        self._lane_observation_history.append(entry)
+        return entry
+
+    @staticmethod
+    def _lane_observation_debug_fields(entry):
+        """Flatten a lane observation entry into debug-friendly fields."""
+        if not isinstance(entry, dict):
+            return {}
+        return {
+            'observed_lane_sides': ",".join(entry.get('sides', ())),
+            'observed_lane_count': int(entry.get('count', 0) or 0),
+            'visible_lane_side': entry.get('visible_side'),
+            'lost_lane_side': entry.get('inferred_lost_side'),
+            'observed_curve_direction': int(entry.get('inferred_curve_direction', 0) or 0),
+            'lane_context_sources': ",".join(entry.get('context_sources', ())),
+            'duplicate_line_collapse_active': bool(entry.get('duplicate_collapse', False)),
+        }
 
     def _mask_x_at_y(self, mask, y_target, search_radius=4):
         """Return the average x coordinate of a binary mask at a given row."""
@@ -926,6 +993,7 @@ Args:
         merged_mask = cv2.bitwise_or(left_mask, right_mask)
         left_source = str(lane_side_sources.get('left', 'none') or 'none')
         right_source = str(lane_side_sources.get('right', 'none') or 'none')
+        resolution_source = 'source_priority'
 
         keep_side = None
         keep_source = 'guessed_single'
@@ -937,6 +1005,21 @@ Args:
             keep_source = right_source
 
         if keep_side is None:
+            candidate_line = side_lines.get('left')
+            if candidate_line is None:
+                candidate_line = side_lines.get('right')
+            if candidate_line is not None:
+                resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
+                    candidate_line,
+                    img_h,
+                    img_w,
+                    prev_seen_side=getattr(self, 'last_seen_side', None),
+                )
+                if resolved_side in ('left', 'right'):
+                    keep_side = resolved_side
+
+        if keep_side is None:
+            resolution_source = 'frame_center'
             y_ref = int(max(0, min(img_h - 1, round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))))
             merged_x = self._mask_x_at_y(merged_mask, y_ref, search_radius=8)
             if merged_x is None:
@@ -959,6 +1042,7 @@ Args:
         return {
             'kept_side': keep_side,
             'dropped_side': drop_side,
+            'resolution_source': resolution_source,
             'overlap_ratio': float(overlap_ratio),
             'mean_gap_px': None if mean_gap_px is None else float(mean_gap_px),
         }
@@ -1022,6 +1106,21 @@ Args:
                         result['history_confirmed'] = True
                         result['sources'].append('history')
 
+        lane_history = getattr(self, '_lane_observation_history', None)
+        if lane_history:
+            latest = lane_history[-1]
+            latest_visible_side = latest.get('visible_side')
+            expected_lost_side = 'right' if side == 'left' else 'left'
+            if (
+                latest_visible_side == side and
+                latest.get('inferred_lost_side') == expected_lost_side
+            ):
+                result['history_confirmed'] = True
+                result['sources'].append(f'lost_{expected_lost_side}')
+            if bool(latest.get('duplicate_collapse', False)) and latest_visible_side == side:
+                result['history_confirmed'] = True
+                result['sources'].append('duplicate_collapse')
+
         continuity_frames = int(getattr(
             self,
             'consecutive_single_left' if side == 'left' else 'consecutive_single_right',
@@ -1032,6 +1131,8 @@ Args:
             result['continuity_confirmed'] = True
             result['sources'].append('continuity')
 
+        if result['sources']:
+            result['sources'] = list(dict.fromkeys(result['sources']))
         result['confirmed'] = bool(result['sources'])
         return result
 
@@ -1096,6 +1197,11 @@ Args:
 
         if len(detected_sides) == 0:
             return None
+
+        lane_observation = self._record_lane_observation(
+            tuple(detected_sides),
+            duplicate_collapse=getattr(self, '_last_local_ai_duplicate_collapse', None),
+        )
 
         visible_side = detected_sides[0] if len(detected_sides) == 1 else None
         visible_line = None
@@ -1204,6 +1310,7 @@ Args:
             'used_virtual_boundary': bool(used_virtual_boundary),
             'guidance_mode': guidance_mode,
             'mask_label': mask_label,
+            'lane_observation': lane_observation,
         }
         if single_line_projection_debug is not None:
             guidance['single_line_projection_debug'] = single_line_projection_debug
@@ -1739,6 +1846,9 @@ Args:
             height,
             width,
         )
+        duplicate_collapse = getattr(self, '_last_local_ai_duplicate_collapse', None)
+        if isinstance(duplicate_collapse, dict):
+            debug_info['duplicate_line_collapse'] = duplicate_collapse
 
         if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
             local_mask_guidance = self._build_local_mask_guidance(
@@ -1778,6 +1888,9 @@ Args:
                 debug_info['mask_label'] = local_mask_guidance.get('mask_label', 'NONE')
                 debug_info['left_lines'] = []
                 debug_info['right_lines'] = []
+                debug_info.update(self._lane_observation_debug_fields(
+                    local_mask_guidance.get('lane_observation')
+                ))
                 single_line_projection_debug = local_mask_guidance.get('single_line_projection_debug')
                 if isinstance(single_line_projection_debug, dict):
                     debug_info.update(single_line_projection_debug)
@@ -1787,6 +1900,11 @@ Args:
                     )
                     debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
                     debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
+                elif isinstance(duplicate_collapse, dict):
+                    debug_info['single_line_side_source'] = (
+                        f"duplicate_overlap:{duplicate_collapse.get('resolution_source', 'unknown')}"
+                    )
+                    debug_info['single_line_resolved_side'] = duplicate_collapse.get('kept_side')
 
                 return None, None, height, width, render_lane_mask, debug_info
 
@@ -1804,6 +1922,11 @@ Args:
                     )
                     debug_info['single_line_resolved_side'] = mask_side_resolution['resolved_side']
                     debug_info['single_line_detected_side'] = mask_side_resolution['detected_side']
+                elif isinstance(duplicate_collapse, dict):
+                    debug_info['single_line_side_source'] = (
+                        f"duplicate_overlap:{duplicate_collapse.get('resolution_source', 'unknown')}"
+                    )
+                    debug_info['single_line_resolved_side'] = duplicate_collapse.get('kept_side')
                 debug_info['render_side_masks'] = render_side_masks
                 return None, None, height, width, empty_mask, debug_info
 
@@ -1914,6 +2037,9 @@ Args:
         self._last_two_line_left = None
         self._last_two_line_right = None
         self._last_two_line_ts = 0.0
+        if hasattr(self, '_lane_observation_history') and self._lane_observation_history is not None:
+            self._lane_observation_history.clear()
+        self._last_local_ai_duplicate_collapse = None
         self._last_single_line_projection_debug = {}
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
@@ -5535,6 +5661,20 @@ Returns:
             self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
         prev_seen_side = self.last_seen_side
+        if not isinstance(local_mask_guidance, dict):
+            if avg_left is not None and avg_right is not None:
+                observed_sides = ('left', 'right')
+            elif avg_left is not None:
+                observed_sides = ('left',)
+            elif avg_right is not None:
+                observed_sides = ('right',)
+            else:
+                observed_sides = ()
+            lane_observation = self._record_lane_observation(
+                observed_sides,
+                duplicate_collapse=debug_info.get('duplicate_line_collapse'),
+            )
+            debug_info.update(self._lane_observation_debug_fields(lane_observation))
 
         if isinstance(local_mask_guidance, dict):
             detected_sides = tuple(local_mask_guidance.get('detected_sides', ()))
