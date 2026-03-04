@@ -611,6 +611,32 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(detector._recovery_state, "STOPPING")
         self.assertEqual(detector._recovery_curve_sign, -1)
 
+    def test_single_line_protective_stop_triggers_after_sustained_saturation(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.detection_mode = "ai_local"
+        detector.max_steering = 25.0
+        detector.max_error_px = 40.0
+        detector.single_line_stop_error_scale = 1.5
+        detector.single_line_stop_max_steer_frames = 3
+        detector._single_line_stop_consecutive = 0
+
+        local_mask_guidance = {
+            "guidance_mode": "single_line_physical",
+            "detected_sides": ("right",),
+            "lane_width_px": 100.0,
+            "raw_error_px": -80.0,
+        }
+
+        self.assertFalse(
+            detector._should_apply_single_line_protective_stop(local_mask_guidance, -25.0, -80.0)
+        )
+        self.assertFalse(
+            detector._should_apply_single_line_protective_stop(local_mask_guidance, -25.0, -80.0)
+        )
+        self.assertTrue(
+            detector._should_apply_single_line_protective_stop(local_mask_guidance, -25.0, -80.0)
+        )
+
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
         engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)

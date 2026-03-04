@@ -314,6 +314,10 @@ Args:
         self.single_line_outer_confirm_frames = 2
         # Slope-only heading hint stays intentionally bounded in 1-line mode.
         self.single_line_curve_heading_max_deg = 10.0
+        # Safety stop: when 1-line mode stays saturated for several frames, stop
+        # pushing forward into a curve the chassis cannot physically close.
+        self.single_line_stop_max_steer_frames = 6
+        self.single_line_stop_error_scale = 1.5
         # Single-line heading calibration: compensates perspective bias so 1-line mode
         # stays close to 0 steering when the car is centered on straight segments.
         self.single_line_heading_ref_alpha = 0.15
@@ -600,6 +604,7 @@ Args:
         self._recovery_reverse_steer_angle = 0.0  # Pre-calculated fixed steer angle for reversing
         self._max_steer_consecutive = 0      # Frames at max steering
         self._error_at_max_steer_start = 0.0 # Error when max steering streak started
+        self._single_line_stop_consecutive = 0
         self._recovery_curve_sign = 0        # +1 for right curve, -1 for left curve
 
         # BFMC-style single-line tracking
@@ -3310,6 +3315,43 @@ Args:
             self._error_at_max_steer_start = 0.0
 
         return steering_angle, speed, False
+
+    def _should_apply_single_line_protective_stop(self, local_mask_guidance, steering_angle, error):
+        """Stop forward motion if 1-line tracking stays saturated for too long."""
+        if not self._is_ai_local_active() or not isinstance(local_mask_guidance, dict):
+            self._single_line_stop_consecutive = 0
+            return False
+
+        if str(local_mask_guidance.get('guidance_mode', '')) != 'single_line_physical':
+            self._single_line_stop_consecutive = 0
+            return False
+
+        detected_sides = tuple(local_mask_guidance.get('detected_sides', ()))
+        if len(detected_sides) != 1:
+            self._single_line_stop_consecutive = 0
+            return False
+
+        if steering_angle is None or abs(float(steering_angle)) < (float(self.max_steering) * 0.9):
+            self._single_line_stop_consecutive = 0
+            return False
+
+        lane_width_px = float(local_mask_guidance.get('lane_width_px', 0.0) or 0.0)
+        raw_error = float(local_mask_guidance.get('raw_error_px', error if error is not None else 0.0) or 0.0)
+        error_threshold = max(
+            20.0,
+            float(self.max_error_px) * float(getattr(self, 'single_line_stop_error_scale', 1.5)),
+            lane_width_px * 0.20,
+        )
+        if abs(raw_error) < error_threshold:
+            self._single_line_stop_consecutive = 0
+            return False
+
+        self._single_line_stop_consecutive += 1
+        required_frames = max(
+            3,
+            int(getattr(self, 'single_line_stop_max_steer_frames', 6) or 0),
+        )
+        return self._single_line_stop_consecutive >= required_frames
 
     # ============= STANLEY CONTROLLER HELPERS =============
 
@@ -6252,10 +6294,25 @@ Returns:
             debug_info['control_override'] = 'curve_recovery'
         debug_info['recovery_state'] = self._recovery_state
 
+        protective_stop_active = False
+        if not recovery_active and self._should_apply_single_line_protective_stop(
+            local_mask_guidance, steering_angle, error
+        ):
+            protective_stop_active = True
+            speed = 0.0
+            self._current_speed = 0.0
+            debug_info['control_override'] = 'single_line_protective_stop'
+        debug_info['single_line_stop_active'] = bool(protective_stop_active)
+
         # Update state
         if steering_angle is not None:
             if recovery_active:
                 self._last_steering_angle = steering_angle
+            elif protective_stop_active:
+                self.last_steering = steering_angle
+                self._last_steering_angle = steering_angle
+                if abs(steering_angle) > 8:
+                    self.last_turn_direction = 1 if steering_angle > 0 else -1
             else:
                 self.last_steering = steering_angle
                 self._last_steering_angle = steering_angle  # For hybrid curve system
@@ -6335,6 +6392,7 @@ Returns:
             "kalman_prediction_used": bool(kalman_prediction_used),
             "recovery_active": bool(recovery_active),
             "recovery_state": self._recovery_state,
+            "single_line_stop_active": bool(protective_stop_active),
             "avg_left_line": avg_left[0].tolist() if avg_left is not None else None,
             "avg_right_line": avg_right[0].tolist() if avg_right is not None else None,
             "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
