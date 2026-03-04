@@ -94,7 +94,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   // Local AI settings (runtime path for deprecated remote AI modes)
   localAiMinConfidence: number = 0.35;
   localAiInputSize: number = 320;
-  localAiInterval: number = 0.10;
+  localAiInterval: number = 0.04;
   localAiReady: boolean = false;
   localAiFps: number = 0;
   localAiInferMs: number = 0;
@@ -634,7 +634,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.selectedLstrModel = 0;
     this.localAiMinConfidence = 0.35;
     this.localAiInputSize = 320;
-    this.localAiInterval = 0.10;
+    this.localAiInterval = 0.04;
     
     // Reset HybridNets
     this.hybridnetsServerUrl = 'ws://127.0.0.1:8500/ws/steering';

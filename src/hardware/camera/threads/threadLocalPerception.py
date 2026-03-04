@@ -28,7 +28,8 @@ class threadLocalPerception(ThreadWithStop):
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
                  action_cooldown=15.0, sign_action_event=None,
                  highway_mode_event=None):
-        super(threadLocalPerception, self).__init__(pause=0.05)
+        # Keep scheduler granularity tight so local_ai_interval can reach high FPS targets.
+        super(threadLocalPerception, self).__init__(pause=0.001)
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger

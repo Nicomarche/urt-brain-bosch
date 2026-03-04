@@ -94,7 +94,8 @@ LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best416px.engine"
 LOCAL_AI_MIN_CONFIDENCE = 0.35
 LOCAL_AI_IMGSZ = 416
 LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
-LOCAL_AI_INTERVAL = 0.10
+# 0.04s ~= 25 FPS objetivo (permite sostener >=24 FPS si hardware acompana).
+LOCAL_AI_INTERVAL = 0.04
 LOCAL_AI_MAX_RESULT_AGE = 0.35
 # Filtro post-proceso para evitar explosiones de cajas en engines TensorRT.
 LOCAL_AI_NMS_IOU = 0.45
