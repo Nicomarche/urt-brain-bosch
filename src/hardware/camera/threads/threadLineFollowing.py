@@ -320,6 +320,8 @@ Args:
         self.single_line_stop_error_scale = 1.5
         # Briefly hold the last good steering when vision drops both lines.
         self.no_lane_hold_steering_frames = 4
+        # Keep full-center reconstruction only briefly after 2->1 line loss.
+        self.single_line_prefer_center_frames = 2
         # Single-line heading calibration: compensates perspective bias so 1-line mode
         # stays close to 0 steering when the car is centered on straight segments.
         self.single_line_heading_ref_alpha = 0.15
@@ -1300,17 +1302,26 @@ Args:
         draw_y = roi_bottom
         guidance_mode = 'midpoint'
         single_line_projection_debug = None
+        single_line_prefer_center = None
+        single_line_streak = None
 
         if visible_side is not None and visible_line is not None:
+            streak_attr = 'consecutive_single_left' if visible_side == 'left' else 'consecutive_single_right'
+            previous_streak = int(getattr(self, streak_attr, 0) or 0)
+            single_line_streak = previous_streak + 1
+            prefer_center_frames = max(1, int(getattr(self, 'single_line_prefer_center_frames', 2) or 0))
+            single_line_prefer_center = single_line_streak <= prefer_center_frames
             single_error, single_heading = self._compute_single_line_error(
                 visible_line,
                 visible_side,
                 img_h,
                 img_w,
-                prefer_center=True,
+                prefer_center=single_line_prefer_center,
                 physical_projection=True,
             )
             single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
+            single_line_projection_debug['single_line_prefer_center'] = bool(single_line_prefer_center)
+            single_line_projection_debug['single_line_streak'] = int(single_line_streak)
             desired_center = float(single_line_projection_debug.get('single_line_target_x', midpoint_x))
             desired_center = max(0.0, min(float(img_w - 1), desired_center))
             midpoint_bottom_x = desired_center
@@ -1358,6 +1369,12 @@ Args:
             'draw_y': int(draw_y),
             'used_virtual_boundary': bool(used_virtual_boundary),
             'guidance_mode': guidance_mode,
+            'single_line_prefer_center': (
+                bool(single_line_prefer_center) if single_line_prefer_center is not None else None
+            ),
+            'single_line_streak': (
+                int(single_line_streak) if single_line_streak is not None else None
+            ),
             'mask_label': mask_label,
             'lane_observation': lane_observation,
         }
@@ -1863,7 +1880,8 @@ Args:
 
         infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
         frame_id = int(payload.get('frame_id', 0) or 0)
-        local_status = self._last_local_perception_status if isinstance(self._last_local_perception_status, dict) else {}
+        local_status_payload = getattr(self, '_last_local_perception_status', None)
+        local_status = local_status_payload if isinstance(local_status_payload, dict) else {}
         throughput_fps = local_status.get('fps')
         processing_fps = local_status.get('processing_fps')
         target_fps = local_status.get('target_fps')

@@ -162,6 +162,24 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
             "lane_width_too_small(20.0<40.5)",
         )
 
+    def test_build_local_mask_guidance_single_line_uses_conservative_center_after_streak(self):
+        self.detector.consecutive_single_right = 4
+        self.detector.single_line_prefer_center_frames = 2
+        self.detector.single_line_offset_factor = 0.2
+        right_mask = self._mask_from_points([(70, 95), (70, 85), (70, 75), (70, 65), (70, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": None, "right": right_mask},
+            100,
+            100,
+            side_lines={"right": np.array([[70, 95, 70, 55]], dtype=np.int32)},
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["guidance_mode"], "single_line_physical")
+        self.assertFalse(guidance["single_line_prefer_center"])
+        self.assertEqual(guidance["single_line_streak"], 5)
+
     def test_detect_with_local_ai_prefers_raw_masks_when_enabled(self):
         left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
         right_mask = self._mask_from_points([(70, 95), (71, 85), (72, 75), (74, 65), (76, 55)])
