@@ -9,6 +9,7 @@ from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.allMessages import (
     LineFollowingConfig,
+    LineFollowingStatus,
     LocalLanePerception,
     LocalPerceptionStatus,
     SignDetected,
@@ -62,12 +63,18 @@ class threadLocalPerception(ThreadWithStop):
         self._last_frame_sequence = 0
         self._preview_interval = 1.0 / 5.0
         self._last_preview_time = 0.0
+        self._lf_curve_state = "STRAIGHT"
+        self._lf_curve_state_frames = 0
+        self._lf_steering_deg = 0.0
 
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
         )
         self.configSubscriber = messageHandlerSubscriber(
             self.queuesList, LineFollowingConfig, "lastOnly", True
+        )
+        self.lineFollowingStatusSubscriber = messageHandlerSubscriber(
+            self.queuesList, LineFollowingStatus, "lastOnly", True
         )
 
         self.localLaneSender = messageHandlerSender(self.queuesList, LocalLanePerception)
@@ -155,6 +162,31 @@ class threadLocalPerception(ThreadWithStop):
         if reload_engine:
             self.engine = self._build_engine()
 
+    def _poll_line_following_context(self):
+        status = self.lineFollowingStatusSubscriber.receive()
+        if not isinstance(status, dict):
+            return
+
+        curve_state = status.get("curve_state")
+        if curve_state is not None:
+            self._lf_curve_state = str(curve_state)
+
+        curve_state_frames = status.get("curve_state_frames")
+        if curve_state_frames is not None:
+            try:
+                self._lf_curve_state_frames = int(curve_state_frames)
+            except (TypeError, ValueError):
+                pass
+
+        steering_deg = status.get("commanded_steering")
+        if steering_deg is None:
+            steering_deg = status.get("steering")
+        if steering_deg is not None:
+            try:
+                self._lf_steering_deg = float(steering_deg)
+            except (TypeError, ValueError):
+                pass
+
     def _publish_sign(self, detections, now):
         if not self.enable_sign_detection or not detections:
             return
@@ -164,7 +196,8 @@ class threadLocalPerception(ThreadWithStop):
         if confidence < self.sign_min_confidence:
             return
 
-        sign_name = str(best.get("class", ""))
+        raw_sign_name = str(best.get("class", ""))
+        sign_name = SignActions.normalize_sign_name(raw_sign_name) or raw_sign_name
         box = best.get("box", [0, 0, 0, 0])
         if len(box) != 4:
             box = [0, 0, 0, 0]
@@ -180,10 +213,11 @@ class threadLocalPerception(ThreadWithStop):
         })
 
         is_close = box_area >= self.sign_min_box_area
-        is_actionable = sign_name in SignActions.ACTIONABLE_SIGNS
+        is_actionable = SignActions.is_actionable_sign(sign_name)
+        sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
-            f"{sign_name} ({confidence:.1%}) box={box_area:.3%}"
+            f"{sign_display} ({confidence:.1%}) box={box_area:.3%}"
             f"{'' if is_close else f' (TOO FAR <{self.sign_min_box_area:.1%})'}"
             f"{'' if self.enable_actions else ' [actions=OFF]'}"
             f"{'' if self.is_sign_actions_active else ' [inactive_mode]'}"
@@ -196,7 +230,11 @@ class threadLocalPerception(ThreadWithStop):
             and is_close
             and is_actionable
         ):
-            self.sign_actions.execute(sign_name)
+            self.sign_actions.execute(
+                sign_name,
+                curve_state=self._lf_curve_state,
+                steering_deg=self._lf_steering_deg,
+            )
 
     def _publish_status(self, result, now):
         if now - self.last_status_time < 1.0:
@@ -304,6 +342,13 @@ class threadLocalPerception(ThreadWithStop):
     def thread_work(self):
         self.state_change_handler()
         self._check_config()
+        self._poll_line_following_context()
+        if self.enable_actions and self.is_sign_actions_active:
+            self.sign_actions.tick(
+                curve_state=self._lf_curve_state,
+                steering_deg=self._lf_steering_deg,
+            )
+
         if self.frame_buffer is None:
             time.sleep(0.02)
             return

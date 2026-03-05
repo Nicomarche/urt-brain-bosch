@@ -180,6 +180,11 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "otobancikis": "highway_exit",
     "otoyol_giris": "highway_entrance",
     "otoyol_cikis": "highway_exit",
+    # Alias cortos usados por algunos datasets/modelos
+    "hw_entry": "highway_entrance",
+    "hw_entrance": "highway_entrance",
+    "highway_entry": "highway_entrance",
+    "hw_exit": "highway_exit",
     "durak": "bus_stop",
     "arac": "vehicle",
     "yaya": "pedestrian",

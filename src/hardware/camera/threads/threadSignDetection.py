@@ -240,6 +240,15 @@ class SignActions:
     CROSSWALK_DURATION = 3.0
     RED_LIGHT_CHECK_INTERVAL = 0.5  # Re-check every 0.5s
 
+    SIGN_ALIASES = {
+        "highway_entry": "highway_entrance",
+        "highway_entrance": "highway_entrance",
+        "highway_exit": "highway_exit",
+        "hw_entry": "highway_entrance",
+        "hw_entrance": "highway_entrance",
+        "hw_exit": "highway_exit",
+    }
+
     ACTIONABLE_SIGNS = {
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
         "green_light", "speed_20", "speed_30", "parking",
@@ -252,7 +261,8 @@ class SignActions:
         "yellow_light": "traffic_light", "green_light": "traffic_light",
         "speed_20": "speed_limit", "speed_30": "speed_limit",
         "parking": "parking",
-        "highway_entrance": "highway", "highway_exit": "highway",
+        "highway_entrance": "highway_entrance",
+        "highway_exit": "highway_exit",
     }
 
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
@@ -266,8 +276,21 @@ class SignActions:
         self.current_speed = self.BASE_SPEED
         self.is_stopped = False
 
+    @classmethod
+    def normalize_sign_name(cls, sign_name):
+        normalized = str(sign_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return cls.SIGN_ALIASES.get(normalized, normalized)
+
     def execute(self, sign_name):
         """Execute action for a detected sign. Returns True if action was taken."""
+        sign_name = self.normalize_sign_name(sign_name)
+        if sign_name not in self.ACTIONABLE_SIGNS:
+            print(
+                f"\033[1;97m[ SignActions ] :\033[0m \033[1;93mINFO\033[0m - "
+                f"{sign_name} detected (no action)"
+            )
+            return False
+
         now = time.time()
 
         # Cooldown by action group (stop/no_entry/red_light share "stop" group)
@@ -583,18 +606,19 @@ class threadSignDetection(ThreadWithStop):
                 box_area = (box[2] - box[0]) * (box[3] - box[1])
 
             if sign_name is not None:
+                canonical_sign = SignActions.normalize_sign_name(sign_name)
                 self.detection_count += 1
-                self.last_sign_name = sign_name
+                self.last_sign_name = canonical_sign
                 self.last_sign_time = now
                 is_close = box_area >= self.min_box_area
                 print(
                     f"\033[1;97m[ SignDetection ] :\033[0m \033[1;96mDETECTED\033[0m - "
-                    f"{sign_name} ({confidence:.1%}) [server: {server_time_ms:.0f}ms] "
+                    f"{canonical_sign} ({confidence:.1%}) [server: {server_time_ms:.0f}ms] "
                     f"box={box_area:.3%}{'' if is_close else ' (TOO FAR)'}"
                 )
 
                 self.signDetectedSender.send({
-                    "sign": sign_name,
+                    "sign": canonical_sign,
                     "confidence": round(confidence, 3),
                     "box_area": round(box_area, 5),
                     "timestamp": now,
@@ -602,13 +626,13 @@ class threadSignDetection(ThreadWithStop):
 
                 # Execute actions ONLY in AUTO mode AND when sign is close enough
                 if self.is_active and self.enable_actions and is_close:
-                    self.sign_actions.execute(sign_name)
-                elif self.enable_actions and is_close and sign_name in SignActions.ACTIONABLE_SIGNS:
+                    self.sign_actions.execute(canonical_sign)
+                elif self.enable_actions and is_close and canonical_sign in SignActions.ACTIONABLE_SIGNS:
                     # Actionable sign detected but conditions not met — log why
                     if not self.is_active:
                         print(
                             f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mSKIPPED\033[0m - "
-                            f"{sign_name} — is_active=False (need AUTO mode)"
+                            f"{canonical_sign} — is_active=False (need AUTO mode)"
                         )
 
             # Debug image (only decode frame if debug is on — expensive!)
