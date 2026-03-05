@@ -2240,7 +2240,26 @@ Args:
                     )
                     debug_info['single_line_resolved_side'] = duplicate_collapse.get('kept_side')
                 debug_info['render_side_masks'] = render_side_masks
-                return None, None, height, width, empty_mask, debug_info
+                has_line_fallback = any(
+                    isinstance(prepared_side_lines.get(side), np.ndarray)
+                    and prepared_side_lines.get(side).ndim == 2
+                    and prepared_side_lines.get(side).shape[1] >= 4
+                    for side in ('left', 'right')
+                )
+                lane_side_points_payload = payload.get('lane_side_points')
+                has_side_points_fallback = (
+                    isinstance(lane_side_points_payload, dict)
+                    and any(lane_side_points_payload.get(side) for side in ('left', 'right'))
+                )
+                lane_points_payload = payload.get('lane_points', [])
+                has_lane_points_fallback = isinstance(lane_points_payload, (list, tuple)) and len(lane_points_payload) > 0
+
+                # If mask geometry fails but lane geometry exists, continue with legacy fit
+                # instead of forcing a "no lanes" frame.
+                if not (has_line_fallback or has_side_points_fallback or has_lane_points_fallback):
+                    return None, None, height, width, empty_mask, debug_info
+                debug_info['pipeline_label'] = 'AI Local - Mask Fallback to Lines'
+                debug_info['control_mode'] = 'legacy_line_fit'
 
         lane_points = payload.get('lane_points', [])
         lane_side_points = payload.get('lane_side_points')
