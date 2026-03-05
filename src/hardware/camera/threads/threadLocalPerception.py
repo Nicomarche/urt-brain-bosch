@@ -369,6 +369,7 @@ class threadLocalPerception(ThreadWithStop):
         try:
             build_debug = self._should_build_debug(now)
             result = self.engine.infer(frame, build_debug=build_debug)
+            result_timestamp = time.time()
             self._last_result = result
             self.frame_counter += 1
 
@@ -393,7 +394,11 @@ class threadLocalPerception(ThreadWithStop):
                 "lane_mask": lane_mask,
                 "inference_time_ms": float(result.get("inference_time_ms", 0.0)),
                 "frame_id": int(result.get("frame_id", 0)),
-                "timestamp": frame_timestamp or now,
+                # timestamp now represents "result published" time; keep source frame time separately.
+                "result_timestamp": result_timestamp,
+                "timestamp": result_timestamp,
+                "source_frame_timestamp": frame_timestamp or 0.0,
+                "source_frame_sequence": int(frame_sequence or 0),
                 "lane_count": len(lane_points),
                 "model_ready": bool(result.get("model_ready", False)),
             })

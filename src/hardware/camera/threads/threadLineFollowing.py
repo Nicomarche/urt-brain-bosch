@@ -553,6 +553,7 @@ Args:
         self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
         self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
         self.local_ai_max_result_age = 0.35
+        self.local_ai_stale_grace_s = 0.20
         self.ai_local_use_mask_geometry = True
         self._hybridnets_client = None
         self._last_local_lane_payload = None
@@ -2091,14 +2092,44 @@ Args:
             debug_info['local_ai_status'] = 'not_ready'
             return None, None, height, width, empty_mask, debug_info
 
-        timestamp = float(payload.get('timestamp', 0.0) or 0.0)
-        result_age = (time.time() - timestamp) if timestamp else None
-        if result_age is None or result_age > self.local_ai_max_result_age:
+        now_ts = time.time()
+        timestamp = 0.0
+        timestamp_source = 'none'
+        for candidate_key in ('result_timestamp', 'timestamp', 'source_frame_timestamp'):
+            try:
+                candidate_ts = float(payload.get(candidate_key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                candidate_ts = 0.0
+            if candidate_ts > 0.0:
+                timestamp = candidate_ts
+                timestamp_source = candidate_key
+                break
+        result_age = max(0.0, (now_ts - timestamp)) if timestamp > 0.0 else None
+
+        try:
+            source_frame_timestamp = float(payload.get('source_frame_timestamp', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            source_frame_timestamp = 0.0
+        source_frame_age_ms = (
+            round(max(0.0, now_ts - source_frame_timestamp) * 1000.0, 1)
+            if source_frame_timestamp > 0.0 else None
+        )
+
+        max_result_age = float(self.local_ai_max_result_age)
+        stale_grace_limit = max_result_age + max(0.0, float(getattr(self, 'local_ai_stale_grace_s', 0.20)))
+        stale_grace_active = (
+            result_age is not None and
+            max_result_age < result_age <= stale_grace_limit
+        )
+        if result_age is None or result_age > stale_grace_limit:
             self._smooth_detected_line(None, 'left')
             self._smooth_detected_line(None, 'right')
             debug_info['pipeline_label'] = 'AI Local - Stale result'
             debug_info['local_ai_status'] = 'stale'
             debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
+            debug_info['timestamp_source'] = timestamp_source
+            if source_frame_age_ms is not None:
+                debug_info['source_frame_age_ms'] = source_frame_age_ms
             return None, None, height, width, empty_mask, debug_info
 
         infer_ms = float(payload.get('inference_time_ms', 0.0) or 0.0)
@@ -2111,10 +2142,15 @@ Args:
         if processing_fps is None and infer_ms > 0.0:
             processing_fps = 1000.0 / infer_ms
         debug_info['remote_server_time_ms'] = infer_ms
-        debug_info['remote_roundtrip_ms'] = round(result_age * 1000, 1)
+        debug_info['remote_roundtrip_ms'] = round((result_age or 0.0) * 1000, 1)
         debug_info['remote_frame_id'] = frame_id
-        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
-        debug_info['local_ai_status'] = 'ready'
+        debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
+        debug_info['timestamp_source'] = timestamp_source
+        if source_frame_age_ms is not None:
+            debug_info['source_frame_age_ms'] = source_frame_age_ms
+        debug_info['local_ai_status'] = 'stale_grace' if stale_grace_active else 'ready'
+        if stale_grace_active:
+            debug_info['pipeline_label'] = 'AI Local + BFMC Control (Stale Grace)'
         if throughput_fps is not None:
             debug_info['local_ai_throughput_fps'] = float(throughput_fps)
         if processing_fps is not None:
@@ -6177,6 +6213,9 @@ Returns:
         return {
             "frame_id": payload.get("frame_id"),
             "timestamp": payload.get("timestamp"),
+            "result_timestamp": payload.get("result_timestamp"),
+            "source_frame_timestamp": payload.get("source_frame_timestamp"),
+            "source_frame_sequence": payload.get("source_frame_sequence"),
             "inference_time_ms": payload.get("inference_time_ms"),
             "lane_count": payload.get("lane_count"),
             "model_ready": payload.get("model_ready"),
@@ -6611,6 +6650,9 @@ Returns:
         kalman_prediction_used = False
         self._is_stabilization_frame = False  # Reset each frame; set True by just_seen_two_lines logic
         kalman_pred_error = self._kalman_predict_error()
+        stale_grace_active = (debug_info.get('local_ai_status') == 'stale_grace')
+        if stale_grace_active:
+            debug_info['stale_grace_active'] = True
 
         avg_left, avg_right, overlap_collapse = self._collapse_overlapping_two_lines(
             avg_left,
@@ -7144,6 +7186,12 @@ Returns:
                 steering_angle = None
             speed = self.min_speed
             speed_cap = speed
+
+        if stale_grace_active:
+            conservative_cap = float(self.min_speed)
+            speed = min(float(speed), conservative_cap)
+            speed_cap = conservative_cap
+            debug_info['stale_grace_speed_cap'] = conservative_cap
 
         # === POST-CHECK: Reject steering if it looks like a noise spike ===
         if steering_angle is not None and self.use_noise_filter:
