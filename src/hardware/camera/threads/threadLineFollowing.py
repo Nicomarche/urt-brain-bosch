@@ -554,6 +554,10 @@ Args:
         self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
         self.local_ai_max_result_age = 0.35
         self.local_ai_stale_grace_s = 0.20
+        self.local_ai_latency_warn_ms = 450.0
+        self.local_ai_latency_stop_ms = 750.0
+        self.local_ai_latency_stop_frames = 3
+        self._local_ai_high_latency_streak = 0
         self.ai_local_use_mask_geometry = True
         self._hybridnets_client = None
         self._last_local_lane_payload = None
@@ -7355,6 +7359,69 @@ Returns:
             self._current_speed = 0.0
             debug_info['control_override'] = 'single_line_protective_stop'
         debug_info['single_line_stop_active'] = bool(protective_stop_active)
+
+        # Latency safety guard for AI_LOCAL: prevent oscillations when perception is too old.
+        if self._is_ai_local_active():
+            latency_samples_ms = []
+            for key in ('remote_result_age_ms', 'source_frame_age_ms'):
+                value = debug_info.get(key)
+                if value is None:
+                    continue
+                try:
+                    latency_samples_ms.append(float(value))
+                except (TypeError, ValueError):
+                    pass
+
+            if latency_samples_ms:
+                latency_ms = max(latency_samples_ms)
+                warn_ms = max(0.0, float(getattr(self, 'local_ai_latency_warn_ms', 450.0)))
+                stop_ms = max(warn_ms + 50.0, float(getattr(self, 'local_ai_latency_stop_ms', 750.0)))
+                stop_frames = max(1, int(getattr(self, 'local_ai_latency_stop_frames', 3) or 0))
+                if latency_ms >= warn_ms:
+                    self._local_ai_high_latency_streak += 1
+                    debug_info['latency_guard_ms'] = float(latency_ms)
+                    debug_info['latency_guard_streak'] = int(self._local_ai_high_latency_streak)
+
+                    # Cap speed early on high latency so steering corrections remain physically plausible.
+                    conservative_cap = float(self.min_speed)
+                    speed = min(float(speed), conservative_cap)
+                    speed_cap = conservative_cap if speed_cap is None else min(float(speed_cap), conservative_cap)
+
+                    # Blend steering toward previous stable command as latency grows.
+                    previous_steering = getattr(self, '_last_good_steering', None)
+                    if previous_steering is None:
+                        previous_steering = getattr(self, 'last_steering', None)
+                    if steering_angle is not None and previous_steering is not None:
+                        if stop_ms > warn_ms:
+                            ratio = min(1.0, max(0.0, (latency_ms - warn_ms) / (stop_ms - warn_ms)))
+                        else:
+                            ratio = 1.0
+                        blend_ratio = 0.25 + (0.65 * ratio)
+                        steering_angle = (
+                            (1.0 - blend_ratio) * float(steering_angle) +
+                            blend_ratio * float(previous_steering)
+                        )
+                        steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                        debug_info['latency_guard_blend'] = float(blend_ratio)
+                        debug_info['latency_guard_base_steer'] = float(previous_steering)
+
+                    debug_info['latency_guard_state'] = 'warn'
+                    if (
+                        latency_ms >= stop_ms and
+                        self._local_ai_high_latency_streak >= stop_frames and
+                        not recovery_active and
+                        not protective_stop_active
+                    ):
+                        speed = 0.0
+                        self._current_speed = 0.0
+                        debug_info['latency_guard_state'] = 'stop'
+                        debug_info['control_override'] = 'latency_safety_stop'
+                else:
+                    self._local_ai_high_latency_streak = 0
+            else:
+                self._local_ai_high_latency_streak = 0
+        else:
+            self._local_ai_high_latency_streak = 0
 
         # Update state
         if steering_angle is not None:
