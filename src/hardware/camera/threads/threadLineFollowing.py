@@ -2539,6 +2539,83 @@ Args:
             'base_steering': float(previous_steering),
         }
 
+    def _stabilize_single_line_error(self, error_px, side, prev_seen_side, streak, lane_width_px=None, img_w=None):
+        """Limit abrupt 2->1 line error jumps before lateral control."""
+        if error_px is None:
+            return None, None
+        if side not in ('left', 'right'):
+            return float(error_px), None
+
+        stabilized = float(error_px)
+        debug = {
+            'applied': False,
+            'input_error_px': float(error_px),
+            'resolved_side': side,
+            'prev_seen_side': prev_seen_side if prev_seen_side in ('left', 'right', 'both') else 'none',
+            'streak': int(max(0, int(streak or 0))),
+        }
+
+        last_error = getattr(self, '_last_good_error', None)
+        if last_error is not None:
+            last_error = float(last_error)
+            blend_frames = max(0, int(getattr(self, 'single_line_transition_blend_frames', 2) or 0))
+            transition_active = (
+                blend_frames > 0 and
+                debug['streak'] > 0 and
+                debug['streak'] <= (blend_frames + 1) and
+                debug['prev_seen_side'] != side
+            )
+            if transition_active:
+                alpha = min(1.0, float(debug['streak']) / float(blend_frames + 1))
+                stabilized = ((1.0 - alpha) * last_error) + (alpha * stabilized)
+                debug['transition_blend_alpha'] = float(alpha)
+                debug['base_error_px'] = float(last_error)
+                debug['applied'] = True
+
+            width_px = 0.0
+            if lane_width_px is not None:
+                try:
+                    width_px = float(lane_width_px)
+                except (TypeError, ValueError):
+                    width_px = 0.0
+            if width_px <= 1.0 and img_w is not None:
+                width_px = float(self._resolve_nominal_lane_width_px(img_w))
+
+            jump_limit_px = max(
+                20.0,
+                float(getattr(self, 'noise_max_error_jump_px', 80)) * 0.55,
+                width_px * 0.28 if width_px > 1.0 else 0.0,
+            )
+            if debug['streak'] > max(1, int(getattr(self, 'single_line_transition_blend_frames', 2) or 0)):
+                jump_limit_px *= 1.35
+
+            delta = stabilized - last_error
+            if delta > jump_limit_px:
+                stabilized = last_error + jump_limit_px
+                debug['jump_clamped'] = True
+                debug['jump_limit_px'] = float(jump_limit_px)
+                debug['applied'] = True
+            elif delta < -jump_limit_px:
+                stabilized = last_error - jump_limit_px
+                debug['jump_clamped'] = True
+                debug['jump_limit_px'] = float(jump_limit_px)
+                debug['applied'] = True
+
+            abs_limit_px = max(
+                45.0,
+                float(getattr(self, 'max_error_px', 50.0)) * 1.8,
+                width_px * 0.62 if width_px > 1.0 else 0.0,
+            )
+            limited = max(-abs_limit_px, min(abs_limit_px, stabilized))
+            if limited != stabilized:
+                stabilized = limited
+                debug['absolute_clamped'] = True
+                debug['absolute_limit_px'] = float(abs_limit_px)
+                debug['applied'] = True
+
+        debug['output_error_px'] = float(stabilized)
+        return stabilized, (debug if debug.get('applied', False) else None)
+
     def _reset_pid_state(self):
         """Reset PID/Stanley state when changing modes to prevent corrupted values."""
         self.pid.reset()
@@ -6859,6 +6936,17 @@ Returns:
                     else:
                         self._swept_path_info = None
 
+                    error, error_stabilization = self._stabilize_single_line_error(
+                        error,
+                        'left',
+                        prev_seen_side,
+                        self.consecutive_single_left,
+                        lane_width_px=lane_width_px,
+                        img_w=img_w,
+                    )
+                    if error_stabilization is not None:
+                        debug_info['single_line_error_stabilization'] = error_stabilization
+
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                     curve_reference = self._get_stanley_curve_reference(
                         fallback_curve=self._swept_path_info
@@ -6921,6 +7009,17 @@ Returns:
                                 speed_cap = speed
                     else:
                         self._swept_path_info = None
+
+                    error, error_stabilization = self._stabilize_single_line_error(
+                        error,
+                        'right',
+                        prev_seen_side,
+                        self.consecutive_single_right,
+                        lane_width_px=lane_width_px,
+                        img_w=img_w,
+                    )
+                    if error_stabilization is not None:
+                        debug_info['single_line_error_stabilization'] = error_stabilization
 
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                     curve_reference = self._get_stanley_curve_reference(
@@ -7043,6 +7142,16 @@ Returns:
             debug_info['single_line_resolved_side'] = 'left'
             debug_info.setdefault('single_line_side_source', 'legacy')
             debug_info.update(self._last_single_line_projection_debug)
+            sl_error, error_stabilization = self._stabilize_single_line_error(
+                sl_error,
+                'left',
+                prev_seen_side,
+                self.consecutive_single_left,
+                lane_width_px=self._resolve_nominal_lane_width_px(img_w),
+                img_w=img_w,
+            )
+            if error_stabilization is not None:
+                debug_info['single_line_error_stabilization'] = error_stabilization
             error = sl_error
 
             if self.use_kalman_filter:
@@ -7093,6 +7202,16 @@ Returns:
             debug_info['single_line_resolved_side'] = 'right'
             debug_info.setdefault('single_line_side_source', 'legacy')
             debug_info.update(self._last_single_line_projection_debug)
+            sl_error, error_stabilization = self._stabilize_single_line_error(
+                sl_error,
+                'right',
+                prev_seen_side,
+                self.consecutive_single_right,
+                lane_width_px=self._resolve_nominal_lane_width_px(img_w),
+                img_w=img_w,
+            )
+            if error_stabilization is not None:
+                debug_info['single_line_error_stabilization'] = error_stabilization
             error = sl_error
 
             if self.use_kalman_filter:
