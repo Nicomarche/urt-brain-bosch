@@ -1145,6 +1145,18 @@ Args:
         """Sample a lane mask boundary at the requested rows."""
         return [self._mask_x_at_y(mask, y_value) for y_value in y_rows]
 
+    def _mask_y_bounds(self, mask):
+        """Return (top_y, bottom_y) for the active pixels of a binary mask."""
+        if not isinstance(mask, np.ndarray) or mask.size == 0:
+            return None, None
+        mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+        if mask_2d.ndim != 2 or mask_2d.size == 0:
+            return None, None
+        ys = np.where(mask_2d > 0)[0]
+        if ys.size == 0:
+            return None, None
+        return int(ys.min()), int(ys.max())
+
     def _confirm_single_line_outer_curve(self, line, side, img_h, img_w, curve_strength):
         """Confirm that a curve-like single line is likely the outer boundary."""
         result = {
@@ -1261,14 +1273,42 @@ Args:
                 continue
             normalized_masks[side] = mask_2d
 
-        roi_bottom = max(0, min(img_h - 1, int(self.roi_height_end * img_h) - 1))
-        reference_y = max(0, min(
-            roi_bottom,
-            int(round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))
-        ))
-        if roi_bottom - reference_y < 1:
-            reference_y = max(0, roi_bottom - max(1, img_h // 8))
-        y_rows = [roi_bottom, reference_y]
+        roi_top = max(0, min(img_h - 1, int(self.roi_height_start * img_h)))
+        roi_bottom = max(roi_top, min(img_h - 1, int(self.roi_height_end * img_h) - 1))
+
+        mask_bounds = {}
+        for side in ('left', 'right'):
+            mask = normalized_masks[side]
+            if mask is None:
+                continue
+            top_y, bottom_y = self._mask_y_bounds(mask)
+            if top_y is None or bottom_y is None:
+                continue
+            top_y = max(roi_top, min(roi_bottom, int(top_y)))
+            bottom_y = max(roi_top, min(roi_bottom, int(bottom_y)))
+            if bottom_y < top_y:
+                continue
+            mask_bounds[side] = (top_y, bottom_y)
+
+        if not mask_bounds:
+            return None
+
+        # Dynamic anchor row: use where the mask actually starts (nearest visible row),
+        # instead of forcing the ROI bottom. This prevents overreacting to far-curve points
+        # when the camera is pitched up and near-field lane pixels are missing.
+        measurement_bottom_y = min(bounds[1] for bounds in mask_bounds.values())
+        measurement_top_y = max(bounds[0] for bounds in mask_bounds.values())
+        measurement_bottom_y = max(roi_top, min(roi_bottom, int(measurement_bottom_y)))
+        measurement_top_y = max(roi_top, min(measurement_bottom_y, int(measurement_top_y)))
+
+        reference_y = int(round(img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))))
+        reference_y = max(measurement_top_y, min(measurement_bottom_y, reference_y))
+        if measurement_bottom_y - reference_y < 1:
+            reference_y = max(measurement_top_y, measurement_bottom_y - max(1, img_h // 8))
+        if measurement_bottom_y - reference_y < 1:
+            reference_y = max(0, measurement_bottom_y - 1)
+
+        y_rows = [measurement_bottom_y, reference_y]
 
         samples = {
             'left': {'bottom': None, 'reference': None},
@@ -1299,7 +1339,7 @@ Args:
             candidate_line = side_lines.get(visible_side)
             if isinstance(candidate_line, np.ndarray) and candidate_line.ndim == 2 and candidate_line.shape[1] >= 4:
                 visible_line = candidate_line
-                for row_key, y_value in (('bottom', roi_bottom), ('reference', reference_y)):
+                for row_key, y_value in (('bottom', measurement_bottom_y), ('reference', reference_y)):
                     if samples[visible_side][row_key] is None:
                         projected_x = self._line_x_at_y(visible_line, y_value)
                         if projected_x is not None:
@@ -1338,10 +1378,10 @@ Args:
                     return None
 
                 overlap_x = float(sum(overlap_x_values) / len(overlap_x_values))
-                overlap_top_y = max(0, min(reference_y, roi_bottom - 1))
+                overlap_top_y = max(0, min(reference_y, measurement_bottom_y - 1))
                 overlap_line = np.array([[
                     int(round(max(0.0, min(float(img_w - 1), overlap_x)))),
-                    int(roi_bottom),
+                    int(measurement_bottom_y),
                     int(round(max(0.0, min(float(img_w - 1), overlap_x)))),
                     int(overlap_top_y),
                 ]], dtype=np.int32)
@@ -1414,11 +1454,11 @@ Args:
 
         midpoint_bottom_x = (float(left_bottom_x) + float(right_bottom_x)) / 2.0
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
-        dy = max(1.0, float(roi_bottom - reference_y))
+        dy = max(1.0, float(measurement_bottom_y - reference_y))
         heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
         error_px = midpoint_bottom_x - (img_w / 2.0)
         raw_error_px = float(error_px)
-        draw_y = roi_bottom
+        draw_y = measurement_bottom_y
         guidance_mode = 'midpoint'
         single_line_projection_debug = None
         single_line_prefer_center = None
@@ -1484,7 +1524,7 @@ Args:
             'lane_width_px': float(lane_width_px),
             'detected_sides': tuple(detected_sides),
             'reference_y': int(reference_y),
-            'bottom_y': int(roi_bottom),
+            'bottom_y': int(measurement_bottom_y),
             'draw_y': int(draw_y),
             'used_virtual_boundary': bool(used_virtual_boundary),
             'guidance_mode': guidance_mode,
