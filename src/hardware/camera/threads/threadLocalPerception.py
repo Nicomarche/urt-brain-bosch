@@ -179,11 +179,22 @@ class threadLocalPerception(ThreadWithStop):
             "timestamp": now,
         })
 
+        is_close = box_area >= self.sign_min_box_area
+        is_actionable = sign_name in SignActions.ACTIONABLE_SIGNS
+        print(
+            f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
+            f"{sign_name} ({confidence:.1%}) box={box_area:.3%}"
+            f"{'' if is_close else f' (TOO FAR <{self.sign_min_box_area:.1%})'}"
+            f"{'' if self.enable_actions else ' [actions=OFF]'}"
+            f"{'' if self.is_sign_actions_active else ' [inactive_mode]'}"
+            f"{'' if is_actionable else ' [not_actionable]'}"
+        )
+
         if (
             self.enable_actions
             and self.is_sign_actions_active
-            and box_area >= self.sign_min_box_area
-            and sign_name in SignActions.ACTIONABLE_SIGNS
+            and is_close
+            and is_actionable
         ):
             self.sign_actions.execute(sign_name)
 

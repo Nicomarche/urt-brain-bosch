@@ -85,8 +85,9 @@ SIGN_ACTION_COOLDOWN = 15.0
 # Valor normalizado (0.0 - 1.0) = fraccion del area total de la imagen.
 # Si la senal es muy chica (lejos), solo se detecta/publica pero NO se frena.
 # Ejemplo: 0.01 = 1% del area de imagen (~senal a 2-3m de distancia)
+#          0.03 = 3% del area de imagen (~senal a 1-1.5m de distancia)
 # Tip: mirar los logs "box=X.X%" para calibrar este valor con tu camara.
-SIGN_MIN_BOX_AREA = 0.01
+SIGN_MIN_BOX_AREA = 0.03
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.

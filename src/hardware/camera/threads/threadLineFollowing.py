@@ -315,7 +315,7 @@ Args:
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
         self.stanley_k = 0.7            # Crosstrack gain [1/s] in physical Stanley form
-        self.stanley_k_soft = 1.5       # Low-speed softening term [m/s]
+        self.stanley_k_soft = 1.8       # Low-speed softening term [m/s]
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
         self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
         self.stanley_k_ag = 0.04        # ψ_ss gain for curved steady-state tracking
@@ -5861,15 +5861,15 @@ Returns:
                 mode_str = "STANLEY" if self._should_use_stanley_controller() else "PID"
                 if self._is_ai_local_active():
                     mode_str = "STANLEY (forced in AI_LOCAL)"
-                print(
-                    f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
-                    f"Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} "
-                    f"k_d_yaw={self.stanley_k_d_yaw} k_d_steer={self.stanley_k_d_steer} "
-                    f"k_ag={self.stanley_k_ag} v_cmd={self.stanley_speed_to_mps} "
-                    f"v_meas={self.stanley_measured_speed_to_mps} use_meas={bool(self.stanley_use_measured_speed)} "
-                    f"db_cte_m={self.stanley_deadband_crosstrack_m} db_cte_px={self.stanley_deadband_crosstrack_px} "
-                    f"db_heading={self.stanley_deadband_heading_deg} db_out={self.stanley_deadband_output_deg}"
-                )
+                # print(
+                #     f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
+                #     f"Mode: {mode_str} k={self.stanley_k} k_soft={self.stanley_k_soft} "
+                #     f"k_d_yaw={self.stanley_k_d_yaw} k_d_steer={self.stanley_k_d_steer} "
+                #     f"k_ag={self.stanley_k_ag} v_cmd={self.stanley_speed_to_mps} "
+                #     f"v_meas={self.stanley_measured_speed_to_mps} use_meas={bool(self.stanley_use_measured_speed)} "
+                #     f"db_cte_m={self.stanley_deadband_crosstrack_m} db_cte_px={self.stanley_deadband_crosstrack_px} "
+                #     f"db_heading={self.stanley_deadband_heading_deg} db_out={self.stanley_deadband_output_deg}"
+                # )
 
             # Log feed-forward parameter changes
             ff_params = ['wheelbase', 'ff_weight', 'curvature_threshold']
@@ -6841,7 +6841,8 @@ Returns:
             blind_hold_steering = self._get_no_lane_hold_steering()
 
             if self.show_debug:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
+                pass
+                #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
 
             can_use_kalman_pred = (
                 self.use_kalman_filter and
@@ -6979,14 +6980,14 @@ Returns:
                 heading_deg = math.degrees(self._heading_error)
                 psi_ss_deg = math.degrees(self._stanley_last_psi_ss)
                 steer_damp_deg = math.degrees(self.stanley.k_d_steer * self._stanley_last_steer_damping)
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
-                      f"Mode: {control_mode} "
-                      f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px/{self._stanley_last_error_m:.3f}m "
-                      f"Heading: {heading_deg:.1f}° PsiSS: {psi_ss_deg:.1f}° "
-                      f"YawRate: {self._yaw_rate:.2f}/{self._stanley_last_traj_yaw_rate:.2f} "
-                      f"ServoDamp: {steer_damp_deg:.1f}° "
-                      f"v={self._stanley_last_speed_mps:.3f}m/s({self._stanley_last_speed_source}) "
-                      f"scale={self._stanley_last_px_per_cm:.2f}px/cm Source: {src}")
+                # print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;95mSTANLEY\033[0m - "
+                #       f"Mode: {control_mode} "
+                #       f"Steer: {steering_angle:.1f}° Error: {error or 0:.0f}px/{self._stanley_last_error_m:.3f}m "
+                #       f"Heading: {heading_deg:.1f}° PsiSS: {psi_ss_deg:.1f}° "
+                #       f"YawRate: {self._yaw_rate:.2f}/{self._stanley_last_traj_yaw_rate:.2f} "
+                #       f"ServoDamp: {steer_damp_deg:.1f}° "
+                #       f"v={self._stanley_last_speed_mps:.3f}m/s({self._stanley_last_speed_source}) "
+                #       f"scale={self._stanley_last_px_per_cm:.2f}px/cm Source: {src}")
             else:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - "
                       f"Mode: {control_mode} "
