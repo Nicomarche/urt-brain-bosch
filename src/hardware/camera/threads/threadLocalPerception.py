@@ -401,6 +401,16 @@ class threadLocalPerception(ThreadWithStop):
                 "source_frame_sequence": int(frame_sequence or 0),
                 "lane_count": len(lane_points),
                 "model_ready": bool(result.get("model_ready", False)),
+                "heading_hint_rad": float(result.get("heading_hint_rad", 0.0) or 0.0),
+                "heading_hint_confidence": float(result.get("heading_hint_confidence", 0.0) or 0.0),
+                "heading_hint_source": str(result.get("heading_hint_source", "none") or "none"),
+                "road_type_class": str(result.get("road_type_class", "unknown") or "unknown"),
+                "road_type_confidence": float(result.get("road_type_confidence", 0.0) or 0.0),
+                "road_type_source": result.get("road_type_source"),
+                "lead_distance_class": str(result.get("lead_distance_class", "none") or "none"),
+                "lead_distance_confidence": float(result.get("lead_distance_confidence", 0.0) or 0.0),
+                "lead_distance_area": float(result.get("lead_distance_area", 0.0) or 0.0),
+                "lead_distance_source": result.get("lead_distance_source"),
             })
 
             self._publish_sign(result.get("detections", []), now)

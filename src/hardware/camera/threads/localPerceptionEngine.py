@@ -2,6 +2,7 @@ import os
 import re
 import threading
 import time
+import math
 
 import cv2
 import numpy as np
@@ -810,6 +811,139 @@ class LocalPerceptionEngine:
         lane_mask = self._combine_masks([side_masks.get("left"), side_masks.get("right")])
         return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask
 
+    @staticmethod
+    def _coerce_line_values(line_value):
+        if not isinstance(line_value, (list, tuple, np.ndarray)):
+            return None
+        values = line_value
+        if len(values) == 1 and isinstance(values[0], (list, tuple, np.ndarray)):
+            values = values[0]
+        if len(values) < 4:
+            return None
+        try:
+            return [float(values[idx]) for idx in range(4)]
+        except (TypeError, ValueError):
+            return None
+
+    def _line_heading_rad(self, line_value):
+        values = self._coerce_line_values(line_value)
+        if values is None:
+            return None
+        x1, y1, x2, y2 = values
+        if y1 < y2:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        dx = float(x2) - float(x1)
+        dy = float(y1) - float(y2)
+        if dy <= 1.0:
+            return None
+        return math.atan2(dx, dy)
+
+    def _estimate_heading_hint(self, lane_side_lines):
+        if not isinstance(lane_side_lines, dict):
+            return 0.0, 0.0, "none"
+
+        left_heading = self._line_heading_rad(lane_side_lines.get("left"))
+        right_heading = self._line_heading_rad(lane_side_lines.get("right"))
+
+        if left_heading is not None and right_heading is not None:
+            return float((left_heading + right_heading) * 0.5), 0.9, "two_line"
+        if left_heading is not None:
+            return float(left_heading * 0.5), 0.55, "single_left"
+        if right_heading is not None:
+            return float(right_heading * 0.5), 0.55, "single_right"
+        return 0.0, 0.0, "none"
+
+    @staticmethod
+    def _box_area(box):
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return 0.0
+        try:
+            y1, x1, y2, x2 = [float(v) for v in box]
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, (y2 - y1) * (x2 - x1))
+
+    def _estimate_road_type(self, detections):
+        if not isinstance(detections, list):
+            return "unknown", 0.0, None
+
+        road_type_aliases = {
+            "highway": {"highway_entrance", "highway_entry", "highway_exit"},
+            "roundabout": {"roundabout"},
+            "urban": {
+                "crosswalk",
+                "traffic_light",
+                "red_light",
+                "yellow_light",
+                "green_light",
+                "stop",
+                "priority",
+                "no_entry",
+                "one_way",
+                "parking",
+                "speed_20",
+                "speed_30",
+            },
+        }
+
+        best_by_type = {}
+        for detection in detections:
+            class_name = str(detection.get("class", "") or "").strip().lower()
+            confidence = float(detection.get("confidence", 0.0) or 0.0)
+            if confidence <= 0.0:
+                continue
+            for road_type, aliases in road_type_aliases.items():
+                if class_name in aliases and confidence > best_by_type.get(road_type, (0.0, None))[0]:
+                    best_by_type[road_type] = (confidence, class_name)
+
+        if not best_by_type:
+            return "unknown", 0.0, None
+
+        selected_type, selected = max(best_by_type.items(), key=lambda item: item[1][0])
+        return selected_type, float(selected[0]), selected[1]
+
+    def _estimate_lead_distance(self, detections):
+        if not isinstance(detections, list):
+            return "none", 0.0, 0.0, None
+
+        lead_aliases = {
+            "vehicle",
+            "car",
+            "truck",
+            "bus",
+            "motorcycle",
+            "bicycle",
+            "bike",
+            "pedestrian",
+        }
+        best = None
+        for detection in detections:
+            class_name = str(detection.get("class", "") or "").strip().lower()
+            if class_name not in lead_aliases:
+                continue
+            confidence = float(detection.get("confidence", 0.0) or 0.0)
+            area = self._box_area(detection.get("box"))
+            score = area * max(confidence, 1e-3)
+            if best is None or score > best["score"]:
+                best = {
+                    "class_name": class_name,
+                    "confidence": confidence,
+                    "area": area,
+                    "score": score,
+                }
+
+        if best is None:
+            return "none", 0.0, 0.0, None
+
+        area = float(best["area"])
+        if area >= 0.08:
+            distance_class = "near"
+        elif area >= 0.03:
+            distance_class = "medium"
+        else:
+            distance_class = "far"
+        return distance_class, float(best["confidence"]), area, best["class_name"]
+
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
         height, width = overlay.shape[:2]
@@ -912,6 +1046,16 @@ class LocalPerceptionEngine:
                 "input_size": f"{self.imgsz}x{self.imgsz}",
                 "model_ready": False,
                 "error": self.init_error,
+                "heading_hint_rad": 0.0,
+                "heading_hint_confidence": 0.0,
+                "heading_hint_source": "none",
+                "road_type_class": "unknown",
+                "road_type_confidence": 0.0,
+                "road_type_source": None,
+                "lead_distance_class": "none",
+                "lead_distance_confidence": 0.0,
+                "lead_distance_area": 0.0,
+                "lead_distance_source": None,
             }
 
         try:
@@ -930,6 +1074,15 @@ class LocalPerceptionEngine:
 
             side_candidates, detections = self._split_candidates(result, frame_shape)
             side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = self._build_lane_geometry(side_candidates)
+            heading_hint_rad, heading_hint_confidence, heading_hint_source = self._estimate_heading_hint(
+                lane_side_lines
+            )
+            road_type_class, road_type_confidence, road_type_source = self._estimate_road_type(
+                detections
+            )
+            lead_distance_class, lead_distance_confidence, lead_distance_area, lead_distance_source = (
+                self._estimate_lead_distance(detections)
+            )
             inference_ms = (time.time() - start_time) * 1000
             lane_debug = {}
             if build_debug:
@@ -950,6 +1103,16 @@ class LocalPerceptionEngine:
                 "input_size": f"{self.imgsz}x{self.imgsz}",
                 "model_ready": True,
                 "error": None,
+                "heading_hint_rad": float(heading_hint_rad),
+                "heading_hint_confidence": float(heading_hint_confidence),
+                "heading_hint_source": heading_hint_source,
+                "road_type_class": road_type_class,
+                "road_type_confidence": float(road_type_confidence),
+                "road_type_source": road_type_source,
+                "lead_distance_class": lead_distance_class,
+                "lead_distance_confidence": float(lead_distance_confidence),
+                "lead_distance_area": float(lead_distance_area),
+                "lead_distance_source": lead_distance_source,
             }
         except Exception as e:
             self.init_error = str(e)
@@ -972,4 +1135,14 @@ class LocalPerceptionEngine:
                 "input_size": f"{self.imgsz}x{self.imgsz}",
                 "model_ready": False,
                 "error": self.init_error,
+                "heading_hint_rad": 0.0,
+                "heading_hint_confidence": 0.0,
+                "heading_hint_source": "none",
+                "road_type_class": "unknown",
+                "road_type_confidence": 0.0,
+                "road_type_source": None,
+                "lead_distance_class": "none",
+                "lead_distance_confidence": 0.0,
+                "lead_distance_area": 0.0,
+                "lead_distance_source": None,
             }

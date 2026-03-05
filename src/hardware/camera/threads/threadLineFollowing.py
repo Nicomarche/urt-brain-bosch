@@ -343,6 +343,11 @@ Args:
             heading_deadband_rad=math.radians(self.stanley_deadband_heading_deg),
             output_deadband_deg=self.stanley_deadband_output_deg,
         )
+        self._stanley_base_k = float(self.stanley_k)
+        self._stanley_base_k_soft = float(self.stanley_k_soft)
+        self._stanley_sched_k = float(self.stanley_k)
+        self._stanley_sched_k_soft = float(self.stanley_k_soft)
+        self._stanley_sched_alpha = 0.30
 
         # Single-line lane centering: how far from the visible line to aim.
         # 0.50 = exact center (17.5cm), 0.40 = closer to visible line (less overshoot).
@@ -558,6 +563,14 @@ Args:
         self.local_ai_latency_stop_ms = 750.0
         self.local_ai_latency_stop_frames = 3
         self._local_ai_high_latency_streak = 0
+        self._local_ai_heading_hint_rad = 0.0
+        self._local_ai_heading_hint_confidence = 0.0
+        self._local_ai_heading_hint_source = "none"
+        self._local_ai_road_type_class = "unknown"
+        self._local_ai_road_type_confidence = 0.0
+        self._local_ai_lead_distance_class = "none"
+        self._local_ai_lead_distance_confidence = 0.0
+        self._local_ai_lead_distance_area = 0.0
         self.ai_local_use_mask_geometry = True
         self._hybridnets_client = None
         self._last_local_lane_payload = None
@@ -583,6 +596,11 @@ Args:
         self._last_frame_trace = {}
         self._last_requested_motor_command = None
         self._last_state_change_message = None
+        self._dynamic_metrics_window = 20
+        self._theta_abs_error_history = deque(maxlen=self._dynamic_metrics_window)
+        self._offset_abs_error_history = deque(maxlen=self._dynamic_metrics_window)
+        self._theta_dmae_deg = 0.0
+        self._offset_dma_m = 0.0
         
         # Supercombo remote AI server parameters (same protocol as HybridNets)
         self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
@@ -2081,6 +2099,7 @@ Args:
         roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
         debug_info['roi_vertices'] = roi_vertices
 
+        self._reset_local_ai_context()
         payload = self._last_local_lane_payload
         if not payload:
             self._smooth_detected_line(None, 'left')
@@ -2153,6 +2172,12 @@ Args:
         if source_frame_age_ms is not None:
             debug_info['source_frame_age_ms'] = source_frame_age_ms
         debug_info['local_ai_status'] = 'stale_grace' if stale_grace_active else 'ready'
+        self._update_local_ai_context(
+            payload,
+            debug_info=debug_info,
+            result_age=result_age,
+            stale_grace=stale_grace_active,
+        )
         if stale_grace_active:
             debug_info['pipeline_label'] = 'AI Local + BFMC Control (Stale Grace)'
         if throughput_fps is not None:
@@ -2636,6 +2661,20 @@ Args:
         self._stanley_last_speed_source = "none"
         self._stanley_last_error_m = 0.0
         self._stanley_last_px_per_cm = 0.0
+        self._stanley_sched_k = float(getattr(self, '_stanley_base_k', self.stanley_k))
+        self._stanley_sched_k_soft = float(getattr(self, '_stanley_base_k_soft', self.stanley_k_soft))
+        self._local_ai_heading_hint_rad = 0.0
+        self._local_ai_heading_hint_confidence = 0.0
+        self._local_ai_heading_hint_source = "none"
+        self._local_ai_road_type_class = "unknown"
+        self._local_ai_road_type_confidence = 0.0
+        self._local_ai_lead_distance_class = "none"
+        self._local_ai_lead_distance_confidence = 0.0
+        self._local_ai_lead_distance_area = 0.0
+        self._theta_abs_error_history.clear()
+        self._offset_abs_error_history.clear()
+        self._theta_dmae_deg = 0.0
+        self._offset_dma_m = 0.0
         self._single_line_heading_ref_left = 0.0
         self._single_line_heading_ref_right = 0.0
         self._last_two_line_left = None
@@ -4152,6 +4191,189 @@ Args:
         error_m = error_cm / 100.0
         return error_m, px_per_cm
 
+    def _reset_local_ai_context(self):
+        self._local_ai_heading_hint_rad = 0.0
+        self._local_ai_heading_hint_confidence = 0.0
+        self._local_ai_heading_hint_source = "none"
+        self._local_ai_road_type_class = "unknown"
+        self._local_ai_road_type_confidence = 0.0
+        self._local_ai_lead_distance_class = "none"
+        self._local_ai_lead_distance_confidence = 0.0
+        self._local_ai_lead_distance_area = 0.0
+
+    def _update_local_ai_context(self, payload, debug_info=None, result_age=None, stale_grace=False):
+        """Extract optional high-level AI cues from the local lane payload."""
+        self._reset_local_ai_context()
+        if not isinstance(payload, dict):
+            return
+
+        def _safe_float(name, default=0.0):
+            try:
+                return float(payload.get(name, default) or default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        age_factor = 1.0
+        if result_age is not None:
+            age_limit = max(1e-6, float(self.local_ai_max_result_age) + max(0.0, float(self.local_ai_stale_grace_s)))
+            age_factor = max(0.0, min(1.0, 1.0 - (float(result_age) / age_limit)))
+            if stale_grace:
+                age_factor *= 0.6
+
+        heading_hint_rad = _safe_float("heading_hint_rad", 0.0)
+        heading_hint_conf = _safe_float("heading_hint_confidence", 0.0)
+        heading_hint_conf = max(0.0, min(1.0, heading_hint_conf * age_factor))
+        heading_hint_source = str(payload.get("heading_hint_source", "none") or "none")
+
+        road_type_class = str(payload.get("road_type_class", "unknown") or "unknown").strip().lower()
+        road_type_conf = _safe_float("road_type_confidence", 0.0)
+        road_type_conf = max(0.0, min(1.0, road_type_conf * age_factor))
+
+        lead_distance_class = str(payload.get("lead_distance_class", "none") or "none").strip().lower()
+        lead_distance_conf = _safe_float("lead_distance_confidence", 0.0)
+        lead_distance_conf = max(0.0, min(1.0, lead_distance_conf * age_factor))
+        lead_distance_area = max(0.0, _safe_float("lead_distance_area", 0.0))
+
+        self._local_ai_heading_hint_rad = float(heading_hint_rad)
+        self._local_ai_heading_hint_confidence = float(heading_hint_conf)
+        self._local_ai_heading_hint_source = heading_hint_source
+        self._local_ai_road_type_class = road_type_class
+        self._local_ai_road_type_confidence = float(road_type_conf)
+        self._local_ai_lead_distance_class = lead_distance_class
+        self._local_ai_lead_distance_confidence = float(lead_distance_conf)
+        self._local_ai_lead_distance_area = float(lead_distance_area)
+
+        if isinstance(debug_info, dict):
+            debug_info["heading_hint_rad"] = float(self._local_ai_heading_hint_rad)
+            debug_info["heading_hint_confidence"] = float(self._local_ai_heading_hint_confidence)
+            debug_info["heading_hint_source"] = self._local_ai_heading_hint_source
+            debug_info["road_type_class"] = self._local_ai_road_type_class
+            debug_info["road_type_confidence"] = float(self._local_ai_road_type_confidence)
+            debug_info["lead_distance_class"] = self._local_ai_lead_distance_class
+            debug_info["lead_distance_confidence"] = float(self._local_ai_lead_distance_confidence)
+            debug_info["lead_distance_area"] = float(self._local_ai_lead_distance_area)
+
+    def _fuse_heading_with_local_hint(self, heading_rad, debug_info=None, mode="normal"):
+        """Blend geometric heading with AI heading hint to reduce 1-line spikes."""
+        try:
+            base_heading = float(heading_rad)
+        except (TypeError, ValueError):
+            base_heading = 0.0
+
+        hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
+        if hint_conf <= 0.02:
+            return base_heading
+
+        hint_heading = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
+        mode_name = str(mode or "normal")
+        if mode_name == "single_line":
+            max_weight = 0.65
+            max_delta = math.radians(24.0)
+        elif mode_name == "stale":
+            max_weight = 0.75
+            max_delta = math.radians(20.0)
+        else:
+            max_weight = 0.35
+            max_delta = math.radians(14.0)
+
+        fusion_weight = max(0.0, min(max_weight, hint_conf))
+        delta = hint_heading - base_heading
+        delta = max(-max_delta, min(max_delta, delta))
+        fused_heading = base_heading + fusion_weight * delta
+
+        if isinstance(debug_info, dict):
+            debug_info["heading_fusion_mode"] = mode_name
+            debug_info["heading_fusion_weight"] = float(fusion_weight)
+            debug_info["heading_fusion_hint_deg"] = float(math.degrees(hint_heading))
+            debug_info["heading_fusion_base_deg"] = float(math.degrees(base_heading))
+            debug_info["heading_fusion_out_deg"] = float(math.degrees(fused_heading))
+        return fused_heading
+
+    def _apply_stanley_road_type_schedule(self):
+        """Schedule Stanley gains with road-type cue (paper-style multi-task fusion)."""
+        base_k = float(getattr(self, "_stanley_base_k", self.stanley_k))
+        base_k_soft = float(getattr(self, "_stanley_base_k_soft", self.stanley_k_soft))
+
+        road_type = str(getattr(self, "_local_ai_road_type_class", "unknown") or "unknown")
+        confidence = float(getattr(self, "_local_ai_road_type_confidence", 0.0) or 0.0)
+        confidence = max(0.0, min(1.0, confidence))
+        if confidence < 0.15:
+            road_type = "unknown"
+
+        target_k = base_k
+        target_k_soft = base_k_soft
+        if road_type == "highway":
+            target_k = base_k * 0.85
+            target_k_soft = base_k_soft * 1.20
+        elif road_type == "roundabout":
+            target_k = base_k * 1.20
+            target_k_soft = base_k_soft * 0.90
+        elif road_type == "urban":
+            target_k = base_k * 1.05
+            target_k_soft = base_k_soft * 0.95
+
+        alpha = max(0.05, min(1.0, float(getattr(self, "_stanley_sched_alpha", 0.30))))
+        self._stanley_sched_k = (1.0 - alpha) * float(self._stanley_sched_k) + alpha * float(target_k)
+        self._stanley_sched_k_soft = (
+            (1.0 - alpha) * float(self._stanley_sched_k_soft) + alpha * float(target_k_soft)
+        )
+        self.stanley.k = float(self._stanley_sched_k)
+        self.stanley.k_soft = max(0.1, float(self._stanley_sched_k_soft))
+
+    def _apply_lead_distance_speed_cap(self, speed, speed_cap=None, debug_info=None):
+        """Apply conservative longitudinal cap from lead-distance class."""
+        lead_class = str(getattr(self, "_local_ai_lead_distance_class", "none") or "none")
+        lead_conf = float(getattr(self, "_local_ai_lead_distance_confidence", 0.0) or 0.0)
+        if lead_conf < 0.20:
+            return speed, speed_cap
+
+        cap = None
+        if lead_class == "near":
+            cap = float(self.min_speed)
+        elif lead_class == "medium":
+            cap = float(self.min_speed) + 2.0
+        elif lead_class == "far":
+            cap = float(self.base_speed)
+
+        if cap is None:
+            return speed, speed_cap
+
+        if speed_cap is None:
+            new_cap = cap
+        else:
+            new_cap = min(float(speed_cap), cap)
+        new_speed = min(float(speed), float(new_cap))
+
+        if isinstance(debug_info, dict):
+            debug_info["lead_speed_cap"] = float(new_cap)
+        return new_speed, new_cap
+
+    def _update_dynamic_tracking_metrics(self, error_px=None):
+        """Update dynamic moving-average errors inspired by theta dMAE / offset dMA."""
+        heading_abs_deg = abs(math.degrees(float(getattr(self, "_heading_error", 0.0) or 0.0)))
+        self._theta_abs_error_history.append(float(heading_abs_deg))
+
+        offset_abs_m = None
+        if self._should_use_stanley_controller():
+            offset_abs_m = abs(float(getattr(self, "_stanley_last_error_m", 0.0) or 0.0))
+        elif error_px is not None:
+            try:
+                px_per_cm = max(1e-6, float(self._resolve_px_per_cm()))
+                offset_abs_m = abs(float(error_px)) / px_per_cm / 100.0
+            except (TypeError, ValueError):
+                offset_abs_m = None
+        if offset_abs_m is not None:
+            self._offset_abs_error_history.append(float(offset_abs_m))
+
+        if self._theta_abs_error_history:
+            self._theta_dmae_deg = float(sum(self._theta_abs_error_history) / len(self._theta_abs_error_history))
+        else:
+            self._theta_dmae_deg = 0.0
+        if self._offset_abs_error_history:
+            self._offset_dma_m = float(sum(self._offset_abs_error_history) / len(self._offset_abs_error_history))
+        else:
+            self._offset_dma_m = 0.0
+
     def _resolve_stanley_speed_mps(self, speed_value, speed_cap=None):
         """Resolve Stanley speed in m/s, preferring fresh measured speed from Nucleo."""
         command_speed = abs(float(speed_value))
@@ -4238,6 +4460,7 @@ Args:
         """
         self._heading_error = float(heading)
         if self._should_use_stanley_controller():
+            self._apply_stanley_road_type_schedule()
             error_m, px_per_cm = self._convert_error_px_to_m(
                 error, lane_width_px=lane_width_px, img_w=img_w
             )
@@ -6093,6 +6316,10 @@ Returns:
             if any(p in normalized_config for p in stanley_params):
                 self.stanley.k = self.stanley_k
                 self.stanley.k_soft = self.stanley_k_soft
+                self._stanley_base_k = float(self.stanley_k)
+                self._stanley_base_k_soft = float(self.stanley_k_soft)
+                self._stanley_sched_k = float(self.stanley_k)
+                self._stanley_sched_k_soft = float(self.stanley_k_soft)
                 self.stanley.k_d_yaw = self.stanley_k_d_yaw
                 self.stanley.k_d_steer = self.stanley_k_d_steer
                 self.stanley.max_steering = self.max_steering
@@ -6300,6 +6527,14 @@ Returns:
             "inference_time_ms": payload.get("inference_time_ms"),
             "lane_count": payload.get("lane_count"),
             "model_ready": payload.get("model_ready"),
+            "heading_hint_rad": payload.get("heading_hint_rad"),
+            "heading_hint_confidence": payload.get("heading_hint_confidence"),
+            "heading_hint_source": payload.get("heading_hint_source"),
+            "road_type_class": payload.get("road_type_class"),
+            "road_type_confidence": payload.get("road_type_confidence"),
+            "lead_distance_class": payload.get("lead_distance_class"),
+            "lead_distance_confidence": payload.get("lead_distance_confidence"),
+            "lead_distance_area": payload.get("lead_distance_area"),
             "lane_side_sources": payload.get("lane_side_sources"),
             "lane_side_point_counts": {
                 "left": len(lane_side_points.get("left", []) or []),
@@ -6368,6 +6603,14 @@ Returns:
                 "stanley_speed_source": self._stanley_last_speed_source,
                 "stanley_error_m": round(float(self._stanley_last_error_m), 4),
                 "stanley_px_per_cm": round(float(self._stanley_last_px_per_cm), 4),
+                "theta_dmae_deg": round(float(self._theta_dmae_deg), 4),
+                "offset_dma_m": round(float(self._offset_dma_m), 5),
+                "heading_hint_rad": round(float(self._local_ai_heading_hint_rad), 5),
+                "heading_hint_confidence": round(float(self._local_ai_heading_hint_confidence), 4),
+                "road_type_class": self._local_ai_road_type_class,
+                "road_type_confidence": round(float(self._local_ai_road_type_confidence), 4),
+                "lead_distance_class": self._local_ai_lead_distance_class,
+                "lead_distance_confidence": round(float(self._local_ai_lead_distance_confidence), 4),
                 "current_speed_target": round(float(self._current_speed), 3),
                 "frames_without_line": int(self.frames_without_line),
                 "last_seen_side": self.last_seen_side,
@@ -6835,6 +7078,10 @@ Returns:
 
             error = float(local_mask_guidance.get('error_px', 0.0) or 0.0)
             heading = float(local_mask_guidance.get('heading_rad', 0.0) or 0.0)
+            if len(detected_sides) == 1:
+                heading = self._fuse_heading_with_local_hint(heading, debug_info, mode='single_line')
+            elif stale_grace_active:
+                heading = self._fuse_heading_with_local_hint(heading, debug_info, mode='stale')
             self._heading_error = heading
             midpoint_x = int(round(local_mask_guidance.get('midpoint_bottom_x', img_w / 2.0)))
             midpoint_x = max(0, min(img_w - 1, midpoint_x))
@@ -7098,6 +7345,10 @@ Returns:
 
                 # Compute steering from crosstrack error
                 heading = self._compute_heading_error(avg_left, avg_right)
+                if stale_grace_active:
+                    heading = self._fuse_heading_with_local_hint(heading, debug_info, mode='stale')
+                else:
+                    heading = self._fuse_heading_with_local_hint(heading, debug_info, mode='normal')
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 curve_reference = self._get_stanley_curve_reference(
                     avg_left=avg_left,
@@ -7143,6 +7394,7 @@ Returns:
                 prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
                 physical_projection=use_physical_single_line,
             )
+            sl_heading = self._fuse_heading_with_local_hint(sl_heading, debug_info, mode='single_line')
             debug_info['single_line_resolved_side'] = 'left'
             debug_info.setdefault('single_line_side_source', 'legacy')
             debug_info.update(self._last_single_line_projection_debug)
@@ -7203,6 +7455,7 @@ Returns:
                 prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
                 physical_projection=use_physical_single_line,
             )
+            sl_heading = self._fuse_heading_with_local_hint(sl_heading, debug_info, mode='single_line')
             debug_info['single_line_resolved_side'] = 'right'
             debug_info.setdefault('single_line_side_source', 'legacy')
             debug_info.update(self._last_single_line_projection_debug)
@@ -7286,6 +7539,7 @@ Returns:
                 else:
                     speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                     heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
+                    heading_pred = self._fuse_heading_with_local_hint(heading_pred, debug_info, mode='stale')
                     curve_reference = self._get_stanley_curve_reference()
                     steering_angle = self._compute_lateral_control(
                         error, heading_pred, speed_val, curve_reference=curve_reference,
@@ -7309,6 +7563,13 @@ Returns:
                 steering_angle = None
             speed = self.min_speed
             speed_cap = speed
+
+        if self._is_ai_local_active():
+            speed, speed_cap = self._apply_lead_distance_speed_cap(
+                speed,
+                speed_cap=speed_cap,
+                debug_info=debug_info,
+            )
 
         if stale_grace_active:
             conservative_cap = float(self.min_speed)
@@ -7454,6 +7715,10 @@ Returns:
                     steering_angle *= steer_attenuation
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
 
+        self._update_dynamic_tracking_metrics(error_px=error)
+        debug_info['theta_dmae_deg'] = float(self._theta_dmae_deg)
+        debug_info['offset_dma_m'] = float(self._offset_dma_m)
+
         if self.show_debug and steering_angle is not None:
             if isinstance(local_mask_guidance, dict):
                 src = f"mask:{local_mask_guidance.get('mask_label', 'NONE').lower()}"
@@ -7505,6 +7770,14 @@ Returns:
             "stanley_speed_mps": self._stanley_last_speed_mps if self._should_use_stanley_controller() else None,
             "stanley_speed_source": self._stanley_last_speed_source if self._should_use_stanley_controller() else None,
             "stanley_px_per_cm": self._stanley_last_px_per_cm if self._should_use_stanley_controller() else None,
+            "theta_dmae_deg": self._theta_dmae_deg,
+            "offset_dma_m": self._offset_dma_m,
+            "heading_hint_rad": self._local_ai_heading_hint_rad,
+            "heading_hint_confidence": self._local_ai_heading_hint_confidence,
+            "road_type_class": self._local_ai_road_type_class,
+            "road_type_confidence": self._local_ai_road_type_confidence,
+            "lead_distance_class": self._local_ai_lead_distance_class,
+            "lead_distance_confidence": self._local_ai_lead_distance_confidence,
             "kalman_prediction_used": bool(kalman_prediction_used),
             "recovery_active": bool(recovery_active),
             "recovery_state": self._recovery_state,
