@@ -942,6 +942,60 @@ Args:
         t = (float(y_target) - y1) / dy
         return x1 + t * (x2 - x1)
 
+    def _mask_guidance_line(self, guidance, side, img_h, img_w):
+        """Build a representative line segment from local mask-guidance points."""
+        if not isinstance(guidance, dict) or side not in ("left", "right"):
+            return None
+
+        if side == "left":
+            bottom_key = "bottom_left_x"
+            ref_key = "left_x"
+        else:
+            bottom_key = "bottom_right_x"
+            ref_key = "right_x"
+
+        x_bottom = guidance.get(bottom_key)
+        x_ref = guidance.get(ref_key)
+        y_bottom = guidance.get("bottom_y")
+        y_ref = guidance.get("reference_y")
+
+        if x_bottom is None or x_ref is None or y_bottom is None or y_ref is None:
+            return None
+
+        try:
+            x_bottom = int(round(float(x_bottom)))
+            x_ref = int(round(float(x_ref)))
+            y_bottom = int(round(float(y_bottom)))
+            y_ref = int(round(float(y_ref)))
+        except (TypeError, ValueError):
+            return None
+
+        x_bottom = max(0, min(img_w - 1, x_bottom))
+        x_ref = max(0, min(img_w - 1, x_ref))
+        y_bottom = max(0, min(img_h - 1, y_bottom))
+        y_ref = max(0, min(img_h - 1, y_ref))
+
+        if y_bottom == y_ref:
+            y_ref = max(0, y_bottom - 1)
+            if y_ref == y_bottom:
+                return None
+
+        return np.array([[x_bottom, y_bottom, x_ref, y_ref]], dtype=np.int32)
+
+    def _mask_guidance_lines(self, guidance, img_h, img_w):
+        """Return (left_line, right_line) built from local mask-guidance geometry."""
+        if not isinstance(guidance, dict):
+            return None, None
+
+        detected_sides = set(guidance.get("detected_sides", ()))
+        left_line = None
+        right_line = None
+        if "left" in detected_sides:
+            left_line = self._mask_guidance_line(guidance, "left", img_h, img_w)
+        if "right" in detected_sides:
+            right_line = self._mask_guidance_line(guidance, "right", img_h, img_w)
+        return left_line, right_line
+
     def _record_lane_observation(self, observed_sides, duplicate_collapse=None):
         """Store short-term lane visibility history for line-loss context."""
         if not hasattr(self, '_lane_observation_history') or self._lane_observation_history is None:
@@ -1477,6 +1531,7 @@ Args:
                 img_w,
                 prefer_center=single_line_prefer_center,
                 physical_projection=True,
+                reference_y_override=reference_y,
             )
             single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
             single_line_projection_debug['single_line_prefer_center'] = bool(single_line_prefer_center)
@@ -1495,6 +1550,13 @@ Args:
         single_side_error_limit_px = None
         if len(detected_sides) == 1:
             limit_factor = 0.85 if guidance_mode == 'single_line_physical' else 0.60
+            if (
+                guidance_mode == 'single_line_physical' and
+                isinstance(single_line_projection_debug, dict) and
+                bool(single_line_projection_debug.get('single_line_outer_confirmed', False))
+            ):
+                # Outer single-line curves are the least observable case: be more conservative.
+                limit_factor = min(limit_factor, 0.45)
             single_side_error_limit_px = max(8.0, float(lane_width_px) * limit_factor)
             error_px = max(
                 -single_side_error_limit_px,
@@ -4073,7 +4135,16 @@ Args:
             )
         return self.pid.compute(error)
 
-    def _compute_single_line_error(self, line, side, img_h, img_w, prefer_center=False, physical_projection=False):
+    def _compute_single_line_error(
+        self,
+        line,
+        side,
+        img_h,
+        img_w,
+        prefer_center=False,
+        physical_projection=False,
+        reference_y_override=None,
+    ):
         """Compute crosstrack error from a single visible lane marking.
 
         The target is reconstructed from the visible marking side plus the
@@ -4146,9 +4217,12 @@ Args:
             ) * curve_strength
 
         if physical_projection:
-            reference_y = _clamp_reference_y(
-                img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))
-            )
+            if reference_y_override is not None:
+                reference_y = _clamp_reference_y(reference_y_override)
+            else:
+                reference_y = _clamp_reference_y(
+                    img_h * (1.0 - float(getattr(self, 'lookahead', 0.4)))
+                )
             reference_x = self._line_x_at_y(line, reference_y)
             if reference_x is None:
                 reference_x = x1
@@ -6539,9 +6613,14 @@ Returns:
 
         # === PRE-CHECK: Reject obviously noisy frames (reflection/glare) ===
         local_mask_guidance = debug_info.get('local_mask_guidance')
+        mask_guidance_left_line = None
+        mask_guidance_right_line = None
         num_lines = (1 if avg_left is not None else 0) + (1 if avg_right is not None else 0)
         if isinstance(local_mask_guidance, dict):
             num_lines = len(local_mask_guidance.get('detected_sides', ()))
+            mask_guidance_left_line, mask_guidance_right_line = self._mask_guidance_lines(
+                local_mask_guidance, img_h, img_w
+            )
         _pre_noisy, _pre_reason = self._is_frame_noisy(debug_info, None, None, num_lines)
         if _pre_noisy:
             # Frame is noisy (e.g. too many Hough lines from reflections)
@@ -6578,8 +6657,17 @@ Returns:
             return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
-        if self.use_swept_path and not isinstance(local_mask_guidance, dict):
-            self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
+        if self.use_swept_path:
+            if isinstance(local_mask_guidance, dict):
+                self._update_curve_state(
+                    num_lines,
+                    mask_guidance_left_line,
+                    mask_guidance_right_line,
+                    img_h,
+                    img_w,
+                )
+            else:
+                self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
         prev_seen_side = self.last_seen_side
         if not isinstance(local_mask_guidance, dict):
@@ -6631,9 +6719,35 @@ Returns:
                 self.frames_without_line = 0
                 self.last_seen_side = "both"
 
+                curve_reference = None
+                if (
+                    self.use_swept_path and
+                    mask_guidance_left_line is not None and
+                    mask_guidance_right_line is not None
+                ):
+                    swept = self._predict_swept_path(
+                        mask_guidance_left_line,
+                        mask_guidance_right_line,
+                        img_h,
+                        img_w,
+                    )
+                    self._swept_path_info = swept
+                    if swept is not None and abs(float(swept.get('offset_px', 0.0) or 0.0)) > 0.5:
+                        error += float(swept['offset_px'])
+                        if self.curve_speed_reduction and float(swept.get('min_clearance_cm', 1e9)) < self.min_clearance_warn_cm:
+                            speed = self.min_speed
+                            speed_cap = speed
+                    curve_reference = self._get_stanley_curve_reference(
+                        avg_left=mask_guidance_left_line,
+                        avg_right=mask_guidance_right_line,
+                        img_h=img_h,
+                        img_w=img_w,
+                        fallback_curve=self._swept_path_info,
+                    )
+
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None,
+                    error, heading, speed_val, curve_reference=curve_reference,
                     lane_width_px=lane_width_px, img_w=img_w
                 )
 
@@ -6649,21 +6763,59 @@ Returns:
                 speed = self.min_speed + 2
                 speed_cap = speed
 
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None, speed_cap=speed_cap,
-                    lane_width_px=lane_width_px, img_w=img_w
-                )
+                if self._is_seeing_inner_line('left'):
+                    steering_angle = self.max_steering * self.curve_inner_line_steer_factor
+                    speed = self.min_speed
+                    speed_cap = speed
+                    self._swept_path_info = None
+                    debug_info['inner_line_escape'] = True
+                else:
+                    swept = None
+                    if self.use_swept_path and mask_guidance_left_line is not None:
+                        swept = self._predict_swept_path_single_line(
+                            mask_guidance_left_line, 'left', img_h, img_w
+                        )
+                        self._swept_path_info = swept
+                        if swept is not None:
+                            if self._curve_state == "IN_CURVE":
+                                w = self.single_line_swept_weight_in_curve
+                            elif self._curve_state == "EXITING":
+                                w = self.single_line_swept_weight_exiting
+                            elif self._curve_state == "ENTERING":
+                                w = self.single_line_swept_weight_entering
+                            else:
+                                w = 0.35
+                            w = max(0.0, min(1.0, float(w)))
+                            error = (1.0 - w) * error + w * float(swept.get('steering_error', error))
+                            heading = heading * (1.0 - 0.6 * w)
+                            debug_info['single_line_swept_weight'] = float(w)
+                            if (
+                                self.curve_speed_reduction and
+                                float(swept.get('min_clearance_cm', 1e9)) < self.min_clearance_warn_cm
+                            ):
+                                speed = self.min_speed
+                                speed_cap = speed
+                    else:
+                        self._swept_path_info = None
 
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                steering_angle, transition_blend = self._blend_single_line_transition_steering(
-                    steering_angle,
-                    'left',
-                    prev_seen_side,
-                    self.consecutive_single_left,
-                )
-                if transition_blend is not None:
-                    debug_info['single_line_transition_blend'] = transition_blend
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    curve_reference = self._get_stanley_curve_reference(
+                        fallback_curve=self._swept_path_info
+                    ) if isinstance(self._swept_path_info, dict) else None
+                    steering_angle = self._compute_lateral_control(
+                        error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
+                        lane_width_px=lane_width_px, img_w=img_w
+                    )
+
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                    steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                        steering_angle,
+                        'left',
+                        prev_seen_side,
+                        self.consecutive_single_left,
+                    )
+                    if transition_blend is not None:
+                        debug_info['single_line_transition_blend'] = transition_blend
                 self.frames_without_line = 0
             elif 'right' in detected_sides:
                 self.consecutive_single_right += 1
@@ -6674,21 +6826,59 @@ Returns:
                 speed = self.min_speed + 2
                 speed_cap = speed
 
-                speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=None, speed_cap=speed_cap,
-                    lane_width_px=lane_width_px, img_w=img_w
-                )
+                if self._is_seeing_inner_line('right'):
+                    steering_angle = -self.max_steering * self.curve_inner_line_steer_factor
+                    speed = self.min_speed
+                    speed_cap = speed
+                    self._swept_path_info = None
+                    debug_info['inner_line_escape'] = True
+                else:
+                    swept = None
+                    if self.use_swept_path and mask_guidance_right_line is not None:
+                        swept = self._predict_swept_path_single_line(
+                            mask_guidance_right_line, 'right', img_h, img_w
+                        )
+                        self._swept_path_info = swept
+                        if swept is not None:
+                            if self._curve_state == "IN_CURVE":
+                                w = self.single_line_swept_weight_in_curve
+                            elif self._curve_state == "EXITING":
+                                w = self.single_line_swept_weight_exiting
+                            elif self._curve_state == "ENTERING":
+                                w = self.single_line_swept_weight_entering
+                            else:
+                                w = 0.35
+                            w = max(0.0, min(1.0, float(w)))
+                            error = (1.0 - w) * error + w * float(swept.get('steering_error', error))
+                            heading = heading * (1.0 - 0.6 * w)
+                            debug_info['single_line_swept_weight'] = float(w)
+                            if (
+                                self.curve_speed_reduction and
+                                float(swept.get('min_clearance_cm', 1e9)) < self.min_clearance_warn_cm
+                            ):
+                                speed = self.min_speed
+                                speed_cap = speed
+                    else:
+                        self._swept_path_info = None
 
-                steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                steering_angle, transition_blend = self._blend_single_line_transition_steering(
-                    steering_angle,
-                    'right',
-                    prev_seen_side,
-                    self.consecutive_single_right,
-                )
-                if transition_blend is not None:
-                    debug_info['single_line_transition_blend'] = transition_blend
+                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                    curve_reference = self._get_stanley_curve_reference(
+                        fallback_curve=self._swept_path_info
+                    ) if isinstance(self._swept_path_info, dict) else None
+                    steering_angle = self._compute_lateral_control(
+                        error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
+                        lane_width_px=lane_width_px, img_w=img_w
+                    )
+
+                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                    steering_angle, transition_blend = self._blend_single_line_transition_steering(
+                        steering_angle,
+                        'right',
+                        prev_seen_side,
+                        self.consecutive_single_right,
+                    )
+                    if transition_blend is not None:
+                        debug_info['single_line_transition_blend'] = transition_blend
                 self.frames_without_line = 0
 
         elif avg_left is not None and avg_right is not None:
