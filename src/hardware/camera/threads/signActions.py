@@ -30,8 +30,11 @@ class SignActions:
 
     ACTIONABLE_SIGNS = {
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
-        "green_light", "speed_20", "speed_30", "parking",
+        "green_light", "speed_20", "speed_30",
         "highway_entrance", "highway_exit",
+        # "parking" is intentionally excluded: the parking state machine in
+        # threadLineFollowing handles it via _poll_sign_detected(). Routing it
+        # through SignActions would stop the car indefinitely.
     }
 
     ACTION_GROUP = {
