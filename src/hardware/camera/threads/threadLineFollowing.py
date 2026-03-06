@@ -329,6 +329,8 @@ Args:
         self.stanley_measured_speed_timeout = 0.4
         self.stanley_curve_min_confidence = 0.35  # Ignore weak curve estimates for ψ_ss / r_traj
         self.stanley_psi_ss_max_deg = 12.0  # Safety cap for steady-state heading bias
+        self.stanley_curve_direction_guard_error_m = 0.010
+        self.stanley_curve_direction_guard_heading_deg = 1.5
         self.stanley_deadband_crosstrack_m = 0.01
         self.stanley_deadband_crosstrack_px = 4.0
         self.stanley_deadband_heading_deg = 1.0
@@ -395,6 +397,7 @@ Args:
         self._stanley_last_speed_source = "none"
         self._stanley_last_error_m = 0.0
         self._stanley_last_px_per_cm = 0.0
+        self._stanley_last_curve_guard = "none"
         # Kalman filter for crosstrack error (robust when lanes flicker due to glare/shadows)
         self.use_kalman_filter = True
         self.kalman_process_noise = 0.04
@@ -2693,6 +2696,7 @@ Args:
         self._stanley_last_speed_source = "none"
         self._stanley_last_error_m = 0.0
         self._stanley_last_px_per_cm = 0.0
+        self._stanley_last_curve_guard = "none"
         self._stanley_sched_k = float(getattr(self, '_stanley_base_k', self.stanley_k))
         self._stanley_sched_k_soft = float(getattr(self, '_stanley_base_k_soft', self.stanley_k_soft))
         self._local_ai_heading_hint_rad = 0.0
@@ -4510,8 +4514,35 @@ Args:
             self.stanley.crosstrack_deadband = max(0.0, float(crosstrack_deadband))
             self.stanley.crosstrack_deadband_px = self.stanley.crosstrack_deadband
 
+            curve_reference_for_control = curve_reference
+            self._stanley_last_curve_guard = "none"
+            if isinstance(curve_reference, dict):
+                turn_direction = int(curve_reference.get('turn_direction', 0) or 0)
+                intent_sign = 0
+                intent_source = "none"
+                error_guard = max(
+                    0.001,
+                    float(getattr(self, 'stanley_curve_direction_guard_error_m', 0.010) or 0.010),
+                )
+                heading_guard = math.radians(max(
+                    0.1,
+                    float(getattr(self, 'stanley_curve_direction_guard_heading_deg', 1.5) or 1.5),
+                ))
+                if abs(float(error_m)) >= error_guard:
+                    intent_sign = 1 if float(error_m) > 0.0 else -1
+                    intent_source = "error"
+                elif abs(float(heading)) >= heading_guard:
+                    intent_sign = 1 if float(heading) > 0.0 else -1
+                    intent_source = "heading"
+
+                if turn_direction != 0 and intent_sign != 0 and turn_direction != intent_sign:
+                    curve_reference_for_control = None
+                    self._stanley_last_curve_guard = (
+                        f"direction_conflict(turn={turn_direction}, intent={intent_sign}, src={intent_source})"
+                    )
+
             psi_ss, traj_yaw_rate, steer_damping_delta = self._get_stanley_dynamic_terms(
-                speed_mps, curve_reference
+                speed_mps, curve_reference_for_control
             )
             self._stanley_last_speed_mps = float(speed_mps)
             self._stanley_last_speed_source = str(speed_source)
@@ -6643,6 +6674,7 @@ Returns:
                 "road_type_confidence": round(float(self._local_ai_road_type_confidence), 4),
                 "lead_distance_class": self._local_ai_lead_distance_class,
                 "lead_distance_confidence": round(float(self._local_ai_lead_distance_confidence), 4),
+                "curve_guard": self._stanley_last_curve_guard,
                 "current_speed_target": round(float(self._current_speed), 3),
                 "frames_without_line": int(self.frames_without_line),
                 "last_seen_side": self.last_seen_side,
@@ -7810,6 +7842,7 @@ Returns:
             "road_type_confidence": self._local_ai_road_type_confidence,
             "lead_distance_class": self._local_ai_lead_distance_class,
             "lead_distance_confidence": self._local_ai_lead_distance_confidence,
+            "curve_guard": self._stanley_last_curve_guard,
             "kalman_prediction_used": bool(kalman_prediction_used),
             "recovery_active": bool(recovery_active),
             "recovery_state": self._recovery_state,
