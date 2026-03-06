@@ -20,9 +20,9 @@ TRAFFIC_LIGHT_HEIGHT_CM = 20.0 # altura típica de semáforo BFMC
 # These control the distance traveled in each parking phase using odometry.
 # If odometry (encoder speed) is not available, timers in threadLineFollowing are used as fallback.
 PARKING_TRIGGER_DISTANCE_CM = 100.0  # activar SPOT_TRACKED cuando el spot está a esta distancia
-PARKING_D_FORWARD_CM = 45.0          # avanzar más allá del spot antes de reversar
-PARKING_D_REVERSE_ANGLE_CM = 60.0    # reversa en ángulo dentro del espacio
-PARKING_D_REVERSE_STRAIGHT_CM = 22.0 # corrección de alineación final
+PARKING_D_FORWARD_CM = 40.0          # avanzar más allá del spot antes de reversar
+PARKING_D_REVERSE_ANGLE_CM = 75.0    # reversa en ángulo dentro del espacio
+PARKING_D_REVERSE_STRAIGHT_CM = 35.0 # corrección de alineación final
 
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
