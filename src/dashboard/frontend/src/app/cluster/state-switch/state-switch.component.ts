@@ -109,6 +109,7 @@ export class StateSwitchComponent implements OnInit {
 
         if (newState === 'parking') {
           this.isParkingActive = true;
+          this.clusterService.updateParkingActive(true);
           this.clusterService.updateDrivingMode(newState);
           return;
         }
@@ -116,6 +117,7 @@ export class StateSwitchComponent implements OnInit {
         // Leaving parking mode — clear parking flag
         if (this.isParkingActive) {
           this.isParkingActive = false;
+          this.clusterService.updateParkingActive(false);
         }
 
         const stateIndex = this.states.indexOf(newState);
@@ -361,12 +363,14 @@ export class StateSwitchComponent implements OnInit {
     if (this.isParkingActive) {
       // Cancel parking — return to manual mode
       this.isParkingActive = false;
+      this.clusterService.updateParkingActive(false);
       this.currentStateIndex = this.states.indexOf('manual');
       this.clusterService.updateDrivingMode('manual');
       this.webSocketService.sendMessageToFlask(`{"Name": "DrivingMode", "Value": "manual"}`);
     } else {
       // Activate parking mode
       this.isParkingActive = true;
+      this.clusterService.updateParkingActive(true);
       this.clusterService.updateDrivingMode('parking');
       this.webSocketService.sendMessageToFlask(`{"Name": "DrivingMode", "Value": "parking"}`);
     }

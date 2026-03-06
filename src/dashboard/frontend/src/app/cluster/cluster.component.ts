@@ -78,6 +78,15 @@ export class ClusterComponent {
   private klSubscription: Subscription | undefined;
   private currentSerialConnectionStateSubscription: Subscription | undefined;
   private serialConnectionStateSubscription: Subscription | undefined;
+
+  public isParkingActive: boolean = false;
+  public currentDrivingMode: string = '';
+  private parkingSubscription: Subscription | undefined;
+  private drivingModeSubscription: Subscription | undefined;
+
+  get isParkingButtonVisible(): boolean {
+    return this.currentDrivingMode === 'manual' || this.isParkingActive;
+  }
   constructor( private  webSocketService: WebSocketService, private clusterService: ClusterService) { }
 
   ngOnInit()
@@ -131,6 +140,14 @@ export class ClusterComponent {
         console.error('Error receiving KL state:', error);
       }
     );
+
+    this.parkingSubscription = this.clusterService.isParkingActive$.subscribe(
+      (value) => { this.isParkingActive = value; }
+    );
+
+    this.drivingModeSubscription = this.clusterService.drivingMode$.subscribe(
+      (value) => { this.currentDrivingMode = value; }
+    );
   }
 
   ngOnDestroy() {
@@ -148,6 +165,14 @@ export class ClusterComponent {
 
     if (this.klSubscription) {
       this.klSubscription.unsubscribe();
+    }
+
+    if (this.parkingSubscription) {
+      this.parkingSubscription.unsubscribe();
+    }
+
+    if (this.drivingModeSubscription) {
+      this.drivingModeSubscription.unsubscribe();
     }
 
     if (this.currentSerialConnectionStateSubscription) {
@@ -179,6 +204,12 @@ export class ClusterComponent {
   setKL(index: number): void {
     if (this.klSwitchComponent) {
       this.klSwitchComponent.setState(index);
+    }
+  }
+
+  toggleParking(): void {
+    if (this.stateSwitchComponent) {
+      this.stateSwitchComponent.toggleParking();
     }
   }
 }

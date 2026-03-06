@@ -150,6 +150,47 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     height: 3%;
 }
 
+.cluster-park-button-container {
+    position: absolute;
+    width: 8%;
+    left: 65%;
+    height: 5.5%;
+    top: 78.5%;
+    z-index: 5;
+}
+
+.cluster-park-button {
+    width: 100%;
+    height: 100%;
+    font-size: 0.9vw;
+    font-weight: bold;
+    text-shadow: 0 0 0.3vw rgba(0, 0, 0, 1);
+    filter: drop-shadow(0 0 0.3vw rgba(0, 0, 0, 0.3));
+    background-color: #3a7d44;
+    color: white;
+    border: none;
+    border-radius: 0.3vw;
+    cursor: pointer;
+    text-align: center;
+    transition: background-color 0.3s ease;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+    user-select: none;
+}
+
+.cluster-park-button:hover {
+    background-color: #2e6136;
+}
+
+.cluster-park-button--active {
+    background-color: #e08c00;
+}
+
+.cluster-park-button--active:hover {
+    background-color: #b87000;
+}
+
 .cluster-record { 
     position: absolute;
     width: 8%;

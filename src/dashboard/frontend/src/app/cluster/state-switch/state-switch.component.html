@@ -65,13 +65,4 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
     <button *ngIf="isMobile" class="stop-button" (click)="setState(0)">stop car</button>
   </div>
 
-  <div *ngIf="!isMobile && (currentState === 'manual' || isParkingActive)" class="park-button-container">
-    <button
-      class="park-button"
-      [class.park-button--active]="isParkingActive"
-      (click)="toggleParking()"
-    >
-      {{ isParkingActive ? 'Cancelar' : 'Estacionar' }}
-    </button>
-  </div>
 </div>

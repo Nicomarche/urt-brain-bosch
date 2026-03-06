@@ -56,6 +56,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
 
   <app-car class="cluster-car" [position]="carPosition" [leftLaneOn]="carLeftLaneOn" [rightLaneOn]="carRightLaneOn" />
   <app-steering class="cluster-steering" />
+  <div *ngIf="isParkingButtonVisible" class="cluster-park-button-container">
+    <button
+      class="cluster-park-button"
+      [class.cluster-park-button--active]="isParkingActive"
+      (click)="toggleParking()"
+    >
+      {{ isParkingActive ? 'Cancelar' : 'Estacionar' }}
+    </button>
+  </div>
   <app-record class="cluster-record" />
   <app-live-camera class="cluster-live-camera" />
   <app-warning-light class="cluster-warning-light" />
