@@ -3,6 +3,27 @@ Configuracion general del proyecto URT Brain.
 Modifica estos valores para cambiar el comportamiento del auto.
 """
 
+# ===================== PHYSICAL DIMENSIONS =====================
+# Lane and road geometry (BFMC spec)
+LANE_WIDTH_CM = 35.0           # carril: distancia entre bordes interiores de líneas
+LINE_WIDTH_CM = 2.0            # ancho de las marcas viales pintadas
+
+# Parking spot dimensions (BFMC spec)
+PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
+PARKING_SPOT_WIDTH_CM = 35.0   # ancho del espacio de estacionamiento
+
+# Known object heights for metric distance estimation
+SIGN_HEIGHT_CM = 15.0          # altura típica de señal BFMC
+TRAFFIC_LIGHT_HEIGHT_CM = 20.0 # altura típica de semáforo BFMC
+
+# Parking maneuver distances (replace open-loop timers)
+# These control the distance traveled in each parking phase using odometry.
+# If odometry (encoder speed) is not available, timers in threadLineFollowing are used as fallback.
+PARKING_TRIGGER_DISTANCE_CM = 100.0  # activar SPOT_TRACKED cuando el spot está a esta distancia
+PARKING_D_FORWARD_CM = 45.0          # avanzar más allá del spot antes de reversar
+PARKING_D_REVERSE_ANGLE_CM = 60.0    # reversa en ángulo dentro del espacio
+PARKING_D_REVERSE_STRAIGHT_CM = 22.0 # corrección de alineación final
+
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
 CAMERA_TYPE = "jetson"

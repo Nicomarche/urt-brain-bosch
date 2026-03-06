@@ -66,6 +66,9 @@ class threadLocalPerception(ThreadWithStop):
         self._lf_curve_state = "STRAIGHT"
         self._lf_curve_state_frames = 0
         self._lf_steering_deg = 0.0
+        self._current_mode = ""
+        self._px_per_cm = 0.0       # cached from LineFollowingStatus.stanley_px_per_cm
+        self._last_frame_shape = None  # (height, width) of last processed frame
 
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
@@ -123,10 +126,12 @@ class threadLocalPerception(ThreadWithStop):
             return
         try:
             mode_dict = SystemMode[message].value
+            self._current_mode = mode_dict.get("mode", "").lower()
             camera_config = mode_dict.get("camera", {})
             sign_config = camera_config.get("signDetection", {})
             self.is_sign_actions_active = bool(sign_config.get("enabled", False))
         except (KeyError, TypeError):
+            self._current_mode = ""
             self.is_sign_actions_active = False
 
     def _check_config(self):
@@ -187,7 +192,42 @@ class threadLocalPerception(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
-    def _publish_sign(self, detections, now):
+        px_per_cm = status.get("stanley_px_per_cm")
+        if px_per_cm is not None:
+            try:
+                val = float(px_per_cm)
+                if val > 0.1:
+                    self._px_per_cm = val
+            except (TypeError, ValueError):
+                pass
+
+    def _estimate_sign_distance_cm(self, box, img_height):
+        """Estimate metric distance to an object from its bounding box base.
+
+        Uses the cached px_per_cm (calibrated from lane_width_cm=35cm) to
+        convert vertical pixel displacement from the bottom of the image into
+        an approximate forward distance in cm.
+
+        The formula assumes that the bottom of the bbox is the ground contact
+        point of the object. Further objects appear higher in the image, so the
+        vertical distance from the image bottom to the base scales with forward
+        distance. px_per_cm gives us horizontal scale at the bottom of the
+        image; we apply it as an approximation for the forward direction too.
+
+        Returns None if px_per_cm is not calibrated yet.
+        """
+        if self._px_per_cm < 0.1 or img_height is None or img_height < 1:
+            return None
+        try:
+            base_y_norm = float(box[2])  # bottom of box, normalized [0,1]
+            base_y_px = base_y_norm * float(img_height)
+            vertical_displacement_px = float(img_height) - base_y_px
+            distance_cm = vertical_displacement_px / self._px_per_cm
+            return max(0.0, round(distance_cm, 1))
+        except (TypeError, ValueError, IndexError):
+            return None
+
+    def _publish_sign(self, detections, now, img_shape=None):
         if not self.enable_sign_detection or not detections:
             return
 
@@ -203,32 +243,45 @@ class threadLocalPerception(ThreadWithStop):
             box = [0, 0, 0, 0]
         box_area = max(0.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
 
+        img_height = img_shape[0] if img_shape is not None else None
+        distance_cm = self._estimate_sign_distance_cm(box, img_height)
+
         self.detection_count += 1
         self.last_sign_name = sign_name
         self.signDetectedSender.send({
             "sign": sign_name,
             "confidence": round(confidence, 3),
+            "box": [round(float(v), 5) for v in box],
             "box_area": round(box_area, 5),
+            "distance_cm": distance_cm,
             "timestamp": now,
         })
 
         is_close = box_area >= self.sign_min_box_area
         is_actionable = SignActions.is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
+        dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
-            f"{sign_display} ({confidence:.1%}) box={box_area:.3%}"
+            f"{sign_display} ({confidence:.1%}) box={box_area:.3%}{dist_str}"
             f"{'' if is_close else f' (TOO FAR <{self.sign_min_box_area:.1%})'}"
             f"{'' if self.enable_actions else ' [actions=OFF]'}"
             f"{'' if self.is_sign_actions_active else ' [inactive_mode]'}"
             f"{'' if is_actionable else ' [not_actionable]'}"
         )
 
+        # In PARKING mode the parking-spot sign triggers the state machine in
+        # threadLineFollowing instead of signActions, so we skip the action here
+        # to avoid signActions stopping the vehicle indefinitely.
+        _parking_mode_active = self._current_mode == "parking"
+        _skip_parking_action = _parking_mode_active and sign_name == "parking"
+
         if (
             self.enable_actions
             and self.is_sign_actions_active
             and is_close
             and is_actionable
+            and not _skip_parking_action
         ):
             self.sign_actions.execute(
                 sign_name,
@@ -371,6 +424,7 @@ class threadLocalPerception(ThreadWithStop):
             result = self.engine.infer(frame, build_debug=build_debug)
             result_timestamp = time.time()
             self._last_result = result
+            self._last_frame_shape = frame.shape[:2] if frame is not None else None
             self.frame_counter += 1
 
             elapsed = now - self.fps_timer
@@ -385,6 +439,12 @@ class threadLocalPerception(ThreadWithStop):
             lane_side_sources = result.get("lane_side_sources", {"left": "none", "right": "none"})
             side_masks = result.get("side_masks", {"left": None, "right": None})
             lane_mask = result.get("lane_mask")
+            lead_distance_px_height = float(result.get("lead_distance_px_height", 0.0) or 0.0)
+            lead_distance_cm = None
+            if lead_distance_px_height > 0.0 and self._px_per_cm > 0.1 and self._last_frame_shape:
+                lead_distance_cm = round(
+                    (self._last_frame_shape[0] - lead_distance_px_height) / self._px_per_cm, 1
+                )
             self.localLaneSender.send({
                 "lane_points": lane_points,
                 "lane_side_points": lane_side_points,
@@ -411,9 +471,10 @@ class threadLocalPerception(ThreadWithStop):
                 "lead_distance_confidence": float(result.get("lead_distance_confidence", 0.0) or 0.0),
                 "lead_distance_area": float(result.get("lead_distance_area", 0.0) or 0.0),
                 "lead_distance_source": result.get("lead_distance_source"),
+                "lead_distance_cm": lead_distance_cm,
             })
 
-            self._publish_sign(result.get("detections", []), now)
+            self._publish_sign(result.get("detections", []), now, img_shape=self._last_frame_shape)
             self._publish_status(result, now)
             if build_debug:
                 self._show_debug_windows(result, now)

@@ -903,8 +903,17 @@ class LocalPerceptionEngine:
         return selected_type, float(selected[0]), selected[1]
 
     def _estimate_lead_distance(self, detections):
+        """Estimate distance to the closest lead vehicle/pedestrian.
+
+        Returns:
+            (distance_class, confidence, area, class_name, box_height_norm)
+            distance_class: "near" / "medium" / "far" / "none"
+            box_height_norm: normalized [0-1] height of the leading object's
+                bounding box, useful for metric distance estimation in the
+                calling thread when px_per_cm is available.
+        """
         if not isinstance(detections, list):
-            return "none", 0.0, 0.0, None
+            return "none", 0.0, 0.0, None, 0.0
 
         lead_aliases = {
             "vehicle",
@@ -922,18 +931,27 @@ class LocalPerceptionEngine:
             if class_name not in lead_aliases:
                 continue
             confidence = float(detection.get("confidence", 0.0) or 0.0)
-            area = self._box_area(detection.get("box"))
+            box = detection.get("box")
+            area = self._box_area(box)
             score = area * max(confidence, 1e-3)
+            # Compute normalized box height [y2 - y1] for metric distance
+            box_height_norm = 0.0
+            if isinstance(box, (list, tuple)) and len(box) >= 4:
+                try:
+                    box_height_norm = max(0.0, float(box[2]) - float(box[0]))
+                except (TypeError, ValueError):
+                    box_height_norm = 0.0
             if best is None or score > best["score"]:
                 best = {
                     "class_name": class_name,
                     "confidence": confidence,
                     "area": area,
                     "score": score,
+                    "box_height_norm": box_height_norm,
                 }
 
         if best is None:
-            return "none", 0.0, 0.0, None
+            return "none", 0.0, 0.0, None, 0.0
 
         area = float(best["area"])
         if area >= 0.08:
@@ -942,7 +960,7 @@ class LocalPerceptionEngine:
             distance_class = "medium"
         else:
             distance_class = "far"
-        return distance_class, float(best["confidence"]), area, best["class_name"]
+        return distance_class, float(best["confidence"]), area, best["class_name"], float(best["box_height_norm"])
 
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
@@ -1056,6 +1074,7 @@ class LocalPerceptionEngine:
                 "lead_distance_confidence": 0.0,
                 "lead_distance_area": 0.0,
                 "lead_distance_source": None,
+                "lead_distance_px_height": 0.0,
             }
 
         try:
@@ -1080,9 +1099,11 @@ class LocalPerceptionEngine:
             road_type_class, road_type_confidence, road_type_source = self._estimate_road_type(
                 detections
             )
-            lead_distance_class, lead_distance_confidence, lead_distance_area, lead_distance_source = (
+            lead_distance_class, lead_distance_confidence, lead_distance_area, lead_distance_source, lead_box_height_norm = (
                 self._estimate_lead_distance(detections)
             )
+            # Convert normalized box height to pixels for metric distance estimation in the caller
+            lead_distance_px_height = lead_box_height_norm * float(frame_shape[0]) if lead_box_height_norm > 0.0 else 0.0
             inference_ms = (time.time() - start_time) * 1000
             lane_debug = {}
             if build_debug:
@@ -1113,6 +1134,7 @@ class LocalPerceptionEngine:
                 "lead_distance_confidence": float(lead_distance_confidence),
                 "lead_distance_area": float(lead_distance_area),
                 "lead_distance_source": lead_distance_source,
+                "lead_distance_px_height": round(lead_distance_px_height, 1),
             }
         except Exception as e:
             self.init_error = str(e)
@@ -1145,4 +1167,5 @@ class LocalPerceptionEngine:
                 "lead_distance_confidence": 0.0,
                 "lead_distance_area": 0.0,
                 "lead_distance_source": None,
+                "lead_distance_px_height": 0.0,
             }

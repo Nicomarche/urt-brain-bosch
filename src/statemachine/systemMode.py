@@ -145,6 +145,36 @@ class SystemMode(Enum):
         }
     }
 
+    PARKING = {
+        "mode": "parking",
+        "camera": {
+            "process": {
+                "enabled": True,
+            },
+            "thread": {
+                "resolution": "1080p",
+            },
+            "lineFollowing": {
+                "enabled": True,
+            },
+        },
+        "serial_handler": {
+            "process": {
+                "enabled": True,
+            }
+        },
+        "semaphore": {
+            "process": {
+                "enabled": False,
+            }
+        },
+        "traffic_com": {
+            "process": {
+                "enabled": False,
+            }
+        }
+    }
+
     STOP = {
         "mode": "stop",
         "camera": {

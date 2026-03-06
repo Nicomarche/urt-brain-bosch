@@ -12,7 +12,8 @@ import json
 import os
 from collections import deque
 from enum import Enum
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus
+import config as _config
+from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -43,6 +44,40 @@ class DetectionMode(Enum):
     AI_LOCAL = "ai_local"      # Local YOLO lane perception (best.pt) + local BFMC/Stanley control
     HYBRIDNETS = "hybridnets"  # Legacy/deprecated alias preserved for compatibility
     SUPERCOMBO = "supercombo"  # Legacy/deprecated alias preserved for compatibility
+
+
+class ParkingState(Enum):
+    """States for the autonomous parking maneuver state machine."""
+    IDLE             = "idle"             # Parking inactive
+    LANE_KEEPING     = "lane_keeping"     # Moving forward, keeping lane, looking for spot
+    SPOT_TRACKED     = "spot_tracked"     # Parking spot detected and being tracked
+    FORWARD_PAST_SPOT= "forward_past_spot"# Moving forward past the spot before reversing
+    REVERSING_ANGLE  = "reversing_angle"  # Reversing into spot at angle (right steer)
+    REVERSING_STRAIGHT = "reversing_straight" # Straightening inside spot (left correction)
+    PARKED           = "parked"           # Maneuver complete, vehicle stationary
+
+
+# ---------------------------------------------------------------------------
+# Parking maneuver constants — tune these on the physical robot.
+# Spot dimensions: 76.5 cm long x 35 cm wide (BFMC spec, also in config.py).
+# Speed units match min_speed/max_speed; distance phases use encoder odometry
+# (self._measured_speed * stanley_measured_speed_to_mps) with timer fallback.
+# ---------------------------------------------------------------------------
+PARKING_SEARCH_SPEED        = 13    # Speed while searching for spot (same as min_speed)
+PARKING_FORWARD_SPEED       = 13    # Speed during forward-past-spot phase
+PARKING_REVERSE_SPEED       = -13   # Speed during reverse phases (negative = backward)
+PARKING_REVERSE_ANGLE_STEER = 20.0  # Steer angle (deg) during angled reverse (+right)
+PARKING_REVERSE_STRAIGHT_STEER = -8.0  # Steer correction (deg) to straighten in spot
+PARKING_SPOT_MISS_THRESHOLD = 8     # Consecutive frames without detection → spot lost
+# Distance-based phase thresholds (read from config; fallback values below)
+PARKING_TRIGGER_DISTANCE_CM  = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
+PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          45.0))
+PARKING_D_REVERSE_ANGLE_CM   = float(getattr(_config, "PARKING_D_REVERSE_ANGLE_CM",    60.0))
+PARKING_D_REVERSE_STRAIGHT_CM = float(getattr(_config, "PARKING_D_REVERSE_STRAIGHT_CM", 22.0))
+# Timer fallbacks (used when encoder speed == 0)
+PARKING_T_FORWARD           = 1.5   # Seconds to advance past the spot (fallback)
+PARKING_T_REVERSE_ANGLE     = 3.0   # Seconds reversing at angle (fallback)
+PARKING_T_REVERSE_STRAIGHT  = 1.5   # Seconds reversing to straighten (fallback)
 
 
 class PIDController:
@@ -424,9 +459,9 @@ Args:
         self.camera_to_front_axle = 11.5 # Camera position ahead of front axle (cm)
         self.camera_to_rear_axle = 37.5  # Camera to rear axle (11.5 + 26.0) (cm)
 
-        # Track dimensions (cm) - BFMC standard track
-        self.lane_width_cm = 35.0        # Lane width between line inner edges (cm)
-        self.line_width_cm = 2.0         # Width of lane line markings (cm)
+        # Track dimensions (cm) - BFMC standard track (configurable via config.py)
+        self.lane_width_cm = float(getattr(_config, "LANE_WIDTH_CM", 35.0))
+        self.line_width_cm = float(getattr(_config, "LINE_WIDTH_CM", 2.0))
 
         # Swept path prediction parameters
         self.use_swept_path = False      # Swept path disabled: Stanley handles curves via pure crosstrack+heading error
@@ -667,10 +702,11 @@ Args:
         self.right_fit_history = []
         self.fit_history_size = 8
 
-        # Perspective transform
+        # Perspective transform (bird's eye view)
         self.perspective_M = None
         self.perspective_M_inv = None
         self.perspective_initialized = False
+        self.bev_cm_per_px = 0.0  # metric scale: cm per pixel in BEV space (set in _init_perspective_transform)
 
         self._update_hsv_arrays()
 
@@ -731,6 +767,18 @@ Args:
         self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
         self.currentSpeedSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
         self.currentSteerSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSteer, "lastOnly", True)
+
+        # Parking spot detection subscriber
+        self.signDetectedSubscriber = messageHandlerSubscriber(self.queuesList, SignDetected, "lastOnly", True)
+
+        # Parking state machine variables
+        self._parking_state                = ParkingState.IDLE
+        self._parking_last_spot_box        = None    # Last known bbox [y1,x1,y2,x2] normalized
+        self._parking_last_spot_distance_cm = None   # Metric distance to spot (from SignDetected)
+        self._parking_spot_miss_frames     = 0       # Consecutive frames without parking detection
+        self._parking_phase_start_time     = 0.0     # Timestamp when current phase started
+        self._parking_phase_dist_cm        = 0.0     # Odometry-based distance traveled in current phase
+        self._parking_last_sm_time         = 0.0     # Last time state machine was called (for delta dt)
 
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
@@ -6050,27 +6098,54 @@ Args:
             return None
 
     def _init_perspective_transform(self, width, height):
-        """Initialize perspective transform matrices for bird's eye view."""
-        # Source points (trapezoid in the original image)
+        """Initialize perspective transform matrices for bird's eye view.
+
+        The destination rectangle is anchored to lane_width_cm so that the
+        BEV has a known metric scale: bev_cm_per_px cm per BEV pixel.
+        The trapezoid src points model the road visible from the camera at
+        its mounting position (bottom 40% of image height, 10–90% width).
+        """
+        # Source points: trapezoid covering the road region in perspective view.
+        # Bottom edge spans 10–90% of frame width (the widest visible road).
+        # Top edge spans 40–60% of frame width at 60% height (horizon of interest).
         src = np.float32([
             [width * 0.1, height],           # bottom-left
             [width * 0.4, height * 0.6],     # top-left
             [width * 0.6, height * 0.6],     # top-right
             [width * 0.9, height]            # bottom-right
         ])
-        
-        # Destination points (rectangle in bird's eye view)
+
+        # Destination points: rectangle in BEV space.
+        # Width of the rectangle (dst_x_right - dst_x_left) represents the
+        # lane_width_cm road region visible at the bottom of the src trapezoid.
+        # The bottom src span is width*0.8 pixels = lane_width_cm => bev_cm_per_px.
+        dst_x_left  = width * 0.2
+        dst_x_right = width * 0.8
         dst = np.float32([
-            [width * 0.2, height],           # bottom-left
-            [width * 0.2, 0],                # top-left
-            [width * 0.8, 0],                # top-right
-            [width * 0.8, height]            # bottom-right
+            [dst_x_left,  height],   # bottom-left
+            [dst_x_left,  0],        # top-left
+            [dst_x_right, 0],        # top-right
+            [dst_x_right, height]    # bottom-right
         ])
-        
-        self.perspective_M = cv2.getPerspectiveTransform(src, dst)
+
+        self.perspective_M     = cv2.getPerspectiveTransform(src, dst)
         self.perspective_M_inv = cv2.getPerspectiveTransform(dst, src)
         self.perspective_initialized = True
-        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Perspective transform initialized for {width}x{height}")
+
+        # Metric scale: the dst rectangle spans dst_x_right - dst_x_left pixels
+        # and corresponds to the road region whose physical width is lane_width_cm.
+        # (The src bottom span width*0.8 maps 1:1 to lane_width_cm at the bottom.)
+        bev_lane_width_px = float(dst_x_right - dst_x_left)
+        if bev_lane_width_px > 0.0 and self.lane_width_cm > 0.0:
+            self.bev_cm_per_px = self.lane_width_cm / bev_lane_width_px
+        else:
+            self.bev_cm_per_px = 0.0
+
+        print(
+            f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - "
+            f"BEV initialized {width}x{height} | bev_cm_per_px={self.bev_cm_per_px:.4f} "
+            f"(lane={self.lane_width_cm}cm / {bev_lane_width_px:.0f}px)"
+        )
 
     def warp_perspective(self, img):
         """Transform image to bird's eye view."""
@@ -6079,6 +6154,51 @@ Args:
     def unwarp_perspective(self, img):
         """Transform image back from bird's eye view."""
         return cv2.warpPerspective(img, self.perspective_M_inv, (img.shape[1], img.shape[0]))
+
+    def _estimate_ground_distance_cm(self, box_normalized, img_w, img_h):
+        """Estimate metric forward distance to an object from its bounding box.
+
+        Projects the bottom-center of the bounding box through the calibrated
+        BEV homography (perspective_M) to obtain a metric ground-plane position.
+        Returns (lateral_cm, forward_cm) relative to the camera, or None if
+        the BEV is not yet initialized.
+
+        lateral_cm: positive = object to the right of image center.
+        forward_cm: distance ahead along the road direction.
+
+        If BEV is not initialized, falls back to a pixel-ratio estimate using
+        the cached px_per_cm. Both can return None if no calibration is available.
+        """
+        try:
+            y1, x1, y2, x2 = [float(v) for v in box_normalized]
+            # Bottom-center of the box = approximate ground contact point
+            base_x_px = ((x1 + x2) / 2.0) * float(img_w)
+            base_y_px = y2 * float(img_h)
+
+            if self.perspective_initialized and self.bev_cm_per_px > 0.0:
+                pt = np.array([[[base_x_px, base_y_px]]], dtype=np.float32)
+                bev_pt = cv2.perspectiveTransform(pt, self.perspective_M)
+                bev_x = float(bev_pt[0][0][0])
+                bev_y = float(bev_pt[0][0][1])
+                # In BEV: y=img_h is the bottom (close to car), y=0 is the top (far).
+                # forward_cm = distance from bottom of BEV to the object's BEV position.
+                forward_cm = (float(img_h) - bev_y) * self.bev_cm_per_px
+                center_bev_x = float(img_w) / 2.0
+                lateral_cm = (bev_x - center_bev_x) * self.bev_cm_per_px
+                return max(0.0, round(forward_cm, 1)), round(lateral_cm, 1)
+
+            # Fallback: use px_per_cm calibration (horizontal scale applied to vertical)
+            px_per_cm = float(self._last_px_per_cm or 0.0)
+            if px_per_cm > 0.1:
+                vertical_displacement_px = float(img_h) - base_y_px
+                forward_cm = vertical_displacement_px / px_per_cm
+                center_px = float(img_w) / 2.0
+                lateral_cm = (base_x_px - center_px) / px_per_cm
+                return max(0.0, round(forward_cm, 1)), round(lateral_cm, 1)
+
+        except (TypeError, ValueError, cv2.error):
+            pass
+        return None
 
     def get_histogram(self, binary_img):
         """Get histogram of bottom half of binary image."""
@@ -6736,7 +6856,44 @@ Returns:
             self.check_state_change()
             self._check_config()
             self._poll_local_ai_messages()
+            self._poll_sign_detected()
             self._read_sensor_data()
+
+            # Parking maneuver phases that bypass lane detection entirely
+            _maneuver_states = (
+                ParkingState.FORWARD_PAST_SPOT,
+                ParkingState.REVERSING_ANGLE,
+                ParkingState.REVERSING_STRAIGHT,
+                ParkingState.PARKED,
+            )
+            if self._parking_state in _maneuver_states:
+                park_steer, park_speed = self._parking_state_machine()
+                if park_steer is not None:
+                    self.send_motor_commands(park_steer, park_speed)
+                return
+
+            # In SPOT_TRACKED, count consecutive frames without detection.
+            # (_poll_sign_detected resets the counter when the spot is seen.)
+            if self._parking_state == ParkingState.SPOT_TRACKED:
+                self._parking_spot_miss_frames += 1
+                if self._parking_spot_miss_frames >= PARKING_SPOT_MISS_THRESHOLD:
+                    now_t = time.time()
+                    self._parking_state = ParkingState.FORWARD_PAST_SPOT
+                    self._parking_phase_start_time = now_t
+                    self._parking_phase_dist_cm = 0.0
+                    self._parking_last_sm_time = now_t
+                    last_dist = self._parking_last_spot_distance_cm
+                    dist_str = f"~{last_dist:.0f}cm" if last_dist is not None else "unknown"
+                    print(
+                        f"\033[1;97m[ Parking ] :\033[0m \033[1;96mFORWARD_PAST_SPOT\033[0m - "
+                        f"Spot lost after {self._parking_spot_miss_frames} frames, "
+                        f"last distance={dist_str}"
+                    )
+                    # Transition immediately to maneuver in this cycle
+                    park_steer, park_speed = self._parking_state_machine()
+                    if park_steer is not None:
+                        self.send_motor_commands(park_steer, park_speed)
+                    return
 
             loop_start = time.time()
             self._begin_preview_cycle(loop_start)
@@ -6787,6 +6944,12 @@ Returns:
                     self._last_safe_steering = steering_angle
                     if speed is not None:
                         self._last_safe_speed = speed
+
+            # While parking is active (LANE_KEEPING / SPOT_TRACKED), cap speed
+            # so the vehicle moves slowly enough to react to the detected spot.
+            _parking_active_states = (ParkingState.LANE_KEEPING, ParkingState.SPOT_TRACKED)
+            if self._parking_state in _parking_active_states and speed is not None:
+                speed = min(speed, PARKING_SEARCH_SPEED)
 
             computed_steering = steering_angle
             computed_speed = speed
@@ -8051,13 +8214,183 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     self._last_inactive_log = False  # Reset inactive log flag
                     if str(message) == "AUTO":
                         self._reset_auto_run_log(message)
+                    elif str(message) == "PARKING":
+                        self._reset_parking_state()
+                        self._parking_state = ParkingState.LANE_KEEPING
+                        print("\033[1;97m[ Parking ] :\033[0m \033[1;92mLANE_KEEPING\033[0m - Parking mode activated, searching for spot")
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
                 else:
                     self.is_line_following_active = False
                     self._auto_run_log_enabled = False
+                    if self._parking_state != ParkingState.IDLE:
+                        self._reset_parking_state()
+                        print("\033[1;97m[ Parking ] :\033[0m \033[1;93mCANCELLED\033[0m - Parking aborted due to mode change")
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mDEACTIVATED\033[0m - Line following is now INACTIVE")
             except KeyError as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
+
+    # ------------------------------------------------------------------
+    # Parking maneuver helpers
+    # ------------------------------------------------------------------
+
+    def _poll_sign_detected(self):
+        """Consume SignDetected messages and update parking-spot tracking.
+
+        Returns True if a parking detection was received this cycle.
+
+        The LANE_KEEPING → SPOT_TRACKED transition is gated by metric distance:
+        the spot must be within PARKING_TRIGGER_DISTANCE_CM to activate tracking.
+        If distance_cm is not available (no px_per_cm calibration yet), falls back
+        to triggering on any detection (original behavior).
+        """
+        msg = self.signDetectedSubscriber.receive()
+        if msg is None:
+            return False
+        try:
+            data = msg if isinstance(msg, dict) else json.loads(msg)
+        except Exception:
+            return False
+
+        if data.get("sign") != "parking":
+            return False
+
+        self._parking_last_spot_box = data.get("box")
+        self._parking_spot_miss_frames = 0
+
+        raw_dist = data.get("distance_cm")
+        if raw_dist is not None:
+            try:
+                self._parking_last_spot_distance_cm = float(raw_dist)
+            except (TypeError, ValueError):
+                self._parking_last_spot_distance_cm = None
+        else:
+            self._parking_last_spot_distance_cm = None
+
+        if self._parking_state == ParkingState.LANE_KEEPING:
+            dist = self._parking_last_spot_distance_cm
+            # Transition only when spot is within trigger range, or if no metric is available
+            within_range = (dist is None) or (dist <= PARKING_TRIGGER_DISTANCE_CM)
+            if within_range:
+                self._parking_state = ParkingState.SPOT_TRACKED
+                dist_str = f" at ~{dist:.0f}cm" if dist is not None else " (dist unknown)"
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;96mSPOT_TRACKED\033[0m - "
+                    f"Spot detected{dist_str}"
+                )
+        elif self._parking_state == ParkingState.SPOT_TRACKED:
+            dist = self._parking_last_spot_distance_cm
+            if dist is not None and self.show_debug:
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;94mTRACKING\033[0m - "
+                    f"Spot at ~{dist:.0f}cm"
+                )
+        return True
+
+    def _parking_advance_distance(self, now):
+        """Integrate encoder odometry to get distance traveled in the current phase (cm).
+
+        Uses _measured_speed (Nucleo CurrentSpeed in ×10 cm/s units) converted to
+        m/s via stanley_measured_speed_to_mps. If the encoder is not reporting
+        (speed == 0), accumulation is skipped and only the timer fallback is used.
+        Returns the accumulated phase distance in cm.
+        """
+        dt = now - self._parking_last_sm_time if self._parking_last_sm_time > 0.0 else 0.0
+        self._parking_last_sm_time = now
+
+        speed_mps = abs(float(self._measured_speed or 0.0)) * float(self.stanley_measured_speed_to_mps)
+        if speed_mps > 0.001 and dt > 0.0:
+            self._parking_phase_dist_cm += speed_mps * 100.0 * dt  # m/s → cm/s × s = cm
+
+        return self._parking_phase_dist_cm
+
+    def _parking_phase_complete(self, now, dist_threshold_cm, timer_threshold_s):
+        """Return True when the current phase should transition.
+
+        Primary criterion: encoder distance traveled >= dist_threshold_cm.
+        Timer fallback: elapsed time >= timer_threshold_s (used when encoder
+        speed is 0 throughout the phase, i.e., no odometry available).
+        """
+        dist_cm = self._parking_advance_distance(now)
+        elapsed = now - self._parking_phase_start_time
+
+        speed_available = abs(float(self._measured_speed or 0.0)) > 0.5
+        if speed_available:
+            return dist_cm >= dist_threshold_cm
+        # Fallback: use timer when encoder is not reporting
+        return elapsed >= timer_threshold_s
+
+    def _parking_state_machine(self):
+        """Non-blocking parking state machine (called at 20 Hz from thread_work).
+
+        Returns (steering_angle, speed) to be sent to the motors, or
+        (None, None) when the state machine is IDLE.
+
+        Phase transitions use encoder odometry (distance in cm) as the primary
+        criterion. Timer fallbacks are used when encoder speed == 0.
+        """
+        now = time.time()
+
+        if self._parking_state == ParkingState.IDLE:
+            return None, None
+
+        # --- LANE_KEEPING / SPOT_TRACKED: delegate to normal line following ---
+        if self._parking_state in (ParkingState.LANE_KEEPING, ParkingState.SPOT_TRACKED):
+            return None, None  # handled by main pipeline
+
+        # --- FORWARD_PAST_SPOT: advance past spot before reversing ---
+        if self._parking_state == ParkingState.FORWARD_PAST_SPOT:
+            if self._parking_phase_complete(now, PARKING_D_FORWARD_CM, PARKING_T_FORWARD):
+                dist_done = self._parking_phase_dist_cm
+                self._parking_state = ParkingState.REVERSING_ANGLE
+                self._parking_phase_start_time = now
+                self._parking_phase_dist_cm = 0.0
+                self._parking_last_sm_time = now
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;96mREVERSING_ANGLE\033[0m - "
+                    f"Advanced {dist_done:.0f}cm, starting angled reverse"
+                )
+            return 0.0, PARKING_FORWARD_SPEED
+
+        # --- REVERSING_ANGLE: reverse into spot at angle ---
+        if self._parking_state == ParkingState.REVERSING_ANGLE:
+            if self._parking_phase_complete(now, PARKING_D_REVERSE_ANGLE_CM, PARKING_T_REVERSE_ANGLE):
+                dist_done = self._parking_phase_dist_cm
+                self._parking_state = ParkingState.REVERSING_STRAIGHT
+                self._parking_phase_start_time = now
+                self._parking_phase_dist_cm = 0.0
+                self._parking_last_sm_time = now
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;96mREVERSING_STRAIGHT\033[0m - "
+                    f"Reversed {dist_done:.0f}cm, straightening in spot"
+                )
+            return PARKING_REVERSE_ANGLE_STEER, PARKING_REVERSE_SPEED
+
+        # --- REVERSING_STRAIGHT: correct alignment inside spot ---
+        if self._parking_state == ParkingState.REVERSING_STRAIGHT:
+            if self._parking_phase_complete(now, PARKING_D_REVERSE_STRAIGHT_CM, PARKING_T_REVERSE_STRAIGHT):
+                dist_done = self._parking_phase_dist_cm
+                self._parking_state = ParkingState.PARKED
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
+                    f"Aligned {dist_done:.0f}cm, maneuver complete"
+                )
+            return PARKING_REVERSE_STRAIGHT_STEER, PARKING_REVERSE_SPEED
+
+        # --- PARKED: hold still ---
+        if self._parking_state == ParkingState.PARKED:
+            return 0.0, 0.0
+
+        return None, None
+
+    def _reset_parking_state(self):
+        """Reset all parking state variables back to IDLE."""
+        self._parking_state                = ParkingState.IDLE
+        self._parking_last_spot_box        = None
+        self._parking_last_spot_distance_cm = None
+        self._parking_spot_miss_frames     = 0
+        self._parking_phase_start_time     = 0.0
+        self._parking_phase_dist_cm        = 0.0
+        self._parking_last_sm_time         = 0.0
 
     def stop(self):
         """Stop the thread and cleanup."""

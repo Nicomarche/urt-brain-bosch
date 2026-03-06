@@ -60,7 +60,15 @@ class TransitionTable:
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP,
-            "dashboard_manual_button" : SystemMode.MANUAL # this is a special case, because the manual button is always available
+            "dashboard_manual_button" : SystemMode.MANUAL, # this is a special case, because the manual button is always available
+            "dashboard_parking_button" : SystemMode.PARKING,
+        },
+        SystemMode.PARKING: {
+            "dashboard_manual_button" : SystemMode.MANUAL,
+            "dashboard_stop_button" : SystemMode.STOP,
+            "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_legacy_button" : SystemMode.LEGACY,
+            "dashboard_parking_button" : SystemMode.PARKING, # idempotent
         },
         SystemMode.LEGACY: {
             "dashboard_auto_button" : SystemMode.AUTO,

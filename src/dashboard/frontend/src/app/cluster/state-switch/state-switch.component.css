@@ -183,3 +183,43 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
 .full-width-button:hover {
   background-color: #6497b1;
 }
+
+.park-button-container {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+}
+
+.park-button {
+  width: 100%;
+  height: 100%;
+  font-size: 0.9vw;
+  font-weight: bold;
+  text-shadow: 0 0 0.3vw rgba(0, 0, 0, 1);
+  filter: drop-shadow(0 0 0.3vw rgb(0, 0, 0, 0.3));
+  background-color: #3a7d44;
+  color: white;
+  border: none;
+  border-radius: 0.3vw;
+  z-index: 10;
+  cursor: pointer;
+  text-align: center;
+  padding: 0.4vw 0.8vw;
+  transition: background-color 0.3s ease;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+}
+
+.park-button:hover {
+  background-color: #2e6136;
+}
+
+.park-button--active {
+  background-color: #e08c00;
+}
+
+.park-button--active:hover {
+  background-color: #b87000;
+}

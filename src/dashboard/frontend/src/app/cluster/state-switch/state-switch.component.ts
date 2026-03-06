@@ -43,6 +43,7 @@ import { Subscription } from 'rxjs';
 export class StateSwitchComponent implements OnInit {
   public states: string[] = ['stop', 'manual', 'legacy', 'auto'];
   public currentStateIndex: number = 0;
+  public isParkingActive: boolean = false;
 
   public isMobile: boolean = false;
 
@@ -105,6 +106,18 @@ export class StateSwitchComponent implements OnInit {
     this.stateChangeSubscription = this.webSocketService.receiveStateChange().subscribe(
       (message) => {
         const newState = message.value?.toLowerCase();
+
+        if (newState === 'parking') {
+          this.isParkingActive = true;
+          this.clusterService.updateDrivingMode(newState);
+          return;
+        }
+
+        // Leaving parking mode — clear parking flag
+        if (this.isParkingActive) {
+          this.isParkingActive = false;
+        }
+
         const stateIndex = this.states.indexOf(newState);
         if (stateIndex !== -1 && stateIndex !== this.currentStateIndex) {
           this.currentStateIndex = stateIndex;
@@ -342,6 +355,21 @@ export class StateSwitchComponent implements OnInit {
     }
 
     return '#2b8fd1';
+  }
+
+  toggleParking(): void {
+    if (this.isParkingActive) {
+      // Cancel parking — return to manual mode
+      this.isParkingActive = false;
+      this.currentStateIndex = this.states.indexOf('manual');
+      this.clusterService.updateDrivingMode('manual');
+      this.webSocketService.sendMessageToFlask(`{"Name": "DrivingMode", "Value": "manual"}`);
+    } else {
+      // Activate parking mode
+      this.isParkingActive = true;
+      this.clusterService.updateDrivingMode('parking');
+      this.webSocketService.sendMessageToFlask(`{"Name": "DrivingMode", "Value": "parking"}`);
+    }
   }
 
   ngOnDestroy() {
