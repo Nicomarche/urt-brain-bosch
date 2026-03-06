@@ -266,9 +266,9 @@ Args:
         # Speed parameters
         self.base_speed = 15
         self.max_speed = 20
-        self.min_speed = 10
+        self.min_speed = 13
         self.highway_max_speed = 25
-        self.highway_min_speed = 10
+        self.highway_min_speed = 13
         self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
         self._current_speed = self.base_speed  # Tracks actual speed for ramping
         self.speed_steer_factor = 0.4  # Steering attenuation at max speed (0=none, 1=full mute)
@@ -314,11 +314,11 @@ Args:
         #   Low speed  → aggressive correction (tight curves)
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
-        self.stanley_k = 1.5            # Crosstrack gain [1/s] in physical Stanley form
-        self.stanley_k_soft = 1.8       # Low-speed softening term [m/s]
+        self.stanley_k = 2.0            # Crosstrack gain [1/s] in physical Stanley form
+        self.stanley_k_soft = 0.15      # Low-speed softening term [m/s] — must be comparable to operating speed (0.10–0.25 m/s)
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
         self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
-        self.stanley_k_ag = 0.04        # ψ_ss gain for curved steady-state tracking
+        self.stanley_k_ag = 0.0         # ψ_ss gain for curved steady-state tracking (disabled: k_ag×v²/r < 0.3° at all operating speeds)
         # Speed scale for command speed units (controller speed variable) to m/s.
         # Controller speed uses cm/s internally, so 1 cm/s = 0.01 m/s.
         self.stanley_speed_to_mps = 0.01
@@ -399,9 +399,12 @@ Args:
         self._stanley_last_px_per_cm = 0.0
         self._stanley_last_curve_guard = "none"
         # Kalman filter for crosstrack error (robust when lanes flicker due to glare/shadows)
+        # Q=300, R=8 → gain ≈ 0.97 (near-passthrough): AI masks are clean and must not be
+        # over-smoothed. The old Q=0.04/R=25 (ratio 1:625) was killing curve errors — a real
+        # -132 px curve offset was reduced to -7.8 px, giving Stanley near-zero crosstrack input.
         self.use_kalman_filter = True
-        self.kalman_process_noise = 0.04
-        self.kalman_measurement_noise = 25.0
+        self.kalman_process_noise = 300.0
+        self.kalman_measurement_noise = 8.0
         self.kalman_max_prediction_frames = 4
         self.kalman_prediction_damping = 0.92
         self._kalman_error = cv2.KalmanFilter(2, 1)
@@ -426,11 +429,24 @@ Args:
         self.line_width_cm = 2.0         # Width of lane line markings (cm)
 
         # Swept path prediction parameters
-        self.use_swept_path = True       # Enable geometric curve prediction
-        self.swept_path_margin_cm = 2.0  # Safety margin for clearance checks (cm)
+        self.use_swept_path = False      # Swept path disabled: Stanley handles curves via pure crosstrack+heading error
+        self.swept_path_margin_cm = 4.0  # Safety margin for clearance checks (cm) — larger = more outward in curves
         self.curve_offset_gain = 1.0     # Apply full optimal offset (0-1)
-        self.curve_inner_bias_cm = 2.0   # Extra cm to shift toward inside of curve (on top of swept path)
-        self.curve_confidence_threshold = 0.3  # Min confidence to apply curve offset
+        self.curve_inner_bias_cm = 0.0   # Inner bias disabled: was pushing car toward inside of curve
+        # Heading-proportional outward offset for crosstrack error (both two-line and single-line).
+        # heading_rad = atan2(Δmidpoint, dy) is computed over a short baseline (≈42px), which
+        # perspective-amplifies the road curvature to ~-45° in tight curves even when the car is
+        # nearly centered (raw_error_px ≈ 5-13px).  Without correction this heading term drives
+        # Stanley to max left steering (-25°) when only -15° to -18° is actually needed.
+        # Calibrated to BFMC curve geometry (TC-04, wheelbase=26cm, lane=35cm):
+        #   inner lane R=66.5cm → need 21.3°  (gain ≈ 0.19)
+        #   outer lane R=103.5cm → need 14.1°  (gain ≈ 0.27)
+        # At heading=-44.8° / raw_error=13px / lane=496px / speed=0.132 m/s:
+        #   gain=0.27 → offset=105px → error=118px → arctan=30.4° → δ=−14.4°  ✓ outer lane
+        #   gain=0.19 → offset=74px  → error=87px  → arctan=23.2° → δ=−21.6°  ✓ inner lane
+        # Start at 0.27 (outer lane target). Reduce toward 0.19 if car turns too wide.
+        self.curve_crosstrack_heading_gain = 0.27
+        self.curve_confidence_threshold = 0.15  # Min confidence to apply curve offset (lower = earlier activation)
         self.min_clearance_warn_cm = 3.0 # Warn if clearance below this (cm)
         self.curve_speed_reduction = True  # Reduce speed when clearance is tight
         self.single_line_radius_k = 31.0 # Calibration constant: R ≈ k / tan(slope_angle) (cm)
@@ -456,17 +472,17 @@ Args:
         # State transition thresholds
         self.curve_enter_frames = 1          # Frames with 1 line to start ENTERING (fast!)
         self.curve_confirm_frames = 2        # Frames with 1 line to confirm IN_CURVE
-        self.curve_exit_frames = 3           # Frames with 2 lines before EXITING→STRAIGHT
+        self.curve_exit_frames = 8           # Frames with 2 lines before EXITING→STRAIGHT (longer = smoother heading recovery)
         self.curve_vp_threshold = 0.20       # VP offset to detect curve early from 2 lines (0.10 was too sensitive)
         self.curve_vp_confirm_frames = 3    # Consecutive frames with VP above threshold to trigger ENTERING from 2 lines
         self._vp_above_count = 0            # Counter: consecutive frames VP exceeded threshold
-        self.curve_pre_position_gain = 0.85  # Pre-position aggressively when ENTERING
-        self.curve_exit_gain = 0.25          # Reduce curve offset when EXITING (0=ignore curve, 1=full curve)
+        self.curve_pre_position_gain = 0.95  # Pre-position aggressively when ENTERING (higher = more outer-line protection)
+        self.curve_exit_gain = 0.08          # Tiny residual offset when EXITING; fades over curve_exit_frames
         self.curve_inner_line_steer_factor = 0.4  # When seeing inner line, steer opposite at this fraction of max (0-1)
         # Single-line fusion: blend geometric swept-path error with Stanley error in curves.
-        self.single_line_swept_weight_entering = 0.55
-        self.single_line_swept_weight_in_curve = 0.85
-        self.single_line_swept_weight_exiting = 0.65
+        self.single_line_swept_weight_entering = 0.40   # reduced: stronger Stanley k_soft=0.20 amplifies swept corrections
+        self.single_line_swept_weight_in_curve = 0.55   # reduced from 0.85: prevents cutting inner line with new gains
+        self.single_line_swept_weight_exiting = 0.45    # reduced from 0.65
 
         # Steering feedback estimator
         self._steering_radius_history = deque(maxlen=8)  # Last N radius estimates from steering
@@ -575,6 +591,11 @@ Args:
         self._local_ai_lead_distance_confidence = 0.0
         self._local_ai_lead_distance_area = 0.0
         self.ai_local_use_mask_geometry = True
+        # AI_LOCAL uses a wider ROI for mask geometry so far-field masks (visible
+        # during curve approach when near-field lines are hidden) are not discarded.
+        # 0.15 = clip only top 15% of frame; standard roi_height_start=0.35 is too
+        # aggressive for AI masks and causes "No lines detected" in curves.
+        self.ai_local_roi_height_start = 0.15
         self._hybridnets_client = None
         self._last_local_lane_payload = None
         self._last_local_perception_status = None
@@ -1086,7 +1107,7 @@ Args:
             'duplicate_line_collapse_active': bool(entry.get('duplicate_collapse', False)),
         }
 
-    def _mask_x_at_y(self, mask, y_target, search_radius=4):
+    def _mask_x_at_y(self, mask, y_target, search_radius=8):
         """Return the average x coordinate of a binary mask at a given row."""
         if not isinstance(mask, np.ndarray) or mask.size == 0:
             return None
@@ -1367,7 +1388,8 @@ Args:
                 continue
             normalized_masks[side] = mask_2d
 
-        roi_top = max(0, min(img_h - 1, int(self.roi_height_start * img_h)))
+        roi_top_factor = float(getattr(self, 'ai_local_roi_height_start', self.roi_height_start))
+        roi_top = max(0, min(img_h - 1, int(roi_top_factor * img_h)))
         roi_bottom = max(roi_top, min(img_h - 1, int(self.roi_height_end * img_h) - 1))
 
         mask_bounds = {}
@@ -1560,10 +1582,13 @@ Args:
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
         dy = max(1.0, float(measurement_bottom_y - reference_y))
         heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
-        error_px = midpoint_bottom_x - (img_w / 2.0)
+        # Error at reference_y (lookahead): matches the overlay green dot and captures
+        # curve geometry visible ahead. midpoint_bottom (near-field) spans nearly the
+        # full frame width in perspective → gives ~0 error even in curves.
+        error_px = midpoint_x - (img_w / 2.0)
         raw_error_px = float(error_px)
-        draw_y = measurement_bottom_y
-        guidance_mode = 'midpoint'
+        draw_y = reference_y
+        guidance_mode = 'midpoint_ref'
         single_line_projection_debug = None
         single_line_prefer_center = None
         single_line_streak = None
@@ -1627,6 +1652,21 @@ Args:
             mask_label = 'LEFT'
         else:
             mask_label = 'RIGHT'
+
+        # Heading-proportional outward offset — applies to ALL modes (two-line and single-line).
+        # When heading is large the heading term in Stanley dominates and can pull the car
+        # into the inner line. This offset adds an outward bias proportional to |heading|:
+        #   left curve  (heading < 0) → +offset (pushes car rightward = outward)
+        #   right curve (heading > 0) → -offset (pushes car leftward  = outward)
+        # Works for two-line (midpoint_ref) and single-line (outer RIGHT in left curve).
+        # Effect on straights is negligible because heading_rad ≈ 0 → offset ≈ 0.
+        ct_heading_gain = float(getattr(self, 'curve_crosstrack_heading_gain', 0.0))
+        heading_abs = abs(float(heading_rad))
+        if ct_heading_gain > 0.0 and heading_abs > 0.0:
+            max_offset_px = float(lane_width_px) * 0.30
+            outward_px = min(heading_abs * ct_heading_gain * float(lane_width_px), max_offset_px)
+            curve_ct_offset = math.copysign(outward_px, -float(heading_rad))
+            error_px = float(error_px) + curve_ct_offset
 
         guidance = {
             'midpoint_x': float(midpoint_x),
@@ -7106,17 +7146,18 @@ Returns:
             return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
-        if self.use_swept_path:
-            if isinstance(local_mask_guidance, dict):
-                self._update_curve_state(
-                    num_lines,
-                    mask_guidance_left_line,
-                    mask_guidance_right_line,
-                    img_h,
-                    img_w,
-                )
-            else:
-                self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
+        # Always run, even when use_swept_path=False: curve_state drives single-line
+        # error weights and heading fusion — independent of swept-path geometry.
+        if isinstance(local_mask_guidance, dict):
+            self._update_curve_state(
+                num_lines,
+                mask_guidance_left_line,
+                mask_guidance_right_line,
+                img_h,
+                img_w,
+            )
+        else:
+            self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
         prev_seen_side = self.last_seen_side
         if not isinstance(local_mask_guidance, dict):

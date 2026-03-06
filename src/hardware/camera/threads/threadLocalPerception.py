@@ -61,7 +61,7 @@ class threadLocalPerception(ThreadWithStop):
         self.last_sign_name = ""
         self._last_result = None
         self._last_frame_sequence = 0
-        self._preview_interval = 1.0 / 5.0
+        self._preview_interval = 1.0 / 25.0
         self._last_preview_time = 0.0
         self._lf_curve_state = "STRAIGHT"
         self._lf_curve_state_frames = 0
