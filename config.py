@@ -28,17 +28,17 @@ PARKING_FORWARD_SPEED = 13   # Velocidad en fases de avance
 PARKING_REVERSE_SPEED = -13  # Velocidad en fases de reversa (negativo = atrás)
 
 # --- Ángulos de dirección (grados; + = derecha, − = izquierda) ---
-PARKING_ENTRY_STEER =  20.0  # Giro máx DERECHA: REVERSING_ENTRY y FORWARD_CORRECTION
-PARKING_ALIGN_STEER = -20.0  # Giro máx IZQUIERDA: REVERSING_ALIGN
+PARKING_ENTRY_STEER =  25.0  # Giro máx DERECHA: REVERSING_ENTRY y FORWARD_CORRECTION
+PARKING_ALIGN_STEER = -25.0  # Giro máx IZQUIERDA: REVERSING_ALIGN
 
 # --- Detección / seguimiento del spot ---
 PARKING_SPOT_MISS_THRESHOLD  = 8      # Frames consecutivos sin detección → spot perdido
 PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot está a ≤ esta distancia (cm)
 
 # --- Distancias de cada fase (odometría del encoder) ---
-PARKING_D_FORWARD_CM         = 40.0   # Avanzar más allá del spot antes de reversar
-PARKING_D_REVERSING_ENTRY_CM = 60.0   # Reversa con entry steer (meter el trasero al spot)
-PARKING_D_REVERSING_ALIGN_CM = 22.0   # Reversa con align steer (alinear dentro del spot)
+PARKING_D_FORWARD_CM         = 50.0   # Avanzar más allá del spot antes de reversar
+PARKING_D_REVERSING_ENTRY_CM = 85.0   # Reversa con entry steer (meter el trasero al spot)
+PARKING_D_REVERSING_ALIGN_CM = 45.0   # Reversa con align steer (alinear dentro del spot)
 PARKING_D_FORWARD_CORR_CM    = 20.0   # Corrección hacia adelante con entry steer
 
 # --- Tiempos fallback (cuando el encoder no reporta velocidad) ---
