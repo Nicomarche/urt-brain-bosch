@@ -48,13 +48,14 @@ class DetectionMode(Enum):
 
 class ParkingState(Enum):
     """States for the autonomous parking maneuver state machine."""
-    IDLE             = "idle"             # Parking inactive
-    LANE_KEEPING     = "lane_keeping"     # Moving forward, keeping lane, looking for spot
-    SPOT_TRACKED     = "spot_tracked"     # Parking spot detected and being tracked
-    FORWARD_PAST_SPOT= "forward_past_spot"# Moving forward past the spot before reversing
-    REVERSING_ANGLE  = "reversing_angle"  # Reversing into spot at angle (right steer)
-    REVERSING_STRAIGHT = "reversing_straight" # Straightening inside spot (left correction)
-    PARKED           = "parked"           # Maneuver complete, vehicle stationary
+    IDLE               = "idle"               # Parking inactive
+    LANE_KEEPING       = "lane_keeping"       # Moving forward, keeping lane, looking for spot
+    SPOT_TRACKED       = "spot_tracked"       # Parking spot detected and being tracked
+    FORWARD_PAST_SPOT  = "forward_past_spot"  # Moving forward past the spot before reversing
+    REVERSING_ANGLE    = "reversing_angle"    # Reversing into spot at angle (right steer)
+    REVERSING_STRAIGHT = "reversing_straight" # Continue reverse with opposite steer (deeper in)
+    FORWARD_CORRECTION = "forward_correction" # Go forward with max opposite steer to straighten
+    PARKED             = "parked"             # Maneuver complete, vehicle stationary
 
 
 # ---------------------------------------------------------------------------
@@ -66,18 +67,22 @@ class ParkingState(Enum):
 PARKING_SEARCH_SPEED        = 13    # Speed while searching for spot (same as min_speed)
 PARKING_FORWARD_SPEED       = 13    # Speed during forward-past-spot phase
 PARKING_REVERSE_SPEED       = -13   # Speed during reverse phases (negative = backward)
-PARKING_REVERSE_ANGLE_STEER = 20.0  # Steer angle (deg) during angled reverse (+right)
-PARKING_REVERSE_STRAIGHT_STEER = -8.0  # Steer correction (deg) to straighten in spot
+PARKING_REVERSE_ANGLE_STEER    = 20.0  # Steer angle (deg) during angled reverse (+right)
+PARKING_REVERSE_STRAIGHT_STEER = -20.0 # Opposite steer (deg) during 2nd reverse phase (-left, max)
+# Forward correction steer = opposite of initial reverse = -PARKING_REVERSE_ANGLE_STEER at max
+PARKING_FORWARD_CORRECTION_STEER = -20.0  # Max left steer (opposite of initial +right) for forward correction
 PARKING_SPOT_MISS_THRESHOLD = 8     # Consecutive frames without detection → spot lost
 # Distance-based phase thresholds (read from config; fallback values below)
 PARKING_TRIGGER_DISTANCE_CM  = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
 PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          45.0))
 PARKING_D_REVERSE_ANGLE_CM   = float(getattr(_config, "PARKING_D_REVERSE_ANGLE_CM",    60.0))
-PARKING_D_REVERSE_STRAIGHT_CM = float(getattr(_config, "PARKING_D_REVERSE_STRAIGHT_CM", 22.0))
+PARKING_D_REVERSE_STRAIGHT_CM   = float(getattr(_config, "PARKING_D_REVERSE_STRAIGHT_CM",   22.0))
+PARKING_D_FORWARD_CORRECTION_CM = float(getattr(_config, "PARKING_D_FORWARD_CORRECTION_CM", 20.0))
 # Timer fallbacks (used when encoder speed == 0)
-PARKING_T_FORWARD           = 1.5   # Seconds to advance past the spot (fallback)
-PARKING_T_REVERSE_ANGLE     = 3.0   # Seconds reversing at angle (fallback)
-PARKING_T_REVERSE_STRAIGHT  = 1.5   # Seconds reversing to straighten (fallback)
+PARKING_T_FORWARD             = 1.5   # Seconds to advance past the spot (fallback)
+PARKING_T_REVERSE_ANGLE       = 3.0   # Seconds reversing at angle (fallback)
+PARKING_T_REVERSE_STRAIGHT    = 1.5   # Seconds reversing with opposite steer (fallback)
+PARKING_T_FORWARD_CORRECTION  = 1.5   # Seconds going forward with max opposite steer (fallback)
 
 
 class PIDController:
@@ -6864,6 +6869,7 @@ Returns:
                 ParkingState.FORWARD_PAST_SPOT,
                 ParkingState.REVERSING_ANGLE,
                 ParkingState.REVERSING_STRAIGHT,
+                ParkingState.FORWARD_CORRECTION,
                 ParkingState.PARKED,
             )
             if self._parking_state in _maneuver_states:
@@ -8365,16 +8371,31 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 )
             return PARKING_REVERSE_ANGLE_STEER, PARKING_REVERSE_SPEED
 
-        # --- REVERSING_STRAIGHT: correct alignment inside spot ---
+        # --- REVERSING_STRAIGHT: reverse with opposite steer to deepen position ---
         if self._parking_state == ParkingState.REVERSING_STRAIGHT:
             if self._parking_phase_complete(now, PARKING_D_REVERSE_STRAIGHT_CM, PARKING_T_REVERSE_STRAIGHT):
+                dist_done = self._parking_phase_dist_cm
+                self._parking_state = ParkingState.FORWARD_CORRECTION
+                self._parking_phase_start_time = now
+                self._parking_phase_dist_cm = 0.0
+                self._parking_last_sm_time = now
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;96mFORWARD_CORRECTION\033[0m - "
+                    f"Reversed {dist_done:.0f}cm, correcting forward with max opposite steer"
+                )
+            return PARKING_REVERSE_STRAIGHT_STEER, PARKING_REVERSE_SPEED
+
+        # --- FORWARD_CORRECTION: go forward with max steer opposite to initial reverse ---
+        # Initial reverse was RIGHT (+PARKING_REVERSE_ANGLE_STEER), so correction is max LEFT.
+        if self._parking_state == ParkingState.FORWARD_CORRECTION:
+            if self._parking_phase_complete(now, PARKING_D_FORWARD_CORRECTION_CM, PARKING_T_FORWARD_CORRECTION):
                 dist_done = self._parking_phase_dist_cm
                 self._parking_state = ParkingState.PARKED
                 print(
                     f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
-                    f"Aligned {dist_done:.0f}cm, maneuver complete"
+                    f"Corrected {dist_done:.0f}cm forward, maneuver complete"
                 )
-            return PARKING_REVERSE_STRAIGHT_STEER, PARKING_REVERSE_SPEED
+            return PARKING_FORWARD_CORRECTION_STEER, PARKING_FORWARD_SPEED
 
         # --- PARKED: hold still ---
         if self._parking_state == ParkingState.PARKED:
