@@ -1319,16 +1319,30 @@ Args:
         result['confirmed'] = bool(result['sources'])
         return result
 
-    def _estimate_virtual_boundary_from_single_side(self, side, visible_x, lane_width_px, img_w):
-        """Estimate the missing lane boundary from one visible side."""
+    def _estimate_virtual_boundary_from_single_side(
+        self,
+        side,
+        visible_x,
+        lane_width_px,
+        img_w,
+        target_factor=0.5,
+    ):
+        """Estimate the missing lane boundary from one visible side.
+
+        target_factor defines where the lane center should be relative to the
+        visible side:
+        - 0.50 -> exact lane center
+        - <0.50 -> stay closer to the visible side (safer in one-line curves)
+        """
         if visible_x is None:
             return None
 
         lane_width_px = max(1.0, float(lane_width_px))
+        target_factor = max(0.20, min(0.50, float(target_factor)))
         if side == 'left':
-            virtual_x = float(visible_x) + lane_width_px
+            virtual_x = float(visible_x) + (2.0 * target_factor * lane_width_px)
         else:
-            virtual_x = float(visible_x) - lane_width_px
+            virtual_x = float(visible_x) - (2.0 * target_factor * lane_width_px)
 
         return max(0.0, min(float(img_w - 1), virtual_x))
 
@@ -1497,9 +1511,18 @@ Args:
                 }
                 self._last_local_ai_mask_reject_reason = None
 
+        curve_context = self._curve_state in ("ENTERING", "IN_CURVE", "EXITING")
+        prev_seen_side = str(getattr(self, 'last_seen_side', 'none') or 'none').lower()
         used_virtual_boundary = False
         if len(detected_sides) == 1:
             missing_side = 'right' if visible_side == 'left' else 'left'
+            if curve_context:
+                virtual_target_factor = max(
+                    0.25,
+                    min(0.50, float(getattr(self, 'single_line_offset_factor', 0.42)))
+                )
+            else:
+                virtual_target_factor = 0.50
             for row_key in ('bottom', 'reference'):
                 visible_x = samples[visible_side][row_key]
                 if visible_x is None:
@@ -1509,6 +1532,7 @@ Args:
                     visible_x,
                     lane_width_px,
                     img_w,
+                    target_factor=virtual_target_factor,
                 )
             used_virtual_boundary = True
 
@@ -1546,7 +1570,12 @@ Args:
             previous_streak = int(getattr(self, streak_attr, 0) or 0)
             single_line_streak = previous_streak + 1
             prefer_center_frames = max(1, int(getattr(self, 'single_line_prefer_center_frames', 2) or 0))
-            single_line_prefer_center = single_line_streak <= prefer_center_frames
+            # Only use center-reconstruction briefly on straight transitions.
+            single_line_prefer_center = (
+                (not curve_context) and
+                prev_seen_side == "both" and
+                single_line_streak <= prefer_center_frames
+            )
             single_error, single_heading = self._compute_single_line_error(
                 visible_line,
                 visible_side,
@@ -1559,6 +1588,7 @@ Args:
             single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
             single_line_projection_debug['single_line_prefer_center'] = bool(single_line_prefer_center)
             single_line_projection_debug['single_line_streak'] = int(single_line_streak)
+            single_line_projection_debug['single_line_curve_context'] = bool(curve_context)
             desired_center = float(single_line_projection_debug.get('single_line_target_x', midpoint_x))
             desired_center = max(0.0, min(float(img_w - 1), desired_center))
             midpoint_bottom_x = desired_center
@@ -1573,6 +1603,8 @@ Args:
         single_side_error_limit_px = None
         if len(detected_sides) == 1:
             limit_factor = 0.85 if guidance_mode == 'single_line_physical' else 0.60
+            if curve_context:
+                limit_factor = min(limit_factor, 0.55)
             if (
                 guidance_mode == 'single_line_physical' and
                 isinstance(single_line_projection_debug, dict) and
