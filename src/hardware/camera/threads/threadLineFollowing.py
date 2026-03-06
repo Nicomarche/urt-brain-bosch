@@ -89,6 +89,9 @@ PARKING_ALIGN_STEER  = -20.0  # Max LEFT steer (opposite): phase REVERSING_ALIGN
 
 PARKING_SPOT_MISS_THRESHOLD = 8  # Consecutive frames without detection → spot lost
 
+# Distance threshold (cm) to activate SPOT_TRACKED from LANE_KEEPING.
+PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM", 100.0))
+
 # Time the servo needs to physically reach the target steer angle before moving (seconds).
 PARKING_T_WAIT_STEER  = float(getattr(_config, "PARKING_T_WAIT_STEER",  1.0))
 
