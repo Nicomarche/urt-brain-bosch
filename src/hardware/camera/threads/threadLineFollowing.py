@@ -439,13 +439,15 @@ Args:
         # nearly centered (raw_error_px ≈ 5-13px).  Without correction this heading term drives
         # Stanley to max left steering (-25°) when only -15° to -18° is actually needed.
         # Calibrated to BFMC curve geometry (TC-04, wheelbase=26cm, lane=35cm):
-        #   inner lane R=66.5cm → need 21.3°  (gain ≈ 0.19)
-        #   outer lane R=103.5cm → need 14.1°  (gain ≈ 0.27)
-        # At heading=-44.8° / raw_error=13px / lane=496px / speed=0.132 m/s:
-        #   gain=0.27 → offset=105px → error=118px → arctan=30.4° → δ=−14.4°  ✓ outer lane
-        #   gain=0.19 → offset=74px  → error=87px  → arctan=23.2° → δ=−21.6°  ✓ inner lane
-        # Start at 0.27 (outer lane target). Reduce toward 0.19 if car turns too wide.
-        self.curve_crosstrack_heading_gain = 0.27
+        #   inner lane R=66.5cm → need 21.3°
+        #   outer lane R=103.5cm → need 14.1°
+        # Applied ONLY in midpoint_ref (two-line) mode — see comment below.
+        # At heading=-22°/raw=-55px/lane=535px/speed=0.132 m/s (new log, outer lane):
+        #   gain=0.40 → offset=84px → net=+29px → arctan=8.4° → δ=−14.2°  ✓ outer lane
+        # At heading=-25°/raw=-61px (peak): gain=0.40 → net=+31px → δ=−16.8°
+        # Single-line (heading=+20°/raw=-162px): NOT applied (guidance_mode != midpoint_ref)
+        #   → error stays -162px → δ=-17.6° (correct, was -25° with gain applied)
+        self.curve_crosstrack_heading_gain = 0.40
         self.curve_confidence_threshold = 0.15  # Min confidence to apply curve offset (lower = earlier activation)
         self.min_clearance_warn_cm = 3.0 # Warn if clearance below this (cm)
         self.curve_speed_reduction = True  # Reduce speed when clearance is tight
@@ -1653,17 +1655,18 @@ Args:
         else:
             mask_label = 'RIGHT'
 
-        # Heading-proportional outward offset — applies to ALL modes (two-line and single-line).
-        # When heading is large the heading term in Stanley dominates and can pull the car
-        # into the inner line. This offset adds an outward bias proportional to |heading|:
-        #   left curve  (heading < 0) → +offset (pushes car rightward = outward)
-        #   right curve (heading > 0) → -offset (pushes car leftward  = outward)
-        # Works for two-line (midpoint_ref) and single-line (outer RIGHT in left curve).
-        # Effect on straights is negligible because heading_rad ≈ 0 → offset ≈ 0.
+        # Heading-proportional outward offset — two-line (midpoint_ref) mode ONLY.
+        # In midpoint_ref mode the heading is computed as the image slope of the road midline
+        # over a short vertical baseline (≈42–79 px), which perspective-amplifies the road
+        # curvature angle by 2–7×.  This makes heading dominate Stanley and causes the car to
+        # turn too tightly.  The offset boosts the crosstrack term to counteract heading.
+        # NOT applied in single_line_physical: the physical projection already produces a
+        # meaningful crosstrack error.  Adding the offset there amplified the leftward push
+        # (e.g. raw=-162 px → error=-213 px → steering pinned at -25° instead of -17.6°).
         ct_heading_gain = float(getattr(self, 'curve_crosstrack_heading_gain', 0.0))
         heading_abs = abs(float(heading_rad))
-        if ct_heading_gain > 0.0 and heading_abs > 0.0:
-            max_offset_px = float(lane_width_px) * 0.30
+        if ct_heading_gain > 0.0 and heading_abs > 0.0 and guidance_mode == 'midpoint_ref':
+            max_offset_px = float(lane_width_px) * 0.35
             outward_px = min(heading_abs * ct_heading_gain * float(lane_width_px), max_offset_px)
             curve_ct_offset = math.copysign(outward_px, -float(heading_rad))
             error_px = float(error_px) + curve_ct_offset
