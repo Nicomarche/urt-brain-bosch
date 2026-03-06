@@ -10,19 +10,45 @@ LINE_WIDTH_CM = 2.0            # ancho de las marcas viales pintadas
 
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
-PARKING_SPOT_WIDTH_CM = 35.0   # ancho del espacio de estacionamiento
+PARKING_SPOT_WIDTH_CM  = 35.0  # ancho del espacio de estacionamiento
 
 # Known object heights for metric distance estimation
-SIGN_HEIGHT_CM = 15.0          # altura típica de señal BFMC
-TRAFFIC_LIGHT_HEIGHT_CM = 20.0 # altura típica de semáforo BFMC
+SIGN_HEIGHT_CM          = 15.0  # altura típica de señal BFMC
+TRAFFIC_LIGHT_HEIGHT_CM = 20.0  # altura típica de semáforo BFMC
 
-# Parking maneuver distances (replace open-loop timers)
-# These control the distance traveled in each parking phase using odometry.
-# If odometry (encoder speed) is not available, timers in threadLineFollowing are used as fallback.
-PARKING_TRIGGER_DISTANCE_CM = 100.0  # activar SPOT_TRACKED cuando el spot está a esta distancia
-PARKING_D_FORWARD_CM = 40.0          # avanzar más allá del spot antes de reversar
-PARKING_D_REVERSE_ANGLE_CM = 75.0    # reversa en ángulo dentro del espacio
-PARKING_D_REVERSE_STRAIGHT_CM = 35.0 # corrección de alineación final
+# ===================== PARKING MANEUVER =====================
+# Secuencia: LANE_KEEPING → SPOT_TRACKED → FORWARD_PAST_SPOT →
+#            WAIT_STEER_1 → REVERSING_ENTRY → WAIT_STEER_2 →
+#            REVERSING_ALIGN → WAIT_STEER_3 → FORWARD_CORRECTION → PARKED
+# El spot se asume a la DERECHA del carril.
+
+# --- Velocidades (mismas unidades que min_speed / max_speed) ---
+PARKING_SEARCH_SPEED  = 13   # Velocidad buscando el spot
+PARKING_FORWARD_SPEED = 13   # Velocidad en fases de avance
+PARKING_REVERSE_SPEED = -13  # Velocidad en fases de reversa (negativo = atrás)
+
+# --- Ángulos de dirección (grados; + = derecha, − = izquierda) ---
+PARKING_ENTRY_STEER =  20.0  # Giro máx DERECHA: REVERSING_ENTRY y FORWARD_CORRECTION
+PARKING_ALIGN_STEER = -20.0  # Giro máx IZQUIERDA: REVERSING_ALIGN
+
+# --- Detección / seguimiento del spot ---
+PARKING_SPOT_MISS_THRESHOLD  = 8      # Frames consecutivos sin detección → spot perdido
+PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot está a ≤ esta distancia (cm)
+
+# --- Distancias de cada fase (odometría del encoder) ---
+PARKING_D_FORWARD_CM         = 40.0   # Avanzar más allá del spot antes de reversar
+PARKING_D_REVERSING_ENTRY_CM = 60.0   # Reversa con entry steer (meter el trasero al spot)
+PARKING_D_REVERSING_ALIGN_CM = 22.0   # Reversa con align steer (alinear dentro del spot)
+PARKING_D_FORWARD_CORR_CM    = 20.0   # Corrección hacia adelante con entry steer
+
+# --- Tiempos fallback (cuando el encoder no reporta velocidad) ---
+PARKING_T_FORWARD         = 1.5  # seg — FORWARD_PAST_SPOT
+PARKING_T_REVERSING_ENTRY = 3.0  # seg — REVERSING_ENTRY
+PARKING_T_REVERSING_ALIGN = 1.5  # seg — REVERSING_ALIGN
+PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
+
+# --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
+PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)

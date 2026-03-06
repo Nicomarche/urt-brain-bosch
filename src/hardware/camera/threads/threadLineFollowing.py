@@ -73,40 +73,37 @@ class ParkingState(Enum):
 
 
 # ---------------------------------------------------------------------------
-# Parking maneuver constants — tune these on the physical robot.
-# Spot dimensions: 76.5 cm long x 35 cm wide (BFMC spec, also in config.py).
-# Speed units match min_speed/max_speed; distance phases use encoder odometry
-# (self._measured_speed * stanley_measured_speed_to_mps) with timer fallback.
+# Parking maneuver constants — all values come from config.py.
+# Edit config.py to tune; fallbacks here are last-resort safety defaults.
 # ---------------------------------------------------------------------------
-PARKING_SEARCH_SPEED     = 13    # Speed while searching for spot (same as min_speed)
-PARKING_FORWARD_SPEED    = 13    # Speed during forward driving phases
-PARKING_REVERSE_SPEED    = -13   # Speed during reverse phases (negative = backward)
 
-# Steer angles (degrees, + = right, − = left).
-# Spot is assumed to be on the RIGHT side of the lane.
-PARKING_ENTRY_STEER  = 20.0   # Max RIGHT steer: phases REVERSING_ENTRY and FORWARD_CORRECTION
-PARKING_ALIGN_STEER  = -20.0  # Max LEFT steer (opposite): phase REVERSING_ALIGN
+# Velocidades
+PARKING_SEARCH_SPEED  = int(getattr(_config, "PARKING_SEARCH_SPEED",   13))
+PARKING_FORWARD_SPEED = int(getattr(_config, "PARKING_FORWARD_SPEED",  13))
+PARKING_REVERSE_SPEED = int(getattr(_config, "PARKING_REVERSE_SPEED", -13))
 
-PARKING_SPOT_MISS_THRESHOLD = 8  # Consecutive frames without detection → spot lost
+# Ángulos de dirección (grados)
+PARKING_ENTRY_STEER = float(getattr(_config, "PARKING_ENTRY_STEER",  20.0))
+PARKING_ALIGN_STEER = float(getattr(_config, "PARKING_ALIGN_STEER", -20.0))
 
-# Distance threshold (cm) to activate SPOT_TRACKED from LANE_KEEPING.
-PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM", 100.0))
+# Detección del spot
+PARKING_SPOT_MISS_THRESHOLD = int(getattr(_config,   "PARKING_SPOT_MISS_THRESHOLD",  8))
+PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
 
-# Time the servo needs to physically reach the target steer angle before moving (seconds).
-PARKING_T_WAIT_STEER  = float(getattr(_config, "PARKING_T_WAIT_STEER",  1.0))
+# Distancias por fase (odometría del encoder)
+PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          40.0))
+PARKING_D_REVERSING_ENTRY_CM = float(getattr(_config, "PARKING_D_REVERSING_ENTRY_CM",  60.0))
+PARKING_D_REVERSING_ALIGN_CM = float(getattr(_config, "PARKING_D_REVERSING_ALIGN_CM",  22.0))
+PARKING_D_FORWARD_CORR_CM    = float(getattr(_config, "PARKING_D_FORWARD_CORR_CM",     20.0))
 
-# Distance-based phase thresholds (read from config; fallback timer values below).
-# Spot: 76.5 cm long × 35 cm wide.
-PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",         45.0))  # past spot
-PARKING_D_REVERSING_ENTRY_CM = float(getattr(_config, "PARKING_D_REVERSING_ENTRY_CM", 60.0))  # entry reverse
-PARKING_D_REVERSING_ALIGN_CM = float(getattr(_config, "PARKING_D_REVERSING_ALIGN_CM", 22.0))  # align reverse
-PARKING_D_FORWARD_CORR_CM    = float(getattr(_config, "PARKING_D_FORWARD_CORR_CM",    20.0))  # forward correction
+# Tiempos fallback (cuando encoder speed == 0)
+PARKING_T_FORWARD         = float(getattr(_config, "PARKING_T_FORWARD",         1.5))
+PARKING_T_REVERSING_ENTRY = float(getattr(_config, "PARKING_T_REVERSING_ENTRY", 3.0))
+PARKING_T_REVERSING_ALIGN = float(getattr(_config, "PARKING_T_REVERSING_ALIGN", 1.5))
+PARKING_T_FORWARD_CORR    = float(getattr(_config, "PARKING_T_FORWARD_CORR",    1.5))
 
-# Timer fallbacks used when encoder speed == 0.
-PARKING_T_FORWARD        = 1.5
-PARKING_T_REVERSING_ENTRY = 3.0
-PARKING_T_REVERSING_ALIGN = 1.5
-PARKING_T_FORWARD_CORR   = 1.5
+# Tiempo de espera servo
+PARKING_T_WAIT_STEER = float(getattr(_config, "PARKING_T_WAIT_STEER", 1.0))
 
 
 class PIDController:
