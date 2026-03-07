@@ -41,6 +41,9 @@ export class RecordComponent {
   recording: boolean = false;
   text: string = "start record"
 
+  calibActive: boolean = false;
+  calibText: string = "calib mode"
+
   constructor( private webSocketService: WebSocketService) { }
 
   changeState() {
@@ -62,5 +65,15 @@ export class RecordComponent {
     }
 
     return "#d9534f";
+  }
+
+  toggleCalib() {
+    this.calibActive = !this.calibActive;
+    this.calibText = this.calibActive ? "stop calib" : "calib mode";
+    this.webSocketService.sendMessageToFlask(`{"Name": "LaneCalibMode", "Value": "${this.calibActive}"}`);
+  }
+
+  getCalibButtonColor() {
+    return this.calibActive ? "#f0ad4e" : "#5b5ea6";
   }
 }

@@ -30,4 +30,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
     <button class="record-button" [style.backgroundColor]="getButtonColor()" (click)="changeState()">
       {{text}}
     </button>
+    <button class="calib-button" [style.backgroundColor]="getCalibButtonColor()" (click)="toggleCalib()">
+      {{calibText}}
+    </button>
 </div>

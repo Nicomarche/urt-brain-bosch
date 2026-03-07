@@ -13,7 +13,7 @@ import os
 from collections import deque
 from enum import Enum
 import config as _config
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected
+from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -692,6 +692,18 @@ Args:
         self._auto_run_log_enabled = False
         self._auto_run_log_frame_idx = 0
         self._last_frame_trace = {}
+
+        # Calibration mode state
+        self._calib_mode_active = False
+        self._calib_log_frame_idx = 0
+        self._calib_log_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..", "..",
+                "temp",
+                "lane_calib_log.txt",
+            )
+        )
         self._last_requested_motor_command = None
         self._last_state_change_message = None
         self._dynamic_metrics_window = 20
@@ -807,6 +819,9 @@ Args:
 
         # Parking spot detection subscriber
         self.signDetectedSubscriber = messageHandlerSubscriber(self.queuesList, SignDetected, "lastOnly", True)
+
+        # Calibration mode subscriber
+        self.laneCalibModeSubscriber = messageHandlerSubscriber(self.queuesList, LaneCalibMode, "lastOnly", True)
 
         # Parking state machine variables
         self._parking_state                = ParkingState.IDLE
@@ -7014,6 +7029,112 @@ Returns:
             log_file.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
             log_file.write("\n\n")
 
+    # ------------------------------------------------------------------
+    # Calibration mode helpers
+    # ------------------------------------------------------------------
+
+    def _check_calib_mode(self):
+        """Process incoming LaneCalibMode toggle messages."""
+        msg = self.laneCalibModeSubscriber.receive()
+        if msg is None:
+            return
+        active = str(msg).strip().lower() == "true"
+        if active and not self._calib_mode_active:
+            self._start_calib_mode()
+        elif not active and self._calib_mode_active:
+            self._stop_calib_mode()
+
+    def _start_calib_mode(self):
+        """Reset and open the calibration log file, activate calib mode."""
+        self._calib_mode_active = True
+        self._calib_log_frame_idx = 0
+        log_dir = os.path.dirname(self._calib_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        header = {
+            "log": "lane_calib_log",
+            "start_timestamp": round(time.time(), 3),
+            "detection_mode": str(getattr(self, "detection_mode", "")),
+            "min_speed": float(self.min_speed),
+            "note": (
+                "manual_steer = real servo position (from Nucleo feedback). "
+                "algorithm_steer = what Stanley would have commanded. "
+                "Car moves at min_speed; steering is controlled manually by the user."
+            ),
+        }
+        with open(self._calib_log_path, "w", encoding="utf-8") as f:
+            f.write("=== CALIBRATION MODE START ===\n")
+            f.write(json.dumps(header, indent=2, sort_keys=True))
+            f.write("\n\n")
+        print(
+            f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mCALIB\033[0m "
+            f"- Mode STARTED. Log: {self._calib_log_path}"
+        )
+
+    def _stop_calib_mode(self):
+        """Deactivate calib mode and write a footer to the log."""
+        self._calib_mode_active = False
+        footer = {
+            "stop_timestamp": round(time.time(), 3),
+            "total_frames": self._calib_log_frame_idx,
+        }
+        log_dir = os.path.dirname(self._calib_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            with open(self._calib_log_path, "a", encoding="utf-8") as f:
+                f.write("=== CALIBRATION MODE END ===\n")
+                f.write(json.dumps(footer, indent=2, sort_keys=True))
+                f.write("\n\n")
+        except Exception as exc:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mCALIB\033[0m - Error writing footer: {exc}")
+        print(
+            f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mCALIB\033[0m "
+            f"- Mode STOPPED after {self._calib_log_frame_idx} frames."
+        )
+
+    def _log_calib_frame(self, computed_steering):
+        """Append one frame entry to the calibration log.
+
+        Records the manual steering (real servo position from Nucleo) versus
+        the steering angle the algorithm would have computed from lane detection.
+        """
+        if not self._calib_mode_active:
+            return
+        self._calib_log_frame_idx += 1
+        # _measured_steer is in steer_x10 units (tenths of degrees)
+        manual_steer_deg = float(self._measured_steer) / 10.0
+        algo_steer_deg = float(computed_steering) if computed_steering is not None else None
+        delta = round(algo_steer_deg - manual_steer_deg, 2) if algo_steer_deg is not None else None
+        payload = {
+            "frame_index": self._calib_log_frame_idx,
+            "wall_time": round(time.time(), 3),
+            "manual": {
+                "steer_deg": round(manual_steer_deg, 2),
+                "steer_x10_raw": round(float(self._measured_steer), 1),
+            },
+            "algorithm_would_compute": {
+                "steer_deg": round(algo_steer_deg, 2) if algo_steer_deg is not None else None,
+            },
+            "delta_algorithm_minus_manual_deg": delta,
+            "controller_state": {
+                "stanley_error_m": round(float(self._stanley_last_error_m), 4),
+                "stanley_px_per_cm": round(float(self._stanley_last_px_per_cm), 4),
+                "heading_error_deg": round(math.degrees(self._heading_error), 3),
+                "measured_speed": round(float(self._measured_speed), 3),
+                "curve_state": self._curve_state,
+                "curve_direction": self._curve_direction,
+            },
+            "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
+        }
+        log_dir = os.path.dirname(self._calib_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        try:
+            with open(self._calib_log_path, "a", encoding="utf-8") as f:
+                f.write(f"=== FRAME {self._calib_log_frame_idx:04d} ===\n")
+                f.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
+                f.write("\n\n")
+        except Exception as exc:
+            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mCALIB\033[0m - Error writing frame: {exc}")
+
     def _build_local_lane_payload_log(self):
         """Return a compact summary of the latest local lane payload."""
         payload = self._last_local_lane_payload
@@ -7131,6 +7252,7 @@ Returns:
         """Main loop for line following."""
         try:
             self.check_state_change()
+            self._check_calib_mode()
             self._check_config()
             self._poll_local_ai_messages()
             self._poll_sign_detected()
@@ -7257,12 +7379,19 @@ Returns:
                         self.send_motor_commands(0, self.min_speed)
             else:
                 command_source = "blocked_inactive"
-                # Line following not active - need to be in AUTO mode
-                if steering_angle is not None:
-                    pass
                 if hasattr(self, '_last_inactive_log') == False:
-                    #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mINACTIVE\033[0m - Line following not active. Detection mode: {self.detection_mode}")
                     self._last_inactive_log = True
+
+                # CALIBRATION MODE: manual mode only — run algorithm silently, enforce min speed
+                if self._calib_mode_active:
+                    command_source = "calib_mode"
+                    # Enforce minimum speed so the car moves slowly during calibration
+                    calib_speed_x10 = int(round(self.min_speed * 10))
+                    self.speedMotorSender.send(str(calib_speed_x10))
+                    commanded_speed = self.min_speed
+                    # Steering is NOT sent — the user's manual web commands control the wheels
+                    # Log computed vs manual for calibration analysis
+                    self._log_calib_frame(steering_angle)
 
             if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
                 if command_source in ("normal", "stale_hold"):

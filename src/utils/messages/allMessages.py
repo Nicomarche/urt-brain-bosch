@@ -199,6 +199,12 @@ class LineFollowingConfig(Enum):
     msgID = 21
     msgType = "dict"
 
+class LaneCalibMode(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 22
+    msgType = "str"  # "true" / "false"
+
 ################################# From Line Following ##################################
 class LineFollowingDebug(Enum):
     Queue = "General"
