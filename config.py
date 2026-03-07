@@ -16,6 +16,26 @@ PARKING_SPOT_WIDTH_CM  = 35.0  # ancho del espacio de estacionamiento
 SIGN_HEIGHT_CM          = 15.0  # altura típica de señal BFMC
 TRAFFIC_LIGHT_HEIGHT_CM = 20.0  # altura típica de semáforo BFMC
 
+# ── Geometría de cámara para estimación de distancia al parking spot ─────────
+# Cámara: IMX219 (Raspberry Pi Camera v2) en Jetson Nano/Orin.
+# Pipeline: captura 1280×720 (modo 2×2 bin de crop 2560×1440) → escala a 640×480.
+#
+# CAMERA_HEIGHT_CM: altura del centro óptico (lente) al suelo en cm.
+CAMERA_HEIGHT_CM = 17.0
+#
+# CAMERA_FY_480: focal length vertical en píxeles para imagen de 480px de alto.
+# Derivación:
+#   IMX219 f=3.04mm, pixel=1.12µm, crop 2560×1440, 2×2 binning → 1280×720
+#   f_y @ 720px = (720/2)/tan(14.84°) = 1357px (pixels cuadrados)
+#   Jetson escala 720→480 de forma no uniforme: f_y @ 480px = 1357 × 480/720 = 905px
+CAMERA_FY_480 = 905.0
+#
+# CAMERA_PITCH_DEG: ángulo de inclinación de la cámara hacia abajo (desde horizontal).
+# Derivado de parámetros IMX219 + observable px_per_cm ≈ 14.1 en reference_y=288px
+# con H=17cm: β = 16.4°. Medir con inclinómetro para calibración precisa.
+# Rango típico para robots BFMC: 10°–25°.
+CAMERA_PITCH_DEG = 16.4
+
 # ===================== PARKING MANEUVER =====================
 # Secuencia: LANE_KEEPING → SPOT_TRACKED → FORWARD_PAST_SPOT →
 #            WAIT_STEER_1 → REVERSING_ENTRY → WAIT_STEER_2 →
@@ -49,6 +69,34 @@ PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
 
 # --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
 PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
+
+# --- Calibración de distancia cámara → spot ---
+# ADVERTENCIA: La fórmula de estimación de distancia usa px_per_cm HORIZONTAL
+# (calibrado del ancho de carril) para medir distancia VERTICAL hacia adelante.
+# Esto es incorrecto en una imagen de perspectiva: px_per_cm horizontal ≈ 14,
+# pero el scale vertical hacia adelante es ~1-2 px/cm. La fórmula siempre da
+# < 30 cm, por lo que el trigger PARKING_TRIGGER_DISTANCE_CM=100 nunca se
+# alcanza y el spot siempre se detecta en el primer frame. El factor de escala
+# existe para calibración pero no resuelve el problema fundamental.
+# TODO: reemplazar con estimación basada en parámetros intrínsecos de la cámara.
+PARKING_DISTANCE_SCALE_FACTOR = 1.0
+
+# --- Compensación de curva: pausar conteo de avance mientras el auto gira ---
+# Cuando el parking se activa saliendo de una curva, el auto todavía está
+# girando al iniciar FORWARD_PAST_SPOT. Si se contaran los 55 cm en arco,
+# el auto quedaría mal posicionado. Con True: la odometría se pausa mientras
+# curve_state sea IN_CURVE o ENTERING, y solo empieza a contar cuando el
+# auto está en STRAIGHT o EXITING. El auto avanza hasta enderezarse, y luego
+# cuenta los 55 cm en línea recta.
+PARKING_CURVE_WAIT_FOR_STRAIGHT = True
+
+# --- Compensación de avance cuando el spot se pierde estando adelante ---
+# Con la fórmula de perspectiva corregida (CAMERA_*), last_dist es realista:
+#   - Desaparición normal (spot al costado del auto): last_dist ≈ 30–45cm
+#   - Desaparición en curva (spot todavía adelante): last_dist ≈ 50–80cm
+# Si last_dist > threshold → se agrega el exceso al avance FORWARD_PAST_SPOT.
+# Ajustar al ~90% del valor de desaparición normal observado en pruebas.
+PARKING_SPOT_LOST_DIST_THRESHOLD_CM = 45.0
 
 # ═══════════════════════════════════════════════════════════════════════════
 #                     PARÁMETROS DE CALIBRACIÓN DE GIRO

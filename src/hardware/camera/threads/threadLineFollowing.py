@@ -831,6 +831,7 @@ Args:
         self._parking_phase_start_time     = 0.0     # Timestamp when current phase started
         self._parking_phase_dist_cm        = 0.0     # Odometry-based distance traveled in current phase
         self._parking_last_sm_time         = 0.0     # Last time state machine was called (for delta dt)
+        self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM  # Computed at spot-lost transition
 
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
@@ -7286,11 +7287,22 @@ Returns:
                     self._parking_phase_dist_cm = 0.0
                     self._parking_last_sm_time = now_t
                     last_dist = self._parking_last_spot_distance_cm
+                    # Dynamic advance: if the spot disappeared while still ahead of the
+                    # camera (curve-exit case), the car hasn't fully passed it yet.
+                    # Add the remaining distance so the car stops at the correct position.
+                    _lost_thr = float(getattr(_config, "PARKING_SPOT_LOST_DIST_THRESHOLD_CM", 10.0))
+                    if last_dist is not None and last_dist > _lost_thr:
+                        extra_cm = last_dist - _lost_thr
+                        self._parking_dynamic_forward_cm = PARKING_D_FORWARD_CM + extra_cm
+                    else:
+                        self._parking_dynamic_forward_cm = PARKING_D_FORWARD_CM
                     dist_str = f"~{last_dist:.0f}cm" if last_dist is not None else "unknown"
                     print(
                         f"\033[1;97m[ Parking ] :\033[0m \033[1;96mFORWARD_PAST_SPOT\033[0m - "
                         f"Spot lost after {self._parking_spot_miss_frames} frames, "
-                        f"last distance={dist_str}"
+                        f"last distance={dist_str}, "
+                        f"advance={self._parking_dynamic_forward_cm:.0f}cm "
+                        f"(base={PARKING_D_FORWARD_CM:.0f}cm)"
                     )
                     # Transition immediately to maneuver in this cycle
                     park_steer, park_speed = self._parking_state_machine()
@@ -8813,10 +8825,26 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         Uses _measured_speed (Nucleo CurrentSpeed in ×10 cm/s units) converted to
         m/s via stanley_measured_speed_to_mps. If the encoder is not reporting
         (speed == 0), accumulation is skipped and only the timer fallback is used.
+
+        During FORWARD_PAST_SPOT, accumulation is paused while the car is still
+        in a curve (curve_state IN_CURVE or ENTERING). This ensures the 55 cm are
+        counted only once the car is travelling straight, so the maneuver reference
+        point is correct regardless of whether parking is triggered mid-curve.
+
         Returns the accumulated phase distance in cm.
         """
         dt = now - self._parking_last_sm_time if self._parking_last_sm_time > 0.0 else 0.0
         self._parking_last_sm_time = now
+
+        # In FORWARD_PAST_SPOT: wait for the car to finish any residual curve before
+        # counting distance (curve_state must be STRAIGHT or EXITING).
+        _wait_straight = bool(getattr(_config, "PARKING_CURVE_WAIT_FOR_STRAIGHT", True))
+        _in_forward_past = (self._parking_state == ParkingState.FORWARD_PAST_SPOT)
+        _still_curving = self._curve_state in ("IN_CURVE", "ENTERING")
+        if _in_forward_past and _wait_straight and _still_curving:
+            # Keep timer anchor current so the timer fallback doesn't fire while waiting.
+            self._parking_phase_start_time = now
+            return self._parking_phase_dist_cm  # no accumulation yet
 
         speed_mps = abs(float(self._measured_speed or 0.0)) * float(self.stanley_measured_speed_to_mps)
         if speed_mps > 0.001 and dt > 0.0:
@@ -8874,10 +8902,14 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                   f"(prev dist={dist_done:.0f}cm)")
 
         # ---------------------------------------------------------------
-        # Phase 1: go forward past the spot (straight, no steer)
+        # Phase 1: go forward past the spot (straight, no steer).
+        # Uses _parking_dynamic_forward_cm (computed at spot-lost transition)
+        # instead of the raw PARKING_D_FORWARD_CM constant so that the advance
+        # accounts for any remaining distance when the spot exited the camera
+        # FOV (typical when parking is detected while exiting a curve).
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.FORWARD_PAST_SPOT:
-            if self._parking_phase_complete(now, PARKING_D_FORWARD_CM, PARKING_T_FORWARD):
+            if self._parking_phase_complete(now, self._parking_dynamic_forward_cm, PARKING_T_FORWARD):
                 _advance(ParkingState.WAIT_STEER_1, "WAIT_STEER_1 - stopped, turning wheels to entry steer")
             return 0.0, PARKING_FORWARD_SPEED
 
@@ -8954,6 +8986,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_phase_start_time     = 0.0
         self._parking_phase_dist_cm        = 0.0
         self._parking_last_sm_time         = 0.0
+        self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
 
     def stop(self):
         """Stop the thread and cleanup."""

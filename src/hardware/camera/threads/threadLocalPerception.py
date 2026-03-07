@@ -1,3 +1,4 @@
+import math
 import time
 
 import cv2
@@ -202,29 +203,56 @@ class threadLocalPerception(ThreadWithStop):
                 pass
 
     def _estimate_sign_distance_cm(self, box, img_height):
-        """Estimate metric distance to an object from its bounding box base.
+        """Estimate forward distance to a ground-level object from its bounding box.
 
-        Uses the cached px_per_cm (calibrated from lane_width_cm=35cm) to
-        convert vertical pixel displacement from the bottom of the image into
-        an approximate forward distance in cm.
+        Uses a pinhole perspective camera model:
 
-        The formula assumes that the bottom of the bbox is the ground contact
-        point of the object. Further objects appear higher in the image, so the
-        vertical distance from the image bottom to the base scales with forward
-        distance. px_per_cm gives us horizontal scale at the bottom of the
-        image; we apply it as an approximation for the forward direction too.
+            d = H × (cos β − P·sin β) / (P·cos β + sin β)
 
-        Returns None if px_per_cm is not calibrated yet.
+        where:
+            P   = (base_y_px − center_y) / f_y   [normalised image coordinate]
+            H   = CAMERA_HEIGHT_CM  (camera height above ground, 17 cm)
+            β   = CAMERA_PITCH_DEG  (downward tilt from horizontal, ~16.4°)
+            f_y = CAMERA_FY_480 × (img_height / 480)  (vertical focal length)
+
+        Camera parameters are derived from IMX219 (RPi Cam v2) specs:
+            Capture 1280×720 via Jetson CSI (2×2 binned crop of 2560×1440),
+            then non-uniformly scaled to 640×480. The resulting f_y at 480px
+            is 905 px; pitch is back-calculated from the observable px_per_cm
+            and camera height (verified: β ≈ 16.4° places reference_y at 288 px
+            for d_ref ≈ 48 cm, matching the lane-following calibration).
+
+        A final PARKING_DISTANCE_SCALE_FACTOR (default 1.0) can fine-tune
+        the result after physical measurement.
+
+        Returns None if calibration data is not yet available.
         """
-        if self._px_per_cm < 0.1 or img_height is None or img_height < 1:
+        if img_height is None or img_height < 1:
             return None
         try:
-            base_y_norm = float(box[2])  # bottom of box, normalized [0,1]
-            base_y_px = base_y_norm * float(img_height)
-            vertical_displacement_px = float(img_height) - base_y_px
-            distance_cm = vertical_displacement_px / self._px_per_cm
-            return max(0.0, round(distance_cm, 1))
-        except (TypeError, ValueError, IndexError):
+            H       = float(getattr(config, "CAMERA_HEIGHT_CM",  17.0))
+            beta    = math.radians(float(getattr(config, "CAMERA_PITCH_DEG", 16.4)))
+            fy_480  = float(getattr(config, "CAMERA_FY_480",     905.0))
+            scale   = float(getattr(config, "PARKING_DISTANCE_SCALE_FACTOR", 1.0))
+
+            f_y     = fy_480 * (float(img_height) / 480.0)
+            center_y = float(img_height) / 2.0
+
+            base_y_px = float(box[2]) * float(img_height)   # bottom of bbox in px
+            P = (base_y_px - center_y) / f_y                # normalised coord
+
+            cos_b = math.cos(beta)
+            sin_b = math.sin(beta)
+            denom = P * cos_b + sin_b
+            if abs(denom) < 1e-6:
+                return None
+
+            distance_cm = H * (cos_b - P * sin_b) / denom
+            if distance_cm < 0.0:
+                return None
+
+            return max(0.0, round(distance_cm * scale, 1))
+        except (TypeError, ValueError, IndexError, ZeroDivisionError):
             return None
 
     def _publish_sign(self, detections, now, img_shape=None):
