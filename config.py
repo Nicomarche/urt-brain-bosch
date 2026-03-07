@@ -303,10 +303,15 @@ SIGN_ACTION_COOLDOWN = 15.0
 # Area minima del bounding box para EJECUTAR acciones (stop, frenar, etc.)
 # Valor normalizado (0.0 - 1.0) = fraccion del area total de la imagen.
 # Si la senal es muy chica (lejos), solo se detecta/publica pero NO se frena.
-# Ejemplo: 0.01 = 1% del area de imagen (~senal a 2-3m de distancia)
-#          0.03 = 3% del area de imagen (~senal a 1-1.5m de distancia)
-# Tip: mirar los logs "box=X.X%" para calibrar este valor con tu camara.
-SIGN_MIN_BOX_AREA = 0.03
+# IMPORTANTE: Los signos de hw_entry / hw_exit son verticales y se ven de costado;
+# su box area máxima en el track es ~1.5–2% (nunca llegan a 3%). Las señales
+# frontales (STOP, cruce) sí pueden superar el 3%, pero 1% es suficiente filtro
+# dado que ya hay un umbral de confianza (SIGN_MIN_CONFIDENCE=0.50).
+# Calibración por observación de logs "box=X.X%":
+#   box ≈ 0.3–2%  → highway_entry / highway_exit (signos de pared, vistos lateralmente)
+#   box ≈ 1–10%   → señales frontales a 0.5–1.5m
+#   box ≈ 15–25%  → parking spot (suelo, muy cerca)
+SIGN_MIN_BOX_AREA = 0.010
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
