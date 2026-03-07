@@ -108,11 +108,15 @@ OFFTRACK_CURVE_ONLY = True
 #   → Más bajo: más suave, puede acumular error lateral si hay perturbaciones
 STANLEY_K      = 0.8
 
-# STANLEY_K_SOFT [m/s] — suavizado a baja velocidad (evita giro brusco al arrancar):
-#   Debe ser ≥ velocidad mínima de operación (≈ 0.13 m/s).
-#   Rango: 0.10 – 0.40 m/s
-#   → Más alto: crosstrack menos agresivo a baja velocidad
-STANLEY_K_SOFT = 0.20
+# STANLEY_K_SOFT [m/s] — suavizado a baja velocidad (evita saturar el término crosstrack):
+#   Con v_min = 0.13 m/s, el denominador efectivo es (K_SOFT + v).
+#   Rango calibrado para este vehículo: 1.0 – 5.0 m/s
+#   → 3.0: óptimo — crosstrack contribuye 2-7° en curvas, heading domina (gradual)
+#   → 1.0: más agresivo — empieza a saturar en curvas cerradas
+#   → 5.0: muy suave — corrección lateral muy lenta en rectas
+#   NOTA: el valor previo de 0.20 causaba saturación inmediata (25°) en toda curva
+#         porque atan(0.8×e / 0.33) >> 25° para cualquier e > 0.04m
+STANLEY_K_SOFT = 3.0
 
 # STANLEY_K_D_STEER [adimensional] — amortiguamiento de servo de dirección:
 #   Término de "lead" del paper de Hoffmann: k_d_steer × (δ_meas(i) - δ_meas(i+1))
