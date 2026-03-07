@@ -375,7 +375,7 @@ Args:
         #   Low speed  → aggressive correction (tight curves)
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
-        self.stanley_k = 2.0            # Crosstrack gain [1/s] in physical Stanley form
+        self.stanley_k = 1.2            # Crosstrack gain [1/s] in physical Stanley form
         self.stanley_k_soft = 0.15      # Low-speed softening term [m/s] — must be comparable to operating speed (0.10–0.25 m/s)
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
         self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion

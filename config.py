@@ -37,7 +37,7 @@ PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot est�
 
 # --- Distancias de cada fase (odometría del encoder) ---
 PARKING_D_FORWARD_CM         = 50.0   # Avanzar más allá del spot antes de reversar
-PARKING_D_REVERSING_ENTRY_CM = 85.0   # Reversa con entry steer (meter el trasero al spot)
+PARKING_D_REVERSING_ENTRY_CM = 75.0   # Reversa con entry steer (meter el trasero al spot)
 PARKING_D_REVERSING_ALIGN_CM = 45.0   # Reversa con align steer (alinear dentro del spot)
 PARKING_D_FORWARD_CORR_CM    = 20.0   # Corrección hacia adelante con entry steer
 
