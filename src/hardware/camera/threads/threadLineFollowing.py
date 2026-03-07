@@ -1681,7 +1681,12 @@ Args:
         # to push it back toward center; no effect when car is already safely inside.
         _safety_margin_cm = float(getattr(self, 'lane_safety_margin_cm', 5.0))
         if _safety_margin_cm > 0.0 and lane_width_px > 10.0:
-            _px_per_cm = lane_width_px / max(1e-3, float(self.lane_width_cm))
+            # Use the lane width AT reference_y (right_ref_x - left_ref_x) as the pixel
+            # scale, NOT the averaged lane_width_px which is bottom-heavy due to perspective.
+            # At reference_y: right_ref_x - left_ref_x = actual lane width in pixels at that
+            # distance, so (right_ref_x - left_ref_x) / lane_width_cm gives the correct px/cm.
+            _ref_lw_px = max(1.0, float(right_ref_x) - float(left_ref_x))
+            _px_per_cm = _ref_lw_px / max(1e-3, float(self.lane_width_cm))
             _car_half_px = (float(self.car_width) / 2.0) * _px_per_cm
             _safety_px = _safety_margin_cm * _px_per_cm
             _car_center = img_w / 2.0
@@ -4479,6 +4484,18 @@ Args:
             max_delta = math.radians(14.0)
 
         fusion_weight = max(0.0, min(max_weight, hint_conf))
+
+        # In single-line mode, scale the fusion weight by the local heading reliability.
+        # When the visible line is nearly horizontal (e.g. very sharp curve), the line
+        # angle cannot be reliably converted to a heading — single_line_heading_reliability
+        # captures this and will be 0 for near-horizontal lines.  A hint derived from such
+        # a line should not dominate the controller even if its confidence is otherwise high.
+        if mode_name == "single_line" and isinstance(debug_info, dict):
+            local_reliability = float(debug_info.get("single_line_heading_reliability", 1.0) or 0.0)
+            fusion_weight *= local_reliability
+            if isinstance(debug_info, dict):
+                debug_info["heading_fusion_local_reliability"] = round(local_reliability, 3)
+
         delta = hint_heading - base_heading
         delta = max(-max_delta, min(max_delta, delta))
         fused_heading = base_heading + fusion_weight * delta
@@ -7538,14 +7555,20 @@ Returns:
                 # The safety margin ensures the car body (car_width cm wide) stays at least
                 # lane_safety_margin_cm from each line at all times.
                 direct_error_m = None
-                if lane_width_px > 1.0:
-                    _lw_cm  = float(self.lane_width_cm)
-                    _lw_px  = float(lane_width_px)
-                    _left_x  = float(local_mask_guidance.get('left_x',  0.0) or 0.0)
-                    _right_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                _left_x  = float(local_mask_guidance.get('left_x',  0.0) or 0.0)
+                _right_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                # Use the lane width AT reference_y as the pixel scale.
+                # left_x / right_x are measured at reference_y, so (right_x - left_x) gives
+                # the true lane width in pixels at that depth.  This guarantees:
+                #   D_left_cm + D_right_cm == lane_width_cm
+                # Using the averaged lane_width_px (bottom-heavy) would break this invariant
+                # because the lane appears wider near the bottom due to perspective.
+                _ref_lw_px = _right_x - _left_x
+                if _ref_lw_px > 1.0:
+                    _lw_cm = float(self.lane_width_cm)
                     # Distances from camera centre (= car centre) to each line in cm
-                    D_right_cm = (_right_x - img_w / 2.0) * _lw_cm / _lw_px
-                    D_left_cm  = (img_w / 2.0 - _left_x)  * _lw_cm / _lw_px
+                    D_right_cm = (_right_x - img_w / 2.0) * _lw_cm / _ref_lw_px
+                    D_left_cm  = (img_w / 2.0 - _left_x)  * _lw_cm / _ref_lw_px
                     # Base error: positive → car is left of lane centre → steer right
                     direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
                     # Safety margin in physical units
@@ -7556,6 +7579,10 @@ Returns:
                         _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
                         direct_error_m += _lv / 100.0   # push right if too close to left
                         direct_error_m -= _rv / 100.0   # push left  if too close to right
+                    debug_info['two_line_D_left_cm']  = round(D_left_cm, 2)
+                    debug_info['two_line_D_right_cm'] = round(D_right_cm, 2)
+                    debug_info['two_line_ref_lw_px']  = round(_ref_lw_px, 1)
+                    debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
 
                 steering_angle = self._compute_lateral_control(
                     error, heading, speed_val, curve_reference=curve_reference,
@@ -7817,10 +7844,10 @@ Returns:
                 prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
                 physical_projection=use_physical_single_line,
             )
+            debug_info.update(self._last_single_line_projection_debug)
             sl_heading = self._fuse_heading_with_local_hint(sl_heading, debug_info, mode='single_line')
             debug_info['single_line_resolved_side'] = 'left'
             debug_info.setdefault('single_line_side_source', 'legacy')
-            debug_info.update(self._last_single_line_projection_debug)
             sl_error, error_stabilization = self._stabilize_single_line_error(
                 sl_error,
                 'left',
@@ -7878,10 +7905,10 @@ Returns:
                 prefer_center=(True if use_physical_single_line else (prev_seen_side == "both")),
                 physical_projection=use_physical_single_line,
             )
+            debug_info.update(self._last_single_line_projection_debug)
             sl_heading = self._fuse_heading_with_local_hint(sl_heading, debug_info, mode='single_line')
             debug_info['single_line_resolved_side'] = 'right'
             debug_info.setdefault('single_line_side_source', 'legacy')
-            debug_info.update(self._last_single_line_projection_debug)
             sl_error, error_stabilization = self._stabilize_single_line_error(
                 sl_error,
                 'right',
