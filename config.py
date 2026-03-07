@@ -114,6 +114,17 @@ STANLEY_K      = 0.8
 #   → Más alto: crosstrack menos agresivo a baja velocidad
 STANLEY_K_SOFT = 0.20
 
+# STANLEY_K_D_STEER [adimensional] — amortiguamiento de servo de dirección:
+#   Término de "lead" del paper de Hoffmann: k_d_steer × (δ_meas(i) - δ_meas(i+1))
+#   Resiste cambios bruscos del servo. Se aplica en radianes al steering command.
+#   Rango: 0.0 – 0.30
+#   → 0.0: sin amortiguamiento (más reactivo, puede oscilar en transiciones de curva)
+#   → 0.10: valor nominal (atenúa ~4° en transiciones de 42°)
+#   → 0.30: muy amortiguado (respuesta lenta pero muy suave)
+#   NOTA: el bug de steer_x10 fue corregido. Con el fix, el efecto es 10x menor
+#   que antes. Si el auto oscila, bajar a 0.05; si va muy rígido, subir a 0.20.
+STANLEY_K_D_STEER = 0.10
+
 # ── 5. AMORTIGUAMIENTO DEL STEERING (historial de frames) ────────────────────
 # El steering final se promedia sobre los últimos N frames para suavizar
 # cambios bruscos entre frames. Con N=1 no hay suavizado (reacción inmediata).

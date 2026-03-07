@@ -383,7 +383,7 @@ Args:
         # Parking runs at v≈0.13 m/s; k_soft=0.20 keeps gain finite and speed-proportional.
         self.stanley_k_soft = float(getattr(_config, "STANLEY_K_SOFT", 0.20))
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
-        self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
+        self.stanley_k_d_steer = float(getattr(_config, "STANLEY_K_D_STEER", 0.10))  # from config.py
         self.stanley_k_ag = 0.0         # ψ_ss gain for curved steady-state tracking (disabled: k_ag×v²/r < 0.3° at all operating speeds)
         # Speed scale for command speed units (controller speed variable) to m/s.
         # Controller speed uses cm/s internally, so 1 cm/s = 0.01 m/s.
@@ -4762,7 +4762,11 @@ Args:
         """
         psi_ss = 0.0
         traj_yaw_rate = 0.0
-        steer_damping_delta = math.radians(self._measured_steer_delta)
+        # _measured_steer_delta is in steer_x10 units (raw hardware delta, tenths of degrees).
+        # Convert to actual degrees first, then to radians for the Stanley formula.
+        # Without the /10.0, a 42.3° transition (stored as 423) would be treated as
+        # 423 degrees → 7.38 rad → k_d_steer × 7.38 = 42.3° of extra steer, saturating Stanley.
+        steer_damping_delta = math.radians(self._measured_steer_delta / 10.0)
 
         ref = curve_reference if isinstance(curve_reference, dict) else None
         if ref is not None:
