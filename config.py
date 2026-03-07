@@ -62,7 +62,7 @@ PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 # Rango típico: 2.0 – 7.0 cm
 #   → Más alto: dobla más abierto (más lejos de la línea interior)
 #   → Más bajo: permite ir más cerca de la línea
-LANE_SAFETY_MARGIN_CM = 5.0
+LANE_SAFETY_MARGIN_CM = 25.0
 
 # ── 2. GEOMETRÍA DEL AUTO ────────────────────────────────────────────────────
 # Batalla (distancia entre ejes) en cm. Se usa para calcular el "offtracking"
@@ -71,7 +71,7 @@ LANE_SAFETY_MARGIN_CM = 5.0
 # Fórmula: offtracking = sqrt(R² + L²) − R   con R = wheelbase / tan(|δ|)
 # A 25° de giro con wheelbase=26 cm → offtracking ≈ 5.8 cm.
 # Valor físico del TC-04: 26.0 cm
-CAR_WHEELBASE_CM = 26.0
+CAR_WHEELBASE_CM = 83.0
 
 # ── 3. CORRECCIÓN DE OFFTRACKING (desvío del eje trasero en curvas) ──────────
 # Cuando el auto gira, el eje trasero corta más hacia adentro que la cámara.
@@ -86,7 +86,7 @@ CAR_WHEELBASE_CM = 26.0
 #   PROBLEMA CONOCIDO: el offtracking usa el steering del frame anterior;
 #   si ese valor fue ±25° (corrección extrema), puede generar oscilación en
 #   la recta. Si eso ocurre, reducir a 0.3–0.5 o usar OFFTRACK_CURVE_ONLY=True.
-OFFTRACK_SCALE = 1.0
+OFFTRACK_SCALE = 0.5
 
 # OFFTRACK_CURVE_ONLY:
 #   True  → el offtracking SÓLO se aplica durante ENTERING / IN_CURVE / EXITING
@@ -147,7 +147,7 @@ NOISE_MAX_REJECT_FRAMES    = 3
 # Rango: 0.2 – 0.8
 #   → 0.4: gira al 40% del máximo (suave, evita escaparse por el otro lado)
 #   → 0.7: gira más fuerte (corrección más rápida pero riesgo de sobrepasar)
-CURVE_INNER_LINE_STEER_FACTOR = 0.4
+CURVE_INNER_LINE_STEER_FACTOR = 0.6
 
 # ── 8. SUAVIZADO EN TRANSICIONES DE MODO ─────────────────────────────────────
 # Al pasar de modo 2-líneas a 1-línea (o cambio de lado), el steering se mezcla
