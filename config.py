@@ -50,6 +50,16 @@ PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
 # --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
 PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 
+# ===================== STANLEY CONTROLLER =====================
+# Fórmula: δ = heading_error + arctan(k · e / (k_soft + v))
+# k [1/s]      : ganancia de crosstrack. A v=0.13 m/s, satura (~25°) cuando
+#                e > arctan(max_steer) * (k_soft + v) / k
+#                k=0.5 → saturación a ~20 cm (57% del carril); k=1.2 → a ~8.5 cm (bang-bang)
+# k_soft [m/s] : softening a baja velocidad; debe ser ≥ velocidad mínima de operación
+#                (v_parking ≈ 0.13 m/s → k_soft = 0.20 da buen margen)
+STANLEY_K      = 0.5   # Ganancia crosstrack [1/s]
+STANLEY_K_SOFT = 0.20  # Softening de baja velocidad [m/s]
+
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
 CAMERA_TYPE = "jetson"

@@ -375,8 +375,12 @@ Args:
         #   Low speed  → aggressive correction (tight curves)
         #   High speed → gentle correction (highway stability)
         self.use_stanley = True          # True=Stanley, False=PID (fallback)
-        self.stanley_k = 1.2            # Crosstrack gain [1/s] in physical Stanley form
-        self.stanley_k_soft = 0.15      # Low-speed softening term [m/s] — must be comparable to operating speed (0.10–0.25 m/s)
+        # k=0.5 saturates (~25°) at e≈20cm (57% of 35cm lane) at v=0.13 m/s.
+        # k=1.2 (old) saturated at only e≈8.5cm causing bang-bang oscillation.
+        self.stanley_k = float(getattr(_config, "STANLEY_K", 0.5))
+        # k_soft must be >= minimum operating speed to prevent gain explosion at near-zero speed.
+        # Parking runs at v≈0.13 m/s; k_soft=0.20 keeps gain finite and speed-proportional.
+        self.stanley_k_soft = float(getattr(_config, "STANLEY_K_SOFT", 0.20))
         self.stanley_k_d_yaw = 0.0      # Yaw rate damping from IMU (0=disabled, try 0.1 with IMU)
         self.stanley_k_d_steer = 0.10   # Steering servo damping from measured wheel motion
         self.stanley_k_ag = 0.0         # ψ_ss gain for curved steady-state tracking (disabled: k_ag×v²/r < 0.3° at all operating speeds)
@@ -4328,6 +4332,15 @@ Args:
         if cached_px_per_cm > 0.5:
             return cached_px_per_cm
 
+        # BEV-derived scale: updated every frame in _estimate_curvature_from_lines
+        # when two lane lines are detected. More accurate than the fixed geometric
+        # estimate because it uses actual projected lane positions in BEV space.
+        bev_cm_per_px = float(getattr(self, 'bev_cm_per_px', 0.0) or 0.0)
+        if bev_cm_per_px > 0.0:
+            bev_px_per_cm = 1.0 / bev_cm_per_px
+            if bev_px_per_cm > 0.5:
+                return bev_px_per_cm
+
         cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
         if cached_lane_width > 1.0 and float(self.lane_width_cm) > 1e-3:
             return cached_lane_width / float(self.lane_width_cm)
@@ -5700,6 +5713,29 @@ Args:
 
         px_per_cm = lane_width_px / self.lane_width_cm
 
+        # Recalibrate bev_cm_per_px every frame using actual lane positions projected into BEV.
+        # The fixed geometric estimate computed at init (lane_width_cm / dst_width) assumes the
+        # full dst rectangle represents one lane, which is incorrect: in practice the lane
+        # covers only ~41% of the src trapezoid bottom. By projecting the detected bottom lane
+        # points through the perspective matrix we get the true BEV lane width in pixels,
+        # making the metric scale accurate and dynamic.
+        if (
+            getattr(self, 'perspective_initialized', False) and
+            getattr(self, 'perspective_M', None) is not None and
+            lane_width_px > 10.0
+        ):
+            try:
+                pts = np.array(
+                    [[[bottom_left_x, float(img_h)]], [[bottom_right_x, float(img_h)]]],
+                    dtype=np.float32,
+                )
+                bev_pts = cv2.perspectiveTransform(pts, self.perspective_M)
+                bev_lane_w = abs(float(bev_pts[1][0][0]) - float(bev_pts[0][0][0]))
+                if bev_lane_w > 5.0 and float(self.lane_width_cm) > 0.0:
+                    self.bev_cm_per_px = self.lane_width_cm / bev_lane_w
+            except Exception:
+                pass
+
         # Find vanishing point (intersection of the two lines)
         # Using parametric: P = P1 + t*(P2-P1) for each line
         det = dx_l * dy_r - dx_r * dy_l
@@ -6192,8 +6228,10 @@ Args:
         lateral_cm: positive = object to the right of image center.
         forward_cm: distance ahead along the road direction.
 
-        If BEV is not initialized, falls back to a pixel-ratio estimate using
-        the cached px_per_cm. Both can return None if no calibration is available.
+        Returns None if BEV is not yet initialized. The former fallback that
+        applied horizontal px_per_cm to vertical displacement was removed: that
+        approach is geometrically incorrect because perspective projection makes
+        vertical and horizontal pixel scales fundamentally different.
         """
         try:
             y1, x1, y2, x2 = [float(v) for v in box_normalized]
@@ -6207,20 +6245,17 @@ Args:
                 bev_x = float(bev_pt[0][0][0])
                 bev_y = float(bev_pt[0][0][1])
                 # In BEV: y=img_h is the bottom (close to car), y=0 is the top (far).
-                # forward_cm = distance from bottom of BEV to the object's BEV position.
+                # bev_cm_per_px is updated per frame from actual lane detections and
+                # applies equally to both axes in the orthorectified BEV space.
                 forward_cm = (float(img_h) - bev_y) * self.bev_cm_per_px
                 center_bev_x = float(img_w) / 2.0
                 lateral_cm = (bev_x - center_bev_x) * self.bev_cm_per_px
                 return max(0.0, round(forward_cm, 1)), round(lateral_cm, 1)
 
-            # Fallback: use px_per_cm calibration (horizontal scale applied to vertical)
-            px_per_cm = float(self._last_px_per_cm or 0.0)
-            if px_per_cm > 0.1:
-                vertical_displacement_px = float(img_h) - base_y_px
-                forward_cm = vertical_displacement_px / px_per_cm
-                center_px = float(img_w) / 2.0
-                lateral_cm = (base_x_px - center_px) / px_per_cm
-                return max(0.0, round(forward_cm, 1)), round(lateral_cm, 1)
+            # No fallback: applying horizontal px_per_cm to vertical pixel displacement
+            # is geometrically incorrect (perspective projection makes vertical and
+            # horizontal pixel scales fundamentally different). Return None to signal
+            # that no reliable metric estimate is available without BEV calibration.
 
         except (TypeError, ValueError, cv2.error):
             pass
@@ -8343,7 +8378,10 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         dist_cm = self._parking_advance_distance(now)
         elapsed = now - self._parking_phase_start_time
 
-        speed_available = abs(float(self._measured_speed or 0.0)) > 0.5
+        # Threshold of 5.0 = 0.5 cm/s actual speed (measured_speed is in ×10 cm/s units).
+        # The old threshold of 0.5 (= 0.05 cm/s) triggered odometry mode on encoder
+        # noise at rest, accumulating phantom distance. 5.0 filters noise correctly.
+        speed_available = abs(float(self._measured_speed or 0.0)) > 5.0
         if speed_available:
             return dist_cm >= dist_threshold_cm
         # Fallback: use timer when encoder is not reporting
