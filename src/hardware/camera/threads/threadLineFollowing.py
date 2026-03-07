@@ -2772,10 +2772,32 @@ Args:
             D_right_cm = (float(real_ref_x) - img_w / 2.0) / px_per_cm
             D_left_cm  = _lw_cm - D_right_cm
 
+        # Rear-axle offtracking: the camera is at the front; when turning, the rear axle
+        # follows a tighter radius (offtracking = sqrt(R²+L²) − R, R = wheelbase/tan(δ)).
+        # Add this extra distance to the INNER boundary safety so the rear body corner
+        # never touches the inner lane line — same principle as a truck turning wide.
+        _steer_val  = float(getattr(self, '_last_good_steering', 0.0) or 0.0)
+        _steer_rad  = math.radians(abs(_steer_val))
+        _wbase_cm   = float(getattr(self, 'car_wheelbase_cm', 26.0))
+        if _steer_rad > 0.017:  # > 1°
+            _R_cm        = _wbase_cm / math.tan(_steer_rad)
+            _offtrack_cm = math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm
+        else:
+            _offtrack_cm = 0.0
+
         direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
         if _safety_cm > 0.0:
-            _lv = max(0.0, (_car_half + _safety_cm) - D_left_cm)
-            _rv = max(0.0, (_car_half + _safety_cm) - D_right_cm)
+            if _steer_val < -1.0:
+                # Turning left → inner = left boundary
+                _lv = max(0.0, (_car_half + _safety_cm + _offtrack_cm) - D_left_cm)
+                _rv = max(0.0, (_car_half + _safety_cm) - D_right_cm)
+            elif _steer_val > 1.0:
+                # Turning right → inner = right boundary
+                _lv = max(0.0, (_car_half + _safety_cm) - D_left_cm)
+                _rv = max(0.0, (_car_half + _safety_cm + _offtrack_cm) - D_right_cm)
+            else:
+                _lv = max(0.0, (_car_half + _safety_cm) - D_left_cm)
+                _rv = max(0.0, (_car_half + _safety_cm) - D_right_cm)
             direct_error_m += _lv / 100.0   # push right if too close to left
             direct_error_m -= _rv / 100.0   # push left  if too close to right
 
@@ -2786,6 +2808,7 @@ Args:
             debug_info['sl_direct_error_m']  = round(direct_error_m, 4)
             debug_info['sl_px_per_cm']       = round(px_per_cm, 4)
             debug_info['sl_is_outer_line']   = is_outer
+            debug_info['sl_offtrack_cm']     = round(_offtrack_cm, 2)
 
         return direct_error_m
 
@@ -7654,18 +7677,37 @@ Returns:
                     D_left_cm  = (img_w / 2.0 - _left_x)  * _lw_cm / _ref_lw_px
                     # Base error: positive → car is left of lane centre → steer right
                     direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
-                    # Safety margin in physical units
+                    # Safety margin + rear-axle offtracking correction.
+                    # When turning, the rear axle follows a tighter radius than the
+                    # front camera (offtracking = sqrt(R²+L²) − R).  Add this to the
+                    # inner-side safety margin so the REAR body corner clears the line.
                     _safety_cm   = float(getattr(self, 'lane_safety_margin_cm', 5.0))
                     _car_half_cm = float(self.car_width) / 2.0
+                    _steer_v     = float(getattr(self, '_last_good_steering', 0.0) or 0.0)
+                    _steer_r     = math.radians(abs(_steer_v))
+                    _wbase_cm    = float(getattr(self, 'car_wheelbase_cm', 26.0))
+                    if _steer_r > 0.017:
+                        _R_cm        = _wbase_cm / math.tan(_steer_r)
+                        _offtrack_cm = math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm
+                    else:
+                        _offtrack_cm = 0.0
                     if _safety_cm > 0.0:
-                        _lv = max(0.0, (_car_half_cm + _safety_cm) - D_left_cm)
-                        _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
+                        if _steer_v < -1.0:
+                            _lv = max(0.0, (_car_half_cm + _safety_cm + _offtrack_cm) - D_left_cm)
+                            _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
+                        elif _steer_v > 1.0:
+                            _lv = max(0.0, (_car_half_cm + _safety_cm) - D_left_cm)
+                            _rv = max(0.0, (_car_half_cm + _safety_cm + _offtrack_cm) - D_right_cm)
+                        else:
+                            _lv = max(0.0, (_car_half_cm + _safety_cm) - D_left_cm)
+                            _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
                         direct_error_m += _lv / 100.0   # push right if too close to left
                         direct_error_m -= _rv / 100.0   # push left  if too close to right
                     debug_info['two_line_D_left_cm']  = round(D_left_cm, 2)
                     debug_info['two_line_D_right_cm'] = round(D_right_cm, 2)
                     debug_info['two_line_ref_lw_px']  = round(_ref_lw_px, 1)
                     debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
+                    debug_info['two_line_offtrack_cm']    = round(_offtrack_cm, 2)
 
                 # In 2-line mode with a physical direct_error_m the heading from the
                 # mask geometry is dominated by the car's YAW angle, not road curvature.

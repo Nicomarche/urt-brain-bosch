@@ -58,6 +58,14 @@ PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 # Con LANE_SAFETY_MARGIN_CM = 5.0 comienza a corregir cuando la holgura cae por debajo de 5cm.
 LANE_SAFETY_MARGIN_CM = 5.0
 
+# ===================== GEOMETRÍA DEL AUTO =====================
+# Batalla (distancia entre ejes) del TC-04 en cm. Se usa para calcular el "offtracking" del eje
+# trasero: cuando el auto gira, el eje trasero sigue un radio MÁS CORTO que la cámara delantera.
+# offtracking = sqrt(R² + L²) − R  donde  R = wheelbase / tan(|steering_angle|)
+# Ejemplo con wheelbase=26cm y steering=25°: offtracking ≈ 5.8cm → se suma al margen de seguridad
+# del lado interior para que la ESQUINA TRASERA no toque la línea interna de la curva.
+CAR_WHEELBASE_CM = 26.0  # TC-04 spec [cm]
+
 # ===================== STANLEY CONTROLLER =====================
 # Fórmula: δ = heading_error + arctan(k · e / (k_soft + v))
 # k [1/s]      : ganancia de crosstrack. A v=0.20 m/s y k_soft=0.20:
