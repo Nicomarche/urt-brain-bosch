@@ -7667,8 +7667,17 @@ Returns:
                     debug_info['two_line_ref_lw_px']  = round(_ref_lw_px, 1)
                     debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
 
+                # In 2-line mode with a physical direct_error_m the heading from the
+                # mask geometry is dominated by the car's YAW angle, not road curvature.
+                # As the Stanley crosstrack correction turns the car body, the heading
+                # grows positively (nose points more left → heading says "steer right"),
+                # creating a positive-feedback loop that cancels the very correction being
+                # applied.  With direct_error_m providing a physically reliable crosstrack
+                # signal, the heading term is not only unnecessary but actively harmful.
+                # Pass heading=0 so crosstrack is the sole driver in 2-line mode.
+                _two_line_heading = 0.0 if direct_error_m is not None else heading
                 steering_angle = self._compute_lateral_control(
-                    error, heading, speed_val, curve_reference=curve_reference,
+                    error, _two_line_heading, speed_val, curve_reference=curve_reference,
                     lane_width_px=lane_width_px, img_w=img_w,
                     direct_error_m=direct_error_m,
                 )

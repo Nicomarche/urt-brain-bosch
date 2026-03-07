@@ -60,12 +60,14 @@ LANE_SAFETY_MARGIN_CM = 5.0
 
 # ===================== STANLEY CONTROLLER =====================
 # Fórmula: δ = heading_error + arctan(k · e / (k_soft + v))
-# k [1/s]      : ganancia de crosstrack. A v=0.13 m/s, satura (~25°) cuando
-#                e > arctan(max_steer) * (k_soft + v) / k
-#                k=0.5 → saturación a ~20 cm (57% del carril); k=1.2 → a ~8.5 cm (bang-bang)
+# k [1/s]      : ganancia de crosstrack. A v=0.20 m/s y k_soft=0.20:
+#                k=0.5 → crosstrack=4.3° para e=6cm (demasiado débil, el heading de 5° lo cancela)
+#                k=1.5 → crosstrack=12.7° para e=6cm (domina sobre heading ≤10°)
 # k_soft [m/s] : softening a baja velocidad; debe ser ≥ velocidad mínima de operación
 #                (v_parking ≈ 0.13 m/s → k_soft = 0.20 da buen margen)
-STANLEY_K      = 0.5   # Ganancia crosstrack [1/s]
+# NOTA: En modo 2-líneas el heading se pone a 0 (ver threadLineFollowing.py),
+#       por lo que k=1.5 sólo afecta al crosstrack, sin riesgo de oscilación por heading.
+STANLEY_K      = 1.5   # Ganancia crosstrack [1/s]  (subido de 0.5 → 1.5)
 STANLEY_K_SOFT = 0.20  # Softening de baja velocidad [m/s]
 
 # ======================== CAMERA ========================
