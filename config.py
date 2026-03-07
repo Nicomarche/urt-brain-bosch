@@ -313,6 +313,28 @@ SIGN_ACTION_COOLDOWN = 15.0
 #   box ≈ 15–25%  → parking spot (suelo, muy cerca)
 SIGN_MIN_BOX_AREA = 0.010
 
+# Umbral de box area por señal, sobreescribe SIGN_MIN_BOX_AREA para señales
+# específicas. Útil para señales vistas lateralmente a alta velocidad (hw_exit),
+# donde el bounding box nunca supera el 1% aunque el auto esté cerca.
+# Calibración por observación de logs: hw_exit llega a ~0.6% máximo.
+SIGN_MIN_BOX_AREA_PER_SIGN = {
+    "highway_exit": 0.005,   # 0.5% – señal lateral, vista a alta velocidad (250)
+}
+
+# ===================== SIGN ACTIONS - VELOCIDADES =====================
+# Velocidades enviadas al motor por las acciones de señales.
+# Escala interna 0–10; se transmiten como speed*10 sobre el canal SpeedMotor
+# (ej: SIGN_HIGHWAY_SPEED=7 → envía "70").
+# Estas velocidades son interpretadas por el controlador de motor directamente
+# y son INDEPENDIENTES de la rampa de velocidad del line-following (0–250).
+SIGN_BASE_SPEED      = 5    # Velocidad base: marcha normal fuera de autopista
+SIGN_LOW_SPEED       = 3    # Velocidad reducida: semáforo amarillo, zona escolar
+SIGN_SPEED_20        = 3    # Límite 20 km/h
+SIGN_SPEED_30        = 5    # Límite 30 km/h
+SIGN_HIGHWAY_SPEED   = 7    # Velocidad autopista (se activa con highway_entrance)
+SIGN_STOP_DURATION      = 3.0   # Segundos detenido en señal STOP / no_entry
+SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
+
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
 # En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.

@@ -1,18 +1,19 @@
 import time
 
+import config
 from src.utils.messages.allMessages import SpeedMotor
 
 
 class SignActions:
     """Shared sign action executor used by local and legacy sign pipelines."""
 
-    BASE_SPEED = 5
-    LOW_SPEED = 3
-    SPEED_20 = 3
-    SPEED_30 = 5
-    HIGHWAY_SPEED = 7
-    STOP_DURATION = 3.0
-    CROSSWALK_DURATION = 3.0
+    BASE_SPEED      = getattr(config, "SIGN_BASE_SPEED",      5)
+    LOW_SPEED       = getattr(config, "SIGN_LOW_SPEED",       3)
+    SPEED_20        = getattr(config, "SIGN_SPEED_20",        3)
+    SPEED_30        = getattr(config, "SIGN_SPEED_30",        5)
+    HIGHWAY_SPEED   = getattr(config, "SIGN_HIGHWAY_SPEED",   7)
+    STOP_DURATION      = getattr(config, "SIGN_STOP_DURATION",      3.0)
+    CROSSWALK_DURATION = getattr(config, "SIGN_CROSSWALK_DURATION", 3.0)
     DEFAULT_CURVE_STRAIGHT_FRAMES = 3
     DEFAULT_CURVE_STRAIGHT_STEER_DEG = 5.0
     DEFAULT_PENDING_TIMEOUT = 8.0

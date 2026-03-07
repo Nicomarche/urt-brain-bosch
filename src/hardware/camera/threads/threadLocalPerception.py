@@ -43,6 +43,9 @@ class threadLocalPerception(ThreadWithStop):
         self.enable_actions = enable_actions
         self.sign_min_confidence = float(sign_min_confidence)
         self.sign_min_box_area = float(sign_min_box_area)
+        self.sign_min_box_area_per_sign = dict(
+            getattr(config, "SIGN_MIN_BOX_AREA_PER_SIGN", {})
+        )
         self.is_sign_actions_active = False
 
         self.local_ai_interval = float(getattr(config, "LOCAL_AI_INTERVAL", 0.10))
@@ -285,14 +288,17 @@ class threadLocalPerception(ThreadWithStop):
             "timestamp": now,
         })
 
-        is_close = box_area >= self.sign_min_box_area
+        effective_min_box = self.sign_min_box_area_per_sign.get(
+            sign_name, self.sign_min_box_area
+        )
+        is_close = box_area >= effective_min_box
         is_actionable = SignActions.is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
         dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
             f"{sign_display} ({confidence:.1%}) box={box_area:.3%}{dist_str}"
-            f"{'' if is_close else f' (TOO FAR <{self.sign_min_box_area:.1%})'}"
+            f"{'' if is_close else f' (TOO FAR <{effective_min_box:.1%})'}"
             f"{'' if self.enable_actions else ' [actions=OFF]'}"
             f"{'' if self.is_sign_actions_active else ' [inactive_mode]'}"
             f"{'' if is_actionable else ' [not_actionable]'}"
