@@ -2745,6 +2745,22 @@ Args:
         }
         return collapsed_left, collapsed_right, collapse_info
 
+    def _interp_line_x_at_y(self, line, target_y):
+        """Return the x coordinate of a line segment at target_y by linear interpolation.
+
+        line must be a numpy array of shape (1, 4) = [[x1, y1, x2, y2]] (BFMC format).
+        If target_y is outside the segment or the segment is vertical, returns None.
+        """
+        try:
+            x1, y1, x2, y2 = float(line[0][0]), float(line[0][1]), float(line[0][2]), float(line[0][3])
+        except (IndexError, TypeError, ValueError):
+            return None
+        dy = y2 - y1
+        if abs(dy) < 1e-6:
+            return None
+        t = (float(target_y) - y1) / dy
+        return x1 + t * (x2 - x1)
+
     def _compute_sl_physical_error(self, side, real_ref_x, img_w, px_per_cm, debug_info=None):
         """Physical direct_error_m for single-line mode with safety margin.
 
@@ -4474,6 +4490,14 @@ Args:
             except (TypeError, ValueError):
                 pass
 
+        # Two-line reference scale: computed as _ref_lw_px / lane_width_cm where
+        # _ref_lw_px = right_x - left_x at reference_y in the AI local overlay.
+        # This is the most accurate source because it uses the actual visible lane
+        # width at the exact same depth used for D_left/D_right measurements.
+        two_line_ppc = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
+        if two_line_ppc > 0.5:
+            return two_line_ppc
+
         # AI mask lane width: most reliable source because it uses actual pixel-level
         # segmentation of the lane lines, independent of Hough-line fitting noise.
         # Prioritized above the OpenCV Hough cache to match the AI overlay's coordinate
@@ -4903,13 +4927,20 @@ Args:
         def _clamp_reference_y(y_target):
             return int(max(segment_top_y, min(segment_bottom_y, int(round(y_target)))))
 
-        # Pixel-to-cm ratio: prefer cached value from last two-line detection
-        cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
-        if cached_px_per_cm is not None and cached_px_per_cm > 0.5:
-            px_per_cm = cached_px_per_cm
+        # Pixel-to-cm ratio: highest priority is the value cached by the last 2-line
+        # frame from _ref_lw_px / lane_width_cm (same reference_y, same coordinate
+        # system).  Using a different source (AI overall width, Hough cache) would
+        # introduce a scale mismatch that shifts all D measurements by 2× or more.
+        two_line_ppc = getattr(self, '_last_two_line_ref_px_per_cm', None)
+        if two_line_ppc is not None and two_line_ppc > 0.5:
+            px_per_cm = two_line_ppc
         else:
-            # Fallback: lane (35cm) typically spans ~45% of image width at bottom
-            px_per_cm = (img_w * 0.45) / self.lane_width_cm
+            cached_px_per_cm = getattr(self, '_last_px_per_cm', None)
+            if cached_px_per_cm is not None and cached_px_per_cm > 0.5:
+                px_per_cm = cached_px_per_cm
+            else:
+                # Fallback: lane (35cm) typically spans ~45% of image width at bottom
+                px_per_cm = (img_w * 0.45) / self.lane_width_cm
 
         # On a fresh 2→1 transition, aim at the full reconstructed center to
         # avoid a steering jump. Otherwise keep the configured conservative bias.
@@ -7677,6 +7708,13 @@ Returns:
                 _ref_lw_px = _right_x - _left_x
                 if _ref_lw_px > 1.0:
                     _lw_cm = float(self.lane_width_cm)
+                    # Cache the authoritative px/cm AND reference_y from 2-line detection.
+                    # Single-line mode must use the SAME reference_y so that left_x/right_x
+                    # positions and px_per_cm correspond to the same point in the image.
+                    self._last_two_line_ref_px_per_cm = _ref_lw_px / max(1e-3, _lw_cm)
+                    _two_line_ref_y = local_mask_guidance.get('reference_y')
+                    if _two_line_ref_y is not None:
+                        self._last_two_line_reference_y = int(_two_line_ref_y)
                     # Distances from camera centre (= car centre) to each line in cm
                     D_right_cm = (_right_x - img_w / 2.0) * _lw_cm / _ref_lw_px
                     D_left_cm  = (img_w / 2.0 - _left_x)  * _lw_cm / _ref_lw_px
@@ -7794,10 +7832,18 @@ Returns:
                     ) if isinstance(self._swept_path_info, dict) else None
 
                     # Physical direct_error_m using the real left mask position + safety margin.
-                    # Uses the same px_per_cm as the single-line projection (_last_px_per_cm)
-                    # and estimates D_right_cm = lane_width - D_left_cm.
-                    _sl_ppc    = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-                    _sl_ref_x  = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
+                    # CRITICAL: use the position at the 2-line reference_y (lookahead point) and
+                    # the px_per_cm calibrated at that same y.  The single-line guidance samples
+                    # left_x at a different reference_y (clamped by the mask extent), which is
+                    # farther from the lookahead and gives a completely different apparent
+                    # position even though the car hasn't moved.
+                    _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
+                    _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
+                    if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_left_line is not None:
+                        _sl_ref_x = self._interp_line_x_at_y(mask_guidance_left_line, _std_ref_y)
+                    else:
+                        _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                        _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
                     _sl_direct = self._compute_sl_physical_error(
                         'left', _sl_ref_x, img_w, _sl_ppc, debug_info
                     )
@@ -7877,8 +7923,13 @@ Returns:
                     ) if isinstance(self._swept_path_info, dict) else None
 
                     # Physical direct_error_m using the real right mask position + safety margin.
-                    _sl_ppc    = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-                    _sl_ref_x  = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                    _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
+                    _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
+                    if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_right_line is not None:
+                        _sl_ref_x = self._interp_line_x_at_y(mask_guidance_right_line, _std_ref_y)
+                    else:
+                        _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                        _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
                     _sl_direct = self._compute_sl_physical_error(
                         'right', _sl_ref_x, img_w, _sl_ppc, debug_info
                     )

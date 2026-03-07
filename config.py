@@ -62,7 +62,7 @@ PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 # Rango típico: 2.0 – 7.0 cm
 #   → Más alto: dobla más abierto (más lejos de la línea interior)
 #   → Más bajo: permite ir más cerca de la línea
-LANE_SAFETY_MARGIN_CM = 25.0
+LANE_SAFETY_MARGIN_CM = 5.0
 
 # ── 2. GEOMETRÍA DEL AUTO ────────────────────────────────────────────────────
 # Batalla (distancia entre ejes) en cm. Se usa para calcular el "offtracking"
@@ -71,7 +71,7 @@ LANE_SAFETY_MARGIN_CM = 25.0
 # Fórmula: offtracking = sqrt(R² + L²) − R   con R = wheelbase / tan(|δ|)
 # A 25° de giro con wheelbase=26 cm → offtracking ≈ 5.8 cm.
 # Valor físico del TC-04: 26.0 cm
-CAR_WHEELBASE_CM = 83.0
+CAR_WHEELBASE_CM = 26.0
 
 # ── 3. CORRECCIÓN DE OFFTRACKING (desvío del eje trasero en curvas) ──────────
 # Cuando el auto gira, el eje trasero corta más hacia adentro que la cámara.
