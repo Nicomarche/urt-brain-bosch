@@ -1667,16 +1667,28 @@ Args:
         midpoint_bottom_x = (float(left_bottom_x) + float(right_bottom_x)) / 2.0
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
         dy = max(1.0, float(measurement_bottom_y - reference_y))
-        heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
-        # Cap the two-line heading to prevent numerically unstable estimates when the
-        # mask is short (dy small, e.g. in tight curves) — atan2(Δx, 19px) easily reaches
-        # 60-70° even for modest lateral shifts, saturating the Stanley controller.
-        # 25° cap still provides full steering authority while keeping the crosstrack term
-        # meaningful and preventing the controller from latching at max_steering.
+        _raw_two_line_heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
         _max_two_line_heading_rad = math.radians(
             float(getattr(self, 'max_two_line_heading_deg', 25.0))
         )
-        heading_rad = max(-_max_two_line_heading_rad, min(_max_two_line_heading_rad, heading_rad))
+        # When the raw heading exceeds the cap, the estimate is unreliable: the midpoint
+        # shift between rows is dominated by the car's lateral offset (perspective effect)
+        # rather than true heading. In this case we use 0 so the Stanley crosstrack term
+        # drives correction without interference from a saturated heading estimate.
+        # The crosstrack error is always physical and reliable; the heading term only adds
+        # value when the car's angular alignment relative to the lane is well-measured.
+        if abs(_raw_two_line_heading_rad) > _max_two_line_heading_rad:
+            heading_rad = 0.0
+        else:
+            heading_rad = _raw_two_line_heading_rad
+        # Apply EMA to smooth frame-to-frame oscillations caused by AI mask FPS < camera FPS.
+        _heading_ema_alpha = float(getattr(self, 'two_line_heading_ema_alpha', 0.35))
+        _prev_heading_ema = getattr(self, '_two_line_heading_ema', heading_rad)
+        self._two_line_heading_ema = _heading_ema_alpha * heading_rad + (1.0 - _heading_ema_alpha) * _prev_heading_ema
+        heading_rad = max(
+            -_max_two_line_heading_rad,
+            min(_max_two_line_heading_rad, self._two_line_heading_ema)
+        )
         # Error at reference_y (lookahead): matches the overlay green dot and captures
         # curve geometry visible ahead. midpoint_bottom (near-field) spans nearly the
         # full frame width in perspective → gives ~0 error even in curves.
@@ -1802,6 +1814,7 @@ Args:
                 float(single_side_error_limit_px) if single_side_error_limit_px is not None else None
             ),
             'heading_rad': float(heading_rad),
+            'raw_two_line_heading_rad': float(_raw_two_line_heading_rad) if len(detected_sides) >= 2 else None,
             'left_x': float(left_ref_x),
             'right_x': float(right_ref_x),
             'bottom_left_x': float(left_bottom_x),
@@ -4031,6 +4044,14 @@ Args:
             if steer_jump > self.noise_max_steer_jump_deg and self._noise_reject_count < self.noise_max_reject_frames:
                 # Exception: don't reject if we're transitioning states (curve entry/exit)
                 if self._curve_state in ("ENTERING", "EXITING"):
+                    return False, ""
+                # Exception: don't reject when steering DIRECTION reverses.
+                # A reversal (e.g., last_good=+22° → new=-3°) indicates a legitimate
+                # mode transition (2-line heading-dominated → 1-line crosstrack-dominated),
+                # not sensor noise. Rejecting it keeps the car going the wrong way for 3
+                # frames, allowing dangerous lateral accumulation.
+                if (float(self._last_good_steering) > 2.0 and float(steering_angle) < -2.0) or \
+                   (float(self._last_good_steering) < -2.0 and float(steering_angle) > 2.0):
                     return False, ""
                 return True, f"steer_jump({steer_jump:.0f}°>{self.noise_max_steer_jump_deg})"
 
