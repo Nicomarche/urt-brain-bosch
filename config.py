@@ -50,33 +50,112 @@ PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
 # --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
 PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 
-# ===================== LANE KEEPING =====================
-# Margen mínimo de seguridad entre el borde del auto y el borde interior de cada línea del carril.
-# Si el auto se acerca más de este valor a una línea, se añade una corrección proporcional
-# al error lateral (empuja al auto de vuelta al centro). Se aplica en modo 2-líneas.
-# El auto tiene 19cm de ancho → al centro del carril (35cm) el margen real es (35-19)/2 = 8cm.
-# Con LANE_SAFETY_MARGIN_CM = 5.0 comienza a corregir cuando la holgura cae por debajo de 5cm.
+# ═══════════════════════════════════════════════════════════════════════════
+#                     PARÁMETROS DE CALIBRACIÓN DE GIRO
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── 1. MARGEN DE SEGURIDAD BASE ─────────────────────────────────────────────
+# Distancia mínima (cm) que el borde del auto debe mantener con cada línea del
+# carril. El ancho del auto es 19 cm → espacio libre en un carril de 35 cm =
+# (35-19)/2 = 8 cm. Con LANE_SAFETY_MARGIN_CM = 5 empieza a corregir cuando
+# queda < 5 cm de holgura entre el auto y la línea.
+# Rango típico: 2.0 – 7.0 cm
+#   → Más alto: dobla más abierto (más lejos de la línea interior)
+#   → Más bajo: permite ir más cerca de la línea
 LANE_SAFETY_MARGIN_CM = 5.0
 
-# ===================== GEOMETRÍA DEL AUTO =====================
-# Batalla (distancia entre ejes) del TC-04 en cm. Se usa para calcular el "offtracking" del eje
-# trasero: cuando el auto gira, el eje trasero sigue un radio MÁS CORTO que la cámara delantera.
-# offtracking = sqrt(R² + L²) − R  donde  R = wheelbase / tan(|steering_angle|)
-# Ejemplo con wheelbase=26cm y steering=25°: offtracking ≈ 5.8cm → se suma al margen de seguridad
-# del lado interior para que la ESQUINA TRASERA no toque la línea interna de la curva.
-CAR_WHEELBASE_CM = 26.0  # TC-04 spec [cm]
+# ── 2. GEOMETRÍA DEL AUTO ────────────────────────────────────────────────────
+# Batalla (distancia entre ejes) en cm. Se usa para calcular el "offtracking"
+# del eje trasero: cuando el auto gira, la parte trasera sigue un radio MÁS
+# CORTO que la cámara delantera (igual que un camión).
+# Fórmula: offtracking = sqrt(R² + L²) − R   con R = wheelbase / tan(|δ|)
+# A 25° de giro con wheelbase=26 cm → offtracking ≈ 5.8 cm.
+# Valor físico del TC-04: 26.0 cm
+CAR_WHEELBASE_CM = 26.0
 
-# ===================== STANLEY CONTROLLER =====================
-# Fórmula: δ = heading_error + arctan(k · e / (k_soft + v))
-# k [1/s]      : ganancia de crosstrack. A v=0.20 m/s y k_soft=0.20:
-#                k=0.5 → crosstrack=4.3° para e=6cm (demasiado débil, el heading de 5° lo cancela)
-#                k=1.5 → crosstrack=12.7° para e=6cm (domina sobre heading ≤10°)
-# k_soft [m/s] : softening a baja velocidad; debe ser ≥ velocidad mínima de operación
-#                (v_parking ≈ 0.13 m/s → k_soft = 0.20 da buen margen)
-# NOTA: En modo 2-líneas el heading se pone a 0 (ver threadLineFollowing.py),
-#       por lo que k=1.5 sólo afecta al crosstrack, sin riesgo de oscilación por heading.
-STANLEY_K      = 1.5   # Ganancia crosstrack [1/s]  (subido de 0.5 → 1.5)
-STANLEY_K_SOFT = 0.20  # Softening de baja velocidad [m/s]
+# ── 3. CORRECCIÓN DE OFFTRACKING (desvío del eje trasero en curvas) ──────────
+# Cuando el auto gira, el eje trasero corta más hacia adentro que la cámara.
+# Esta corrección amplía el margen de seguridad del lado interior en la cantidad
+# calculada de offtracking, para que la ESQUINA TRASERA no toque la línea.
+#
+# OFFTRACK_SCALE:
+#   Factor de escala 0.0 – 1.0 que multiplica el offtracking calculado.
+#   → 0.0: corrección desactivada (comportamiento pre-fix, más cerrado en curvas)
+#   → 0.5: corrección al 50% (compromiso)
+#   → 1.0: corrección física completa (más abierto en curvas)
+#   PROBLEMA CONOCIDO: el offtracking usa el steering del frame anterior;
+#   si ese valor fue ±25° (corrección extrema), puede generar oscilación en
+#   la recta. Si eso ocurre, reducir a 0.3–0.5 o usar OFFTRACK_CURVE_ONLY=True.
+OFFTRACK_SCALE = 1.0
+
+# OFFTRACK_CURVE_ONLY:
+#   True  → el offtracking SÓLO se aplica durante ENTERING / IN_CURVE / EXITING
+#            (evita la oscilación en recta causada por el steering previo extremo)
+#   False → se aplica siempre (incluso en STRAIGHT)
+OFFTRACK_CURVE_ONLY = True
+
+# ── 4. CONTROLADOR STANLEY ───────────────────────────────────────────────────
+# Fórmula: δ = heading_error + arctan(STANLEY_K · e / (STANLEY_K_SOFT + v))
+# En modo 2-líneas, heading_error = 0 (sólo el término crosstrack importa).
+#
+# STANLEY_K [1/s] — ganancia del término de error lateral (crosstrack):
+#   A v = 0.20 m/s y k_soft = 0.20, el crosstrack para e = 6 cm es:
+#     k=0.5 →  4.3°  (muy suave, fácilmente cancelado por heading de 5°)
+#     k=0.8 →  6.8°  (equilibrado para este track)
+#     k=1.5 → 12.7°  (agresivo, puede oscilar si el margen de seguridad es grande)
+#   Rango recomendado: 0.5 – 1.5
+#   → Más alto: corrige más rápido el error lateral, pero puede oscilar
+#   → Más bajo: más suave, puede acumular error lateral si hay perturbaciones
+STANLEY_K      = 0.8
+
+# STANLEY_K_SOFT [m/s] — suavizado a baja velocidad (evita giro brusco al arrancar):
+#   Debe ser ≥ velocidad mínima de operación (≈ 0.13 m/s).
+#   Rango: 0.10 – 0.40 m/s
+#   → Más alto: crosstrack menos agresivo a baja velocidad
+STANLEY_K_SOFT = 0.20
+
+# ── 5. AMORTIGUAMIENTO DEL STEERING (historial de frames) ────────────────────
+# El steering final se promedia sobre los últimos N frames para suavizar
+# cambios bruscos entre frames. Con N=1 no hay suavizado (reacción inmediata).
+# Rango: 1 – 5
+#   → 1: sin suavizado (más reactivo, puede oscilar)
+#   → 3: buen compromiso
+#   → 5: muy suave pero con mayor retardo
+STEER_HISTORY_LEN = 2
+
+# ── 6. FILTRO DE RUIDO (noise filter) ────────────────────────────────────────
+# Descarta frames donde el cambio de steering es demasiado grande de golpe
+# (probablemente ruido de detección), manteniendo el steering previo por hasta
+# NOISE_MAX_REJECT_FRAMES frames consecutivos.
+#
+# NOISE_MAX_STEER_JUMP_DEG: cambio máximo permitido de steering entre frames [°]
+#   Rango: 10 – 30°
+#   → Más bajo: filtra más agresivamente (puede ignorar correcciones legítimas)
+#   → Más alto: permite cambios bruscos (menos filtrado)
+NOISE_MAX_STEER_JUMP_DEG   = 15
+
+# NOISE_MAX_REJECT_FRAMES: frames consecutivos que se pueden rechazar antes de
+# aceptar el nuevo valor incondicionalmente.
+#   Rango: 1 – 5
+#   → Más alto: filtra por más tiempo (puede causar retardo en curvas)
+NOISE_MAX_REJECT_FRAMES    = 3
+
+# ── 7. FACTOR DE GIRO EN MODO UNA SOLA LÍNEA ─────────────────────────────────
+# Cuando el auto sólo ve la línea INTERIOR (está saliendo del carril por la curva
+# más cerrada), aplica un steering de escape igual a:
+#   CURVE_INNER_LINE_STEER_FACTOR × MAX_STEERING
+# Rango: 0.2 – 0.8
+#   → 0.4: gira al 40% del máximo (suave, evita escaparse por el otro lado)
+#   → 0.7: gira más fuerte (corrección más rápida pero riesgo de sobrepasar)
+CURVE_INNER_LINE_STEER_FACTOR = 0.4
+
+# ── 8. SUAVIZADO EN TRANSICIONES DE MODO ─────────────────────────────────────
+# Al pasar de modo 2-líneas a 1-línea (o cambio de lado), el steering se mezcla
+# gradualmente durante N frames para evitar un salto brusco.
+# Rango: 0 – 4
+#   → 0: sin suavizado (inmediato)
+#   → 2: mezcla en 2 frames (valor por defecto)
+SINGLE_LINE_BLEND_FRAMES = 2
 
 # ======================== CAMERA ========================
 # Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)

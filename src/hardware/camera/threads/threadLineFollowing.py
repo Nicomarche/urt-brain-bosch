@@ -354,7 +354,8 @@ Args:
         self.dead_zone_ratio = 50  # Ignore errors below 50px (bfmc24-brain: PID_TOLERANCE)
         self.integral_reset_interval = 10  # Reset integral every N iterations (anti-windup)
         self.smoothing_factor = 0.5  # Higher = more reactive, Lower = more smooth
-        self.steer_history = deque(maxlen=1)  # Moving average of last 5 steering values (smooths erratic readings)
+        _steer_hist_len = max(1, int(getattr(_config, 'STEER_HISTORY_LEN', 1)))
+        self.steer_history = deque(maxlen=_steer_hist_len)
         self.lookahead = 0.4
         self.pid = PIDController(
             Kp=self.kp, Ki=self.ki, Kd=self.kd,
@@ -483,7 +484,7 @@ Args:
         # Measured from the actual BFMC 1:10 scale car (Bosch)
         self.car_length = 36.5           # Total car length (cm)
         self.car_width = 19.0            # Total car width (cm)
-        self.car_wheelbase_cm = 26.0     # Wheelbase (TC-04 spec, cm)
+        self.car_wheelbase_cm = float(getattr(_config, 'CAR_WHEELBASE_CM', 26.0))
         self.car_front_overhang = 7.2    # Front axle to front bumper (cm)
         self.car_rear_overhang = 1.8     # Rear axle to rear of car (cm)
         self.camera_to_front_axle = 11.5 # Camera position ahead of front axle (cm)
@@ -551,7 +552,7 @@ Args:
         self._vp_above_count = 0            # Counter: consecutive frames VP exceeded threshold
         self.curve_pre_position_gain = 0.95  # Pre-position aggressively when ENTERING (higher = more outer-line protection)
         self.curve_exit_gain = 0.08          # Tiny residual offset when EXITING; fades over curve_exit_frames
-        self.curve_inner_line_steer_factor = 0.4  # When seeing inner line, steer opposite at this fraction of max (0-1)
+        self.curve_inner_line_steer_factor = float(getattr(_config, 'CURVE_INNER_LINE_STEER_FACTOR', 0.4))
         # Single-line fusion: blend geometric swept-path error with Stanley error in curves.
         self.single_line_swept_weight_entering = 0.40   # reduced: stronger Stanley k_soft=0.20 amplifies swept corrections
         self.single_line_swept_weight_in_curve = 0.55   # reduced from 0.85: prevents cutting inner line with new gains
@@ -723,7 +724,7 @@ Args:
         self._smoothed_right_line = None
         self._left_line_missing_frames = 0
         self._right_line_missing_frames = 0
-        self.single_line_transition_blend_frames = 2
+        self.single_line_transition_blend_frames = int(getattr(_config, 'SINGLE_LINE_BLEND_FRAMES', 2))
         self.duplicate_line_gap_ratio = 0.18
 
         # Sliding window parameters
@@ -759,8 +760,8 @@ Args:
         self.use_noise_filter = True         # Enable noise rejection
         self.noise_max_hough_lines = 40      # Max Hough lines before flagging as noisy
         self.noise_max_error_jump_px = 80    # Max error change between frames (px)
-        self.noise_max_steer_jump_deg = 15   # Max steering change between frames (deg)
-        self.noise_max_reject_frames = 3     # Max consecutive frames to reject
+        self.noise_max_steer_jump_deg = float(getattr(_config, 'NOISE_MAX_STEER_JUMP_DEG', 15))
+        self.noise_max_reject_frames = int(getattr(_config, 'NOISE_MAX_REJECT_FRAMES', 3))
         self._noise_reject_count = 0         # Current consecutive rejected frames
         self._last_good_error = 0.0          # Last accepted error value
         self._last_good_steering = 0.0       # Last accepted steering angle
@@ -2776,12 +2777,16 @@ Args:
         # follows a tighter radius (offtracking = sqrt(R²+L²) − R, R = wheelbase/tan(δ)).
         # Add this extra distance to the INNER boundary safety so the rear body corner
         # never touches the inner lane line — same principle as a truck turning wide.
+        # Controlled by OFFTRACK_SCALE (0=off, 1=full) and OFFTRACK_CURVE_ONLY.
         _steer_val  = float(getattr(self, '_last_good_steering', 0.0) or 0.0)
         _steer_rad  = math.radians(abs(_steer_val))
         _wbase_cm   = float(getattr(self, 'car_wheelbase_cm', 26.0))
-        if _steer_rad > 0.017:  # > 1°
+        _ot_scale   = float(getattr(_config, 'OFFTRACK_SCALE', 1.0))
+        _ot_curve_only = bool(getattr(_config, 'OFFTRACK_CURVE_ONLY', False))
+        _in_curve   = getattr(self, '_curve_state', 'STRAIGHT') in ('ENTERING', 'IN_CURVE', 'EXITING')
+        if _steer_rad > 0.017 and _ot_scale > 0.0 and (not _ot_curve_only or _in_curve):
             _R_cm        = _wbase_cm / math.tan(_steer_rad)
-            _offtrack_cm = math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm
+            _offtrack_cm = (math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm) * _ot_scale
         else:
             _offtrack_cm = 0.0
 
@@ -7678,17 +7683,18 @@ Returns:
                     # Base error: positive → car is left of lane centre → steer right
                     direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
                     # Safety margin + rear-axle offtracking correction.
-                    # When turning, the rear axle follows a tighter radius than the
-                    # front camera (offtracking = sqrt(R²+L²) − R).  Add this to the
-                    # inner-side safety margin so the REAR body corner clears the line.
+                    # Controlled by OFFTRACK_SCALE and OFFTRACK_CURVE_ONLY (config.py).
                     _safety_cm   = float(getattr(self, 'lane_safety_margin_cm', 5.0))
                     _car_half_cm = float(self.car_width) / 2.0
                     _steer_v     = float(getattr(self, '_last_good_steering', 0.0) or 0.0)
                     _steer_r     = math.radians(abs(_steer_v))
                     _wbase_cm    = float(getattr(self, 'car_wheelbase_cm', 26.0))
-                    if _steer_r > 0.017:
+                    _ot_scale2   = float(getattr(_config, 'OFFTRACK_SCALE', 1.0))
+                    _ot_c_only2  = bool(getattr(_config, 'OFFTRACK_CURVE_ONLY', False))
+                    _in_curve2   = self._curve_state in ('ENTERING', 'IN_CURVE', 'EXITING')
+                    if _steer_r > 0.017 and _ot_scale2 > 0.0 and (not _ot_c_only2 or _in_curve2):
                         _R_cm        = _wbase_cm / math.tan(_steer_r)
-                        _offtrack_cm = math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm
+                        _offtrack_cm = (math.sqrt(_R_cm ** 2 + _wbase_cm ** 2) - _R_cm) * _ot_scale2
                     else:
                         _offtrack_cm = 0.0
                     if _safety_cm > 0.0:
