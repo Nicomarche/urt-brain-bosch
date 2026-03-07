@@ -325,12 +325,12 @@ Args:
         self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
 
         # Speed parameters
-        self.base_speed = 15
-        self.max_speed = 20
-        self.min_speed = 13
-        self.highway_max_speed = 25
-        self.highway_min_speed = 13
-        self.speed_ramp_step = 0.5   # Max speed increase per frame (gradual acceleration)
+        self.base_speed        = float(getattr(_config, "LF_BASE_SPEED",        10))
+        self.max_speed         = float(getattr(_config, "LF_MAX_SPEED",         13))
+        self.min_speed         = float(getattr(_config, "LF_MIN_SPEED",          8))
+        self.highway_max_speed = float(getattr(_config, "LF_HIGHWAY_MAX_SPEED", 25))
+        self.highway_min_speed = float(getattr(_config, "LF_HIGHWAY_MIN_SPEED", 15))
+        self.speed_ramp_step   = float(getattr(_config, "LF_SPEED_RAMP_STEP",  0.5))
         self._current_speed = self.base_speed  # Tracks actual speed for ramping
         self.speed_steer_factor = 0.4  # Steering attenuation at max speed (0=none, 1=full mute)
         self.max_frame_age_ms = 300.0
