@@ -2759,6 +2759,8 @@ Args:
         if abs(dy) < 1e-6:
             return None
         t = (float(target_y) - y1) / dy
+        if not (0.0 <= t <= 1.0):
+            return None   # target_y fuera del segmento → no extrapolar
         return x1 + t * (x2 - x1)
 
     def _compute_sl_physical_error(self, side, real_ref_x, img_w, px_per_cm, debug_info=None):
