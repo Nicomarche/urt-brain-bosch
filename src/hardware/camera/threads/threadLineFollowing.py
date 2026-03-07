@@ -1668,6 +1668,15 @@ Args:
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
         dy = max(1.0, float(measurement_bottom_y - reference_y))
         heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
+        # Cap the two-line heading to prevent numerically unstable estimates when the
+        # mask is short (dy small, e.g. in tight curves) — atan2(Δx, 19px) easily reaches
+        # 60-70° even for modest lateral shifts, saturating the Stanley controller.
+        # 25° cap still provides full steering authority while keeping the crosstrack term
+        # meaningful and preventing the controller from latching at max_steering.
+        _max_two_line_heading_rad = math.radians(
+            float(getattr(self, 'max_two_line_heading_deg', 25.0))
+        )
+        heading_rad = max(-_max_two_line_heading_rad, min(_max_two_line_heading_rad, heading_rad))
         # Error at reference_y (lookahead): matches the overlay green dot and captures
         # curve geometry visible ahead. midpoint_bottom (near-field) spans nearly the
         # full frame width in perspective → gives ~0 error even in curves.
@@ -2722,6 +2731,51 @@ Args:
         }
         return collapsed_left, collapsed_right, collapse_info
 
+    def _compute_sl_physical_error(self, side, real_ref_x, img_w, px_per_cm, debug_info=None):
+        """Physical direct_error_m for single-line mode with safety margin.
+
+        Uses the REAL detected line position at reference_y and the known lane width to
+        compute D_left_cm / D_right_cm (one measured, one estimated via lane_width_cm) and
+        then applies the same safety margin as two-line direct_error_m.
+
+        Inner vs outer distinction: the formula handles both cases correctly —
+        if the visible line is the outer line, D_visible will be small and the safety
+        margin pushes the car away from it; if it is the inner line, D_other is small
+        and the margin pushes the car back toward center.
+
+        Returns None if the inputs are invalid.
+        """
+        if px_per_cm < 0.5 or real_ref_x is None or real_ref_x <= 0.0:
+            return None
+
+        _lw_cm      = float(self.lane_width_cm)
+        _safety_cm  = float(getattr(self, 'lane_safety_margin_cm', 5.0))
+        _car_half   = float(self.car_width) / 2.0
+
+        if side == 'left':
+            D_left_cm  = (img_w / 2.0 - float(real_ref_x)) / px_per_cm
+            D_right_cm = _lw_cm - D_left_cm
+        else:
+            D_right_cm = (float(real_ref_x) - img_w / 2.0) / px_per_cm
+            D_left_cm  = _lw_cm - D_right_cm
+
+        direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
+        if _safety_cm > 0.0:
+            _lv = max(0.0, (_car_half + _safety_cm) - D_left_cm)
+            _rv = max(0.0, (_car_half + _safety_cm) - D_right_cm)
+            direct_error_m += _lv / 100.0   # push right if too close to left
+            direct_error_m -= _rv / 100.0   # push left  if too close to right
+
+        if isinstance(debug_info, dict):
+            is_outer = bool(debug_info.get('single_line_outer_curve_line', False))
+            debug_info['sl_D_left_cm']       = round(D_left_cm, 2)
+            debug_info['sl_D_right_cm']      = round(D_right_cm, 2)
+            debug_info['sl_direct_error_m']  = round(direct_error_m, 4)
+            debug_info['sl_px_per_cm']       = round(px_per_cm, 4)
+            debug_info['sl_is_outer_line']   = is_outer
+
+        return direct_error_m
+
     def _blend_single_line_transition_steering(self, steering_angle, side, prev_seen_side, streak):
         """Blend single-line steering briefly after side/mode transitions to avoid spikes."""
         if steering_angle is None:
@@ -2743,6 +2797,14 @@ Args:
             previous_steering = getattr(self, '_last_good_steering', None)
         if previous_steering is None:
             return steering_angle, None
+
+        # If the required steering direction reverses (e.g. previous max-right in a right
+        # curve, new max-left in the immediately following left curve), blending would keep
+        # the car going the wrong way for several frames.  Skip the blend entirely in that
+        # case and apply the new steering immediately.
+        if (float(previous_steering) > 2.0 and float(steering_angle) < -2.0) or \
+           (float(previous_steering) < -2.0 and float(steering_angle) > 2.0):
+            return float(steering_angle), None
 
         alpha = min(1.0, float(streak) / float(blend_frames + 1))
         blended = ((1.0 - alpha) * float(previous_steering)) + (alpha * float(steering_angle))
@@ -7652,9 +7714,18 @@ Returns:
                     curve_reference = self._get_stanley_curve_reference(
                         fallback_curve=self._swept_path_info
                     ) if isinstance(self._swept_path_info, dict) else None
+
+                    # Physical direct_error_m using the real left mask position + safety margin.
+                    # Uses the same px_per_cm as the single-line projection (_last_px_per_cm)
+                    # and estimates D_right_cm = lane_width - D_left_cm.
+                    _sl_ppc    = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                    _sl_ref_x  = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
+                    _sl_direct = self._compute_sl_physical_error(
+                        'left', _sl_ref_x, img_w, _sl_ppc, debug_info
+                    )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
-                        lane_width_px=lane_width_px, img_w=img_w
+                        lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
                     )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -7726,9 +7797,16 @@ Returns:
                     curve_reference = self._get_stanley_curve_reference(
                         fallback_curve=self._swept_path_info
                     ) if isinstance(self._swept_path_info, dict) else None
+
+                    # Physical direct_error_m using the real right mask position + safety margin.
+                    _sl_ppc    = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                    _sl_ref_x  = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                    _sl_direct = self._compute_sl_physical_error(
+                        'right', _sl_ref_x, img_w, _sl_ppc, debug_info
+                    )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
-                        lane_width_px=lane_width_px, img_w=img_w
+                        lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
                     )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
