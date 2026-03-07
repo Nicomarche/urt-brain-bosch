@@ -493,6 +493,12 @@ Args:
         self.lane_width_cm = float(getattr(_config, "LANE_WIDTH_CM", 35.0))
         self.line_width_cm = float(getattr(_config, "LINE_WIDTH_CM", 2.0))
 
+        # Minimum clearance from car body edge to lane line inner edge.
+        # A correction is added to the lateral error when this margin is violated,
+        # proportional to how much the margin is exceeded, pushing the car back toward center.
+        # Applies only in 2-line detection mode where both line positions are physically known.
+        self.lane_safety_margin_cm = float(getattr(_config, 'LANE_SAFETY_MARGIN_CM', 5.0))
+
         # Swept path prediction parameters
         self.use_swept_path = False      # Swept path disabled: Stanley handles curves via pure crosstrack+heading error
         self.swept_path_margin_cm = 4.0  # Safety margin for clearance checks (cm) — larger = more outward in curves
@@ -1666,6 +1672,30 @@ Args:
         # curve geometry visible ahead. midpoint_bottom (near-field) spans nearly the
         # full frame width in perspective → gives ~0 error even in curves.
         error_px = midpoint_x - (img_w / 2.0)
+
+        # Safety margin correction (two-line mode only, where both line positions are physical).
+        # Ensures the car body (car_width wide) stays at least lane_safety_margin_cm from each
+        # line center. left_ref_x / right_ref_x are the centers of the lane mask regions at
+        # reference_y (inner boundary = mask center ≈ line center for thin lines).
+        # The correction is additive: if the car is within the margin, the error is amplified
+        # to push it back toward center; no effect when car is already safely inside.
+        _safety_margin_cm = float(getattr(self, 'lane_safety_margin_cm', 5.0))
+        if _safety_margin_cm > 0.0 and lane_width_px > 10.0:
+            _px_per_cm = lane_width_px / max(1e-3, float(self.lane_width_cm))
+            _car_half_px = (float(self.car_width) / 2.0) * _px_per_cm
+            _safety_px = _safety_margin_cm * _px_per_cm
+            _car_center = img_w / 2.0
+            # Distance from car edge to line center at reference_y (positive = clear)
+            _left_clearance = (_car_center - _car_half_px) - float(left_ref_x)
+            _right_clearance = float(right_ref_x) - (_car_center + _car_half_px)
+            _correction = 0.0
+            if _left_clearance < _safety_px:
+                _correction += _safety_px - _left_clearance   # push right (+)
+            if _right_clearance < _safety_px:
+                _correction -= _safety_px - _right_clearance  # push left  (-)
+            if abs(_correction) > 0.5:
+                error_px = float(error_px) + _correction
+
         raw_error_px = float(error_px)
         draw_y = reference_y
         guidance_mode = 'midpoint_ref'
@@ -4328,6 +4358,16 @@ Args:
             except (TypeError, ValueError):
                 pass
 
+        # AI mask lane width: most reliable source because it uses actual pixel-level
+        # segmentation of the lane lines, independent of Hough-line fitting noise.
+        # Prioritized above the OpenCV Hough cache to match the AI overlay's coordinate
+        # system, which the user confirmed shows the correct centered lane geometry.
+        ai_lane_width_px = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+        if ai_lane_width_px > 1.0 and float(self.lane_width_cm) > 1e-3:
+            return ai_lane_width_px / float(self.lane_width_cm)
+
+        # OpenCV Hough-line cache (lower priority than AI mask but still useful when
+        # the AI has not produced a fresh lane width in this detection cycle).
         cached_px_per_cm = float(getattr(self, '_last_px_per_cm', 0.0) or 0.0)
         if cached_px_per_cm > 0.5:
             return cached_px_per_cm
@@ -4340,10 +4380,6 @@ Args:
             bev_px_per_cm = 1.0 / bev_cm_per_px
             if bev_px_per_cm > 0.5:
                 return bev_px_per_cm
-
-        cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
-        if cached_lane_width > 1.0 and float(self.lane_width_cm) > 1e-3:
-            return cached_lane_width / float(self.lane_width_cm)
 
         if img_w is not None and float(img_w) > 1.0 and float(self.lane_width_cm) > 1e-3:
             return (float(img_w) * 0.45) / float(self.lane_width_cm)
@@ -4617,19 +4653,34 @@ Args:
         speed_cap=None,
         lane_width_px=None,
         img_w=None,
+        direct_error_m=None,
     ):
         """Compute steering with the active controller policy for the current mode.
 
         For Stanley, inputs are converted to physical units:
-        - crosstrack error: pixels -> meters (using lane-width scale)
+        - crosstrack error: pixels -> meters (using lane-width scale), OR
+          direct_error_m can be provided as a pre-computed physical error (meters)
+          derived directly from measured distances to each lane line and the known
+          lane_width_cm. When direct_error_m is supplied, _convert_error_px_to_m is
+          skipped entirely, removing any dependence on cached px/cm values.
         - speed: controller units / measured Nucleo speed -> m/s
         """
         self._heading_error = float(heading)
         if self._should_use_stanley_controller():
             self._apply_stanley_road_type_schedule()
-            error_m, px_per_cm = self._convert_error_px_to_m(
-                error, lane_width_px=lane_width_px, img_w=img_w
-            )
+            if direct_error_m is not None:
+                # Physical error supplied directly: no pixel conversion or cache needed.
+                error_m = float(direct_error_m)
+                # px_per_cm is still needed for the legacy deadband path; compute from
+                # current-frame lane width if available, otherwise fall back to cache.
+                if lane_width_px is not None and float(lane_width_px) > 1.0:
+                    px_per_cm = float(lane_width_px) / max(1e-3, float(self.lane_width_cm))
+                else:
+                    px_per_cm = max(1e-6, float(self._resolve_px_per_cm(img_w=img_w)))
+            else:
+                error_m, px_per_cm = self._convert_error_px_to_m(
+                    error, lane_width_px=lane_width_px, img_w=img_w
+                )
             speed_mps, speed_source = self._resolve_stanley_speed_mps(
                 speed_value, speed_cap=speed_cap
             )
@@ -7419,14 +7470,20 @@ Returns:
             elif stale_grace_active:
                 heading = self._fuse_heading_with_local_hint(heading, debug_info, mode='stale')
             self._heading_error = heading
-            midpoint_x = int(round(local_mask_guidance.get('midpoint_bottom_x', img_w / 2.0)))
+            # Use the LOOKAHEAD midpoint (midpoint_x at reference_y) for the visual dot,
+            # not the near-field midpoint (midpoint_bottom_x at measurement_bottom_y).
+            # The error is computed at reference_y (lookahead), so the visualization must
+            # show the same point — this is what the AI Local Overlay also shows (green dot
+            # at height * 0.6). Using midpoint_bottom_x with draw_y=reference_y was mixing
+            # near-field X with lookahead Y, making the final_result appear decentered.
+            midpoint_x = int(round(local_mask_guidance.get('midpoint_x', img_w / 2.0)))
             midpoint_x = max(0, min(img_w - 1, midpoint_x))
             bottom_left_x = int(round(local_mask_guidance.get('bottom_left_x', 0.0) or 0.0))
             bottom_right_x = int(round(local_mask_guidance.get('bottom_right_x', img_w - 1) or (img_w - 1)))
             bottom_left_x = max(0, min(img_w - 1, bottom_left_x))
             bottom_right_x = max(0, min(img_w - 1, bottom_right_x))
             debug_info['midpoint_draw_y'] = int(
-                local_mask_guidance.get('draw_y', local_mask_guidance.get('bottom_y', img_h - 1))
+                local_mask_guidance.get('reference_y', local_mask_guidance.get('draw_y', img_h // 2))
             )
             self._swept_path_info = None
             self.just_seen_two_lines = False
@@ -7471,9 +7528,39 @@ Returns:
                     )
 
                 speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+
+                # Physical error: computed directly from the distance of the car to each
+                # lane line using the KNOWN lane width (lane_width_cm) as the calibration.
+                # This avoids using img_w/2 as a universal reference — instead it measures:
+                #   D_right_cm = how many cm the car is from the right lane line
+                #   D_left_cm  = how many cm the car is from the left lane line
+                # Error = D_right_cm - lane_width_cm/2  (+ = car is LEFT, steer RIGHT)
+                # The safety margin ensures the car body (car_width cm wide) stays at least
+                # lane_safety_margin_cm from each line at all times.
+                direct_error_m = None
+                if lane_width_px > 1.0:
+                    _lw_cm  = float(self.lane_width_cm)
+                    _lw_px  = float(lane_width_px)
+                    _left_x  = float(local_mask_guidance.get('left_x',  0.0) or 0.0)
+                    _right_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                    # Distances from camera centre (= car centre) to each line in cm
+                    D_right_cm = (_right_x - img_w / 2.0) * _lw_cm / _lw_px
+                    D_left_cm  = (img_w / 2.0 - _left_x)  * _lw_cm / _lw_px
+                    # Base error: positive → car is left of lane centre → steer right
+                    direct_error_m = (D_right_cm - _lw_cm / 2.0) / 100.0
+                    # Safety margin in physical units
+                    _safety_cm   = float(getattr(self, 'lane_safety_margin_cm', 5.0))
+                    _car_half_cm = float(self.car_width) / 2.0
+                    if _safety_cm > 0.0:
+                        _lv = max(0.0, (_car_half_cm + _safety_cm) - D_left_cm)
+                        _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
+                        direct_error_m += _lv / 100.0   # push right if too close to left
+                        direct_error_m -= _rv / 100.0   # push left  if too close to right
+
                 steering_angle = self._compute_lateral_control(
                     error, heading, speed_val, curve_reference=curve_reference,
-                    lane_width_px=lane_width_px, img_w=img_w
+                    lane_width_px=lane_width_px, img_w=img_w,
+                    direct_error_m=direct_error_m,
                 )
 
                 self.steer_history.append(steering_angle)

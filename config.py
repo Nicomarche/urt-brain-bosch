@@ -50,6 +50,14 @@ PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
 # --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
 PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3
 
+# ===================== LANE KEEPING =====================
+# Margen mínimo de seguridad entre el borde del auto y el borde interior de cada línea del carril.
+# Si el auto se acerca más de este valor a una línea, se añade una corrección proporcional
+# al error lateral (empuja al auto de vuelta al centro). Se aplica en modo 2-líneas.
+# El auto tiene 19cm de ancho → al centro del carril (35cm) el margen real es (35-19)/2 = 8cm.
+# Con LANE_SAFETY_MARGIN_CM = 5.0 comienza a corregir cuando la holgura cae por debajo de 5cm.
+LANE_SAFETY_MARGIN_CM = 5.0
+
 # ===================== STANLEY CONTROLLER =====================
 # Fórmula: δ = heading_error + arctan(k · e / (k_soft + v))
 # k [1/s]      : ganancia de crosstrack. A v=0.13 m/s, satura (~25°) cuando
