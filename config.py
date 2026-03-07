@@ -99,14 +99,16 @@ OFFTRACK_CURVE_ONLY = True
 # En modo 2-líneas, heading_error = 0 (sólo el término crosstrack importa).
 #
 # STANLEY_K [1/s] — ganancia del término de error lateral (crosstrack):
-#   A v = 0.20 m/s y k_soft = 0.20, el crosstrack para e = 6 cm es:
-#     k=0.5 →  4.3°  (muy suave, fácilmente cancelado por heading de 5°)
-#     k=0.8 →  6.8°  (equilibrado para este track)
-#     k=1.5 → 12.7°  (agresivo, puede oscilar si el margen de seguridad es grande)
-#   Rango recomendado: 0.5 – 1.5
-#   → Más alto: corrige más rápido el error lateral, pero puede oscilar
-#   → Más bajo: más suave, puede acumular error lateral si hay perturbaciones
-STANLEY_K      = 0.8
+#   Con K_SOFT=3.0, el denominador efectivo es ~3.20 a v=0.20 m/s.
+#   Ejemplos de salida crosstrack pura (sin heading) a v=0.20 m/s:
+#     k=0.8  → e=10cm:  1.4°   e=25cm:  3.6°   e=40cm:  5.7°  (muy lento en recta)
+#     k=2.5  → e=10cm:  4.5°   e=25cm: 11.2°   e=40cm: 17.4°  (optimo: recta rápida)
+#     k=4.0  → e=10cm:  7.1°   e=25cm: 17.2°   e=40cm: 23.0°  (agresivo, puede oscilar)
+#   Rango recomendado (con K_SOFT=3.0): 1.5 – 4.0
+#   → Más alto: corrección en recta más rápida. Curvas con error >20cm pueden saturar.
+#   → Más bajo: corrección en recta muy lenta (error acumula antes de corregir).
+#   NOTA: K_SOFT=3.0 hace que K necesite ser 2-4x mayor que el valor histórico de 0.8.
+STANLEY_K      = 2.5
 
 # STANLEY_K_SOFT [m/s] — suavizado a baja velocidad (evita saturar el término crosstrack):
 #   Con v_min = 0.13 m/s, el denominador efectivo es (K_SOFT + v).
