@@ -348,7 +348,9 @@ SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
 # En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.
-LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best416px.engine"
+# Para generar el engine desde el ONNX reentrenado, ejecutar:
+#   cd models/lane_segmentation && python build_trt.py
+LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best_weights_reentrenado_416px.engine"
 LOCAL_AI_MIN_CONFIDENCE = 0.35
 LOCAL_AI_IMGSZ = 416
 LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
