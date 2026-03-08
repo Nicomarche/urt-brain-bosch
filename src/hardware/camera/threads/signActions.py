@@ -253,25 +253,31 @@ class SignActions:
     def _execute_left_turn_90(self):
         """Giro izquierda 90° hardcodeado con radio 1,02 m (R=1,02 m, δ≈-14,3°).
 
-        Toma control total de velocidad y dirección bloqueando el line-following
-        a través de steer_override_event. El arco calculado es:
-            arc = (π/2) × 1,02 m ≈ 1,602 m
-        La duración STOP_TURN_DURATION debe calibrarse en el hardware real.
+        Asume que steer_override_event ya está activo (lo setea _execute_stop antes
+        de llamar a esta función). Las ruedas ya están centradas (steer=0) desde
+        el período de stop, así que aquí:
+          1. Se aplica el ángulo de giro y se espera que el servo llegue.
+          2. Se arranca el movimiento hacia adelante.
+          3. Al terminar, steer vuelve a 0 y se devuelve control al line-following.
+
+        Arco 90° = (π/2) × 1,02 m ≈ 1,602 m → calibrar STOP_TURN_DURATION.
         """
+        # Aplicar ángulo de giro con el auto aún detenido y esperar que el servo llegue.
+        self._send_steer(self.STOP_TURN_STEER_DEG)
+        time.sleep(0.5)  # settle time del servo
+
         print(
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
             f"LEFT TURN 90° (R=1.02m, δ={self.STOP_TURN_STEER_DEG}°, "
             f"speed={self.STOP_TURN_SPEED}, t={self.STOP_TURN_DURATION}s)"
         )
-        if self.steer_override_event:
-            self.steer_override_event.set()
         try:
             turn_start = time.time()
             while time.time() - turn_start < self.STOP_TURN_DURATION:
                 self._send_steer(self.STOP_TURN_STEER_DEG)
                 self._send_speed(self.STOP_TURN_SPEED)
                 time.sleep(0.02)
-            # Detener el auto al finalizar el arco
+            # Detener y centrar ruedas al finalizar el arco
             self._send_speed(0)
             self._send_steer(0)
         finally:
@@ -291,6 +297,15 @@ class SignActions:
         )
         if self.sign_action_event:
             self.sign_action_event.set()
+
+        if self.STOP_LEFT_TURN_ENABLED:
+            # Tomar control del steer inmediatamente para que el line-following
+            # no mueva las ruedas durante la parada. Se centra el servo a 0°
+            # así las ruedas quedan rectas antes de iniciar el giro.
+            if self.steer_override_event:
+                self.steer_override_event.set()
+            self._send_steer(0)
+
         self._send_speed(0)
         self.is_stopped = True
         time.sleep(self.STOP_DURATION)
