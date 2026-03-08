@@ -1390,6 +1390,13 @@ Args:
 
         curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
         curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+
+        # Never apply outer-curve bias on a straight segment.  On a straight road
+        # lines can appear at 40-50° from vertical due to perspective alone, making
+        # curve_strength = 1.0 even though the road is straight.  Applying outer bias
+        # in that case pushes the error in the wrong direction.
+        if curve_state == 'STRAIGHT':
+            return result
         state_confirmed = (
             curve_state in ("ENTERING", "IN_CURVE", "EXITING") and
             (
@@ -1756,6 +1763,26 @@ Args:
         single_line_projection_debug = None
         single_line_prefer_center = None
         single_line_streak = None
+
+        # Keep single-line heading references up to date from AI mask lines during
+        # two-line mode.  In AI local mode avg_left/avg_right (BFMC Hough lines) are
+        # null, so the legacy BFMC calibration path updates the refs with 0.0 each
+        # frame, actively driving them toward zero.  When a 2→1 transition then
+        # occurs, heading_delta = heading_raw − 0 ≈ 46° → camera_shift ≈ ±56 px
+        # transient on the very first single-line frame.  Updating here from the
+        # actual AI line headings eliminates that transient: heading_delta ≈ 0 right
+        # from the start.
+        if len(detected_sides) == 2 and isinstance(side_lines, dict):
+            _heading_ref_alpha = max(0.01, min(1.0, float(getattr(self, 'single_line_heading_ref_alpha', 0.15))))
+            for _side, _ref_attr in (
+                ('left', '_single_line_heading_ref_left'),
+                ('right', '_single_line_heading_ref_right'),
+            ):
+                _sl_line = side_lines.get(_side)
+                if isinstance(_sl_line, np.ndarray) and _sl_line.ndim == 2 and _sl_line.shape[1] >= 4:
+                    _h = self._compute_raw_line_heading(_sl_line)
+                    _cur = float(getattr(self, _ref_attr, 0.0))
+                    setattr(self, _ref_attr, (1.0 - _heading_ref_alpha) * _cur + _heading_ref_alpha * _h)
 
         # Shadow single-line computation (diagnostic only, never affects control).
         # When both lines are visible we know the correct error from two-line mode, so
@@ -8240,15 +8267,20 @@ Returns:
                 )
 
                 # Calibrate single-line heading references from stable two-line geometry.
+                # Skip when a line is None: _compute_raw_line_heading(None) returns 0.0
+                # which would actively drive the reference toward zero each frame, causing
+                # a large camera_shift transient on the first 2→1 single-line frame.
                 alpha = max(0.01, min(1.0, self.single_line_heading_ref_alpha))
-                left_raw_heading = self._compute_raw_line_heading(avg_left)
-                right_raw_heading = self._compute_raw_line_heading(avg_right)
-                self._single_line_heading_ref_left = (
-                    (1.0 - alpha) * self._single_line_heading_ref_left + alpha * left_raw_heading
-                )
-                self._single_line_heading_ref_right = (
-                    (1.0 - alpha) * self._single_line_heading_ref_right + alpha * right_raw_heading
-                )
+                if avg_left is not None:
+                    left_raw_heading = self._compute_raw_line_heading(avg_left)
+                    self._single_line_heading_ref_left = (
+                        (1.0 - alpha) * self._single_line_heading_ref_left + alpha * left_raw_heading
+                    )
+                if avg_right is not None:
+                    right_raw_heading = self._compute_raw_line_heading(avg_right)
+                    self._single_line_heading_ref_right = (
+                        (1.0 - alpha) * self._single_line_heading_ref_right + alpha * right_raw_heading
+                    )
                 debug_info['single_heading_ref_l'] = self._single_line_heading_ref_left
                 debug_info['single_heading_ref_r'] = self._single_line_heading_ref_right
 
