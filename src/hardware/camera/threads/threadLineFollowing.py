@@ -715,6 +715,7 @@ Args:
             )
         )
         self._last_requested_motor_command = None
+        self._last_sl_shadow_debug = None  # populated each two-line frame for calib diagnostics
         self._last_state_change_message = None
         self._dynamic_metrics_window = 20
         self._theta_abs_error_history = deque(maxlen=self._dynamic_metrics_window)
@@ -1756,6 +1757,23 @@ Args:
         single_line_prefer_center = None
         single_line_streak = None
 
+        # Shadow single-line computation (diagnostic only, never affects control).
+        # When both lines are visible we know the correct error from two-line mode, so
+        # compute what each single-line estimator would give independently and log the
+        # discrepancy for calibration.
+        _sl_shadow = None
+        if len(detected_sides) == 2 and isinstance(side_lines, dict):
+            _sl_shadow = self._compute_single_line_shadow_for_calib(
+                side_lines,
+                img_h,
+                img_w,
+                reference_y,
+                raw_error_px,
+                float(left_ref_x),
+                float(right_ref_x),
+            )
+        self._last_sl_shadow_debug = _sl_shadow
+
         if visible_side is not None and visible_line is not None:
             streak_attr = 'consecutive_single_left' if visible_side == 'left' else 'consecutive_single_right'
             previous_streak = int(getattr(self, streak_attr, 0) or 0)
@@ -1767,29 +1785,57 @@ Args:
                 prev_seen_side == "both" and
                 single_line_streak <= prefer_center_frames
             )
-            single_error, single_heading = self._compute_single_line_error(
-                visible_line,
-                visible_side,
-                img_h,
-                img_w,
-                prefer_center=single_line_prefer_center,
-                physical_projection=True,
-                reference_y_override=reference_y,
-            )
-            single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
-            single_line_projection_debug['single_line_prefer_center'] = bool(single_line_prefer_center)
-            single_line_projection_debug['single_line_streak'] = int(single_line_streak)
-            single_line_projection_debug['single_line_curve_context'] = bool(curve_context)
-            desired_center = float(single_line_projection_debug.get('single_line_target_x', midpoint_x))
-            desired_center = max(0.0, min(float(img_w - 1), desired_center))
-            midpoint_bottom_x = desired_center
-            midpoint_x = desired_center
-            heading_rad = float(single_heading)
-            error_px = float(single_error)
-            raw_error_px = float(single_error)
-            draw_y = int(single_line_projection_debug.get('single_line_reference_y', reference_y))
-            draw_y = max(0, min(img_h - 1, draw_y))
-            guidance_mode = 'single_line_physical'
+
+            # When the visible line is nearly horizontal (high angle from vertical), the
+            # line's x position at the lookahead reference_y is dominated by heading
+            # perspective rather than actual lateral offset.  Projecting the lane center
+            # from that position inflates the crosstrack error and diverges from what
+            # two-line mode would compute for the same geometry.  In that case, keep the
+            # midpoint_ref result (virtual boundary + mask x), which is consistent with
+            # the two-line midpoint calculation and gives a smoother transition.
+            _heading_raw_rad = self._compute_raw_line_heading(visible_line)
+            _abs_heading_deg = abs(math.degrees(_heading_raw_rad))
+            _heading_cutoff = float(getattr(self, 'single_line_physical_heading_cutoff_deg', 65.0))
+            _use_physical_projection = _abs_heading_deg < _heading_cutoff
+
+            if _use_physical_projection:
+                single_error, single_heading = self._compute_single_line_error(
+                    visible_line,
+                    visible_side,
+                    img_h,
+                    img_w,
+                    prefer_center=single_line_prefer_center,
+                    physical_projection=True,
+                    reference_y_override=reference_y,
+                )
+                single_line_projection_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
+                single_line_projection_debug['single_line_prefer_center'] = bool(single_line_prefer_center)
+                single_line_projection_debug['single_line_streak'] = int(single_line_streak)
+                single_line_projection_debug['single_line_curve_context'] = bool(curve_context)
+                desired_center = float(single_line_projection_debug.get('single_line_target_x', midpoint_x))
+                desired_center = max(0.0, min(float(img_w - 1), desired_center))
+                midpoint_bottom_x = desired_center
+                midpoint_x = desired_center
+                heading_rad = float(single_heading)
+                error_px = float(single_error)
+                raw_error_px = float(single_error)
+                draw_y = int(single_line_projection_debug.get('single_line_reference_y', reference_y))
+                draw_y = max(0, min(img_h - 1, draw_y))
+                guidance_mode = 'single_line_physical'
+            else:
+                # Line is nearly horizontal: skip physical projection.  Keep the
+                # midpoint_ref error already in error_px (mask x + virtual boundary),
+                # which matches the two-line midpoint formula.  Record a minimal debug
+                # dict so downstream logging still sees single-line fields.
+                single_line_projection_debug = {
+                    'single_line_angle_from_vertical_deg': float(_abs_heading_deg),
+                    'single_line_heading_raw_deg': float(math.degrees(_heading_raw_rad)),
+                    'single_line_heading_reliability': 0.0,
+                    'single_line_prefer_center': bool(single_line_prefer_center),
+                    'single_line_streak': int(single_line_streak),
+                    'single_line_curve_context': bool(curve_context),
+                    'single_line_mode': 'midpoint_ref_fallback',
+                }
 
         single_side_error_limit_px = None
         if len(detected_sides) == 1:
@@ -1866,6 +1912,8 @@ Args:
             guidance['single_line_projection_debug'] = single_line_projection_debug
         if narrow_width_collapse is not None:
             guidance['duplicate_line_collapse'] = narrow_width_collapse
+        if _sl_shadow is not None:
+            guidance['single_line_shadow'] = _sl_shadow
         return guidance
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
@@ -4343,42 +4391,126 @@ Args:
 
         return steering_angle, speed, False
 
+    def _compute_single_line_shadow_for_calib(
+        self,
+        side_lines,
+        img_h,
+        img_w,
+        reference_y,
+        two_line_error_px,
+        left_ref_x,
+        right_ref_x,
+    ):
+        """Compute single-line error independently for each line when two lines are visible.
+
+        Never affects control output.  Used only for calibration diagnostics: knowing the
+        "correct" two-line error lets us measure each single-line estimator's bias and
+        tune parameters so they match when the car transitions to one-line mode.
+
+        For each side we compute two variants:
+          - physical: the same projection used in single_line_physical mode
+          - midpoint_ref_fallback: virtual boundary from lane_width (stable for high angles)
+        """
+        _ref_lw_px = max(1.0, float(right_ref_x) - float(left_ref_x))
+        _px_per_cm_now = _ref_lw_px / max(1e-3, float(self.lane_width_cm))
+
+        # Temporarily expose current frame's px_per_cm so _compute_single_line_error
+        # uses the right scale (the stored attribute is from the previous two-line frame).
+        _saved_ppc = getattr(self, '_last_two_line_ref_px_per_cm', None)
+        _saved_proj_debug = getattr(self, '_last_single_line_projection_debug', None)
+
+        result = {}
+        try:
+            self._last_two_line_ref_px_per_cm = _px_per_cm_now
+
+            for side in ('left', 'right'):
+                line = side_lines.get(side)
+                if not isinstance(line, np.ndarray) or line.ndim != 2 or line.shape[1] < 4:
+                    continue
+
+                _heading_raw = self._compute_raw_line_heading(line)
+                _abs_heading_deg = abs(math.degrees(_heading_raw))
+                _heading_cutoff = float(getattr(self, 'single_line_physical_heading_cutoff_deg', 65.0))
+
+                entry = {
+                    'angle_from_vertical_deg': round(float(_abs_heading_deg), 2),
+                    'heading_cutoff_deg': float(_heading_cutoff),
+                    'would_skip_physical': bool(_abs_heading_deg >= _heading_cutoff),
+                    'px_per_cm': round(float(_px_per_cm_now), 4),
+                    'ref_lw_px': round(float(_ref_lw_px), 2),
+                    'left_ref_x': round(float(left_ref_x), 2),
+                    'right_ref_x': round(float(right_ref_x), 2),
+                    'two_line_error_px': round(float(two_line_error_px), 2),
+                }
+
+                # --- Physical projection ---
+                try:
+                    sl_err_phys, _ = self._compute_single_line_error(
+                        line, side, img_h, img_w,
+                        prefer_center=False,
+                        physical_projection=True,
+                        reference_y_override=reference_y,
+                    )
+                    phys_debug = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
+                    entry['physical'] = {
+                        'error_px': round(float(sl_err_phys), 2),
+                        'delta_vs_two_line_px': round(float(sl_err_phys) - float(two_line_error_px), 2),
+                        'target_x': round(float(phys_debug.get('single_line_target_x', 0.0)), 2),
+                        'ref_line_x': round(
+                            float(phys_debug.get('single_line_target_x', 0.0))
+                            - (img_w / 2.0)
+                            + float(two_line_error_px)
+                            - float(sl_err_phys)
+                            + (img_w / 2.0),
+                            2,
+                        ),
+                        'camera_shift_px': round(float(phys_debug.get('single_line_camera_shift_px', 0.0)), 3),
+                        'heading_reliability': round(float(phys_debug.get('single_line_heading_reliability', 0.0)), 3),
+                        'curve_strength': round(float(phys_debug.get('single_line_curve_strength', 0.0)), 3),
+                        'outer_confirmed': bool(phys_debug.get('single_line_outer_confirmed', False)),
+                        'outer_bias_px': round(float(phys_debug.get('single_line_outer_bias_px', 0.0)), 3),
+                        'mode': str(phys_debug.get('single_line_mode', '')),
+                    }
+                except Exception as _exc:
+                    entry['physical'] = {'error': str(_exc)}
+
+                # --- Midpoint-ref fallback (virtual boundary using exact current lane width) ---
+                ref_line_x_at_y = self._line_x_at_y(line, reference_y)
+                if ref_line_x_at_y is not None:
+                    if side == 'left':
+                        virt_x = min(float(img_w - 1), float(ref_line_x_at_y) + _ref_lw_px)
+                    else:
+                        virt_x = max(0.0, float(ref_line_x_at_y) - _ref_lw_px)
+                    virt_mid = (float(ref_line_x_at_y) + virt_x) / 2.0
+                    sl_err_virt = virt_mid - (img_w / 2.0)
+                    entry['midpoint_ref_fallback'] = {
+                        'error_px': round(float(sl_err_virt), 2),
+                        'delta_vs_two_line_px': round(float(sl_err_virt) - float(two_line_error_px), 2),
+                        'ref_line_x': round(float(ref_line_x_at_y), 2),
+                        'virtual_other_x': round(float(virt_x), 2),
+                        'virtual_midpoint_x': round(float(virt_mid), 2),
+                    }
+                else:
+                    entry['midpoint_ref_fallback'] = {'error': 'ref_line_x_at_y is None'}
+
+                result[side] = entry
+        finally:
+            self._last_two_line_ref_px_per_cm = _saved_ppc
+            self._last_single_line_projection_debug = _saved_proj_debug
+
+        return result if result else None
+
     def _should_apply_single_line_protective_stop(self, local_mask_guidance, steering_angle, error):
-        """Stop forward motion if 1-line tracking stays saturated for too long."""
-        if not self._is_ai_local_active() or not isinstance(local_mask_guidance, dict):
-            self._single_line_stop_consecutive = 0
-            return False
+        """Stop forward motion if 1-line tracking stays saturated for too long.
 
-        if str(local_mask_guidance.get('guidance_mode', '')) != 'single_line_physical':
-            self._single_line_stop_consecutive = 0
-            return False
-
-        detected_sides = tuple(local_mask_guidance.get('detected_sides', ()))
-        if len(detected_sides) != 1:
-            self._single_line_stop_consecutive = 0
-            return False
-
-        if steering_angle is None or abs(float(steering_angle)) < (float(self.max_steering) * 0.9):
-            self._single_line_stop_consecutive = 0
-            return False
-
-        lane_width_px = float(local_mask_guidance.get('lane_width_px', 0.0) or 0.0)
-        raw_error = float(local_mask_guidance.get('raw_error_px', error if error is not None else 0.0) or 0.0)
-        error_threshold = max(
-            20.0,
-            float(self.max_error_px) * float(getattr(self, 'single_line_stop_error_scale', 1.5)),
-            lane_width_px * 0.20,
-        )
-        if abs(raw_error) < error_threshold:
-            self._single_line_stop_consecutive = 0
-            return False
-
-        self._single_line_stop_consecutive += 1
-        required_frames = max(
-            3,
-            int(getattr(self, 'single_line_stop_max_steer_frames', 6) or 0),
-        )
-        return self._single_line_stop_consecutive >= required_frames
+        Disabled: in single-line mode during curves the robot needs to keep moving so
+        the steering correction can take effect.  A large raw_error_px in single-line
+        mode is expected and correct — it means "steer hard to follow the curve", not
+        "the robot is off the track".  Stopping while at max-steer prevents self-correction
+        and causes the robot to freeze permanently.
+        """
+        self._single_line_stop_consecutive = 0
+        return False
 
     # ============= STANLEY CONTROLLER HELPERS =============
 
@@ -7135,6 +7267,7 @@ Returns:
                 "curve_direction": self._curve_direction,
             },
             "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
+            "single_line_shadow": self._last_sl_shadow_debug,
         }
         log_dir = os.path.dirname(self._calib_log_path)
         os.makedirs(log_dir, exist_ok=True)
