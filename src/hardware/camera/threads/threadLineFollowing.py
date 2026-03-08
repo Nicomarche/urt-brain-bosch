@@ -105,6 +105,16 @@ PARKING_T_FORWARD_CORR    = float(getattr(_config, "PARKING_T_FORWARD_CORR",    
 # Tiempo de espera servo
 PARKING_T_WAIT_STEER = float(getattr(_config, "PARKING_T_WAIT_STEER", 1.0))
 
+# Dimensiones del spot (para calcular límites de maniobra)
+PARKING_SPOT_LENGTH_CM = float(getattr(_config, "PARKING_SPOT_LENGTH_CM", 76.5))
+
+# Geometría del auto y control de múltiples maniobras
+PARKING_CAR_LENGTH_CM         = float(getattr(_config, "PARKING_CAR_LENGTH_CM",         20.0))
+PARKING_MAX_MANEUVER_CYCLES   = int(getattr(_config,   "PARKING_MAX_MANEUVER_CYCLES",    4))
+PARKING_REAR_MARGIN_CM        = float(getattr(_config, "PARKING_REAR_MARGIN_CM",         5.0))
+PARKING_FRONT_MARGIN_CM       = float(getattr(_config, "PARKING_FRONT_MARGIN_CM",        5.0))
+PARKING_MIN_USEFUL_REVERSE_CM = float(getattr(_config, "PARKING_MIN_USEFUL_REVERSE_CM",  8.0))
+
 
 class PIDController:
     """PID Controller for lane following steering.
@@ -8923,10 +8933,17 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             return PARKING_ENTRY_STEER, 0
 
         # ---------------------------------------------------------------
-        # Phase 2: reverse with max ENTRY steer (swing rear into spot)
+        # Phase 2: reverse with max ENTRY steer (swing rear into spot).
+        # Distance capped by remaining space to the back wall of the spot.
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.REVERSING_ENTRY:
-            if self._parking_phase_complete(now, PARKING_D_REVERSING_ENTRY_CM, PARKING_T_REVERSING_ENTRY):
+            available_back = max(
+                PARKING_MIN_USEFUL_REVERSE_CM,
+                PARKING_SPOT_LENGTH_CM - PARKING_REAR_MARGIN_CM - self._parking_total_reverse_cm,
+            )
+            phase_dist = min(PARKING_D_REVERSING_ENTRY_CM, available_back)
+            if self._parking_phase_complete(now, phase_dist, PARKING_T_REVERSING_ENTRY):
+                self._parking_total_reverse_cm += self._parking_phase_dist_cm
                 _advance(ParkingState.WAIT_STEER_2, "WAIT_STEER_2 - stopped, turning wheels to align steer")
             return PARKING_ENTRY_STEER, PARKING_REVERSE_SPEED
 
@@ -8939,10 +8956,17 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             return PARKING_ALIGN_STEER, 0
 
         # ---------------------------------------------------------------
-        # Phase 3: reverse with max ALIGN steer (opposite) to straighten in spot
+        # Phase 3: reverse with max ALIGN steer (opposite) to straighten in spot.
+        # Distance capped by remaining space to the back wall of the spot.
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.REVERSING_ALIGN:
-            if self._parking_phase_complete(now, PARKING_D_REVERSING_ALIGN_CM, PARKING_T_REVERSING_ALIGN):
+            available_back = max(
+                PARKING_MIN_USEFUL_REVERSE_CM,
+                PARKING_SPOT_LENGTH_CM - PARKING_REAR_MARGIN_CM - self._parking_total_reverse_cm,
+            )
+            phase_dist = min(PARKING_D_REVERSING_ALIGN_CM, available_back)
+            if self._parking_phase_complete(now, phase_dist, PARKING_T_REVERSING_ALIGN):
+                self._parking_total_reverse_cm += self._parking_phase_dist_cm
                 _advance(ParkingState.WAIT_STEER_3, "WAIT_STEER_3 - stopped, turning wheels back to entry steer")
             return PARKING_ALIGN_STEER, PARKING_REVERSE_SPEED
 
@@ -8958,15 +8982,40 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         # ---------------------------------------------------------------
         # Phase 4: go FORWARD with the SAME max steer as the initial entry
         # (PARKING_ENTRY_STEER) to align the car parallel to the curb.
+        # Distance capped so the car does not exit the front of the spot.
+        # After this phase: decide whether another maneuver cycle is needed.
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.FORWARD_CORRECTION:
-            if self._parking_phase_complete(now, PARKING_D_FORWARD_CORR_CM, PARKING_T_FORWARD_CORR):
-                dist_done = self._parking_phase_dist_cm
-                self._parking_state = ParkingState.PARKED
-                print(
-                    f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
-                    f"Corrected {dist_done:.0f}cm forward, maneuver complete"
+            available_fwd = max(
+                0.0,
+                self._parking_dynamic_forward_cm - PARKING_FRONT_MARGIN_CM
+                - self._parking_total_forward_corr_cm,
+            )
+            phase_dist = min(PARKING_D_FORWARD_CORR_CM, available_fwd)
+            phase_done = (phase_dist <= 0.0
+                          or self._parking_phase_complete(now, phase_dist, PARKING_T_FORWARD_CORR))
+            if phase_done:
+                self._parking_total_forward_corr_cm += self._parking_phase_dist_cm
+                remaining_back = (
+                    PARKING_SPOT_LENGTH_CM - PARKING_REAR_MARGIN_CM - self._parking_total_reverse_cm
                 )
+                dist_done = self._parking_phase_dist_cm
+                if (self._parking_maneuver_cycle < PARKING_MAX_MANEUVER_CYCLES - 1
+                        and remaining_back > PARKING_MIN_USEFUL_REVERSE_CM):
+                    self._parking_maneuver_cycle += 1
+                    _advance(
+                        ParkingState.WAIT_STEER_2,
+                        f"WAIT_STEER_2 ciclo {self._parking_maneuver_cycle} "
+                        f"(fondo restante={remaining_back:.0f}cm)",
+                    )
+                else:
+                    self._parking_state = ParkingState.PARKED
+                    print(
+                        f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
+                        f"Corregido {dist_done:.0f}cm adelante, "
+                        f"ciclos={self._parking_maneuver_cycle + 1}, "
+                        f"reversa total={self._parking_total_reverse_cm:.0f}cm"
+                    )
             return PARKING_ENTRY_STEER, PARKING_FORWARD_SPEED
 
         # ---------------------------------------------------------------
@@ -8987,6 +9036,10 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_phase_dist_cm        = 0.0
         self._parking_last_sm_time         = 0.0
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
+        # Multi-maneuver tracking
+        self._parking_maneuver_cycle        = 0    # número de ciclos completados
+        self._parking_total_reverse_cm      = 0.0  # distancia total acumulada en reversa
+        self._parking_total_forward_corr_cm = 0.0  # distancia total de corrección adelante
 
     def stop(self):
         """Stop the thread and cleanup."""

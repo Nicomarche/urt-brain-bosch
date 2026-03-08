@@ -98,6 +98,27 @@ PARKING_CURVE_WAIT_FOR_STRAIGHT = True
 # Ajustar al ~90% del valor de desaparición normal observado en pruebas.
 PARKING_SPOT_LOST_DIST_THRESHOLD_CM = 45.0
 
+# --- Geometría del auto y límites de maniobra ---
+# Longitud estimada del auto. Usada para calcular el espacio útil dentro del spot.
+# Medir con cinta métrica el auto real y ajustar.
+PARKING_CAR_LENGTH_CM        = 20.0
+
+# Máximo de ciclos completos de (reversa-alineación-corrección) permitidos.
+# El primer ciclo hace ENTRY+ALIGN+CORRECTION; los siguientes solo ALIGN+CORRECTION.
+PARKING_MAX_MANEUVER_CYCLES  = 4
+
+# Margen de seguridad respecto al fondo del spot: la reversa se detiene cuando
+# la distancia restante al fondo es <= este valor.
+PARKING_REAR_MARGIN_CM       = 5.0
+
+# Margen de seguridad respecto a la entrada del spot: el avance de corrección
+# se detiene cuando la distancia restante hacia adelante es <= este valor.
+PARKING_FRONT_MARGIN_CM      = 5.0
+
+# Reversa mínima útil: si el espacio restante hacia atrás es menor que esto,
+# no se inicia otro ciclo de maniobra (el auto ya está bien posicionado).
+PARKING_MIN_USEFUL_REVERSE_CM = 8.0
+
 # ═══════════════════════════════════════════════════════════════════════════
 #                     PARÁMETROS DE CALIBRACIÓN DE GIRO
 # ═══════════════════════════════════════════════════════════════════════════
