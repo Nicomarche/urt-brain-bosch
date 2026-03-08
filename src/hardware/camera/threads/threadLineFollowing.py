@@ -7331,12 +7331,13 @@ Returns:
 
         sl_proj = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
         lane_obs = self._lane_observation_history[-1] if self._lane_observation_history else {}
-        heading_source = lane_obs.get('heading_hint_source', 'unknown') if isinstance(lane_obs, dict) else 'unknown'
-        sl_side = None
-        if 'single_right' in heading_source:
-            sl_side = 'right'
-        elif 'single_left' in heading_source:
-            sl_side = 'left'
+        heading_source = str(getattr(self, '_local_ai_heading_hint_source', 'unknown') or 'unknown')
+        sl_side = (lane_obs.get('visible_side') if isinstance(lane_obs, dict) else None)
+        if sl_side is None:
+            if 'single_right' in heading_source:
+                sl_side = 'right'
+            elif 'single_left' in heading_source:
+                sl_side = 'left'
 
         ref_left_deg = round(math.degrees(float(getattr(self, '_single_line_heading_ref_left', 0.0))), 2)
         ref_right_deg = round(math.degrees(float(getattr(self, '_single_line_heading_ref_right', 0.0))), 2)
@@ -7349,22 +7350,27 @@ Returns:
         is_outer_line = sl_proj.get('single_line_outer_curve_line')
         is_outer_confirmed = sl_proj.get('single_line_outer_confirmed')
         curve_strength = sl_proj.get('single_line_curve_strength')
+        ctrl_curve_dir = int(getattr(self, '_curve_direction', 0) or 0)
+        ctrl_curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
         if sl_side is not None and heading_raw_deg is not None:
             summary = (
+                f"src={heading_source} | "
                 f"side={sl_side} | "
+                f"state={ctrl_curve_state}({ctrl_curve_dir:+d}) | "
                 f"raw={heading_raw_deg:+.1f}° | "
                 f"ref={ref_angle_deg:+.1f}° | "
                 f"Δref={delta_from_ref:+.1f}° | "
-                f"outer_heading={is_outer_h} | "
+                f"outer_h={is_outer_h} | "
                 f"outer_line={is_outer_line} | "
-                f"outer_confirmed={is_outer_confirmed} | "
-                f"curve_str={curve_strength:.2f} | "
+                f"confirmed={is_outer_confirmed} | "
+                f"str={curve_strength:.2f} | "
                 f"manual={manual_steer_deg:+.1f}° | "
                 f"algo={algo_steer_deg:+.1f}°"
             )
         else:
             summary = (
-                f"source={heading_source} | "
+                f"src={heading_source} | "
+                f"state={ctrl_curve_state}({ctrl_curve_dir:+d}) | "
                 f"manual={manual_steer_deg:+.1f}° | "
                 f"algo={algo_steer_deg:+.1f}°"
             )
