@@ -1857,7 +1857,107 @@ Args:
             _heading_cutoff = float(getattr(self, 'single_line_physical_heading_cutoff_deg', 65.0))
             _use_physical_projection = _abs_heading_deg < _heading_cutoff
 
-            if _use_physical_projection:
+            # ── Transversal-line detection ───────────────────────────────────────
+            # When the car is in a single-line curve and the detected line's
+            # heading has drifted far in the "wrong" direction relative to the
+            # straight-road reference, the model is tracking the perpendicular
+            # end-of-track boundary line (linea transversal) instead of the real
+            # lane marking.
+            #   • outer RIGHT line (left  curve) → delta ≤ 0 (more left than ref)
+            #   • outer LEFT  line (right curve) → delta ≥ 0 (more right than ref)
+            # A delta going the OPPOSITE way means the line is not a lane boundary.
+            # Detection criterion: |delta| > threshold AND sign is reversed.
+            _transversal_ref_rad = float(getattr(
+                self,
+                '_single_line_heading_ref_left' if visible_side == 'left'
+                else '_single_line_heading_ref_right',
+                0.0,
+            ))
+            _transversal_delta_deg = (
+                math.degrees(_heading_raw_rad) - math.degrees(_transversal_ref_rad)
+            )
+            _transversal_threshold_deg = float(
+                getattr(self, 'single_line_transversal_delta_threshold_deg', 15.0)
+            )
+            # Only trigger when the reference has been meaningfully learned
+            # (|ref| > 5°) to avoid false positives during initialisation.
+            _ref_learned = abs(math.degrees(_transversal_ref_rad)) > 5.0
+            _is_transversal = (
+                curve_context and
+                _ref_learned and
+                (
+                    (visible_side == 'right' and _transversal_delta_deg > _transversal_threshold_deg) or
+                    (visible_side == 'left'  and _transversal_delta_deg < -_transversal_threshold_deg)
+                )
+            )
+            if _is_transversal:
+                # The visible line is the perpendicular end-of-section marker
+                # (linea transversal). The car must turn in _recovery_sign direction
+                # for the entire duration the transversal is visible, until the real
+                # exit lane line comes back into view.
+                #
+                # Two components:
+                #  1. Lateral wall-avoidance: keep the transversal at a safe
+                #     clearance on its expected side.  Once the car has rotated
+                #     enough that the transversal crosses to the opposite half of
+                #     the image the lateral correction drops to zero (the heading
+                #     bias carries the remainder of the turn alone).
+                #  2. Heading bias: constant turn-direction correction throughout
+                #     the whole transversal phase.
+                _recovery_sign = 1.0 if visible_side == 'right' else -1.0
+                _trans_ref_x = self._line_x_at_y(visible_line, reference_y)
+                if _trans_ref_x is None:
+                    _trans_ref_x = img_w * (0.75 if visible_side == 'right' else 0.25)
+                # Keep the transversal at ≈ 1/4 lane-width clearance from the car
+                _clearance_px = float(lane_width_px) * float(
+                    getattr(self, 'single_line_transversal_clearance_factor', 0.25)
+                )
+                if visible_side == 'right':
+                    # Only push car right (away from wall); never use the transversal
+                    # to push the car left when it has already turned past it.
+                    error_px = max(
+                        0.0,
+                        float(_trans_ref_x) - _clearance_px - (img_w / 2.0),
+                    )
+                else:
+                    error_px = min(
+                        0.0,
+                        float(_trans_ref_x) + _clearance_px - (img_w / 2.0),
+                    )
+                # Heading bias — forces the continuous turn regardless of lateral state
+                _heading_bias_deg = float(
+                    getattr(self, 'single_line_transversal_heading_bias_deg', 20.0)
+                )
+                heading_rad = _recovery_sign * math.radians(_heading_bias_deg)
+                _use_physical_projection = False
+                guidance_mode = 'transversal_recovery'
+                _transversal_debug = {
+                    'single_line_angle_from_vertical_deg': float(_abs_heading_deg),
+                    'single_line_heading_raw_deg': float(math.degrees(_heading_raw_rad)),
+                    'single_line_ref_angle_deg': float(math.degrees(_transversal_ref_rad)),
+                    'single_line_heading_delta_from_ref_deg': float(_transversal_delta_deg),
+                    'single_line_is_outer_heading': False,
+                    'single_line_heading_reliability': 0.0,
+                    'single_line_prefer_center': bool(single_line_prefer_center),
+                    'single_line_streak': int(single_line_streak),
+                    'single_line_curve_context': bool(curve_context),
+                    'single_line_mode': 'transversal_recovery',
+                    'single_line_transversal_detected': True,
+                    'single_line_transversal_delta_deg': float(_transversal_delta_deg),
+                    'single_line_transversal_threshold_deg': float(_transversal_threshold_deg),
+                    'single_line_transversal_ref_x': float(_trans_ref_x),
+                    'single_line_transversal_clearance_px': float(_clearance_px),
+                    'single_line_transversal_heading_bias_deg': float(_heading_bias_deg),
+                    'single_line_outer_curve_line': False,
+                    'single_line_outer_confirmed': False,
+                    'single_line_outer_bias_px': 0.0,
+                    'single_line_curve_strength': 0.0,
+                    'single_line_curve_heading_bias_deg': 0.0,
+                }
+                single_line_projection_debug = _transversal_debug
+                self._last_single_line_projection_debug = _transversal_debug
+
+            elif _use_physical_projection:
                 single_error, single_heading = self._compute_single_line_error(
                     visible_line,
                     visible_side,
@@ -7350,9 +7450,22 @@ Returns:
         is_outer_line = sl_proj.get('single_line_outer_curve_line')
         is_outer_confirmed = sl_proj.get('single_line_outer_confirmed')
         curve_strength = sl_proj.get('single_line_curve_strength')
+        is_transversal = bool(sl_proj.get('single_line_transversal_detected', False))
+        sl_mode = sl_proj.get('single_line_mode', '')
         ctrl_curve_dir = int(getattr(self, '_curve_direction', 0) or 0)
         ctrl_curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
-        if sl_side is not None and heading_raw_deg is not None:
+        if is_transversal and sl_side is not None:
+            summary = (
+                f"*** TRANSVERSAL *** src={heading_source} | "
+                f"side={sl_side} | "
+                f"state={ctrl_curve_state}({ctrl_curve_dir:+d}) | "
+                f"raw={heading_raw_deg:+.1f}° | "
+                f"ref={ref_angle_deg:+.1f}° | "
+                f"Δref={delta_from_ref:+.1f}° | "
+                f"RECOVERY → {'RIGHT' if sl_side == 'right' else 'LEFT'} | "
+                f"manual={manual_steer_deg:+.1f}° | algo={algo_steer_deg:+.1f}°"
+            )
+        elif sl_side is not None and heading_raw_deg is not None:
             summary = (
                 f"src={heading_source} | "
                 f"side={sl_side} | "
@@ -7396,6 +7509,10 @@ Returns:
                 "curve_direction": self._curve_direction,
             },
             "single_line_classification": {
+                "mode": sl_mode,
+                "transversal_detected": is_transversal,
+                "transversal_delta_deg": round(sl_proj.get('single_line_transversal_delta_deg', 0.0), 2) if is_transversal else None,
+                "transversal_threshold_deg": round(sl_proj.get('single_line_transversal_threshold_deg', 0.0), 2) if is_transversal else None,
                 "side": sl_side,
                 "heading_raw_deg": round(heading_raw_deg, 2) if heading_raw_deg is not None else None,
                 "ref_angle_deg": round(ref_angle_deg, 2) if ref_angle_deg is not None else None,
