@@ -5341,6 +5341,9 @@ Args:
             'single_line_target_x': float(desired_center),
             'single_line_camera_shift_px': float(camera_shift_px),
             'single_line_heading_raw_deg': float(math.degrees(heading_raw)),
+            'single_line_ref_angle_deg': float(math.degrees(ref_angle)),
+            'single_line_heading_delta_from_ref_deg': float(math.degrees(heading_delta_from_ref)),
+            'single_line_is_outer_heading': bool(_is_outer_heading_sign),
             'single_line_heading_reliability': float(heading_reliability),
             'single_line_angle_from_vertical_deg': float(abs_heading_deg),
             'single_line_curve_like': bool(curve_strength > 0.0),
@@ -7316,6 +7319,7 @@ Returns:
 
         Records the manual steering (real servo position from Nucleo) versus
         the steering angle the algorithm would have computed from lane detection.
+        Only runs when calibration mode is active; the old log is cleared on start.
         """
         if not self._calib_mode_active:
             return
@@ -7324,9 +7328,51 @@ Returns:
         manual_steer_deg = float(self._measured_steer) / 10.0
         algo_steer_deg = float(computed_steering) if computed_steering is not None else None
         delta = round(algo_steer_deg - manual_steer_deg, 2) if algo_steer_deg is not None else None
+
+        sl_proj = dict(getattr(self, '_last_single_line_projection_debug', {}) or {})
+        lane_obs = self._lane_observation_history[-1] if self._lane_observation_history else {}
+        heading_source = lane_obs.get('heading_hint_source', 'unknown') if isinstance(lane_obs, dict) else 'unknown'
+        sl_side = None
+        if 'single_right' in heading_source:
+            sl_side = 'right'
+        elif 'single_left' in heading_source:
+            sl_side = 'left'
+
+        ref_left_deg = round(math.degrees(float(getattr(self, '_single_line_heading_ref_left', 0.0))), 2)
+        ref_right_deg = round(math.degrees(float(getattr(self, '_single_line_heading_ref_right', 0.0))), 2)
+
+        # Compact one-liner for quick log scanning
+        heading_raw_deg = sl_proj.get('single_line_heading_raw_deg')
+        ref_angle_deg = sl_proj.get('single_line_ref_angle_deg')
+        delta_from_ref = sl_proj.get('single_line_heading_delta_from_ref_deg')
+        is_outer_h = sl_proj.get('single_line_is_outer_heading')
+        is_outer_line = sl_proj.get('single_line_outer_curve_line')
+        is_outer_confirmed = sl_proj.get('single_line_outer_confirmed')
+        curve_strength = sl_proj.get('single_line_curve_strength')
+        if sl_side is not None and heading_raw_deg is not None:
+            summary = (
+                f"side={sl_side} | "
+                f"raw={heading_raw_deg:+.1f}° | "
+                f"ref={ref_angle_deg:+.1f}° | "
+                f"Δref={delta_from_ref:+.1f}° | "
+                f"outer_heading={is_outer_h} | "
+                f"outer_line={is_outer_line} | "
+                f"outer_confirmed={is_outer_confirmed} | "
+                f"curve_str={curve_strength:.2f} | "
+                f"manual={manual_steer_deg:+.1f}° | "
+                f"algo={algo_steer_deg:+.1f}°"
+            )
+        else:
+            summary = (
+                f"source={heading_source} | "
+                f"manual={manual_steer_deg:+.1f}° | "
+                f"algo={algo_steer_deg:+.1f}°"
+            )
+
         payload = {
             "frame_index": self._calib_log_frame_idx,
             "wall_time": round(time.time(), 3),
+            "heading_source": heading_source,
             "manual": {
                 "steer_deg": round(manual_steer_deg, 2),
                 "steer_x10_raw": round(float(self._measured_steer), 1),
@@ -7343,7 +7389,23 @@ Returns:
                 "curve_state": self._curve_state,
                 "curve_direction": self._curve_direction,
             },
-            "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
+            "single_line_classification": {
+                "side": sl_side,
+                "heading_raw_deg": round(heading_raw_deg, 2) if heading_raw_deg is not None else None,
+                "ref_angle_deg": round(ref_angle_deg, 2) if ref_angle_deg is not None else None,
+                "heading_delta_from_ref_deg": round(delta_from_ref, 2) if delta_from_ref is not None else None,
+                "is_outer_heading": is_outer_h,
+                "curve_strength": round(curve_strength, 3) if curve_strength is not None else None,
+                "outer_curve_line": is_outer_line,
+                "outer_confirmed": is_outer_confirmed,
+                "outer_confirm_sources": sl_proj.get('single_line_outer_confirm_sources'),
+                "curve_heading_bias_deg": sl_proj.get('single_line_curve_heading_bias_deg'),
+                "outer_bias_px": sl_proj.get('single_line_outer_bias_px'),
+                "heading_reliability": sl_proj.get('single_line_heading_reliability'),
+                "ref_left_deg_stored": ref_left_deg,
+                "ref_right_deg_stored": ref_right_deg,
+            },
+            "lane_observation": lane_obs,
             "single_line_shadow": self._last_sl_shadow_debug,
         }
         log_dir = os.path.dirname(self._calib_log_path)
@@ -7351,6 +7413,7 @@ Returns:
         try:
             with open(self._calib_log_path, "a", encoding="utf-8") as f:
                 f.write(f"=== FRAME {self._calib_log_frame_idx:04d} ===\n")
+                f.write(f"  {summary}\n")
                 f.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
                 f.write("\n\n")
         except Exception as exc:
