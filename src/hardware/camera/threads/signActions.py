@@ -1,7 +1,7 @@
 import time
 
 import config
-from src.utils.messages.allMessages import SpeedMotor
+from src.utils.messages.allMessages import SpeedMotor, SteerMotor
 
 
 class SignActions:
@@ -17,6 +17,14 @@ class SignActions:
     DEFAULT_CURVE_STRAIGHT_FRAMES = 3
     DEFAULT_CURVE_STRAIGHT_STEER_DEG = 5.0
     DEFAULT_PENDING_TIMEOUT = 8.0
+
+    # Giro izquierda 90° post-stop (R=1,02 m hardcodeado)
+    # δ = atan(wheelbase / radius) = atan(0.26 / 1.02) ≈ -14.3° (negativo = izquierda)
+    # Arco = (π/2) × 1.02 m ≈ 1.602 m → calibrar STOP_TURN_DURATION en el hardware real
+    STOP_LEFT_TURN_ENABLED = getattr(config, "SIGN_STOP_LEFT_TURN_ENABLED", True)
+    STOP_TURN_STEER_DEG    = getattr(config, "SIGN_STOP_TURN_STEER_DEG",   -14.3)
+    STOP_TURN_SPEED        = getattr(config, "SIGN_STOP_TURN_SPEED",        5)
+    STOP_TURN_DURATION     = getattr(config, "SIGN_STOP_TURN_DURATION",     8.0)
 
     SIGN_ALIASES = {
         # Common canonical variants
@@ -54,10 +62,11 @@ class SignActions:
     }
 
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
-                 highway_mode_event=None):
+                 highway_mode_event=None, steer_override_event=None):
         self.queuesList = queuesList
         self.sign_action_event = sign_action_event
         self.highway_mode_event = highway_mode_event
+        self.steer_override_event = steer_override_event
         self.action_cooldown = action_cooldown
         self.last_sign = None
         self.last_action_time = {}
@@ -232,6 +241,49 @@ class SignActions:
             "msgValue": speed_value,
         })
 
+    def _send_steer(self, angle_deg):
+        steer_value = str(int(round(angle_deg * 10)))
+        self.queuesList["General"].put({
+            "Owner": SteerMotor.Owner.value,
+            "msgID": SteerMotor.msgID.value,
+            "msgType": SteerMotor.msgType.value,
+            "msgValue": steer_value,
+        })
+
+    def _execute_left_turn_90(self):
+        """Giro izquierda 90° hardcodeado con radio 1,02 m (R=1,02 m, δ≈-14,3°).
+
+        Toma control total de velocidad y dirección bloqueando el line-following
+        a través de steer_override_event. El arco calculado es:
+            arc = (π/2) × 1,02 m ≈ 1,602 m
+        La duración STOP_TURN_DURATION debe calibrarse en el hardware real.
+        """
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
+            f"LEFT TURN 90° (R=1.02m, δ={self.STOP_TURN_STEER_DEG}°, "
+            f"speed={self.STOP_TURN_SPEED}, t={self.STOP_TURN_DURATION}s)"
+        )
+        if self.steer_override_event:
+            self.steer_override_event.set()
+        try:
+            turn_start = time.time()
+            while time.time() - turn_start < self.STOP_TURN_DURATION:
+                self._send_steer(self.STOP_TURN_STEER_DEG)
+                self._send_speed(self.STOP_TURN_SPEED)
+                time.sleep(0.02)
+            # Detener el auto al finalizar el arco
+            self._send_speed(0)
+            self._send_steer(0)
+        finally:
+            if self.steer_override_event:
+                self.steer_override_event.clear()
+            if self.sign_action_event:
+                self.sign_action_event.clear()
+            print(
+                f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mRESUME\033[0m - "
+                f"LEFT TURN complete — returning control to line following"
+            )
+
     def _execute_stop(self):
         print(
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mACTION\033[0m - "
@@ -243,9 +295,13 @@ class SignActions:
         self.is_stopped = True
         time.sleep(self.STOP_DURATION)
         self.is_stopped = False
-        self._send_speed(self.current_speed)
-        if self.sign_action_event:
-            self.sign_action_event.clear()
+
+        if self.STOP_LEFT_TURN_ENABLED:
+            self._execute_left_turn_90()
+        else:
+            self._send_speed(self.current_speed)
+            if self.sign_action_event:
+                self.sign_action_event.clear()
 
     def _execute_crosswalk(self):
         print(

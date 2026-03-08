@@ -322,7 +322,7 @@ Args:
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  show_debug=False, debug_windows=None, sign_action_event=None,
-                 highway_mode_event=None):
+                 highway_mode_event=None, steer_override_event=None):
         super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
         self.queuesList = queuesList
         self.logger = logger
@@ -333,6 +333,7 @@ Args:
         self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
         self._sign_action_was_active = False  # Track transitions to reset speed ramp
         self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
+        self.steer_override_event = steer_override_event  # When set, sign action also controls steer (e.g. hardcoded turn)
 
         # Speed parameters
         self.base_speed        = float(getattr(_config, "LF_BASE_SPEED",        10))
@@ -8864,15 +8865,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             }
 
             # If a sign action (stop, crosswalk, etc.) is active:
-            # - STEER: keep sending so the car aligns with the lane while stopped
-            # - SPEED: block to not override the sign action's speed=0
+            # - SPEED: always blocked to not override the sign action's speed
+            # - STEER: kept sending for lane alignment UNLESS steer_override_event is
+            #   also set (e.g. hardcoded turn), in which case the sign action controls
+            #   both speed and steer.
             if self.sign_action_event and self.sign_action_event.is_set():
                 self._sign_action_was_active = True
                 self._last_requested_motor_command["sign_action_blocked_speed"] = True
                 self._last_requested_motor_command["speed_sent"] = False
-                self.steerMotorSender.send(str(steer_value))
-                if self.show_debug:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
+                if not (self.steer_override_event and self.steer_override_event.is_set()):
+                    self.steerMotorSender.send(str(steer_value))
+                    if self.show_debug:
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
                 return
 
             # Just resumed from a sign action — reset speed ramp to min_speed

@@ -366,6 +366,22 @@ SIGN_HIGHWAY_SPEED   = 7    # Velocidad autopista (se activa con highway_entranc
 SIGN_STOP_DURATION      = 3.0   # Segundos detenido en señal STOP / no_entry
 SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
 
+# ── Giro a la izquierda tras señal STOP ───────────────────────────────────────
+# Después de la parada completa, el auto realiza un giro izquierda de 90° con
+# un radio de 1,02 m de forma hardcodeada, ignorando el seguimiento de línea.
+#
+# Geometría (TC-04, wheelbase=26 cm, radio=102 cm):
+#   δ = atan(L / R) = atan(26 / 102) ≈ 14,3°  → negativo porque es izquierda
+#   Arco 90° = (π/2) × 1,02 m ≈ 1,602 m
+#
+# SIGN_STOP_TURN_DURATION: tiempo estimado para recorrer el arco. Calibrar en
+# el hardware real: medir cuántos segundos tarda el auto en girar 90° a la
+# velocidad SIGN_STOP_TURN_SPEED.
+SIGN_STOP_LEFT_TURN_ENABLED = True     # Activar/desactivar el giro post-stop
+SIGN_STOP_TURN_STEER_DEG   = -14.3   # Ángulo de dirección (Ackermann, negativo = izquierda)
+SIGN_STOP_TURN_SPEED       = 5       # Velocidad durante el giro (misma escala que SIGN_BASE_SPEED)
+SIGN_STOP_TURN_DURATION    = 8.0     # Segundos para completar el arco de 90° — CALIBRAR
+
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
 # En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.

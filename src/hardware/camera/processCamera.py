@@ -154,6 +154,11 @@ class processCamera(WorkerProcess):
         # Shared event: when set, car is on highway — line following uses higher speeds.
         highway_mode_event = threading.Event()
 
+        # Shared event: when set, a sign action controls BOTH speed AND steer
+        # (e.g. hardcoded 90° left turn after stop sign). Line following must not
+        # send steer commands while this event is active.
+        steer_override_event = threading.Event()
+
         # Camera preview window: only if master switch AND individual toggle are on
         show_cam_preview = self.show_preview and self.debug_windows.get("camera_preview", False)
         camTh = threadCamera(
@@ -187,6 +192,7 @@ class processCamera(WorkerProcess):
             action_cooldown=self.sign_action_cooldown,
             sign_action_event=sign_action_event,
             highway_mode_event=highway_mode_event,
+            steer_override_event=steer_override_event,
         )
         self.threads.append(localPerceptionTh)
 
@@ -198,7 +204,8 @@ class processCamera(WorkerProcess):
             show_debug=self.show_preview,
             debug_windows=self.debug_windows,
             sign_action_event=sign_action_event,
-            highway_mode_event=highway_mode_event
+            highway_mode_event=highway_mode_event,
+            steer_override_event=steer_override_event,
         )
         self.threads.append(lineFollowingTh)
 
@@ -214,6 +221,7 @@ class processCamera(WorkerProcess):
                 show_debug=self.show_preview,
                 sign_action_event=sign_action_event,
                 highway_mode_event=highway_mode_event,
+                steer_override_event=steer_override_event,
             )
             self.threads.append(signDetTh)
         elif self.use_legacy_remote_sign_detection and self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:

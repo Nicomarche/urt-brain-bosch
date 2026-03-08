@@ -466,7 +466,8 @@ class threadSignDetection(ThreadWithStop):
                  detection_interval=0.2,
                  show_debug=False,
                  sign_action_event=None,
-                 highway_mode_event=None):
+                 highway_mode_event=None,
+                 steer_override_event=None):
         super(threadSignDetection, self).__init__(pause=0.05)  # 20Hz, suficiente para ~3 FPS de detección
         self.queuesList = queuesList
         self.logger = logger
@@ -480,7 +481,8 @@ class threadSignDetection(ThreadWithStop):
 
         # State
         self.sign_actions = SignActions(self.queuesList, sign_action_event, action_cooldown,
-                                       highway_mode_event)
+                                       highway_mode_event,
+                                       steer_override_event=steer_override_event)
         self.is_active = False
         self.last_detection_time = 0
         self.frame_count = 0

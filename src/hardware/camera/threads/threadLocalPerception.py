@@ -29,7 +29,7 @@ class threadLocalPerception(ThreadWithStop):
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
                  action_cooldown=15.0, sign_action_event=None,
-                 highway_mode_event=None):
+                 highway_mode_event=None, steer_override_event=None):
         # Keep scheduler granularity tight so local_ai_interval can reach high FPS targets.
         super(threadLocalPerception, self).__init__(pause=0.001)
         self.queuesList = queuesList
@@ -94,6 +94,7 @@ class threadLocalPerception(ThreadWithStop):
             sign_action_event=sign_action_event,
             action_cooldown=action_cooldown,
             highway_mode_event=highway_mode_event,
+            steer_override_event=steer_override_event,
         )
 
         self.engine = self._build_engine()
