@@ -18,13 +18,14 @@ class SignActions:
     DEFAULT_CURVE_STRAIGHT_STEER_DEG = 5.0
     DEFAULT_PENDING_TIMEOUT = 8.0
 
-    # Giro izquierda 90° post-stop (R=1,02 m hardcodeado)
-    # δ = atan(wheelbase / radius) = atan(0.26 / 1.02) ≈ -14.3° (negativo = izquierda)
-    # Arco = (π/2) × 1.02 m ≈ 1.602 m → calibrar STOP_TURN_DURATION en el hardware real
+    # Giro izquierda 90° post-stop.
+    # Usa ángulo máximo de dirección (-25°) para un giro visible.
+    # Radio efectivo ≈ 55.8 cm (wheelbase=26cm, steer=25°).
+    # Arco 90° ≈ 87.6 cm → calibrar STOP_TURN_DURATION en el hardware real.
     STOP_LEFT_TURN_ENABLED = getattr(config, "SIGN_STOP_LEFT_TURN_ENABLED", True)
-    STOP_TURN_STEER_DEG    = getattr(config, "SIGN_STOP_TURN_STEER_DEG",   -14.3)
+    STOP_TURN_STEER_DEG    = getattr(config, "SIGN_STOP_TURN_STEER_DEG",   -25.0)
     STOP_TURN_SPEED        = getattr(config, "SIGN_STOP_TURN_SPEED",        5)
-    STOP_TURN_DURATION     = getattr(config, "SIGN_STOP_TURN_DURATION",     8.0)
+    STOP_TURN_DURATION     = getattr(config, "SIGN_STOP_TURN_DURATION",     5.0)
 
     SIGN_ALIASES = {
         # Common canonical variants
