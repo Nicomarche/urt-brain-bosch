@@ -345,9 +345,9 @@ SIGN_MIN_BOX_AREA_PER_SIGN = {
 # ===================== LINE FOLLOWING - VELOCIDADES =====================
 # Escala interna 0–25; el motor recibe speed*10 (ej: LF_MAX_SPEED=13 → 130 PWM).
 # Valores actuales: base normal muy baja para que la autopista sea notoria.
-LF_BASE_SPEED         = 10   # Velocidad inicial al arrancar
-LF_MAX_SPEED          = 13   # Velocidad máxima en modo normal (recta)  → motor 130
-LF_MIN_SPEED          = 8    # Velocidad mínima en modo normal (curva)   → motor 80
+LF_BASE_SPEED         = 15   # Velocidad inicial al arrancar
+LF_MAX_SPEED          = 15   # Velocidad máxima en modo normal (recta)  → motor 130
+LF_MIN_SPEED          = 10    # Velocidad mínima en modo normal (curva)   → motor 80
 LF_HIGHWAY_MAX_SPEED  = 30   # Velocidad máxima en autopista             → motor 250
 LF_HIGHWAY_MIN_SPEED  = 25   # Velocidad mínima en autopista (curva HW)  → motor 150
 LF_SPEED_RAMP_STEP    = 1.0  # Incremento máximo por frame (aceleración gradual)
