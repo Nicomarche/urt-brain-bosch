@@ -1373,8 +1373,17 @@ Args:
             return None, None
         return int(ys.min()), int(ys.max())
 
-    def _confirm_single_line_outer_curve(self, line, side, img_h, img_w, curve_strength):
-        """Confirm that a curve-like single line is likely the outer boundary."""
+    def _confirm_single_line_outer_curve(self, line, side, img_h, img_w, curve_strength,
+                                         heading_raw=0.0):
+        """Confirm that a curve-like single line is likely the outer boundary.
+
+        The outer boundary of a curve tilts in the *same* direction as the turn
+        when viewed from behind the car:
+          - Outer RIGHT line (left curve)  → tilts LEFT  → heading_raw < 0
+          - Outer LEFT  line (right curve) → tilts RIGHT → heading_raw > 0
+        If the heading sign is opposite the line is the INNER boundary of a
+        curve turning the other way; outer-line bias must not be applied.
+        """
         result = {
             'confirmed': False,
             'sources': [],
@@ -1383,6 +1392,28 @@ Args:
             'continuity_confirmed': False,
         }
         if line is None or side not in ('left', 'right'):
+            return result
+
+        # Heading-delta guard: compare the current heading to the straight-road
+        # reference for this line side.  An outer boundary tilts MORE in the
+        # curve direction than the reference (delta in the curve direction):
+        #   outer RIGHT (left  curve) → delta ≤ 0  (more leftward than ref)
+        #   outer LEFT  (right curve) → delta ≥ 0  (more rightward than ref)
+        # Inner lines tilt LESS or in the opposite direction relative to ref.
+        # Using the delta (not the absolute sign of heading_raw) correctly
+        # handles shallow curves where the inner line still appears to tilt
+        # in the "wrong" absolute direction due to straight-road perspective.
+        ref_angle = float(getattr(
+            self,
+            '_single_line_heading_ref_left' if side == 'left' else '_single_line_heading_ref_right',
+            0.0,
+        ))
+        heading_delta_from_ref = heading_raw - ref_angle
+        is_outer_heading = (
+            (side == 'right' and heading_delta_from_ref <= 0) or
+            (side == 'left'  and heading_delta_from_ref >= 0)
+        )
+        if not is_outer_heading:
             return result
 
         min_curve_strength = max(0.0, float(getattr(self, 'single_line_curve_confirm_threshold', 0.35)))
@@ -5149,6 +5180,10 @@ Args:
             fade_span = max(1.0, heading_fade_end_deg - heading_fade_start_deg)
             heading_reliability = (heading_fade_end_deg - abs_heading_deg) / fade_span
         heading_delta = (heading_raw - ref_angle) * heading_reliability
+        # Unscaled delta from the straight-road reference — used for inner/outer
+        # direction checks below.  heading_delta is reliability-weighted (→ 0 at
+        # high angles) so we keep the raw version for directional discrimination.
+        heading_delta_from_ref = heading_raw - ref_angle
         ref_abs_heading_deg = abs(math.degrees(ref_angle))
         curve_bias_start_deg = max(20.0, ref_abs_heading_deg + 8.0)
         curve_bias_full_deg = max(curve_bias_start_deg + 12.0, ref_abs_heading_deg + 28.0)
@@ -5157,10 +5192,22 @@ Args:
         if abs_heading_deg > curve_bias_start_deg:
             curve_span = max(1.0, curve_bias_full_deg - curve_bias_start_deg)
             curve_strength = min(1.0, (abs_heading_deg - curve_bias_start_deg) / curve_span)
-            curve_sign = 1.0 if side == 'left' else -1.0
-            curve_heading_bias = curve_sign * math.radians(
-                float(getattr(self, 'single_line_curve_heading_max_deg', 10.0))
-            ) * curve_strength
+            # Only apply the heading bias when the line's heading has moved in
+            # the direction consistent with being the OUTER boundary of a curve
+            # relative to the straight-road reference for this side:
+            #   outer RIGHT (left  curve) → delta ≤ 0  (more leftward than ref)
+            #   outer LEFT  (right curve) → delta ≥ 0  (more rightward than ref)
+            # If the sign is reversed the visible line is the INNER boundary;
+            # applying the outer-line heading bias would damp a correct hint.
+            is_outer_heading_sign = (
+                (side == 'right' and heading_delta_from_ref <= 0) or
+                (side == 'left'  and heading_delta_from_ref >= 0)
+            )
+            if is_outer_heading_sign:
+                curve_sign = 1.0 if side == 'left' else -1.0
+                curve_heading_bias = curve_sign * math.radians(
+                    float(getattr(self, 'single_line_curve_heading_max_deg', 10.0))
+                ) * curve_strength
 
         if physical_projection:
             if reference_y_override is not None:
@@ -5212,7 +5259,17 @@ Args:
 
         curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
         curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+        # Heading-delta guard: the outer boundary of a curve tilts MORE in the
+        # curve direction relative to the straight-road reference
+        # (outer right → delta ≤ 0; outer left → delta ≥ 0).
+        # Using the delta (not absolute heading_raw) handles shallow curves where
+        # the inner line still has a "wrong-side" absolute tilt from perspective.
+        _is_outer_heading_sign = (
+            (side == 'right' and heading_delta_from_ref <= 0) or
+            (side == 'left'  and heading_delta_from_ref >= 0)
+        )
         is_outer_curve_line = (
+            _is_outer_heading_sign and
             curve_state in ("ENTERING", "IN_CURVE", "EXITING") and
             (
                 (curve_direction == 1 and side == 'left') or
@@ -5226,7 +5283,7 @@ Args:
             line_gap_px = abs(float(reference_x) - (img_w / 2.0))
             outer_line_proximity = 1.0 - min(1.0, line_gap_px / lane_width_px)
             outer_confirmation = self._confirm_single_line_outer_curve(
-                line, side, img_h, img_w, curve_strength
+                line, side, img_h, img_w, curve_strength, heading_raw
             )
             if outer_confirmation.get('confirmed', False):
                 outer_line_weight = max(curve_strength, max(0.0, 1.0 - heading_reliability))
@@ -5249,7 +5306,7 @@ Args:
                 is_outer_curve_line = False
         else:
             outer_confirmation = self._confirm_single_line_outer_curve(
-                line, side, img_h, img_w, curve_strength
+                line, side, img_h, img_w, curve_strength, heading_raw
             )
             if outer_confirmation.get('confirmed', False):
                 lane_width_px = max(1.0, self.lane_width_cm * px_per_cm)
