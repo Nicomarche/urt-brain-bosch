@@ -1912,8 +1912,6 @@ Args:
             guidance['single_line_projection_debug'] = single_line_projection_debug
         if narrow_width_collapse is not None:
             guidance['duplicate_line_collapse'] = narrow_width_collapse
-        if _sl_shadow is not None:
-            guidance['single_line_shadow'] = _sl_shadow
         return guidance
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
@@ -4444,6 +4442,7 @@ Args:
                 }
 
                 # --- Physical projection ---
+                _ref_line_x_at_y = self._line_x_at_y(line, reference_y)
                 try:
                     sl_err_phys, _ = self._compute_single_line_error(
                         line, side, img_h, img_w,
@@ -4455,15 +4454,8 @@ Args:
                     entry['physical'] = {
                         'error_px': round(float(sl_err_phys), 2),
                         'delta_vs_two_line_px': round(float(sl_err_phys) - float(two_line_error_px), 2),
+                        'ref_line_x_at_y': round(float(_ref_line_x_at_y), 2) if _ref_line_x_at_y is not None else None,
                         'target_x': round(float(phys_debug.get('single_line_target_x', 0.0)), 2),
-                        'ref_line_x': round(
-                            float(phys_debug.get('single_line_target_x', 0.0))
-                            - (img_w / 2.0)
-                            + float(two_line_error_px)
-                            - float(sl_err_phys)
-                            + (img_w / 2.0),
-                            2,
-                        ),
                         'camera_shift_px': round(float(phys_debug.get('single_line_camera_shift_px', 0.0)), 3),
                         'heading_reliability': round(float(phys_debug.get('single_line_heading_reliability', 0.0)), 3),
                         'curve_strength': round(float(phys_debug.get('single_line_curve_strength', 0.0)), 3),
@@ -7117,7 +7109,7 @@ Returns:
 
     def _sanitize_log_value(self, value, depth=0):
         """Convert runtime state into JSON-safe, compact log values."""
-        if depth > 4:
+        if depth > 8:
             return str(type(value).__name__)
         if value is None or isinstance(value, (bool, int, float, str)):
             return value
@@ -8735,6 +8727,7 @@ Returns:
             "lane_observation": self._lane_observation_history[-1] if self._lane_observation_history else None,
             "single_line_projection": self._last_single_line_projection_debug,
             "swept_path": self._swept_path_info,
+            "single_line_shadow": self._last_sl_shadow_debug,
             "debug": debug_info,
         })
 
