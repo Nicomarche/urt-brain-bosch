@@ -1,22 +1,22 @@
 # URT Brain — BFMC 2026
 
-Sistema de conducción autónoma para auto a escala 1:10 de la **Bosch Future Mobility Challenge (BFMC)**. Corre sobre Raspberry Pi 5, con offload de inferencia pesada a un servidor GPU remoto vía WebSocket.
+Autonomous driving system for a 1:10 scale car in the **Bosch Future Mobility Challenge (BFMC)**. Runs on Raspberry Pi 5, with heavy inference offloaded to a remote GPU server via WebSocket.
 
-## Arquitectura
+## Architecture
 
-```
+```text
 Raspberry Pi 5                          PC / Laptop (GPU)
 ┌──────────────────────────┐            ┌─────────────────────────┐
 │  main.py                 │            │  aiserver/server.py     │
 │  ├─ processCamera        │  WebSocket │  ├─ /ws/steering        │
-│  │  ├─ threadCamera      │◄──────────►│  │  (HybridNets o       │
+│  │  ├─ threadCamera      │◄──────────►│  │  (HybridNets or      │
 │  │  ├─ threadLineFollow  │  JPEG→JSON │  │   Supercombo)        │
 │  │  └─ threadSignDetect  │◄──────────►│  ├─ /ws/signs           │
 │  ├─ processSerialHandler │            │  │  (YOLOv8)            │
 │  │  ├─ threadRead        │            │  └─ /viz (MJPEG debug)  │
 │  │  └─ threadWrite       │            └─────────────────────────┘
 │  ├─ processDashboard     │
-│  │  └─ Angular frontend  │◄── Browser (control manual + telemetría)
+│  │  └─ Angular frontend  │◄── Browser (manual control + telemetry)
 │  └─ processGateway       │
 │          │                │
 │          │ UART           │
@@ -27,9 +27,9 @@ Raspberry Pi 5                          PC / Laptop (GPU)
 └──────────────────────────┘
 ```
 
-**Comunicación interna**: Colas `multiprocessing.Queue` clasificadas por prioridad (`Critical`, `Warning`, `General`, `Config`, `Log`). Patrón pub/sub con `messageHandlerSender` / `messageHandlerSubscriber`.
+**Internal communication**: `multiprocessing.Queue` queues classified by priority (`Critical`, `Warning`, `General`, `Config`, `Log`). Pub/sub pattern with `messageHandlerSender` / `messageHandlerSubscriber`.
 
-**Máquina de estados**: `DEFAULT` → `AUTO` → `MANUAL` → `STOP`. En modo **AUTO** se activan line following y sign detection.
+**State machine**: `DEFAULT` → `AUTO` → `MANUAL` → `STOP`. In **AUTO** mode, line following and sign detection are enabled.
 
 ## Setup — Raspberry Pi
 
@@ -38,285 +38,291 @@ chmod +x setup.sh
 ./setup.sh
 ```
 
-Esto instala las dependencias del sistema (Node.js 20, Angular CLI, OpenCV, PiCamera2, pyserial, etc.) y las de Python:
+This installs the system dependencies (Node.js 20, Angular CLI, OpenCV, PiCamera2, pyserial, etc.) and the Python dependencies:
 
 ```bash
 sudo pip3 install -r requirements.txt
 ```
 
-### Dependencias opcionales (RPi)
+### Optional dependencies (RPi)
 
 ```bash
-# LSTR AI lane detection (modelo ONNX local)
+# LSTR AI lane detection (local ONNX model)
 pip install onnxruntime
 
-# Detección de señales local (TFLite)
+# Local sign detection (TFLite)
 pip install ai-edge-litert
 
-# Cliente WebSocket para AI Server remoto
+# WebSocket client for remote AI Server
 pip install websockets
 ```
 
-## Setup — AI Server (PC con GPU)
+## Setup — AI Server (PC with GPU)
 
-El AI Server corre en una máquina separada con GPU (NVIDIA, Apple Silicon, o CPU potente).
+The AI Server runs on a separate machine with a GPU (NVIDIA, Apple Silicon, or a powerful CPU).
 
 ```bash
 cd aiserver
 
-# Instalar dependencias
+# Install dependencies
 pip install -r requirements.txt
 
-# Instalar PyTorch según tu GPU:
+# Install PyTorch according to your GPU:
 # CUDA 12.1:  pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 # Apple MPS:  pip install torch torchvision
 # CPU only:   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 
-# Descargar modelo Supercombo (openpilot, ~47MB)
+# Download Supercombo model (openpilot, ~47MB)
 python setup_supercombo.py
 
-# Descargar modelo de señales (YOLOv8, ~22MB)
-# Colocar trafic.pt en aiserver/models/sign_detection/
+# Download sign detection model (YOLOv8, ~22MB)
+# Place trafic.pt in aiserver/models/sign_detection/
 ```
 
-Configurar en `aiserver/config.py`:
+Configure in `aiserver/config.py`:
+
 ```python
 ENGINE_TYPE = "supercombo"   # "hybridnets" | "supercombo"
 DEVICE = "cuda"              # "cuda" | "mps" | "cpu"
 SIGN_DETECTION_ENABLED = True
 ```
 
-Iniciar:
+Start:
+
 ```bash
 python server.py
-# Servidor escucha en 0.0.0.0:8500
+# Server listens on 0.0.0.0:8500
 ```
 
-## Uso
+## Usage
 
 ```bash
-# Terminal 1: Iniciar el brain
+# Terminal 1: Start the brain
 python main.py
 
-# Terminal 2: Dashboard Angular
+# Terminal 2: Angular dashboard
 cd src/dashboard/frontend
 npm start
 ```
 
-El dashboard web permite:
-- Cambiar entre modos (Manual / Auto / Stop)
-- Control manual de velocidad y steering
-- Visualización del stream de cámara
-- Configuración en vivo de parámetros de line following
+The web dashboard allows:
 
-## Configuración
+* Switching between modes (Manual / Auto / Stop)
+* Manual control of speed and steering
+* Camera stream visualization
+* Live configuration of line-following parameters
 
-Toda la configuración del brain está en `config.py`:
+## Configuration
 
-| Parámetro | Descripción |
-|---|---|
-| `CAMERA_TYPE` | `"jetson"` (CSI Jetson), `"picamera"` (CSI RPi) o `"usb"` |
-| `JETSON_SENSOR_ID` | Sensor CSI en Jetson (`0` CAM0, `1` CAM1) |
-| `JETSON_CAPTURE_RESOLUTION` | Resolución nativa del sensor Jetson (ej. `(1920, 1080)`) |
-| `JETSON_OUTPUT_RESOLUTION` | Resolución final enviada a OpenCV/dashboard (ej. `(960, 720)`) |
-| `JETSON_FRAMERATE` | FPS objetivo para `nvarguscamerasrc` |
-| `JETSON_FLIP_METHOD` | `flip-method` de `nvvidconv` (0 = sin flip) |
-| `SHOW_CAMERA_PREVIEW` | Master switch para ventanas de debug OpenCV |
-| `DEBUG_WINDOWS` | Dict para habilitar ventanas individuales |
-| `ENABLE_SIGN_DETECTION` | Activar detección de señales via AI Server |
-| `SIGN_SERVER_URL` | URL WebSocket del AI Server (`ws://ip:8500/ws/signs`) |
-| `SIGN_DETECTION_ACTIONS` | Ejecutar acciones al detectar señales (stop, frenar, etc.) |
-| `SIGN_MIN_CONFIDENCE` | Umbral de confianza mínimo (0.0–1.0) |
-| `SIGN_MIN_BOX_AREA` | Área mínima del bounding box para ejecutar acciones |
-| `SIGN_ACTION_COOLDOWN` | Segundos de cooldown entre acciones de la misma señal |
+All brain configuration is in `config.py`:
 
-## Seguimiento de Líneas
+| Parameter                   | Description                                                   |
+| --------------------------- | ------------------------------------------------------------- |
+| `CAMERA_TYPE`               | `"jetson"` (Jetson CSI), `"picamera"` (RPi CSI), or `"usb"`   |
+| `JETSON_SENSOR_ID`          | CSI sensor on Jetson (`0` CAM0, `1` CAM1)                     |
+| `JETSON_CAPTURE_RESOLUTION` | Native resolution of the Jetson sensor (e.g. `(1920, 1080)`)  |
+| `JETSON_OUTPUT_RESOLUTION`  | Final resolution sent to OpenCV/dashboard (e.g. `(960, 720)`) |
+| `JETSON_FRAMERATE`          | Target FPS for `nvarguscamerasrc`                             |
+| `JETSON_FLIP_METHOD`        | `flip-method` for `nvvidconv` (0 = no flip)                   |
+| `SHOW_CAMERA_PREVIEW`       | Master switch for OpenCV debug windows                        |
+| `DEBUG_WINDOWS`             | Dict to enable individual windows                             |
+| `ENABLE_SIGN_DETECTION`     | Enable sign detection via AI Server                           |
+| `SIGN_SERVER_URL`           | AI Server WebSocket URL (`ws://ip:8500/ws/signs`)             |
+| `SIGN_DETECTION_ACTIONS`    | Execute actions when signs are detected (stop, brake, etc.)   |
+| `SIGN_MIN_CONFIDENCE`       | Minimum confidence threshold (0.0–1.0)                        |
+| `SIGN_MIN_BOX_AREA`         | Minimum bounding box area to execute actions                  |
+| `SIGN_ACTION_COOLDOWN`      | Cooldown in seconds between actions for the same sign         |
 
-El módulo de line following soporta **5 modos de detección** intercambiables desde el dashboard:
+## Line Following
 
-### OpenCV (procesamiento clásico)
+The line-following module supports **5 interchangeable detection modes**, switchable from the dashboard:
 
-Pipeline: CLAHE → HSV filtering → umbral binario → Canny edges → Hough Lines → Sliding Window → Polynomial fit.
+### OpenCV (classical processing)
 
-- **Iluminación adaptativa**: CLAHE ecualiza el histograma localmente, detección adaptativa de blanco ajusta el umbral V dinámicamente según el percentil 92 del frame actual
-- **Fallback por gradiente**: Si la detección por color falla (< 1% de píxeles), recurre a Sobel/Canny como respaldo
-- **Filtro de ruido**: Rechaza frames con más de 40 líneas Hough (reflejos), saltos de error > 80px, o saltos de steering > 15° entre frames
+Pipeline: CLAHE → HSV filtering → binary threshold → Canny edges → Hough Lines → Sliding Window → Polynomial fit.
 
-### LSTR (Transformer local)
+* **Adaptive lighting**: CLAHE locally equalizes the histogram; adaptive white detection dynamically adjusts the V threshold based on the 92nd percentile of the current frame
+* **Gradient fallback**: If color-based detection fails (< 1% of pixels), it falls back to Sobel/Canny as backup
+* **Noise filtering**: Rejects frames with more than 40 Hough lines (reflections), error jumps > 80px, or steering jumps > 15° between frames
 
-Modelo LSTR (WACV 2021) ejecutado con ONNX Runtime directamente en la RPi. Predice parámetros de forma de carril (no segmentación pixel a pixel). Más robusto a cambios de iluminación que OpenCV.
+### LSTR (local Transformer)
+
+LSTR model (WACV 2021) executed with ONNX Runtime directly on the RPi. Predicts lane shape parameters instead of pixel-by-pixel segmentation. More robust to lighting changes than OpenCV.
 
 ### Hybrid (OpenCV + LSTR)
 
-Fusión con pesos configurables (40% OpenCV, 60% LSTR). Bonus de confianza ×1.2 cuando ambos métodos coinciden en dirección.
+Fusion with configurable weights (40% OpenCV, 60% LSTR). Confidence bonus ×1.2 when both methods agree on direction.
 
-### HybridNets (GPU remoto)
+### HybridNets (remote GPU)
 
-Red multi-tarea (EfficientNet + BiFPN): segmentación de ruta + detección de carriles + detección de objetos. Corre en el AI Server con GPU. Comunicación por WebSocket con JPEG crudo.
+Multi-task network (EfficientNet + BiFPN): drivable area segmentation + lane detection + object detection. Runs on the AI Server with GPU. Communication over WebSocket with raw JPEG frames.
 
-### Supercombo (openpilot, GPU remoto)
+### Supercombo (openpilot, remote GPU)
 
-Modelo recurrente de comma.ai. Procesa 2 frames YUV con estado GRU persistente entre frames. Predice 4 carriles × 33 puntos 3D y 5 trayectorias planeadas.
+Recurrent comma.ai model. Processes 2 YUV frames with persistent GRU state across frames. Predicts 4 lanes × 33 3D points and 5 planned trajectories.
 
-## Control PID
+## PID Control
 
-```
+```text
 steering = Kp·error + Ki·∫error·dt + Kd·d(error)/dt
 ```
 
-- **Kp=25.0**: Respuesta proporcional inmediata al error
-- **Ki=1.0**: Corrige offsets persistentes acumulando error en el tiempo
-- **Kd=4.0**: Amortigua oscilaciones basándose en la tasa de cambio
-- **Zona muerta**: Errores < 50px ignorados para estabilidad en recta
-- **Anti-windup**: Reset del integral cada 10 iteraciones
-- **Feed-forward**: Componente predictivo basado en curvatura estimada y modelo de Ackermann (`δ = arctan(L/R)`, L=26.5cm wheelbase)
+* **Kp=25.0**: Immediate proportional response to error
+* **Ki=1.0**: Corrects persistent offsets by accumulating error over time
+* **Kd=4.0**: Damps oscillations based on the rate of change
+* **Dead zone**: Errors < 50px are ignored for straight-line stability
+* **Anti-windup**: Integral is reset every 10 iterations
+* **Feed-forward**: Predictive component based on estimated curvature and the Ackermann model (`δ = arctan(L/R)`, L=26.5cm wheelbase)
 
-### Velocidad adaptativa
+### Adaptive speed
 
-| Steering | Velocidad |
-|---|---|
-| < 10° | max_speed (10) |
-| 10°–15° | interpolación lineal |
-| > 15° | min_speed (5) |
-| Highway mode | 10–25 |
+| Steering     | Speed                |
+| ------------ | -------------------- |
+| < 10°        | max_speed (10)       |
+| 10°–15°      | linear interpolation |
+| > 15°        | min_speed (5)        |
+| Highway mode | 10–25                |
 
-Rampa de aceleración: máximo +0.5 unidades por frame.
+Acceleration ramp: maximum +0.5 units per frame.
 
-## Máquina de Estados de Curvas
+## Curve State Machine
 
+```text
+STRAIGHT ──(1 line for ≥1 frame)──► ENTERING
+    ▲                                  │
+    │                            (≥2 frames with 1 line)
+    │                                  ▼
+EXITING ◄──(2 lines for ≥3 frames)── IN_CURVE
 ```
-STRAIGHT ──(1 línea por ≥1 frame)──► ENTERING
-    ▲                                    │
-    │                              (≥2 frames 1 línea)
-    │                                    ▼
-EXITING ◄──(2 líneas por ≥3 frames)── IN_CURVE
-```
 
-Usa radios conocidos de la pista BFMC (66.5cm carril interior, 103.5cm exterior) para pre-posicionar el auto antes de la curva.
+Uses known BFMC track radii (66.5cm inner lane, 103.5cm outer lane) to pre-position the car before entering a curve.
 
-**Recuperación de curva**: Si el auto queda saturado en máximo steering por >8 frames, ejecuta una maniobra de reversa automática: frena → gira ruedas → retrocede → reposiciona → resume.
+**Curve recovery**: If the car remains saturated at maximum steering for >8 frames, it executes an automatic reverse maneuver: brake → turn wheels → reverse → reposition → resume.
 
-## Detección de Señales de Tráfico
+## Traffic Sign Detection
 
-Arquitectura dual:
+Dual architecture:
 
-| Componente | Modelo | Dónde corre | Protocolo |
-|---|---|---|---|
-| `signDetector.py` | MobilenetV2 SSD (TFLite) | RPi local | Directo |
-| `sign_detection_engine.py` | YOLOv8 (`trafic.pt`) | AI Server | WebSocket |
+| Component                  | Model                    | Where it runs | Protocol  |
+| -------------------------- | ------------------------ | ------------- | --------- |
+| `signDetector.py`          | MobilenetV2 SSD (TFLite) | Local RPi     | Direct    |
+| `sign_detection_engine.py` | YOLOv8 (`trafic.pt`)     | AI Server     | WebSocket |
 
-### Señales soportadas y acciones
+### Supported signs and actions
 
-| Señal | Acción |
-|---|---|
-| Stop / No Entry / Red Light | Frena 3 segundos, luego resume |
-| Crosswalk | Reduce velocidad por 3 segundos |
-| Yellow Light | Reduce velocidad |
-| Green Light | Resume velocidad normal |
-| Speed 20 / Speed 30 | Cambia velocidad base |
-| Highway Entrance | Sube velocidad, activa highway mode |
-| Highway Exit | Baja velocidad, desactiva highway mode |
-| Parking | Detiene el auto |
+| Sign                        | Action                               |
+| --------------------------- | ------------------------------------ |
+| Stop / No Entry / Red Light | Brake for 3 seconds, then resume     |
+| Crosswalk                   | Reduce speed for 3 seconds           |
+| Yellow Light                | Reduce speed                         |
+| Green Light                 | Resume normal speed                  |
+| Speed 20 / Speed 30         | Change base speed                    |
+| Highway Entrance            | Increase speed, enable highway mode  |
+| Highway Exit                | Decrease speed, disable highway mode |
+| Parking                     | Stop the car                         |
 
-### Filtros de seguridad
+### Safety filters
 
-- **Cooldown por grupo**: 15s entre acciones del mismo tipo (evita frenar 3 veces por el mismo stop)
-- **Área mínima de box**: Si la señal ocupa < 1% del frame (está lejos), solo se detecta pero no se ejecuta acción
-- **Solo en modo AUTO**: Las acciones vehiculares solo se ejecutan en modo autónomo
-- **Coordinación con line following**: Un `threading.Event` compartido bloquea los comandos de motor del line following mientras se ejecuta una acción de señal
+* **Per-group cooldown**: 15s between actions of the same type (prevents braking 3 times for the same stop sign)
+* **Minimum box area**: If the sign occupies < 1% of the frame (too far away), it is only detected, but no action is executed
+* **AUTO mode only**: Vehicle actions are only executed in autonomous mode
+* **Coordination with line following**: A shared `threading.Event` blocks motor commands from line following while a sign action is being executed
 
-## Protocolo Serial (RPi ↔ Nucleo STM32)
+## Serial Protocol (RPi ↔ Nucleo STM32)
 
-| Mensaje | Formato | Ejemplo |
-|---|---|---|
-| `SpeedMotor` | `str(speed * 10)` | Velocidad 5.0 → `"50"` |
-| `SteerMotor` | `str(angle)` | 15 grados → `"15"` |
+| Message      | Format            | Example             |
+| ------------ | ----------------- | ------------------- |
+| `SpeedMotor` | `str(speed * 10)` | Speed 5.0 → `"50"`  |
+| `SteerMotor` | `str(angle)`      | 15 degrees → `"15"` |
 
-## Estructura del Proyecto
+## Project Structure
 
-```
+```text
 .
-├── main.py                          # Entry point — orquesta todos los procesos
-├── config.py                        # Configuración global del brain
-├── setup.sh                         # Script de instalación (RPi)
-├── requirements.txt                 # Dependencias Python (RPi)
-├── newComponent.py                  # Generador de nuevos módulos
+├── main.py                          # Entry point — orchestrates all processes
+├── config.py                        # Global brain configuration
+├── setup.sh                         # Installation script (RPi)
+├── requirements.txt                 # Python dependencies (RPi)
+├── newComponent.py                  # New module generator
 │
 ├── src/
 │   ├── hardware/
 │   │   ├── camera/
-│   │   │   ├── processCamera.py     # Proceso de cámara
+│   │   │   ├── processCamera.py     # Camera process
 │   │   │   └── threads/
-│   │   │       ├── threadCamera.py          # Captura de frames
-│   │   │       ├── threadLineFollowing.py   # Detección de carriles + PID
-│   │   │       ├── threadSignDetection.py   # Detección de señales (WebSocket)
+│   │   │       ├── threadCamera.py          # Frame capture
+│   │   │       ├── threadLineFollowing.py   # Lane detection + PID
+│   │   │       ├── threadSignDetection.py   # Sign detection (WebSocket)
 │   │   │       ├── signDetector.py          # MobilenetV2 SSD TFLite (local)
-│   │   │       └── lstrDetector.py          # LSTR Transformer (ONNX local)
-│   │   └── serialhandler/           # Comunicación UART con Nucleo
+│   │   │       └── lstrDetector.py          # LSTR Transformer (local ONNX)
+│   │   └── serialhandler/           # UART communication with Nucleo
 │   ├── statemachine/
-│   │   ├── stateMachine.py          # Lógica de transiciones
-│   │   ├── systemMode.py           # Definición de modos (AUTO, MANUAL, etc.)
+│   │   ├── stateMachine.py          # Transition logic
+│   │   ├── systemMode.py            # Mode definitions (AUTO, MANUAL, etc.)
 │   │   └── transitionTable.py
 │   ├── dashboard/                   # Angular frontend + WebSocket backend
-│   ├── gateway/                     # Router de mensajes internos
+│   ├── gateway/                     # Internal message router
 │   ├── data/
-│   │   ├── Semaphores/              # Procesamiento de semáforos (UDP)
-│   │   └── TrafficCommunication/    # Comunicación con servidor de tráfico
+│   │   ├── Semaphores/              # Traffic light processing (UDP)
+│   │   └── TrafficCommunication/    # Communication with traffic server
 │   ├── templates/
-│   │   ├── workerprocess.py         # Base class para procesos
-│   │   └── threadwithstop.py        # Base class para threads
+│   │   ├── workerprocess.py         # Base class for processes
+│   │   └── threadwithstop.py        # Base class for threads
 │   └── utils/
-│       └── messages/                # Sistema de mensajería pub/sub
+│       └── messages/                # Pub/sub messaging system
 │
-├── aiserver/                        # AI Server (corre en PC con GPU)
+├── aiserver/                        # AI Server (runs on PC with GPU)
 │   ├── server.py                    # FastAPI + WebSocket endpoints
-│   ├── config.py                    # Configuración del servidor
+│   ├── config.py                    # Server configuration
 │   ├── inference.py                 # HybridNets engine (PyTorch)
 │   ├── supercombo_engine.py         # Supercombo engine (ONNX, openpilot)
-│   ├── sign_detection_engine.py     # YOLOv8 engine para señales
-│   ├── client.py                    # WebSocket client (usado por RPi)
-│   ├── setup_supercombo.py          # Descarga modelo Supercombo (~47MB)
-│   ├── requirements.txt             # Dependencias del servidor
-│   └── HybridNets/                  # Repo HybridNets (modelo + utilidades)
+│   ├── sign_detection_engine.py     # YOLOv8 engine for signs
+│   ├── client.py                    # WebSocket client (used by RPi)
+│   ├── setup_supercombo.py          # Downloads Supercombo model (~47MB)
+│   ├── requirements.txt             # Server dependencies
+│   └── HybridNets/                  # HybridNets repo (model + utilities)
 │
 ├── services/
-│   ├── brain-autostart/             # Servicio systemd para iniciar brain al boot
-│   ├── angular-autostart/           # Servicio systemd para iniciar dashboard
-│   └── rpi-wifi-fallback/           # Fallback WiFi automático
+│   ├── brain-autostart/             # systemd service to start brain on boot
+│   ├── angular-autostart/           # systemd service to start dashboard
+│   └── rpi-wifi-fallback/           # Automatic WiFi fallback
 │
-├── models/                          # Modelos de ML (no versionados)
-│   ├── lstr/                        # Modelos LSTR ONNX
-│   └── sign_detection/              # Modelo TFLite de señales
+├── models/                          # ML models (not versioned)
+│   ├── lstr/                        # LSTR ONNX models
+│   └── sign_detection/              # TFLite sign model
 │
-└── calibration/                     # Templates para calibración de motores
+└── calibration/                     # Templates for motor calibration
 ```
 
-## Servicios Systemd
+## Systemd Services
 
-| Servicio | Descripción |
-|---|---|
-| `brain-autostart` | Inicia `main.py` al bootear la RPi |
-| `angular-autostart` | Inicia el dashboard Angular |
-| `rpi-wifi-fallback` | Si la WiFi principal no está disponible, conecta a una red de respaldo |
+| Service             | Description                                                      |
+| ------------------- | ---------------------------------------------------------------- |
+| `brain-autostart`   | Starts `main.py` when the RPi boots                              |
+| `angular-autostart` | Starts the Angular dashboard                                     |
+| `rpi-wifi-fallback` | If the primary WiFi is unavailable, connects to a backup network |
 
-Instalar:
+Install:
+
 ```bash
 cd services/brain-autostart && sudo ./install.sh
 cd services/angular-autostart && sudo ./install.sh
 cd services/rpi-wifi-fallback && sudo ./install.sh
 ```
 
-## Dimensiones del Auto
+## Vehicle Dimensions
 
-| Medida | Valor |
-|---|---|
-| Largo total | 36.5 cm |
-| Ancho total | 19.0 cm |
-| Distancia entre ejes | 27.5 cm |
-| Ancho de carril BFMC | 35.0 cm |
-| Radio curva interior | 66.5 cm (al centro del carril) |
-| Radio curva exterior | 103.5 cm (al centro del carril) |
+| Measurement        | Value                     |
+| ------------------ | ------------------------- |
+| Total length       | 36.5 cm                   |
+| Total width        | 19.0 cm                   |
+| Wheelbase          | 27.5 cm                   |
+| BFMC lane width    | 35.0 cm                   |
+| Inner curve radius | 66.5 cm (to lane center)  |
+| Outer curve radius | 103.5 cm (to lane center) |
 
-## Licencia
+## License
 
-BSD 3-Clause. Basado en el [BFMC Starter Project](https://github.com/ECC-BFMC) de Bosch Engineering Center Cluj.
+BSD 3-Clause. Based on the [BFMC Starter Project](https://github.com/ECC-BFMC) by Bosch Engineering Center Cluj.
+
+If you want, I can also turn this into a cleaner README-style English version with more natural technical wording while preserving the exact structure.
