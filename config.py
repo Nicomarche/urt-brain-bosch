@@ -501,3 +501,4 @@ LOCAL_AI_SIGN_CLASS_MAP = {
 # Walk area stop behavior
 WALK_AREA_STOP_DURATION = 3.0   # seconds to wait after pedestrians clear
 WALK_AREA_COOLDOWN      = 10.0  # seconds before a new walk_area stop can trigger
+WALK_AREA_MIN_BOX_AREA  = 0.04  # min bbox area (normalized) to trigger stop — filters far detections
