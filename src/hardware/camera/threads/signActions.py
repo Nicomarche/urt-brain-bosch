@@ -67,7 +67,7 @@ class SignActions:
     # requisito de esperar curva recta para ejecutar señales pendientes.
     # Esto permite que hw_entry y otras señales se ejecuten inmediatamente
     # después del giro en lugar de quedar bloqueadas por curve_state=IN_CURVE.
-    DEFAULT_FIXED_TURN_GRACE_S = 0.1
+    DEFAULT_FIXED_TURN_GRACE_S = 0.5
 
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
                  highway_mode_event=None, steer_override_event=None):
