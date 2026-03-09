@@ -62,6 +62,12 @@ class SignActions:
         "highway_exit": "highway_exit",
     }
 
+    # Tiempo de gracia después de un giro fijo durante el cual se bypasea el
+    # requisito de esperar curva recta para ejecutar señales pendientes.
+    # Esto permite que hw_entry y otras señales se ejecuten inmediatamente
+    # después del giro en lugar de quedar bloqueadas por curve_state=IN_CURVE.
+    DEFAULT_FIXED_TURN_GRACE_S = 0.5
+
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
                  highway_mode_event=None, steer_override_event=None):
         self.queuesList = queuesList
@@ -81,6 +87,8 @@ class SignActions:
         self.curve_release_straight_frames = self.DEFAULT_CURVE_STRAIGHT_FRAMES
         self.curve_release_steering_deg = self.DEFAULT_CURVE_STRAIGHT_STEER_DEG
         self.pending_sign_timeout = self.DEFAULT_PENDING_TIMEOUT
+        self._fixed_turn_end_time = 0.0
+        self.fixed_turn_grace_s = self.DEFAULT_FIXED_TURN_GRACE_S
 
     @classmethod
     def normalize_sign_name(cls, sign_name):
@@ -118,10 +126,28 @@ class SignActions:
     def _is_curve_state(curve_state):
         return str(curve_state or "").upper() in {"ENTERING", "IN_CURVE", "EXITING"}
 
+    def _in_fixed_turn_grace(self):
+        """True si estamos dentro del período de gracia post-giro fijo."""
+        return (self._fixed_turn_end_time > 0.0 and
+                time.time() - self._fixed_turn_end_time < float(self.fixed_turn_grace_s))
+
     def _requires_curve_exit(self, sign_name):
-        return sign_name in {"highway_entrance"}
+        if sign_name not in {"highway_entrance"}:
+            return False
+        # Durante el período de gracia post-giro fijo no esperamos curva recta.
+        if self._in_fixed_turn_grace():
+            return False
+        return True
 
     def _should_release_pending(self, curve_state, steering_deg):
+        # Durante el período de gracia post-giro fijo, liberar inmediatamente.
+        if self._in_fixed_turn_grace():
+            print(
+                f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mGRACE\033[0m - "
+                f"Liberando señal pendiente '{self.pending_sign}' (post-giro fijo)"
+            )
+            return True
+
         curve_state_norm = str(curve_state or "").upper()
         steering_value = abs(float(steering_deg or 0.0))
 
@@ -292,9 +318,11 @@ class SignActions:
                 self.steer_override_event.clear()
             if self.sign_action_event:
                 self.sign_action_event.clear()
+            self._fixed_turn_end_time = time.time()
             print(
                 f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mRESUME\033[0m - "
-                f"LEFT TURN complete — returning control to line following"
+                f"LEFT TURN complete — returning control to line following "
+                f"(grace {self.fixed_turn_grace_s:.1f}s)"
             )
 
     def _execute_stop(self):
