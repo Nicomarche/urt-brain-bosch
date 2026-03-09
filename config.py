@@ -339,7 +339,8 @@ SIGN_MIN_BOX_AREA = 0.010
 # donde el bounding box nunca supera el 1% aunque el auto esté cerca.
 # Calibración por observación de logs: hw_exit llega a ~0.6% máximo.
 SIGN_MIN_BOX_AREA_PER_SIGN = {
-    "highway_exit": 0.005,   # 0.5% – señal lateral, vista a alta velocidad (250)
+    "highway_exit":     0.003,   # 0.3% – señal lateral, vista a alta velocidad
+    "highway_entrance": 0.003,   # 0.3% – señal lateral, igual que exit
 }
 
 # ===================== LINE FOLLOWING - VELOCIDADES =====================
@@ -348,8 +349,8 @@ SIGN_MIN_BOX_AREA_PER_SIGN = {
 LF_BASE_SPEED         = 15   # Velocidad inicial al arrancar
 LF_MAX_SPEED          = 15   # Velocidad máxima en modo normal (recta)  → motor 130
 LF_MIN_SPEED          = 10    # Velocidad mínima en modo normal (curva)   → motor 80
-LF_HIGHWAY_MAX_SPEED  = 30   # Velocidad máxima en autopista             → motor 250
-LF_HIGHWAY_MIN_SPEED  = 25   # Velocidad mínima en autopista (curva HW)  → motor 150
+LF_HIGHWAY_MAX_SPEED  = 30   # Velocidad máxima en autopista             → motor 300
+LF_HIGHWAY_MIN_SPEED  = 28   # Velocidad mínima en autopista (curva HW)  → motor 280
 LF_SPEED_RAMP_STEP    = 1.0  # Incremento máximo por frame (aceleración gradual)
 
 # ===================== SIGN ACTIONS - VELOCIDADES =====================
@@ -362,7 +363,7 @@ SIGN_BASE_SPEED      = 5    # Velocidad base: marcha normal fuera de autopista
 SIGN_LOW_SPEED       = 3    # Velocidad reducida: semáforo amarillo, zona escolar
 SIGN_SPEED_20        = 3    # Límite 20 km/h
 SIGN_SPEED_30        = 5    # Límite 30 km/h
-SIGN_HIGHWAY_SPEED   = 7    # Velocidad autopista (se activa con highway_entrance)
+SIGN_HIGHWAY_SPEED   = 10   # Velocidad autopista (se activa con highway_entrance)
 SIGN_STOP_DURATION      = 3.0   # Segundos detenido en señal STOP / no_entry
 SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
 
