@@ -1,3 +1,4 @@
+import threading
 import time
 
 import config
@@ -89,6 +90,9 @@ class SignActions:
         self.pending_sign_timeout = self.DEFAULT_PENDING_TIMEOUT
         self._fixed_turn_end_time = 0.0
         self.fixed_turn_grace_s = self.DEFAULT_FIXED_TURN_GRACE_S
+        # Hilo daemon que ejecuta acciones bloqueantes (stop+giro, crosswalk).
+        # Permite que thread_work() siga corriendo para detección e inferencia.
+        self._blocking_action_thread = None
 
     @classmethod
     def normalize_sign_name(cls, sign_name):
@@ -125,6 +129,15 @@ class SignActions:
     @staticmethod
     def _is_curve_state(curve_state):
         return str(curve_state or "").upper() in {"ENTERING", "IN_CURVE", "EXITING"}
+
+    # Señales cuya acción bloquea el hilo (tienen time.sleep internos).
+    # Se ejecutan en un hilo daemon para no congelar thread_work().
+    _ASYNC_BLOCKING_SIGNS = frozenset({"stop", "red_light", "no_entry", "crosswalk"})
+
+    def _is_blocking_action_running(self):
+        """True si hay una acción bloqueante corriendo en el hilo daemon."""
+        return (self._blocking_action_thread is not None and
+                self._blocking_action_thread.is_alive())
 
     def _in_fixed_turn_grace(self):
         """True si estamos dentro del período de gracia post-giro fijo."""
@@ -217,6 +230,10 @@ class SignActions:
             )
             return False
 
+        # No iniciar nueva acción mientras una bloqueante sigue corriendo.
+        if self._is_blocking_action_running():
+            return False
+
         if self.pending_sign == "highway_entrance" and sign_name in {
             "highway_exit", "stop", "red_light", "no_entry", "parking"
         }:
@@ -251,6 +268,20 @@ class SignActions:
                 f"{sign_name} ignored ({remaining:.0f}s left)"
             )
             return False
+
+        # Acciones bloqueantes (tienen sleeps) se corren en un hilo daemon para
+        # que thread_work() siga iterando: inferencia, preview y detección continúan.
+        if sign_name in self._ASYNC_BLOCKING_SIGNS:
+            self.last_sign = sign_name
+            self.last_action_time[action_group] = now
+
+            def _run(sn=sign_name):
+                self._execute_canonical_sign(sn)
+
+            t = threading.Thread(target=_run, daemon=True, name=f"sign-{sign_name}")
+            self._blocking_action_thread = t
+            t.start()
+            return True
 
         if not self._execute_canonical_sign(sign_name):
             return False
