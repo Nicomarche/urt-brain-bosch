@@ -2872,14 +2872,25 @@ Args:
         eff_max, eff_min = self._get_effective_speeds()
         abs_steer = abs(float(steering_angle))
         steer_ratio = min(abs_steer / max(float(self.max_steering), 1e-3), 1.0)
-        target_speed = eff_max - steer_ratio * (eff_max - eff_min)
+
+        is_highway = bool(self.highway_mode_event and self.highway_mode_event.is_set())
+        if is_highway:
+            # En autopista aplicar un factor configurable: 0.0 = sin reducción de velocidad
+            # al corregir, 1.0 = misma reducción que modo normal.
+            hw_factor = float(getattr(_config, "LF_HIGHWAY_STEER_SPEED_FACTOR", 0.2))
+            target_speed = eff_max - steer_ratio * (eff_max - eff_min) * hw_factor
+            ramp_step = float(getattr(_config, "LF_HIGHWAY_SPEED_RAMP_STEP", 3.0))
+        else:
+            target_speed = eff_max - steer_ratio * (eff_max - eff_min)
+            ramp_step = self.speed_ramp_step
+
         if speed_cap is not None:
             target_speed = min(target_speed, float(speed_cap))
 
         if target_speed <= self._current_speed:
             self._current_speed = target_speed
         else:
-            self._current_speed = min(target_speed, self._current_speed + self.speed_ramp_step)
+            self._current_speed = min(target_speed, self._current_speed + ramp_step)
         return self._current_speed
 
     def _get_no_lane_hold_steering(self):
@@ -8767,7 +8778,8 @@ Returns:
                 steering_angle = self.last_steering * 0.95
             else:
                 steering_angle = None
-            speed = self.min_speed
+            _, eff_min_spd = self._get_effective_speeds()
+            speed = eff_min_spd
             speed_cap = speed
 
         if self._is_ai_local_active():
@@ -8778,7 +8790,8 @@ Returns:
             )
 
         if stale_grace_active:
-            conservative_cap = float(self.min_speed)
+            _, eff_min_stale = self._get_effective_speeds()
+            conservative_cap = float(eff_min_stale)
             speed = min(float(speed), conservative_cap)
             speed_cap = conservative_cap
             debug_info['stale_grace_speed_cap'] = conservative_cap
@@ -9113,17 +9126,19 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
                 return
 
-            # Just resumed from a sign action — reset speed ramp to min_speed
-            # so the car starts slow instead of jumping to its previous speed
+            # Just resumed from a sign action — reset speed ramp to effective min_speed
+            # so the car starts slow instead of jumping to its previous speed.
+            # In highway mode, use highway_min_speed so the car doesn't crawl on the highway.
             if self._sign_action_was_active:
                 self._sign_action_was_active = False
-                self._current_speed = self.min_speed
-                speed_value = int(round(self.min_speed * 10))
-                self._last_requested_motor_command["speed"] = float(self.min_speed)
+                _, resume_min = self._get_effective_speeds()
+                self._current_speed = resume_min
+                speed_value = int(round(resume_min * 10))
+                self._last_requested_motor_command["speed"] = float(resume_min)
                 self._last_requested_motor_command["speed_x10"] = int(speed_value)
                 print(
                     f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mRESUME\033[0m - "
-                    f"Speed reset to min ({self.min_speed}) after sign action"
+                    f"Speed reset to min ({resume_min}) after sign action"
                 )
 
             # Normal operation — send both steer and speed

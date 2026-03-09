@@ -349,9 +349,13 @@ SIGN_MIN_BOX_AREA_PER_SIGN = {
 LF_BASE_SPEED         = 15   # Velocidad inicial al arrancar
 LF_MAX_SPEED          = 15   # Velocidad máxima en modo normal (recta)  → motor 130
 LF_MIN_SPEED          = 10    # Velocidad mínima en modo normal (curva)   → motor 80
-LF_HIGHWAY_MAX_SPEED  = 30   # Velocidad máxima en autopista             → motor 300
-LF_HIGHWAY_MIN_SPEED  = 28   # Velocidad mínima en autopista (curva HW)  → motor 280
-LF_SPEED_RAMP_STEP    = 1.0  # Incremento máximo por frame (aceleración gradual)
+LF_HIGHWAY_MAX_SPEED         = 30   # Velocidad máxima en autopista             → motor 300
+LF_HIGHWAY_MIN_SPEED         = 28   # Velocidad mínima en autopista (curva HW)  → motor 280
+LF_SPEED_RAMP_STEP           = 1.0  # Incremento máximo por frame (aceleración gradual)
+LF_HIGHWAY_SPEED_RAMP_STEP   = 3.0  # Aceleración más rápida en autopista (recuperación post-curva)
+# Factor de reducción de velocidad por steering en autopista (0.0 = sin reducción, 1.0 = igual que modo normal).
+# Con 0.0 el auto mantiene max speed incluso durante correcciones en autopista.
+LF_HIGHWAY_STEER_SPEED_FACTOR = 0.2
 
 # ===================== SIGN ACTIONS - VELOCIDADES =====================
 # Velocidades enviadas al motor por las acciones de señales.
