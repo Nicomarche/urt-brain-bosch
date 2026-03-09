@@ -490,4 +490,14 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "yaya": "pedestrian",
     "otobus": "bus",
     "bisikletli": "cyclist",
+    # Walk area / pedestrian crossing area
+    "walk_area": "walk_area",
+    "walk area": "walk_area",
+    "zebra_crossing": "walk_area",
+    "zebra crossing": "walk_area",
+    "yayabolgesi": "walk_area",
 }
+
+# Walk area stop behavior
+WALK_AREA_STOP_DURATION = 3.0   # seconds to wait after pedestrians clear
+WALK_AREA_COOLDOWN      = 10.0  # seconds before a new walk_area stop can trigger

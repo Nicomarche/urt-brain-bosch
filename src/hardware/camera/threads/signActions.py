@@ -70,12 +70,15 @@ class SignActions:
     DEFAULT_FIXED_TURN_GRACE_S = 0.5
 
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
-                 highway_mode_event=None, steer_override_event=None):
+                 highway_mode_event=None, steer_override_event=None,
+                 crosswalk_done_callback=None):
         self.queuesList = queuesList
         self.sign_action_event = sign_action_event
         self.highway_mode_event = highway_mode_event
         self.steer_override_event = steer_override_event
         self.action_cooldown = action_cooldown
+        # Called (with no args) after a crosswalk action completes.
+        self.crosswalk_done_callback = crosswalk_done_callback
         self.last_sign = None
         self.last_action_time = {}
         self.current_speed = self.BASE_SPEED
@@ -391,6 +394,14 @@ class SignActions:
         self._send_speed(self.current_speed)
         if self.sign_action_event:
             self.sign_action_event.clear()
+        if self.crosswalk_done_callback is not None:
+            try:
+                self.crosswalk_done_callback()
+            except Exception as e:
+                print(
+                    f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mERROR\033[0m - "
+                    f"crosswalk_done_callback failed: {e}"
+                )
 
     def _execute_slow_down(self):
         print(

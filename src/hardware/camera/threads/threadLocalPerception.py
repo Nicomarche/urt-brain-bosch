@@ -74,6 +74,14 @@ class threadLocalPerception(ThreadWithStop):
         self._px_per_cm = 0.0       # cached from LineFollowingStatus.stanley_px_per_cm
         self._last_frame_shape = None  # (height, width) of last processed frame
 
+        # Walk-area pedestrian stop logic
+        _wa_stop_dur = float(getattr(config, "WALK_AREA_STOP_DURATION", 3.0))
+        self._walk_area_stop_duration   = _wa_stop_dur
+        self._walk_area_active          = False   # True while stopped for a walk_area
+        self._walk_area_no_obstacle_since = None  # timestamp when obstacle last cleared
+        self._walk_area_cooldown        = float(getattr(config, "WALK_AREA_COOLDOWN", 10.0))
+        self._walk_area_last_cleared    = 0.0     # timestamp of last walk_area resume
+
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
         )
@@ -88,6 +96,7 @@ class threadLocalPerception(ThreadWithStop):
         self.localStatusSender = messageHandlerSender(self.queuesList, LocalPerceptionStatus)
         self.signDetectedSender = messageHandlerSender(self.queuesList, SignDetected)
         self.signStatusSender = messageHandlerSender(self.queuesList, SignDetectionStatus)
+        self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
 
         self.sign_actions = SignActions(
             self.queuesList,
@@ -95,6 +104,7 @@ class threadLocalPerception(ThreadWithStop):
             action_cooldown=action_cooldown,
             highway_mode_event=highway_mode_event,
             steer_override_event=steer_override_event,
+            crosswalk_done_callback=self._on_crosswalk_done,
         )
 
         self.engine = self._build_engine()
@@ -259,6 +269,100 @@ class threadLocalPerception(ThreadWithStop):
         except (TypeError, ValueError, IndexError, ZeroDivisionError):
             return None
 
+    def _on_crosswalk_done(self):
+        """Called by SignActions after a crosswalk action completes.
+
+        In AUTO mode, transition automatically to PARKING mode so the vehicle
+        searches for a parking spot immediately after crossing the crosswalk.
+        """
+        if self._current_mode != "auto":
+            return
+        print(
+            f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mCROSSWALK→PARKING\033[0m - "
+            f"Crosswalk completado en modo AUTO, cambiando a modo PARKING"
+        )
+        try:
+            self.stateChangeSender.send("PARKING")
+        except Exception as e:
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - "
+                f"No se pudo enviar StateChange PARKING: {e}"
+            )
+
+    def _handle_walk_area(self, detections, now):
+        """Stop when a walk_area is detected; resume after pedestrians clear.
+
+        Rules:
+        - On first detection of walk_area (outside cooldown): stop the car.
+        - While stopped:
+            · If an obstacle/pedestrian is visible → keep stopped, reset timer.
+            · If no obstacle → start 3-second clear timer.
+            · Once 3 s without obstacle → resume and enter cooldown.
+        """
+        _OBSTACLE_CLASSES = frozenset({
+            "obstacle", "pedestrian", "person", "yaya", "human",
+        })
+        _WALK_AREA_CLASSES = frozenset({
+            "walk_area", "walk area", "zebra_crossing", "zebra crossing",
+        })
+
+        walk_area_seen = any(
+            str(d.get("class", "")).strip().lower() in _WALK_AREA_CLASSES
+            for d in detections
+        )
+        obstacle_seen = any(
+            str(d.get("class", "")).strip().lower() in _OBSTACLE_CLASSES
+            for d in detections
+        )
+
+        if not self._walk_area_active:
+            if not walk_area_seen:
+                return
+            # Respect cooldown after last resume
+            if now - self._walk_area_last_cleared < self._walk_area_cooldown:
+                return
+            # Activate walk-area stop
+            self._walk_area_active = True
+            self._walk_area_no_obstacle_since = None if obstacle_seen else now
+            if self.sign_actions.sign_action_event:
+                self.sign_actions.sign_action_event.set()
+            self.sign_actions._send_speed(0)
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mWALK_AREA\033[0m - "
+                f"Walk area detectada, auto detenido "
+                f"{'(obstáculo presente)' if obstacle_seen else '(sin obstáculo, esperando 3s)'}"
+            )
+            return
+
+        # Walk area is active — keep car stopped and track obstacle state
+        self.sign_actions._send_speed(0)
+
+        if obstacle_seen:
+            if self._walk_area_no_obstacle_since is not None:
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
+                    f"Obstáculo detectado, reiniciando espera"
+                )
+            self._walk_area_no_obstacle_since = None
+        else:
+            if self._walk_area_no_obstacle_since is None:
+                self._walk_area_no_obstacle_since = now
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
+                    f"Sin obstáculo, esperando {self._walk_area_stop_duration:.0f}s para reanudar"
+                )
+            elif now - self._walk_area_no_obstacle_since >= self._walk_area_stop_duration:
+                # Zona despejada por suficiente tiempo → reanudar
+                self._walk_area_active = False
+                self._walk_area_no_obstacle_since = None
+                self._walk_area_last_cleared = now
+                if self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.clear()
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA\033[0m - "
+                    f"Zona despejada, reanudando marcha"
+                )
+
     def _publish_sign(self, detections, now, img_shape=None):
         if not self.enable_sign_detection or not detections:
             return
@@ -317,6 +421,7 @@ class threadLocalPerception(ThreadWithStop):
             and is_close
             and is_actionable
             and not _skip_parking_action
+            and not self._walk_area_active
         ):
             self.sign_actions.execute(
                 sign_name,
@@ -509,7 +614,9 @@ class threadLocalPerception(ThreadWithStop):
                 "lead_distance_cm": lead_distance_cm,
             })
 
-            self._publish_sign(result.get("detections", []), now, img_shape=self._last_frame_shape)
+            detections = result.get("detections", [])
+            self._handle_walk_area(detections, now)
+            self._publish_sign(detections, now, img_shape=self._last_frame_shape)
             self._publish_status(result, now)
             if build_debug:
                 self._show_debug_windows(result, now)
