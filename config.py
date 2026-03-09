@@ -386,7 +386,7 @@ SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
 SIGN_STOP_LEFT_TURN_ENABLED = True    # Activar/desactivar el giro post-stop
 SIGN_STOP_TURN_STEER_DEG   = -25.0  # Ángulo máximo izquierda (negativo = izquierda)
 SIGN_STOP_TURN_SPEED       = 10      # Velocidad durante el giro (misma escala que SIGN_BASE_SPEED)
-SIGN_STOP_TURN_DURATION    = 19.5    # Segundos para completar el arco de 90° — CALIBRAR
+SIGN_STOP_TURN_DURATION    = 21   # Segundos para completar el arco de 90° — CALIBRAR
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
