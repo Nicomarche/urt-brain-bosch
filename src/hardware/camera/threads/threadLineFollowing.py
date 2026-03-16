@@ -12,6 +12,12 @@ import json
 import os
 from collections import deque
 from enum import Enum
+
+try:
+    from scipy.optimize import minimize as _scipy_minimize
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _SCIPY_AVAILABLE = False
 import config as _config
 from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
 from src.utils.messages.messageHandlerSender import messageHandlerSender
@@ -302,6 +308,171 @@ class StanleyController:
         self._prev_heading = 0.0
 
 
+class LateralMPC:
+    """Model Predictive Controller for lateral lane tracking.
+
+    Drop-in replacement for StanleyController using the same kinematic bicycle
+    model as the reference ACADOS MPC (mpc_acados2_clean.py), but implemented
+    in pure Python via scipy so it runs without ACADOS or GPS.
+
+    Error-space bicycle kinematics (path-following formulation):
+        e_{k+1}     = e_k   + dt * v * sin(psi_e_k)
+        psi_e_{k+1} = psi_e_k + dt * (v/L) * tan(delta_k)
+
+    where:
+        e      — lateral offset from lane centre (m, positive = car is right of centre)
+        psi_e  — heading error relative to lane tangent (rad)
+        delta  — front-wheel steering angle (rad)
+        v      — forward speed (m/s)
+        L      — wheelbase (m)
+
+    Quadratic cost:
+        J = Σ_k [ Q_e·e_k² + Q_psi·psi_e_k² + R·δ_k² + R_rate·(δ_k−δ_{k−1})² ]
+          + Q_e_N·e_N² + Q_psi_N·psi_e_N²
+
+    Falls back to the Stanley formula if scipy is not installed.
+
+    Interface is identical to StanleyController.compute() so either can be
+    plugged in via the `use_lateral_mpc` flag on threadLineFollowing.
+    """
+
+    def __init__(
+        self,
+        L=0.258,
+        N=10,
+        dt=0.033,
+        Q_e=10.0,
+        Q_psi=5.0,
+        R=0.5,
+        R_rate=2.0,
+        Q_e_N=20.0,
+        Q_psi_N=10.0,
+        max_steering=25,
+        crosstrack_deadband=0.005,
+        heading_deadband_rad=0.017,
+        output_deadband_deg=1.0,
+        stanley_k=0.06,
+        stanley_k_soft=1.0,
+    ):
+        self.L = float(L)
+        self.N = int(N)
+        self.dt = float(dt)
+        self.Q_e = float(Q_e)
+        self.Q_psi = float(Q_psi)
+        self.R = float(R)
+        self.R_rate = float(R_rate)
+        self.Q_e_N = float(Q_e_N)
+        self.Q_psi_N = float(Q_psi_N)
+        self.max_steering = float(max_steering)
+        self.crosstrack_deadband = float(crosstrack_deadband)
+        self.heading_deadband_rad = float(heading_deadband_rad)
+        self.output_deadband_deg = float(output_deadband_deg)
+        self.delta_max = math.radians(max_steering)
+        # Stanley fallback parameters (used when scipy unavailable)
+        self._fb_k = float(stanley_k)
+        self._fb_k_soft = float(stanley_k_soft)
+        self._prev_delta = 0.0
+
+    def _rollout(self, e0, psi0, deltas, v):
+        """Simulate N steps of the error-space bicycle model."""
+        e, psi = e0, psi0
+        states = [(e, psi)]
+        for d in deltas:
+            e = e + self.dt * v * math.sin(psi)
+            psi = psi + self.dt * (v / max(self.L, 0.01)) * math.tan(
+                max(-self.delta_max, min(self.delta_max, d))
+            )
+            states.append((e, psi))
+        return states
+
+    def _cost(self, deltas, e0, psi0, v, prev_delta):
+        """Compute MPC cost for a candidate control sequence."""
+        states = self._rollout(e0, psi0, deltas, v)
+        cost = 0.0
+        for k, (e_k, psi_k) in enumerate(states[:-1]):
+            cost += self.Q_e * e_k ** 2 + self.Q_psi * psi_k ** 2
+            cost += self.R * deltas[k] ** 2
+            prev = prev_delta if k == 0 else deltas[k - 1]
+            cost += self.R_rate * (deltas[k] - prev) ** 2
+        e_N, psi_N = states[-1]
+        cost += self.Q_e_N * e_N ** 2 + self.Q_psi_N * psi_N ** 2
+        return cost
+
+    def compute(
+        self,
+        crosstrack_error,
+        heading_error,
+        speed,
+        yaw_rate=0.0,
+        traj_yaw_rate=0.0,
+        steady_state_heading=0.0,
+        steer_damping_delta=0.0,
+    ):
+        """Solve the MPC and return the optimal steering angle (degrees).
+
+        Args match StanleyController.compute() exactly for drop-in replacement.
+            crosstrack_error: Lateral error in metres.  Positive = car left of centre.
+            heading_error:    Heading error in radians. Positive = car heading left.
+            speed:            Forward speed in m/s.
+            (other args accepted but not used by this formulation)
+
+        Returns:
+            float: Optimal steering angle in degrees, clamped to ±max_steering.
+        """
+        e0 = float(crosstrack_error)
+        psi0 = float(heading_error) - float(steady_state_heading)
+        v = max(0.01, abs(float(speed)))
+
+        if abs(e0) < self.crosstrack_deadband:
+            e0 = 0.0
+        if abs(psi0) < self.heading_deadband_rad:
+            psi0 = 0.0
+
+        if not _SCIPY_AVAILABLE:
+            speed_denom = max(self._fb_k_soft + v, 1e-3)
+            delta_rad = psi0 + math.atan2(self._fb_k * e0, speed_denom)
+            delta_deg = math.degrees(delta_rad)
+            delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
+            self._prev_delta = math.radians(delta_deg)
+            return delta_deg
+
+        x0 = np.full(self.N, self._prev_delta)
+        bounds = [(-self.delta_max, self.delta_max)] * self.N
+
+        try:
+            result = _scipy_minimize(
+                self._cost,
+                x0,
+                args=(e0, psi0, v, self._prev_delta),
+                method='SLSQP',
+                bounds=bounds,
+                options={'maxiter': 50, 'ftol': 1e-5},
+            )
+            optimal_deltas = result.x
+        except Exception:
+            # On any solver failure fall back to Stanley
+            speed_denom = max(self._fb_k_soft + v, 1e-3)
+            delta_rad = psi0 + math.atan2(self._fb_k * e0, speed_denom)
+            delta_deg = math.degrees(delta_rad)
+            delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
+            self._prev_delta = math.radians(delta_deg)
+            return delta_deg
+
+        # Apply only the first control in the receding-horizon fashion.
+        delta_opt = float(optimal_deltas[0])
+        delta_opt = max(-self.delta_max, min(self.delta_max, delta_opt))
+        self._prev_delta = delta_opt
+
+        delta_deg = math.degrees(delta_opt)
+        if abs(delta_deg) < self.output_deadband_deg:
+            delta_deg = 0.0
+        return delta_deg
+
+    def reset(self):
+        """Reset controller state."""
+        self._prev_delta = 0.0
+
+
 class threadLineFollowing(ThreadWithStop):
     """Thread which handles line following using OpenCV.
 
@@ -418,6 +589,51 @@ Args:
         self._stanley_sched_k = float(self.stanley_k)
         self._stanley_sched_k_soft = float(self.stanley_k_soft)
         self._stanley_sched_alpha = 0.30
+
+        # ── Lateral MPC (kinematic bicycle, receding horizon) ──────────────
+        # Drop-in replacement for Stanley based on the same bicycle model as
+        # mpc_acados2_clean.py from the reference repo, but running in pure
+        # Python (scipy) without ACADOS or GPS.
+        # Set use_lateral_mpc=True to activate; falls back to Stanley when
+        # scipy is unavailable.
+        self.use_lateral_mpc = bool(getattr(_config, "USE_LATERAL_MPC", True))
+        self.mpc_N = int(getattr(_config, "MPC_N", 10))
+        self.mpc_dt = float(getattr(_config, "MPC_DT", 0.033))
+        self.mpc_L = float(getattr(_config, "MPC_WHEELBASE", 0.258))
+        self.mpc_Q_e = float(getattr(_config, "MPC_Q_E", 10.0))
+        self.mpc_Q_psi = float(getattr(_config, "MPC_Q_PSI", 5.0))
+        self.mpc_R = float(getattr(_config, "MPC_R", 0.5))
+        self.mpc_R_rate = float(getattr(_config, "MPC_R_RATE", 2.0))
+        self.mpc_Q_e_N = float(getattr(_config, "MPC_Q_E_N", 20.0))
+        self.mpc_Q_psi_N = float(getattr(_config, "MPC_Q_PSI_N", 10.0))
+        self.lateral_mpc = LateralMPC(
+            L=self.mpc_L,
+            N=self.mpc_N,
+            dt=self.mpc_dt,
+            Q_e=self.mpc_Q_e,
+            Q_psi=self.mpc_Q_psi,
+            R=self.mpc_R,
+            R_rate=self.mpc_R_rate,
+            Q_e_N=self.mpc_Q_e_N,
+            Q_psi_N=self.mpc_Q_psi_N,
+            max_steering=self.max_steering,
+            crosstrack_deadband=self.stanley_deadband_crosstrack_m,
+            heading_deadband_rad=math.radians(self.stanley_deadband_heading_deg),
+            output_deadband_deg=self.stanley_deadband_output_deg,
+            stanley_k=self.stanley_k,
+            stanley_k_soft=self.stanley_k_soft,
+        )
+        if self.use_lateral_mpc:
+            if _SCIPY_AVAILABLE:
+                print(
+                    "\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - "
+                    f"Lateral MPC active (N={self.mpc_N}, dt={self.mpc_dt}s, L={self.mpc_L}m)"
+                )
+            else:
+                print(
+                    "\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - "
+                    "USE_LATERAL_MPC=True but scipy not installed — falling back to Stanley"
+                )
 
         # Single-line lane centering: how far from the visible line to aim.
         # 0.50 = exact center (17.5cm), 0.40 = closer to visible line (less overshoot).
@@ -840,9 +1056,21 @@ Args:
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
         self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
 
+        # GPS-free tracking state (injected by processCamera after init)
+        self._tracking_state = None
+
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - Windows will open when camera starts streaming")
+
+    def set_tracking_state(self, tracking_state) -> None:
+        """Inject the shared TrackingState object from processCamera.
+
+        Once set, ``_compute_lateral_control`` will use the dead-reckoning
+        waypoint errors whenever ``tracking_state.waypoint_mode_active`` is True
+        (i.e. when the car is near a STOPLINE or INTERSECTION node on the graph).
+        """
+        self._tracking_state = tracking_state
 
     def _update_hsv_arrays(self):
         """Update NumPy arrays for HSV thresholds."""
@@ -1514,6 +1742,70 @@ Args:
 
         return max(0.0, min(float(img_w - 1), virtual_x))
 
+    def _compute_bev_heading(self, side_masks, img_h, img_w, bottom_y, reference_y):
+        """Estimate road heading from lane masks in bird's eye view.
+
+        Projects both lane masks into BEV space and samples the midpoint
+        between the two lines at two y-rows: bottom_y (near field) and
+        reference_y (lookahead).  The heading is atan2(dx, dy) where dx and
+        dy are both in BEV pixels, which are proportional to real metric
+        distances.  This eliminates the perspective foreshortening that
+        inflates the heading estimate computed in image space.
+
+        Returns heading_rad (float) or None when BEV is unavailable or masks
+        are too sparse to produce a reliable estimate.
+        """
+        if not getattr(self, 'perspective_initialized', False):
+            return None
+        if self.bev_cm_per_px <= 0.0:
+            return None
+        if not isinstance(side_masks, dict):
+            return None
+
+        try:
+            warp_size = (img_w, img_h)
+            bev_masks = {}
+            for side in ('left', 'right'):
+                m = side_masks.get(side)
+                if not isinstance(m, np.ndarray) or m.size == 0:
+                    return None
+                m2d = m if m.ndim == 2 else m[..., 0]
+                if m2d.shape[:2] != (img_h, img_w):
+                    return None
+                bev_masks[side] = cv2.warpPerspective(
+                    m2d.astype(np.uint8), self.perspective_M, warp_size
+                )
+
+            min_pixels = max(4, int(img_w * 4))
+
+            def _sample_bev_midpoint_x(y_row):
+                y_row = max(0, min(img_h - 1, int(y_row)))
+                xs = {}
+                for side in ('left', 'right'):
+                    bev = bev_masks[side]
+                    # Sample the mean x of active pixels in a band around y_row.
+                    band_half = max(2, img_h // 40)
+                    y0 = max(0, y_row - band_half)
+                    y1 = min(img_h, y_row + band_half + 1)
+                    band = bev[y0:y1, :]
+                    cols = np.where(band > 0)[1]
+                    if len(cols) < min_pixels:
+                        return None
+                    xs[side] = float(np.mean(cols))
+                return (xs['left'] + xs['right']) / 2.0
+
+            mid_bottom = _sample_bev_midpoint_x(bottom_y)
+            mid_ref = _sample_bev_midpoint_x(reference_y)
+
+            if mid_bottom is None or mid_ref is None:
+                return None
+
+            dy = max(1.0, float(bottom_y - reference_y))
+            return math.atan2(mid_ref - mid_bottom, dy)
+
+        except Exception:
+            return None
+
     def _build_local_mask_guidance(self, side_masks, img_h, img_w, side_lines=None):
         """Build direct steering guidance from the raw local-AI lane masks."""
         self._last_local_ai_mask_reject_reason = None
@@ -1726,6 +2018,30 @@ Args:
         midpoint_x = (float(left_ref_x) + float(right_ref_x)) / 2.0
         dy = max(1.0, float(measurement_bottom_y - reference_y))
         _raw_two_line_heading_rad = math.atan2(midpoint_x - midpoint_bottom_x, dy)
+
+        # BEV heading refinement (two-line mode only).
+        # The perspective-space estimate above is distorted: the vertical pixel
+        # distance between measurement_bottom_y and reference_y is NOT
+        # proportional to real forward distance, so atan2(dx_px, dy_px) inflates
+        # the heading angle in curves.  _compute_bev_heading() repeats the same
+        # midpoint-slope calculation in rectified BEV space where both dx and dy
+        # are metrically correct.  When available it replaces the perspective
+        # estimate; the same max_two_line_heading_deg cap still applies as a
+        # safety guard against bad BEV warps.
+        _bev_heading_active = False
+        if (
+            len(detected_sides) >= 2 and
+            getattr(self, 'ai_local_bev_guidance', True) and
+            getattr(self, 'perspective_initialized', False) and
+            self.bev_cm_per_px > 0.0
+        ):
+            _bev_h = self._compute_bev_heading(
+                normalized_masks, img_h, img_w, measurement_bottom_y, reference_y
+            )
+            if _bev_h is not None:
+                _raw_two_line_heading_rad = _bev_h
+                _bev_heading_active = True
+
         _max_two_line_heading_rad = math.radians(
             float(getattr(self, 'max_two_line_heading_deg', 25.0))
         )
@@ -2028,16 +2344,28 @@ Args:
             curve_ct_offset = math.copysign(outward_px, -float(heading_rad))
             error_px = float(error_px) + curve_ct_offset
 
+        # Metric crosstrack error using BEV scale.  bev_cm_per_px converts BEV
+        # pixels to centimetres; lane_width_px is in perspective pixels, so we
+        # scale error_px to cm via the same ratio: error_cm approximates the
+        # real lateral offset without breaking the existing Stanley k tuning
+        # (which operates on perspective pixels via error_px).
+        _error_cm = None
+        if self.bev_cm_per_px > 0.0 and lane_width_px > 0.0 and self.lane_width_cm > 0.0:
+            _px_to_cm = self.lane_width_cm / max(1.0, lane_width_px)
+            _error_cm = float(error_px) * _px_to_cm
+
         guidance = {
             'midpoint_x': float(midpoint_x),
             'midpoint_bottom_x': float(midpoint_bottom_x),
             'error_px': float(error_px),
             'raw_error_px': float(raw_error_px),
+            'error_cm': _error_cm,
             'single_side_error_limit_px': (
                 float(single_side_error_limit_px) if single_side_error_limit_px is not None else None
             ),
             'heading_rad': float(heading_rad),
             'raw_two_line_heading_rad': float(_raw_two_line_heading_rad) if len(detected_sides) >= 2 else None,
+            'bev_heading_active': bool(_bev_heading_active),
             'left_x': float(left_ref_x),
             'right_x': float(right_ref_x),
             'bottom_left_x': float(left_bottom_x),
@@ -2652,6 +2980,20 @@ Args:
         duplicate_collapse = getattr(self, '_last_local_ai_duplicate_collapse', None)
         if isinstance(duplicate_collapse, dict):
             debug_info['duplicate_line_collapse'] = duplicate_collapse
+
+        # BEV reclassification: verify left/right assignment using the
+        # calibrated homography.  The perspective-space x_center heuristic
+        # used by localPerceptionEngine fails when the vehicle is heading at
+        # an angle relative to the lane (e.g. entering a curve).  In BEV the
+        # x-centroid is metrically correct: the left mask always has a smaller
+        # BEV x than the right mask regardless of vehicle heading.
+        # Only runs when both masks are present and BEV is calibrated; silently
+        # falls back to the original assignment in all other cases.
+        prepared_side_masks, prepared_side_lines, _bev_swapped = self._reclassify_masks_via_bev(
+            prepared_side_masks, prepared_side_lines
+        )
+        if _bev_swapped:
+            debug_info['bev_reclassified'] = True
 
         if bool(getattr(self, 'ai_local_use_mask_geometry', True)):
             local_mask_guidance = self._build_local_mask_guidance(
@@ -5135,6 +5477,35 @@ Args:
         - speed: controller units / measured Nucleo speed -> m/s
         """
         self._heading_error = float(heading)
+
+        # ── Waypoint-mode override (GPS-free tracking at precision zones) ─────
+        # When threadTracking detects a STOPLINE / INTERSECTION node ahead it
+        # sets waypoint_mode_active=True.  We bypass visual lane detection and
+        # feed the dead-reckoning errors directly into the MPC / Stanley.
+        ts = self._tracking_state
+        if ts is not None and getattr(ts, "waypoint_mode_active", False):
+            wp_error_m = float(getattr(ts, "error_m", 0.0))
+            wp_heading_rad = float(getattr(ts, "heading_rad", 0.0))
+            wp_speed_mps = float(getattr(ts, "speed_mps", 0.0))
+            # Use commanded speed as fallback when tracking speed is stale
+            if wp_speed_mps < 1e-4:
+                wp_speed_mps, _ = self._resolve_stanley_speed_mps(
+                    speed_value, speed_cap=speed_cap
+                )
+            if getattr(self, "use_lateral_mpc", False):
+                return self.lateral_mpc.compute(
+                    wp_error_m, wp_heading_rad, wp_speed_mps,
+                    steady_state_heading=0.0,
+                )
+            return self.stanley.compute(
+                wp_error_m, wp_heading_rad, wp_speed_mps,
+                yaw_rate=self._yaw_rate,
+                traj_yaw_rate=0.0,
+                steady_state_heading=0.0,
+                steer_damping_delta=0.0,
+            )
+        # ── End waypoint-mode override ─────────────────────────────────────────
+
         if self._should_use_stanley_controller():
             self._apply_stanley_road_type_schedule()
             if direct_error_m is not None:
@@ -5198,6 +5569,15 @@ Args:
             self._stanley_last_speed_source = str(speed_source)
             self._stanley_last_error_m = float(error_m)
             self._stanley_last_px_per_cm = float(px_per_cm)
+
+            # Route to Lateral MPC or Stanley based on config flag.
+            # Both accept the same arguments; MPC ignores yaw_rate / traj_yaw_rate /
+            # steer_damping_delta (predictive horizon replaces damping terms).
+            if getattr(self, 'use_lateral_mpc', False):
+                return self.lateral_mpc.compute(
+                    error_m, heading, speed_mps,
+                    steady_state_heading=psi_ss,
+                )
             return self.stanley.compute(
                 error_m, heading, speed_mps,
                 yaw_rate=self._yaw_rate,
@@ -6772,6 +7152,74 @@ Args:
     def unwarp_perspective(self, img):
         """Transform image back from bird's eye view."""
         return cv2.warpPerspective(img, self.perspective_M_inv, (img.shape[1], img.shape[0]))
+
+    def _reclassify_masks_via_bev(self, side_masks, side_lines=None):
+        """Correct left/right lane mask swap using bird's eye view centroids.
+
+        In perspective space the x_center heuristic (mask centroid vs frame
+        center) fails when the vehicle heads into a curve or is misaligned
+        with the lane: the geometrically-right lane can appear on the left
+        half of the camera frame.  In BEV (after homography warp) the x
+        position is metrically correct and unambiguous regardless of heading:
+        the left lane mask always has a smaller BEV x-centroid than the right.
+
+        Returns (corrected_side_masks, corrected_side_lines, was_swapped).
+        Falls back to the original assignment when:
+          - The BEV homography is not calibrated.
+          - Only one mask is present (can't compare centroids).
+          - Either warped mask is nearly empty (< min_area pixels).
+          - An unexpected exception occurs.
+        """
+        if not getattr(self, 'perspective_initialized', False):
+            return side_masks, side_lines, False
+
+        if not isinstance(side_masks, dict):
+            return side_masks, side_lines, False
+
+        left_mask = side_masks.get('left')
+        right_mask = side_masks.get('right')
+
+        if not isinstance(left_mask, np.ndarray) or not isinstance(right_mask, np.ndarray):
+            return side_masks, side_lines, False
+        if left_mask.size == 0 or right_mask.size == 0:
+            return side_masks, side_lines, False
+
+        try:
+            h, w = left_mask.shape[:2]
+            warp_size = (w, h)
+            left_bev = cv2.warpPerspective(
+                left_mask.astype(np.uint8), self.perspective_M, warp_size
+            )
+            right_bev = cv2.warpPerspective(
+                right_mask.astype(np.uint8), self.perspective_M, warp_size
+            )
+
+            # Require a minimum number of warped pixels to trust the centroid.
+            min_area = max(4, int(w * h * 0.0005))
+            left_cols = np.where(left_bev > 0)[1]
+            right_cols = np.where(right_bev > 0)[1]
+
+            if len(left_cols) < min_area or len(right_cols) < min_area:
+                return side_masks, side_lines, False
+
+            left_bev_cx = float(np.mean(left_cols))
+            right_bev_cx = float(np.mean(right_cols))
+
+            if left_bev_cx > right_bev_cx:
+                # Masks are swapped — correct them.
+                corrected_masks = {'left': right_mask, 'right': left_mask}
+                corrected_lines = side_lines
+                if isinstance(side_lines, dict):
+                    corrected_lines = {
+                        'left': side_lines.get('right'),
+                        'right': side_lines.get('left'),
+                    }
+                return corrected_masks, corrected_lines, True
+
+        except Exception:
+            pass
+
+        return side_masks, side_lines, False
 
     def _estimate_ground_distance_cm(self, box_normalized, img_w, img_h):
         """Estimate metric forward distance to an object from its bounding box.

@@ -200,6 +200,64 @@ STANLEY_K_SOFT = 3.0
 #   que antes. Si el auto oscila, bajar a 0.05; si va muy rígido, subir a 0.20.
 STANLEY_K_D_STEER = 0.10
 
+# ── LATERAL MPC ───────────────────────────────────────────────────────────────
+# Reemplaza el controlador Stanley por un MPC de horizonte reciente usando el
+# mismo modelo cinemático de bicicleta que el repo de referencia (ACADOS MPC),
+# pero implementado en Python puro (scipy) sin necesidad de GPS ni ACADOS.
+#
+# USE_LATERAL_MPC: True = activa MPC, False = usa Stanley clásico.
+USE_LATERAL_MPC = True
+
+# MPC_WHEELBASE [m]: distancia entre ejes del robot.
+# BFMC robot: 0.258 m (igual que mpc_acados2_clean.py del repo de referencia).
+MPC_WHEELBASE = 0.258
+
+# MPC_N: horizonte de predicción (número de pasos).
+# Más alto = anticipa mejor las curvas pero más lento de resolver.
+# Rango recomendado: 8–15. Con N=10 y dt=0.033s → 330ms de anticipación.
+MPC_N = 10
+
+# MPC_DT [s]: paso de tiempo de la predicción.
+# Debe coincidir con la tasa de control (loop de ~30Hz → 0.033s).
+MPC_DT = 0.033
+
+# Pesos del costo cuadrático:
+#   Q_e    — penaliza error lateral (m²). Mayor = corrección más agresiva.
+#   Q_psi  — penaliza error de heading (rad²). Mayor = mantiene mejor la alineación.
+#   R      — penaliza el esfuerzo de steering (rad²). Mayor = steering más suave.
+#   R_rate — penaliza el cambio de steering entre pasos (rad²). Mayor = más suave.
+#   Q_e_N / Q_psi_N — pesos del costo terminal (N-ésimo paso).
+MPC_Q_E    = 10.0
+MPC_Q_PSI  = 5.0
+MPC_R      = 0.5
+MPC_R_RATE = 2.0
+MPC_Q_E_N  = 20.0
+MPC_Q_PSI_N = 10.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# GPS-FREE TRACKING (dead reckoning + GraphML waypoints)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Path to the GraphML track file.  Relative to the workspace root.
+TRACKING_GRAPHML = "Track GraphML File.graphml"
+
+# Spline interpolation step (metres).  Smaller → denser waypoints, more CPU.
+TRACKING_WAYPOINT_STEP_M = 0.05
+
+# Car advances to next waypoint when it is within this distance (metres).
+TRACKING_ADVANCE_DIST_M = 0.15
+
+# Lookahead distance (metres) used to detect STOPLINE/INTERSECTION nodes ahead.
+# When a precision node is within this distance the tracker switches to
+# waypoint-mode control in threadLineFollowing.
+TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
+
+# Set True to open the OpenCV "Track Navigation" debug window.
+TRACKING_SHOW_WINDOW = True
+
+# Wheelbase already defined as MPC_WHEELBASE; kept here as alias for clarity.
+TRACKING_WHEELBASE_M = MPC_WHEELBASE  # 0.258 m
+
 # ── 5. AMORTIGUAMIENTO DEL STEERING (historial de frames) ────────────────────
 # El steering final se promedia sobre los últimos N frames para suavizar
 # cambios bruscos entre frames. Con N=1 no hay suavizado (reacción inmediata).

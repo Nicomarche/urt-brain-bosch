@@ -51,6 +51,18 @@ except ImportError as e:
     SIGN_DETECTION_AVAILABLE = False
     print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Sign detection not available: {e}")
 
+# GPS-free tracking (optional — requires scipy for spline interpolation)
+try:
+    from src.hardware.tracking.threadTracking import threadTracking, TrackingState
+    from src.hardware.tracking.trackVisualizer import TrackVisualizer
+    import config as _cfg
+    _TRACKING_ENABLED = True
+    _TRACKING_SHOW_WINDOW = getattr(_cfg, "TRACKING_SHOW_WINDOW", True)
+except Exception as _tracking_import_err:
+    _TRACKING_ENABLED = False
+    _TRACKING_SHOW_WINDOW = False
+    print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Tracking not available: {_tracking_import_err}")
+
 
 class LatestFrameBuffer:
     """Thread-safe container that always exposes the newest lores BGR frame."""
@@ -196,6 +208,42 @@ class processCamera(WorkerProcess):
         )
         self.threads.append(localPerceptionTh)
 
+        # GPS-free tracking: dead reckoning + waypoint follower + map visualizer
+        tracking_state = None
+        if _TRACKING_ENABLED:
+            tracking_state = TrackingState()
+
+            visualizer = None
+            if _TRACKING_SHOW_WINDOW:
+                try:
+                    from src.hardware.tracking.trackGraph import TrackGraph
+                    import config as _cfg_vis
+                    _graphml = getattr(_cfg_vis, "TRACKING_GRAPHML", "Track GraphML File.graphml")
+                    _step = getattr(_cfg_vis, "TRACKING_WAYPOINT_STEP_M", 0.05)
+                    import os
+                    if not os.path.isabs(_graphml):
+                        _root = os.path.normpath(
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "..", "..", "..")
+                        )
+                        _graphml = os.path.join(_root, _graphml)
+                    graph = TrackGraph(_graphml, step_m=_step)
+                    visualizer = TrackVisualizer(graph)
+                    visualizer.start()
+                    self.threads.append(visualizer)
+                except Exception as _vis_err:
+                    print(f"[ processCamera ] WARNING - visualizer failed: {_vis_err}")
+                    visualizer = None
+
+            trackingTh = threadTracking(
+                self.queuesList,
+                tracking_state,
+                logging=self.logging,
+                debugging=self.debugging,
+                visualizer=visualizer,
+            )
+            self.threads.append(trackingTh)
+
         # Add line following thread
         # show_debug=True only when master switch SHOW_CAMERA_PREVIEW is on.
         # Individual window toggles are controlled by debug_windows dict.
@@ -207,6 +255,8 @@ class processCamera(WorkerProcess):
             highway_mode_event=highway_mode_event,
             steer_override_event=steer_override_event,
         )
+        if tracking_state is not None:
+            lineFollowingTh.set_tracking_state(tracking_state)
         self.threads.append(lineFollowingTh)
 
         # Legacy remote sign detection path: preserved, but disabled by default.

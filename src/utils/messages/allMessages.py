@@ -366,3 +366,14 @@ class StateChange(Enum):
     msgType = "str"
 
 ### It will have this format: {"WarningName":"name1", "WarningID": 1}
+
+################################# From threadTracking ##################################
+class TrackingDebug(Enum):
+    Queue = "General"
+    Owner = "threadTracking"
+    msgID = 1
+    # value format: {"x": float, "y": float, "yaw": float,
+    #                "error_m": float, "heading_rad": float,
+    #                "speed_mps": float, "wp_idx": int,
+    #                "waypoint_mode_active": bool, "node_attr": int}
+    msgType = "dict"

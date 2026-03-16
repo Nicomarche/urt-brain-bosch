@@ -765,6 +765,10 @@ class LocalPerceptionEngine:
                     "x_center": x_center,
                     "confidence": conf,
                     "side_source": side_source,
+                    # Marks that the x_center heuristic was used: the BEV
+                    # reclassification step in threadLineFollowing will verify
+                    # and correct the assignment when both sides are visible.
+                    "bev_verification_pending": side_source == "guessed_single",
                 }
             )
 

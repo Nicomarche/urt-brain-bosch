@@ -1,0 +1,967 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Track Editor → GraphML</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #eee; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+  #topbar {
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    min-height: 54px;
+  }
+
+  .section-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: #888;
+    margin-right: 2px;
+  }
+
+  #topbar input[type=file] { display: none; }
+  .file-btn {
+    background: #0f3460;
+    color: #e2e8f0;
+    border: 1px solid #1a4a8a;
+    padding: 5px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  .file-btn:hover { background: #1a4a8a; }
+
+  .scale-status {
+    font-size: 11px;
+    color: #94a3b8;
+    white-space: nowrap;
+    padding: 4px 8px;
+    background: #0f3460;
+    border-radius: 4px;
+    border: 1px solid #1a4a8a;
+  }
+  .scale-status b { color: #7dd3fc; }
+  .scale-status.calibrated { border-color: #16a34a; }
+  .scale-status.calibrated b { color: #86efac; }
+
+  .mode-group { display: flex; gap: 4px; }
+  .mode-btn {
+    background: #0f3460;
+    color: #aaa;
+    border: 1px solid #1a4a8a;
+    padding: 5px 11px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .mode-btn:hover { background: #1a4a8a; color: #fff; }
+  .mode-btn.active { background: #e94560; color: #fff; border-color: #e94560; }
+  .mode-btn[data-mode="calibrate"].active { background: #f59e0b; border-color: #d97706; color: #000; }
+
+  .type-group { display: flex; align-items: center; gap: 6px; }
+  .type-group label { font-size: 12px; color: #aaa; }
+  #nodeTypeSelect {
+    background: #0f3460;
+    border: 1px solid #1a4a8a;
+    color: #fff;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  .action-btn {
+    background: #0f3460;
+    color: #7dd3fc;
+    border: 1px solid #0284c7;
+    padding: 5px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .action-btn:hover { background: #0284c7; color: #fff; }
+  .action-btn.danger { color: #fca5a5; border-color: #dc2626; }
+  .action-btn.danger:hover { background: #dc2626; color: #fff; }
+  .action-btn.success { color: #86efac; border-color: #16a34a; }
+  .action-btn.success:hover { background: #16a34a; color: #fff; }
+  .action-btn.warn { color: #fcd34d; border-color: #d97706; }
+  .action-btn.warn:hover { background: #d97706; color: #000; }
+
+  .sep { width: 1px; height: 28px; background: #1a4a8a; flex-shrink: 0; }
+
+  #status {
+    margin-left: auto;
+    font-size: 11px;
+    color: #64748b;
+    white-space: nowrap;
+    min-width: 200px;
+    text-align: right;
+  }
+  #status span { color: #94a3b8; }
+
+  #canvas-container {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+    cursor: crosshair;
+    background: #111827;
+  }
+
+  #bgCanvas {
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }
+
+  #graphSvg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* Node styles */
+  .node-circle { stroke-width: 2; cursor: pointer; }
+  .node-NORMAL       { fill: #3b82f6; stroke: #93c5fd; }
+  .node-CROSSWALK    { fill: #f59e0b; stroke: #fcd34d; }
+  .node-INTERSECTION { fill: #ef4444; stroke: #fca5a5; }
+  .node-ONEWAY       { fill: #8b5cf6; stroke: #c4b5fd; }
+  .node-HIGHWAYLEFT  { fill: #10b981; stroke: #6ee7b7; }
+  .node-HIGHWAYRIGHT { fill: #14b8a6; stroke: #5eead4; }
+  .node-ROUNDABOUT   { fill: #f97316; stroke: #fdba74; }
+  .node-STOPLINE     { fill: #ffffff; stroke: #94a3b8; }
+  .node-DOTTED       { fill: #64748b; stroke: #94a3b8; }
+  .node-DOTTED_CROSSWALK { fill: #d97706; stroke: #fbbf24; }
+  .node-START        { fill: #00ff88; stroke: #ffffff; stroke-width: 2.5; }
+
+  .node-selected { stroke: #ffd700 !important; stroke-width: 3 !important; }
+
+  .edge-line {
+    stroke: #60a5fa;
+    stroke-width: 1.5;
+    fill: none;
+    pointer-events: stroke;
+    cursor: pointer;
+  }
+  .edge-line:hover { stroke: #f87171; stroke-width: 2.5; }
+
+  #hint {
+    position: absolute;
+    bottom: 10px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.75);
+    color: #94a3b8;
+    font-size: 11px;
+    padding: 5px 14px;
+    border-radius: 20px;
+    pointer-events: none;
+    white-space: nowrap;
+  }
+
+  #info-panel {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    background: #16213e;
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 170px;
+    font-size: 12px;
+    display: none;
+  }
+  #info-panel h4 { color: #7dd3fc; margin-bottom: 8px; font-size: 12px; }
+  #info-panel p { color: #94a3b8; margin: 2px 0; }
+  #info-panel p span { color: #e2e8f0; }
+
+  /* Calibration panel */
+  #calibrate-panel {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    background: #1e2a3a;
+    border: 2px solid #f59e0b;
+    border-radius: 10px;
+    padding: 20px 24px;
+    min-width: 300px;
+    font-size: 13px;
+    display: none;
+    z-index: 200;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+  #calibrate-panel h4 { color: #f59e0b; margin-bottom: 12px; font-size: 15px; }
+  #calibrate-panel .info-row { color: #94a3b8; margin: 4px 0; }
+  #calibrate-panel .info-row b { color: #e2e8f0; }
+  #calibrate-panel .input-row { margin-top: 12px; display: flex; align-items: center; gap: 8px; }
+  #calibrate-panel label { color: #aaa; font-size: 12px; white-space: nowrap; }
+  #calibrate-panel input {
+    background: #0f3460;
+    border: 1px solid #f59e0b;
+    color: #fff;
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 14px;
+    width: 90px;
+  }
+  #calibrate-panel input:focus { outline: none; border-color: #fcd34d; }
+  .calib-btns { display: flex; gap: 8px; margin-top: 14px; }
+  .calib-confirm {
+    background: #16a34a; color: #fff; border: none;
+    padding: 7px 16px; border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  .calib-confirm:hover { background: #15803d; }
+  .calib-cancel {
+    background: #374151; color: #e2e8f0; border: none;
+    padding: 7px 16px; border-radius: 5px; cursor: pointer; font-size: 13px;
+  }
+  .calib-cancel:hover { background: #4b5563; }
+
+  /* Calibration line drawn via SVG */
+  .calib-point { fill: none; stroke: #fbbf24; stroke-width: 2; }
+  .calib-line  { stroke: #fbbf24; stroke-width: 1.5; stroke-dasharray: 6 3; fill: none; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <span class="section-label">Imagen</span>
+  <label class="file-btn" for="pngInput">📂 Cargar PNG</label>
+  <input type="file" id="pngInput" accept="image/png,image/jpeg,image/webp,image/gif">
+
+  <div class="sep"></div>
+  <span class="section-label">Escala</span>
+  <span class="scale-status" id="scaleStatus">Sin calibrar</span>
+  <button class="action-btn warn" id="clearCalibBtn" style="display:none">↺ Reset escala</button>
+
+  <div class="sep"></div>
+  <span class="section-label">Modo</span>
+  <div class="mode-group">
+    <button class="mode-btn active" data-mode="add_node">➕ Nodo (N)</button>
+    <button class="mode-btn" data-mode="add_edge">↗ Arista (E)</button>
+    <button class="mode-btn" data-mode="move">✋ Mover (V)</button>
+    <button class="mode-btn" data-mode="delete">🗑 Borrar (X)</button>
+    <button class="mode-btn" data-mode="calibrate">📏 Calibrar (C)</button>
+  </div>
+
+  <div class="sep"></div>
+  <div class="type-group">
+    <label>Tipo nodo</label>
+    <select id="nodeTypeSelect">
+      <option value="0">NORMAL</option>
+      <option value="1">CROSSWALK</option>
+      <option value="2">INTERSECTION</option>
+      <option value="3">ONEWAY</option>
+      <option value="4">HIGHWAYLEFT</option>
+      <option value="5">HIGHWAYRIGHT</option>
+      <option value="6">ROUNDABOUT</option>
+      <option value="7">STOPLINE</option>
+      <option value="8">DOTTED</option>
+      <option value="9">DOTTED_CROSSWALK</option>
+      <option value="10">⭐ START</option>
+    </select>
+  </div>
+
+  <div class="sep"></div>
+  <button class="action-btn danger" id="clearBtn">🗑 Limpiar todo</button>
+  <button class="action-btn" id="undoBtn">↩ Deshacer (Z)</button>
+  <button class="action-btn success" id="exportBtn">⬇ Exportar GraphML</button>
+  <button class="action-btn" id="exportJsonBtn">💾 Guardar JSON</button>
+  <label class="file-btn" for="loadJsonInput">📂 Cargar JSON</label>
+  <input type="file" id="loadJsonInput" accept=".json">
+
+  <div id="status">Nodos: <span id="nodeCount">0</span> | Aristas: <span id="edgeCount">0</span></div>
+</div>
+
+<div id="canvas-container">
+  <canvas id="bgCanvas"></canvas>
+  <svg id="graphSvg" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#60a5fa"/>
+      </marker>
+    </defs>
+    <g id="calibLayer"></g>
+    <g id="edgeLayer"></g>
+    <g id="nodeLayer"></g>
+  </svg>
+  <div id="hint">📂 Carga una imagen PNG para comenzar.</div>
+  <div id="info-panel">
+    <h4>Nodo seleccionado</h4>
+    <p>ID: <span id="info-id">-</span></p>
+    <p>X: <span id="info-x">-</span></p>
+    <p>Y: <span id="info-y">-</span></p>
+    <p>Tipo: <span id="info-type">-</span></p>
+  </div>
+  <div id="calibrate-panel">
+    <h4>📏 Calibrar escala</h4>
+    <p class="info-row">Distancia marcada: <b id="calibPxDist">-</b> px</p>
+    <div class="input-row">
+      <label>Distancia real:</label>
+      <input type="number" id="calibRealDist" step="0.01" min="0.001" placeholder="ej: 2.5">
+      <span style="color:#aaa;font-size:12px;">m</span>
+    </div>
+    <div class="calib-btns">
+      <button class="calib-confirm" id="calibConfirmBtn">✓ Confirmar</button>
+      <button class="calib-cancel" id="calibCancelBtn">✗ Cancelar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Constants ───────────────────────────────────────────────────────────────
+const TYPES = [
+  'NORMAL','CROSSWALK','INTERSECTION','ONEWAY',
+  'HIGHWAYLEFT','HIGHWAYRIGHT','ROUNDABOUT',
+  'STOPLINE','DOTTED','DOTTED_CROSSWALK','START'
+];
+const START_TYPE = 10;
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let nodes = [];   // { id, imgX, imgY, type }
+let edges = [];   // { id, source, target }
+let nextNodeId = 1;
+let nextEdgeId  = 1;
+let mode = 'add_node';
+let edgeFrom     = null;
+let selectedNode = null;
+let draggingNode = null;
+let undoStack    = [];
+
+// Image coordinate space
+let imgW = 800, imgH = 600;
+
+// Display geometry (recalculated on resize/image-load)
+let imgOffsetX = 0, imgOffsetY = 0;
+let imgDisplayW = 800, imgDisplayH = 600;
+let canvasW = 1, canvasH = 1;
+let imageLoaded = false;
+
+// Scale calibration
+let metersPerPixel = null;
+let calibPoints    = [];   // up to 2 image-space points { imgX, imgY }
+
+// ─── DOM refs ────────────────────────────────────────────────────────────────
+const bgCanvas    = document.getElementById('bgCanvas');
+const ctx         = bgCanvas.getContext('2d');
+const graphSvg    = document.getElementById('graphSvg');
+const edgeLayer   = document.getElementById('edgeLayer');
+const nodeLayer   = document.getElementById('nodeLayer');
+const calibLayer  = document.getElementById('calibLayer');
+const container   = document.getElementById('canvas-container');
+const hint        = document.getElementById('hint');
+const infoPanel   = document.getElementById('info-panel');
+const calibPanel  = document.getElementById('calibrate-panel');
+const scaleStatus = document.getElementById('scaleStatus');
+
+// ─── Coordinate helpers ──────────────────────────────────────────────────────
+function imgToCanvas(ix, iy) {
+  return {
+    x: imgOffsetX + (ix / imgW) * imgDisplayW,
+    y: imgOffsetY + (iy / imgH) * imgDisplayH
+  };
+}
+
+function canvasToImg(cx, cy) {
+  return {
+    x: ((cx - imgOffsetX) / imgDisplayW) * imgW,
+    y: ((cy - imgOffsetY) / imgDisplayH) * imgH
+  };
+}
+
+function imgToReal(ix, iy) {
+  const s = metersPerPixel || 1;
+  return {
+    x: Math.round(ix * s * 1000) / 1000,
+    y: Math.round((imgH - iy) * s * 1000) / 1000   // Y-flip: bottom = 0
+  };
+}
+
+function getNodeById(id) { return nodes.find(n => n.id === id); }
+
+function updateStatus() {
+  document.getElementById('nodeCount').textContent = nodes.length;
+  document.getElementById('edgeCount').textContent = edges.length;
+}
+
+function setHint(text) { hint.textContent = text; }
+
+function saveUndo() {
+  undoStack.push(JSON.parse(JSON.stringify({ nodes, edges, nextNodeId, nextEdgeId })));
+  if (undoStack.length > 50) undoStack.shift();
+}
+
+function updateScaleStatus() {
+  if (metersPerPixel) {
+    scaleStatus.innerHTML = `<b>${metersPerPixel.toFixed(5)}</b> m/px`;
+    scaleStatus.className = 'scale-status calibrated';
+    document.getElementById('clearCalibBtn').style.display = '';
+  } else {
+    scaleStatus.textContent = 'Sin calibrar';
+    scaleStatus.className = 'scale-status';
+    document.getElementById('clearCalibBtn').style.display = 'none';
+  }
+}
+
+// ─── Resize ──────────────────────────────────────────────────────────────────
+function resize() {
+  canvasW = container.clientWidth;
+  canvasH = container.clientHeight;
+  bgCanvas.width  = canvasW;
+  bgCanvas.height = canvasH;
+  graphSvg.setAttribute('viewBox', `0 0 ${canvasW} ${canvasH}`);
+  if (imageLoaded) {
+    computeDisplayGeometry();
+    redrawBg();
+  } else {
+    imgDisplayW = canvasW; imgDisplayH = canvasH;
+    imgOffsetX  = 0;       imgOffsetY  = 0;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+  }
+  renderGraph();
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Image display geometry ──────────────────────────────────────────────────
+function computeDisplayGeometry() {
+  const aImg    = imgW / imgH;
+  const aCanvas = canvasW / canvasH;
+  if (aImg > aCanvas) {
+    imgDisplayW = canvasW;
+    imgDisplayH = canvasW / aImg;
+    imgOffsetX  = 0;
+    imgOffsetY  = (canvasH - imgDisplayH) / 2;
+  } else {
+    imgDisplayH = canvasH;
+    imgDisplayW = canvasH * aImg;
+    imgOffsetX  = (canvasW - imgDisplayW) / 2;
+    imgOffsetY  = 0;
+  }
+}
+
+// ─── PNG Loading ─────────────────────────────────────────────────────────────
+document.getElementById('pngInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    bgCanvas._img = img;
+    imgW = img.naturalWidth;
+    imgH = img.naturalHeight;
+    imageLoaded = true;
+    computeDisplayGeometry();
+    redrawBg();
+    renderGraph();
+    setHint('Imagen cargada. Calibra la escala con 📏 (C) y luego coloca nodos.');
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+  e.target.value = '';
+});
+
+function redrawBg() {
+  ctx.clearRect(0, 0, canvasW, canvasH);
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(0, 0, canvasW, canvasH);
+  if (bgCanvas._img) {
+    ctx.drawImage(bgCanvas._img, imgOffsetX, imgOffsetY, imgDisplayW, imgDisplayH);
+  }
+}
+
+// ─── Calibration overlay (drawn on SVG layer) ────────────────────────────────
+function renderCalibLayer() {
+  calibLayer.innerHTML = '';
+  if (calibPoints.length === 0) return;
+
+  const p1 = imgToCanvas(calibPoints[0].imgX, calibPoints[0].imgY);
+
+  // Point 1 crosshair
+  const cross1 = makeCross(p1.x, p1.y, 8);
+  calibLayer.appendChild(cross1);
+
+  if (calibPoints.length >= 2) {
+    const p2 = imgToCanvas(calibPoints[1].imgX, calibPoints[1].imgY);
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', p1.x); line.setAttribute('y1', p1.y);
+    line.setAttribute('x2', p2.x); line.setAttribute('y2', p2.y);
+    line.setAttribute('class', 'calib-line');
+    calibLayer.appendChild(line);
+
+    const cross2 = makeCross(p2.x, p2.y, 8);
+    calibLayer.appendChild(cross2);
+  }
+}
+
+function makeCross(cx, cy, r) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  const circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  circ.setAttribute('cx', cx); circ.setAttribute('cy', cy); circ.setAttribute('r', r);
+  circ.setAttribute('class', 'calib-point');
+  const h = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  h.setAttribute('x1', cx - r); h.setAttribute('y1', cy);
+  h.setAttribute('x2', cx + r); h.setAttribute('y2', cy);
+  h.setAttribute('stroke', '#fbbf24'); h.setAttribute('stroke-width', '1.5');
+  const v = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  v.setAttribute('x1', cx); v.setAttribute('y1', cy - r);
+  v.setAttribute('x2', cx); v.setAttribute('y2', cy + r);
+  v.setAttribute('stroke', '#fbbf24'); v.setAttribute('stroke-width', '1.5');
+  g.appendChild(circ); g.appendChild(h); g.appendChild(v);
+  return g;
+}
+
+// ─── Graph rendering ──────────────────────────────────────────────────────────
+function renderGraph() {
+  renderEdges();
+  renderNodes();
+  renderCalibLayer();
+  updateStatus();
+}
+
+function renderEdges() {
+  edgeLayer.innerHTML = '';
+  edges.forEach(edge => {
+    const from = getNodeById(edge.source);
+    const to   = getNodeById(edge.target);
+    if (!from || !to) return;
+
+    const p1 = imgToCanvas(from.imgX, from.imgY);
+    const p2 = imgToCanvas(to.imgX,   to.imgY);
+
+    const R = nodeRadius(from.type);
+    const dx = p2.x - p1.x, dy = p2.y - p1.y;
+    const len = Math.sqrt(dx*dx + dy*dy);
+    if (len < 1) return;
+    const ux = dx / len, uy = dy / len;
+    const x1 = p1.x + ux * R,        y1 = p1.y + uy * R;
+    const x2 = p2.x - ux * (R + 6),  y2 = p2.y - uy * (R + 6);
+
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x1); line.setAttribute('y1', y1);
+    line.setAttribute('x2', x2); line.setAttribute('y2', y2);
+    line.setAttribute('class', 'edge-line');
+    line.setAttribute('marker-end', 'url(#arrow)');
+    line.addEventListener('click', ev => {
+      ev.stopPropagation();
+      if (mode === 'delete') deleteEdge(edge.id);
+    });
+    edgeLayer.appendChild(line);
+  });
+}
+
+function nodeRadius(type) { return type === START_TYPE ? 12 : 7; }
+
+function renderNodes() {
+  nodeLayer.innerHTML = '';
+  nodes.forEach(node => {
+    const p        = imgToCanvas(node.imgX, node.imgY);
+    const typeName = TYPES[node.type] || 'NORMAL';
+    const isStart  = node.type === START_TYPE;
+    const isSelected = node.id === selectedNode;
+
+    const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+    if (isStart) {
+      // Outer glow ring
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', p.x); ring.setAttribute('cy', p.y); ring.setAttribute('r', 18);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#00ff88');
+      ring.setAttribute('stroke-width', '1');
+      ring.setAttribute('opacity', '0.4');
+      g.appendChild(ring);
+
+      // Star polygon
+      const star = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+      star.setAttribute('points', starPoints(p.x, p.y, 12, 5, 5));
+      star.setAttribute('class', `node-circle node-START${isSelected ? ' node-selected' : ''}`);
+      g.appendChild(star);
+
+      // "S" label inside
+      const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      lbl.setAttribute('x', p.x); lbl.setAttribute('y', p.y + 4);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.setAttribute('font-size', '9'); lbl.setAttribute('font-weight', 'bold');
+      lbl.setAttribute('fill', '#000'); lbl.setAttribute('pointer-events', 'none');
+      lbl.textContent = 'S';
+      g.appendChild(lbl);
+    } else {
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', 7);
+      circle.setAttribute('class', `node-circle node-${typeName}${isSelected ? ' node-selected' : ''}`);
+      g.appendChild(circle);
+    }
+
+    // ID label above node
+    const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    text.setAttribute('x', p.x);
+    text.setAttribute('y', p.y - (isStart ? 16 : 11));
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '9');
+    text.setAttribute('fill', isStart ? '#00ff88' : '#e2e8f0');
+    text.setAttribute('pointer-events', 'none');
+    text.textContent = node.id;
+    g.appendChild(text);
+
+    // Edge-drawing highlight ring
+    if (node.id === edgeFrom) {
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', p.x); ring.setAttribute('cy', p.y); ring.setAttribute('r', 13);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#fbbf24'); ring.setAttribute('stroke-width', '2');
+      g.appendChild(ring);
+    }
+
+    // Transparent hit-area for easier clicking
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    hit.setAttribute('cx', p.x); hit.setAttribute('cy', p.y);
+    hit.setAttribute('r', isStart ? 14 : 10);
+    hit.setAttribute('fill', 'transparent'); hit.setAttribute('stroke', 'none');
+    g.appendChild(hit);
+
+    g.addEventListener('mousedown', ev => {
+      ev.stopPropagation();
+      if (mode === 'move') { draggingNode = node.id; saveUndo(); }
+    });
+    g.addEventListener('click', ev => { ev.stopPropagation(); handleNodeClick(node.id); });
+    g.addEventListener('contextmenu', ev => {
+      ev.preventDefault();
+      selectNode(node.id);
+      const sel = document.getElementById('nodeTypeSelect');
+      const newType = parseInt(sel.value);
+      if (newType === START_TYPE && nodes.some(n => n.type === START_TYPE && n.id !== node.id)) {
+        setHint('⚠️ Ya existe un nodo START. Solo puede haber uno.');
+        return;
+      }
+      saveUndo();
+      node.type = newType;
+      renderGraph();
+    });
+
+    nodeLayer.appendChild(g);
+  });
+}
+
+function starPoints(cx, cy, outerR, innerR, numPoints) {
+  const pts = [];
+  for (let i = 0; i < numPoints * 2; i++) {
+    const r     = i % 2 === 0 ? outerR : innerR;
+    const angle = (i * Math.PI / numPoints) - Math.PI / 2;
+    pts.push(`${cx + r * Math.cos(angle)},${cy + r * Math.sin(angle)}`);
+  }
+  return pts.join(' ');
+}
+
+// ─── Interactions ─────────────────────────────────────────────────────────────
+function handleNodeClick(nodeId) {
+  if (mode === 'add_edge') {
+    if (edgeFrom === null) {
+      edgeFrom = nodeId;
+      setHint('Click en el nodo destino para crear la arista. Esc para cancelar.');
+    } else if (edgeFrom !== nodeId) {
+      saveUndo();
+      edges.push({ id: nextEdgeId++, source: edgeFrom, target: nodeId });
+      edgeFrom = null;
+      setHint('Arista creada.');
+    } else {
+      edgeFrom = null;
+      setHint('Selección cancelada.');
+    }
+    renderGraph();
+  } else if (mode === 'delete') {
+    saveUndo();
+    deleteNode(nodeId);
+  } else {
+    selectNode(nodeId);
+  }
+}
+
+function selectNode(id) {
+  selectedNode = id;
+  const node = getNodeById(id);
+  if (node) {
+    const real = imgToReal(node.imgX, node.imgY);
+    document.getElementById('info-id').textContent   = node.id;
+    document.getElementById('info-x').textContent    = metersPerPixel ? `${real.x} m` : `${Math.round(node.imgX)} px`;
+    document.getElementById('info-y').textContent    = metersPerPixel ? `${real.y} m` : `${Math.round(node.imgY)} px`;
+    document.getElementById('info-type').textContent = TYPES[node.type];
+    infoPanel.style.display = 'block';
+  }
+  renderGraph();
+}
+
+function deleteNode(id) {
+  nodes = nodes.filter(n => n.id !== id);
+  edges = edges.filter(e => e.source !== id && e.target !== id);
+  if (selectedNode === id) { selectedNode = null; infoPanel.style.display = 'none'; }
+  renderGraph();
+}
+
+function deleteEdge(id) {
+  saveUndo();
+  edges = edges.filter(e => e.id !== id);
+  renderGraph();
+}
+
+// ─── Canvas click ─────────────────────────────────────────────────────────────
+graphSvg.addEventListener('click', ev => {
+  const rect = graphSvg.getBoundingClientRect();
+  const cx   = ev.clientX - rect.left;
+  const cy   = ev.clientY - rect.top;
+
+  // Calibration mode
+  if (mode === 'calibrate') {
+    const imgC = canvasToImg(cx, cy);
+    if (calibPoints.length >= 2) return; // wait for panel confirmation
+    calibPoints.push({ imgX: imgC.x, imgY: imgC.y });
+    renderCalibLayer();
+
+    if (calibPoints.length === 1) {
+      setHint('Ahora click en el segundo extremo de la línea de referencia.');
+    } else {
+      const dx = calibPoints[1].imgX - calibPoints[0].imgX;
+      const dy = calibPoints[1].imgY - calibPoints[0].imgY;
+      const pxDist = Math.sqrt(dx*dx + dy*dy);
+      document.getElementById('calibPxDist').textContent = Math.round(pxDist);
+      calibPanel.style.display = 'block';
+      setTimeout(() => document.getElementById('calibRealDist').focus(), 50);
+    }
+    return;
+  }
+
+  if (mode !== 'add_node') return;
+
+  const imgC = canvasToImg(cx, cy);
+  const type = parseInt(document.getElementById('nodeTypeSelect').value);
+
+  if (type === START_TYPE && nodes.some(n => n.type === START_TYPE)) {
+    setHint('⚠️ Ya existe un nodo START. Solo puede haber uno. Borra el existente primero.');
+    return;
+  }
+
+  saveUndo();
+  nodes.push({ id: nextNodeId++, imgX: imgC.x, imgY: imgC.y, type });
+  renderGraph();
+  setHint(`Nodo ${nextNodeId - 1} colocado (${TYPES[type]})`);
+});
+
+// Drag to move node
+graphSvg.addEventListener('mousemove', ev => {
+  if (!draggingNode) return;
+  const rect = graphSvg.getBoundingClientRect();
+  const imgC = canvasToImg(ev.clientX - rect.left, ev.clientY - rect.top);
+  const node = getNodeById(draggingNode);
+  if (node) { node.imgX = imgC.x; node.imgY = imgC.y; renderGraph(); }
+});
+
+graphSvg.addEventListener('mouseup', () => { draggingNode = null; });
+
+// ─── Calibration panel ────────────────────────────────────────────────────────
+document.getElementById('calibConfirmBtn').addEventListener('click', confirmCalib);
+document.getElementById('calibRealDist').addEventListener('keydown', ev => {
+  if (ev.key === 'Enter') confirmCalib();
+  if (ev.key === 'Escape') cancelCalib();
+});
+
+function confirmCalib() {
+  const realDist = parseFloat(document.getElementById('calibRealDist').value);
+  if (!realDist || realDist <= 0) { alert('Ingresa una distancia real válida (> 0).'); return; }
+  const dx     = calibPoints[1].imgX - calibPoints[0].imgX;
+  const dy     = calibPoints[1].imgY - calibPoints[0].imgY;
+  const pxDist = Math.sqrt(dx*dx + dy*dy);
+  if (pxDist < 1) { alert('Los dos puntos son demasiado cercanos.'); return; }
+  metersPerPixel = realDist / pxDist;
+  cancelCalib();
+  updateScaleStatus();
+  setMode('add_node');
+  setHint(`✅ Escala calibrada: 1 px = ${metersPerPixel.toFixed(5)} m`);
+}
+
+function cancelCalib() {
+  calibPoints = [];
+  calibPanel.style.display = 'none';
+  document.getElementById('calibRealDist').value = '';
+  renderCalibLayer();
+}
+
+document.getElementById('calibCancelBtn').addEventListener('click', cancelCalib);
+
+document.getElementById('clearCalibBtn').addEventListener('click', () => {
+  metersPerPixel = null;
+  updateScaleStatus();
+  setHint('Escala eliminada. Calibra de nuevo con 📏 (C).');
+});
+
+// ─── Mode & keyboard ─────────────────────────────────────────────────────────
+function setMode(m) {
+  mode = m;
+  edgeFrom = null;
+  if (m !== 'calibrate') cancelCalib();
+  document.querySelectorAll('.mode-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === m);
+  });
+  const hints = {
+    add_node:  'Click en la imagen para colocar un nodo. Clic derecho en un nodo para cambiar su tipo.',
+    add_edge:  'Click en nodo origen, luego en nodo destino para crear arista.',
+    move:      'Arrastra nodos para repositionarlos.',
+    delete:    'Click en un nodo o arista para eliminarlo.',
+    calibrate: 'Click en el primer extremo de una línea de referencia conocida.'
+  };
+  setHint(hints[m]);
+}
+
+document.querySelectorAll('.mode-btn').forEach(btn => {
+  btn.addEventListener('click', () => setMode(btn.dataset.mode));
+});
+
+document.addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
+  const map = { 'n': 'add_node', 'e': 'add_edge', 'v': 'move', 'x': 'delete', 'c': 'calibrate' };
+  if (map[ev.key.toLowerCase()]) { setMode(map[ev.key.toLowerCase()]); return; }
+  if ((ev.key.toLowerCase() === 'z') && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); undo(); return; }
+  if (ev.key === 'Escape') {
+    edgeFrom = null; selectedNode = null;
+    cancelCalib();
+    infoPanel.style.display = 'none';
+    renderGraph();
+  }
+});
+
+function undo() {
+  if (undoStack.length === 0) return;
+  const prev = undoStack.pop();
+  nodes = prev.nodes; edges = prev.edges;
+  nextNodeId = prev.nextNodeId; nextEdgeId = prev.nextEdgeId;
+  renderGraph();
+}
+
+document.getElementById('undoBtn').addEventListener('click', undo);
+
+document.getElementById('clearBtn').addEventListener('click', () => {
+  if (!confirm('¿Eliminar todos los nodos y aristas?')) return;
+  saveUndo();
+  nodes = []; edges = []; nextNodeId = 1; nextEdgeId = 1;
+  selectedNode = null; edgeFrom = null;
+  infoPanel.style.display = 'none';
+  renderGraph();
+});
+
+// ─── Export GraphML ───────────────────────────────────────────────────────────
+document.getElementById('exportBtn').addEventListener('click', () => {
+  if (nodes.length === 0) { alert('No hay nodos para exportar.'); return; }
+
+  const startNode = nodes.find(n => n.type === START_TYPE);
+  if (!startNode && !confirm('No hay nodo START definido. ¿Exportar de todos modos?')) return;
+  if (!metersPerPixel && !confirm('La escala no está calibrada. Las coordenadas exportadas serán en píxeles. ¿Continuar?')) return;
+
+  let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<graphml xmlns="http://graphml.graphdrawing.org/graphml"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://graphml.graphdrawing.org/graphml
+         http://graphml.graphdrawing.org/graphml/1.0rc/graphml.xsd">
+  <key id="d0" for="node" attr.name="x" attr.type="double"/>
+  <key id="d1" for="node" attr.name="y" attr.type="double"/>
+  <key id="d2" for="node" attr.name="new_attribute" attr.type="long"/>
+  <key id="d3" for="node" attr.name="is_start" attr.type="boolean"/>
+  <graph id="G" edgedefault="directed">\n`;
+
+  nodes.forEach(node => {
+    const real    = imgToReal(node.imgX, node.imgY);
+    const isStart = node.type === START_TYPE;
+    // START node is treated as NORMAL road type (0) in the graph
+    const roadType = isStart ? 0 : node.type;
+    xml += `    <node id="${node.id}">
+      <data key="d0">${real.x}</data>
+      <data key="d1">${real.y}</data>
+      <data key="d2">${roadType}</data>
+      <data key="d3">${isStart}</data>
+    </node>\n`;
+  });
+
+  edges.forEach((edge, i) => {
+    xml += `    <edge id="e${i}" source="${edge.source}" target="${edge.target}"/>\n`;
+  });
+
+  xml += `  </graph>\n</graphml>`;
+  download('track.graphml', xml, 'application/xml');
+});
+
+// ─── Save / Load JSON ─────────────────────────────────────────────────────────
+document.getElementById('exportJsonBtn').addEventListener('click', () => {
+  const data = JSON.stringify({
+    version: 2,
+    nodes, edges, nextNodeId, nextEdgeId,
+    imgW, imgH,
+    metersPerPixel
+  }, null, 2);
+  download('track_editor_save.json', data, 'application/json');
+});
+
+document.getElementById('loadJsonInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    try {
+      const data = JSON.parse(ev.target.result);
+      nodes      = data.nodes;
+      edges      = data.edges;
+      nextNodeId = data.nextNodeId;
+      nextEdgeId = data.nextEdgeId;
+
+      if (data.version === 2) {
+        // Current format
+        if (data.imgW)          imgW           = data.imgW;
+        if (data.imgH)          imgH           = data.imgH;
+        if (data.metersPerPixel) metersPerPixel = data.metersPerPixel;
+      } else if (data.svgViewBox) {
+        // Legacy v1 format: svgX/svgY relative to viewBox
+        const vb = data.svgViewBox;
+        imgW = vb.w; imgH = vb.h;
+        nodes.forEach(n => {
+          if (n.svgX !== undefined) {
+            n.imgX = n.svgX - vb.x;
+            n.imgY = n.svgY - vb.y;
+            delete n.svgX; delete n.svgY;
+          }
+        });
+      }
+
+      updateScaleStatus();
+      renderGraph();
+      setHint('Sesión cargada. Recuerda cargar también la imagen PNG de fondo.');
+    } catch (err) { alert('Error al cargar el archivo: ' + err); }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
+
+function download(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+updateScaleStatus();
+setHint('📂 Carga una imagen PNG → calibra la escala (C) → coloca nodos → conecta → exporta GraphML');
+</script>
+</body>
+</html>
