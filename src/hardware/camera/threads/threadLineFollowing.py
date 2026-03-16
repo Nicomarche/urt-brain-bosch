@@ -7154,67 +7154,89 @@ Args:
         return cv2.warpPerspective(img, self.perspective_M_inv, (img.shape[1], img.shape[0]))
 
     def _reclassify_masks_via_bev(self, side_masks, side_lines=None):
-        """Correct left/right lane mask swap using bird's eye view centroids.
+        """Correct left/right lane mask classification using bird's eye view centroids.
 
-        In perspective space the x_center heuristic (mask centroid vs frame
-        center) fails when the vehicle heads into a curve or is misaligned
-        with the lane: the geometrically-right lane can appear on the left
-        half of the camera frame.  In BEV (after homography warp) the x
+        In perspective space the x_center heuristic fails when the vehicle is
+        heading into a curve: the geometrically-right lane can appear on the
+        LEFT half of the camera frame.  In BEV (after homography warp) the x
         position is metrically correct and unambiguous regardless of heading:
         the left lane mask always has a smaller BEV x-centroid than the right.
 
+        Handles BOTH the two-mask case (swap detection) and the single-mask
+        case (wrong-side detection):
+          - Two masks present: swap if left_bev_cx > right_bev_cx.
+          - One mask present:  move to the correct side based on BEV x-centroid
+            relative to the BEV image centre.  This fixes single-line mode
+            misclassifications where the only visible line is near the image
+            centre in perspective but clearly on one side in BEV.
+
         Returns (corrected_side_masks, corrected_side_lines, was_swapped).
-        Falls back to the original assignment when:
-          - The BEV homography is not calibrated.
-          - Only one mask is present (can't compare centroids).
-          - Either warped mask is nearly empty (< min_area pixels).
-          - An unexpected exception occurs.
+        Falls back without modification when BEV is not calibrated, masks are
+        empty, or an exception occurs.
         """
         if not getattr(self, 'perspective_initialized', False):
             return side_masks, side_lines, False
-
         if not isinstance(side_masks, dict):
             return side_masks, side_lines, False
 
         left_mask = side_masks.get('left')
         right_mask = side_masks.get('right')
+        has_left = isinstance(left_mask, np.ndarray) and left_mask.size > 0 and np.any(left_mask)
+        has_right = isinstance(right_mask, np.ndarray) and right_mask.size > 0 and np.any(right_mask)
 
-        if not isinstance(left_mask, np.ndarray) or not isinstance(right_mask, np.ndarray):
-            return side_masks, side_lines, False
-        if left_mask.size == 0 or right_mask.size == 0:
+        if not has_left and not has_right:
             return side_masks, side_lines, False
 
         try:
-            h, w = left_mask.shape[:2]
+            # Pick any mask to get shape
+            ref_mask = left_mask if has_left else right_mask
+            h, w = ref_mask.shape[:2]
             warp_size = (w, h)
-            left_bev = cv2.warpPerspective(
-                left_mask.astype(np.uint8), self.perspective_M, warp_size
-            )
-            right_bev = cv2.warpPerspective(
-                right_mask.astype(np.uint8), self.perspective_M, warp_size
-            )
-
-            # Require a minimum number of warped pixels to trust the centroid.
             min_area = max(4, int(w * h * 0.0005))
-            left_cols = np.where(left_bev > 0)[1]
-            right_cols = np.where(right_bev > 0)[1]
 
-            if len(left_cols) < min_area or len(right_cols) < min_area:
+            def _bev_cx(mask):
+                bev = cv2.warpPerspective(mask.astype(np.uint8), self.perspective_M, warp_size)
+                cols = np.where(bev > 0)[1]
+                return float(np.mean(cols)) if len(cols) >= min_area else None
+
+            if has_left and has_right:
+                # ── Two-mask case: detect swap ────────────────────────────────
+                lcx = _bev_cx(left_mask)
+                rcx = _bev_cx(right_mask)
+                if lcx is None or rcx is None:
+                    return side_masks, side_lines, False
+                if lcx > rcx:
+                    corrected_masks = {'left': right_mask, 'right': left_mask}
+                    corrected_lines = side_lines
+                    if isinstance(side_lines, dict):
+                        corrected_lines = {
+                            'left': side_lines.get('right'),
+                            'right': side_lines.get('left'),
+                        }
+                    return corrected_masks, corrected_lines, True
                 return side_masks, side_lines, False
 
-            left_bev_cx = float(np.mean(left_cols))
-            right_bev_cx = float(np.mean(right_cols))
+            else:
+                # ── Single-mask case: verify side via BEV centroid ────────────
+                present_side = 'left' if has_left else 'right'
+                present_mask = left_mask if has_left else right_mask
+                cx = _bev_cx(present_mask)
+                if cx is None:
+                    return side_masks, side_lines, False
 
-            if left_bev_cx > right_bev_cx:
-                # Masks are swapped — correct them.
-                corrected_masks = {'left': right_mask, 'right': left_mask}
-                corrected_lines = side_lines
-                if isinstance(side_lines, dict):
-                    corrected_lines = {
-                        'left': side_lines.get('right'),
-                        'right': side_lines.get('left'),
-                    }
-                return corrected_masks, corrected_lines, True
+                bev_center = w / 2.0
+                correct_side = 'left' if cx < bev_center else 'right'
+
+                if correct_side != present_side:
+                    corrected_masks = {'left': None, 'right': None}
+                    corrected_masks[correct_side] = present_mask
+                    corrected_lines = {'left': None, 'right': None}
+                    if isinstance(side_lines, dict):
+                        corrected_lines[correct_side] = side_lines.get(present_side)
+                    elif side_lines is None:
+                        corrected_lines = None
+                    return corrected_masks, corrected_lines, True
+                return side_masks, side_lines, False
 
         except Exception:
             pass
