@@ -911,6 +911,42 @@ Args:
         self._auto_run_log_frame_idx = 0
         self._last_frame_trace = {}
 
+        # Lane mask classification debug log (always-on, controlled by config)
+        self._mask_debug_log_enabled = bool(getattr(_config, 'LANE_MASK_DEBUG_LOG', False))
+        self._mask_debug_log_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..", "..",
+                "temp",
+                "lane_mask_debug.log",
+            )
+        )
+        self._mask_debug_frame_idx = 0
+        self._last_bev_reclassify_debug = {}   # filled by _reclassify_masks_via_bev
+        self._last_yolo_raw_debug = {}          # filled by _detect_with_local_ai
+        if self._mask_debug_log_enabled:
+            try:
+                os.makedirs(os.path.dirname(self._mask_debug_log_path), exist_ok=True)
+                with open(self._mask_debug_log_path, "w", encoding="utf-8") as _f:
+                    import datetime
+                    _f.write(
+                        f"=== LANE MASK DEBUG LOG — started {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                        "Legend:\n"
+                        "  raw      : masks from YOLO (before any classification fix)\n"
+                        "  prep     : after _prepare_local_ai_side_masks (guessed→resolve)\n"
+                        "  bev      : after _reclassify_masks_via_bev\n"
+                        "  guide    : final _build_local_mask_guidance result\n"
+                        "  err      : crosstrack error [m]  (+right / -left of centre)\n"
+                        "  hdg      : heading error [deg]\n"
+                        "  steer    : commanded steering [deg]  (+right / -left)\n"
+                        "  Lcx/Rcx  : BEV x-centroid of left/right mask [px], centre=320\n"
+                        "  src      : YOLO source (g=guessed_single, e=explicit_class, etc)\n"
+                        "\n"
+                    )
+            except Exception as _e:
+                print(f"[ Line Following ] WARNING - could not open mask debug log: {_e}")
+                self._mask_debug_log_enabled = False
+
         # Calibration mode state
         self._calib_mode_active = False
         self._calib_log_frame_idx = 0
@@ -2955,6 +2991,24 @@ Args:
         lane_side_lines = payload.get('lane_side_lines')
         lane_side_sources = self._normalize_lane_side_sources(payload.get('lane_side_sources'))
         lane_mask_payload = payload.get('lane_mask')
+
+        # Capture raw YOLO mask info for mask debug log (before any reclassification)
+        if self._mask_debug_log_enabled:
+            raw_info = {}
+            if isinstance(side_masks, dict):
+                for _s in ('left', 'right'):
+                    _m = side_masks.get(_s)
+                    if isinstance(_m, np.ndarray) and _m.size > 0 and np.any(_m):
+                        _cols = np.where(_m > 0)[1]
+                        raw_info[_s] = {
+                            'px_cx': round(float(np.mean(_cols)), 1) if len(_cols) > 0 else None,
+                            'px_area': int(np.sum(_m > 0)),
+                            'src': str(lane_side_sources.get(_s, 'none') or 'none'),
+                        }
+                    else:
+                        raw_info[_s] = None
+            self._last_yolo_raw_debug = raw_info
+            self._last_bev_reclassify_debug = {}  # reset; will be filled by _reclassify_masks_via_bev
 
         def _collect_render_masks(s_masks, h, w):
             """Build {left, right} dict of 2-D uint8 masks for rendering."""
@@ -7193,6 +7247,7 @@ Args:
             h, w = ref_mask.shape[:2]
             warp_size = (w, h)
             min_area = max(4, int(w * h * 0.0005))
+            bev_center = w / 2.0
 
             def _bev_cx(mask):
                 bev = cv2.warpPerspective(mask.astype(np.uint8), self.perspective_M, warp_size)
@@ -7203,9 +7258,17 @@ Args:
                 # ── Two-mask case: detect swap ────────────────────────────────
                 lcx = _bev_cx(left_mask)
                 rcx = _bev_cx(right_mask)
+                self._last_bev_reclassify_debug = {
+                    'case': 'two_masks',
+                    'L_bev_cx': round(lcx, 1) if lcx is not None else None,
+                    'R_bev_cx': round(rcx, 1) if rcx is not None else None,
+                    'bev_center': round(bev_center, 1),
+                    'swapped': False,
+                }
                 if lcx is None or rcx is None:
                     return side_masks, side_lines, False
                 if lcx > rcx:
+                    self._last_bev_reclassify_debug['swapped'] = True
                     corrected_masks = {'left': right_mask, 'right': left_mask}
                     corrected_lines = side_lines
                     if isinstance(side_lines, dict):
@@ -7221,13 +7284,19 @@ Args:
                 present_side = 'left' if has_left else 'right'
                 present_mask = left_mask if has_left else right_mask
                 cx = _bev_cx(present_mask)
+                correct_side = None if cx is None else ('left' if cx < bev_center else 'right')
+                swapped = correct_side is not None and correct_side != present_side
+                self._last_bev_reclassify_debug = {
+                    'case': 'single_mask',
+                    'present_side': present_side,
+                    'bev_cx': round(cx, 1) if cx is not None else None,
+                    'bev_center': round(bev_center, 1),
+                    'correct_side': correct_side,
+                    'swapped': swapped,
+                }
                 if cx is None:
                     return side_masks, side_lines, False
-
-                bev_center = w / 2.0
-                correct_side = 'left' if cx < bev_center else 'right'
-
-                if correct_side != present_side:
+                if swapped:
                     corrected_masks = {'left': None, 'right': None}
                     corrected_masks[correct_side] = present_mask
                     corrected_lines = {'left': None, 'right': None}
@@ -7241,6 +7310,7 @@ Args:
         except Exception:
             pass
 
+        self._last_bev_reclassify_debug = {}
         return side_masks, side_lines, False
 
     def _estimate_ground_distance_cm(self, box_normalized, img_w, img_h):
@@ -7824,6 +7894,103 @@ Returns:
             log_file.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
             log_file.write("\n\n")
 
+    def _write_mask_debug_entry(self, debug_info, steering_angle, speed):
+        """Write one compact line to the always-on mask classification debug log.
+
+        Format (one line per frame):
+        F000123 HH:MM:SS.mmm | raw:L(cx=NNN,area=NNN,src=X) R(...)
+                              | prep:detected=X resolved=Y via=Z  bev_swap=Y/N
+                              | bev_case=single cx=NNN center=320 correct=R
+                              | guide:MODE detected=LR err=X.XXXm hdg=X.X°
+                              | OUT: steer=+X.X° speed=XX.X
+        """
+        if not self._mask_debug_log_enabled:
+            return
+        try:
+            import datetime
+            self._mask_debug_frame_idx += 1
+            ts = datetime.datetime.now().strftime('%H:%M:%S.') + \
+                 f"{datetime.datetime.now().microsecond // 1000:03d}"
+            fi = self._mask_debug_frame_idx
+
+            # ── RAW YOLO ──────────────────────────────────────────────────────
+            raw = getattr(self, '_last_yolo_raw_debug', {})
+            raw_parts = []
+            for side in ('left', 'right'):
+                r = raw.get(side)
+                if r:
+                    src_short = str(r.get('src', '?'))[:3]
+                    raw_parts.append(
+                        f"{side[0].upper()}(cx={r.get('px_cx','?')},a={r.get('px_area','?')},s={src_short})"
+                    )
+                else:
+                    raw_parts.append(f"{side[0].upper()}=none")
+            raw_str = ' '.join(raw_parts)
+
+            # ── PREP (mask_side_resolution from debug_info) ───────────────────
+            det_side = debug_info.get('single_line_detected_side', '?')
+            res_side = debug_info.get('single_line_resolved_side', '?')
+            res_src = debug_info.get('single_line_side_source', '?')
+            dup = debug_info.get('duplicate_line_collapse')
+            dup_str = f" dup={dup.get('resolution_source','?')}" if isinstance(dup, dict) else ''
+            prep_str = f"det={det_side} res={res_side} via={res_src}{dup_str}"
+
+            # ── BEV reclassify ────────────────────────────────────────────────
+            bev = getattr(self, '_last_bev_reclassify_debug', {})
+            bev_swap = debug_info.get('bev_reclassified', False)
+            if bev:
+                bev_case = bev.get('case', '?')
+                bev_center_val = bev.get('bev_center', '?')
+                if bev_case == 'two_masks':
+                    lcx = bev.get('L_bev_cx', '?')
+                    rcx = bev.get('R_bev_cx', '?')
+                    bev_str = (
+                        f"2mask Lcx={lcx} Rcx={rcx} center={bev_center_val} "
+                        f"swap={'YES ←!' if bev_swap else 'no'}"
+                    )
+                else:
+                    px_cx = bev.get('bev_cx', '?')
+                    present = bev.get('present_side', '?')
+                    correct = bev.get('correct_side', '?')
+                    bev_str = (
+                        f"1mask present={present} cx={px_cx} center={bev_center_val} "
+                        f"correct={correct} swap={'YES ←!' if bev_swap else 'no'}"
+                    )
+            else:
+                bev_str = f"bev=skipped swap={'YES ←!' if bev_swap else 'no'}"
+
+            # ── GUIDANCE result ───────────────────────────────────────────────
+            mguid = debug_info.get('local_mask_guidance') or {}
+            guide_mode = mguid.get('guidance_mode', debug_info.get('control_mode', '?'))
+            guide_sides = ','.join(mguid.get('detected_sides', []) or []) or '?'
+            err_m = mguid.get('error_cm')
+            if err_m is not None:
+                err_str = f"err={err_m/100:.3f}m"
+            else:
+                err_m2 = mguid.get('error_px')
+                err_str = f"err={err_m2:.0f}px" if err_m2 is not None else "err=?"
+            hdg_deg = debug_info.get('heading_error_deg')
+            hdg_str = f"hdg={hdg_deg:+.1f}°" if hdg_deg is not None else "hdg=?"
+            guide_str = f"{guide_mode} sides={guide_sides} {err_str} {hdg_str}"
+
+            # ── OUTPUT ────────────────────────────────────────────────────────
+            steer_s = f"{steering_angle:+.1f}°" if steering_angle is not None else "None"
+            speed_s = f"{speed:.1f}" if speed is not None else "?"
+
+            # ── Write line ────────────────────────────────────────────────────
+            line = (
+                f"F{fi:06d} {ts}"
+                f" | raw: {raw_str}"
+                f" | prep: {prep_str}"
+                f" | bev: {bev_str}"
+                f" | guide: {guide_str}"
+                f" | OUT steer={steer_s} v={speed_s}\n"
+            )
+            with open(self._mask_debug_log_path, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception as _exc:
+            pass  # Never crash the control loop because of logging
+
     # ------------------------------------------------------------------
     # Calibration mode helpers
     # ------------------------------------------------------------------
@@ -8306,6 +8473,10 @@ Returns:
                 commanded_speed=commanded_speed,
                 command_source=command_source,
             )
+            # Always-on mask classification debug log (enabled via LANE_MASK_DEBUG_LOG in config)
+            if self._mask_debug_log_enabled and self._last_frame_trace:
+                _di = self._last_frame_trace.get('debug') or self._last_frame_trace
+                self._write_mask_debug_entry(_di, computed_steering, computed_speed)
 
             if self.show_debug and (computed_steering is not None or commanded_steering is not None):
                 comp_text = f"{computed_steering:.1f}" if computed_steering is not None else "--"

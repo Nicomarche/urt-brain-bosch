@@ -255,6 +255,12 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True
 
+# ── Lane mask classification debug log ──────────────────────────────────────
+# Set True to write temp/lane_mask_debug.log continuously while the car runs.
+# Each line shows: raw YOLO output → after prep → BEV centroid → guidance result → steering.
+# This is separate from the AUTO RUN log and is always-on (not tied to klem state).
+LANE_MASK_DEBUG_LOG = True
+
 # Wheelbase already defined as MPC_WHEELBASE; kept here as alias for clarity.
 TRACKING_WHEELBASE_M = MPC_WHEELBASE  # 0.258 m
 
