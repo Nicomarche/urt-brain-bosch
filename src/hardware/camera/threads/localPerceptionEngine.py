@@ -966,6 +966,29 @@ class LocalPerceptionEngine:
             distance_class = "far"
         return distance_class, float(best["confidence"]), area, best["class_name"], float(best["box_height_norm"])
 
+    @staticmethod
+    def _mask_display_color(mask, width, fallback_side=None):
+        """Return BGR color for a mask based on its x-centroid position in the frame.
+
+        Coloring by centroid position (not by YOLO slot name) ensures the
+        visualization is correct even when YOLO's guessed_single label is wrong.
+        Left half → blue  (255, 120, 0)
+        Right half → yellow/orange  (0, 200, 255)
+        """
+        COLOR_LEFT  = (255, 120, 0)
+        COLOR_RIGHT = (0, 200, 255)
+        if mask is None or not np.any(mask):
+            return None
+        cols = np.where(mask > 0)[1]
+        if len(cols) == 0:
+            if fallback_side == "left":
+                return COLOR_LEFT
+            if fallback_side == "right":
+                return COLOR_RIGHT
+            return COLOR_LEFT
+        cx = float(np.mean(cols))
+        return COLOR_LEFT if cx < width / 2.0 else COLOR_RIGHT
+
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
         height, width = overlay.shape[:2]
@@ -973,10 +996,13 @@ class LocalPerceptionEngine:
 
         left_mask = side_masks.get("left")
         right_mask = side_masks.get("right")
-        if left_mask is not None and np.any(left_mask):
-            mask_overlay[left_mask > 0] = (255, 120, 0)
-        if right_mask is not None and np.any(right_mask):
-            mask_overlay[right_mask > 0] = (0, 200, 255)
+        # Color by x-centroid position (not by YOLO slot) so that a guessed_single
+        # mask that ends up in the wrong slot is still drawn with the correct color.
+        for _m, _fallback in ((left_mask, "left"), (right_mask, "right")):
+            if _m is not None and np.any(_m):
+                _color = self._mask_display_color(_m, width, fallback_side=_fallback)
+                if _color is not None:
+                    mask_overlay[_m > 0] = _color
         if np.any(mask_overlay):
             overlay = cv2.addWeighted(overlay, 1.0, mask_overlay, 0.35, 0)
 
@@ -1029,10 +1055,11 @@ class LocalPerceptionEngine:
         )
 
         masks_view = np.zeros_like(frame)
-        if left_mask is not None and np.any(left_mask):
-            masks_view[left_mask > 0] = (255, 120, 0)
-        if right_mask is not None and np.any(right_mask):
-            masks_view[right_mask > 0] = (0, 200, 255)
+        for _m, _fallback in ((left_mask, "left"), (right_mask, "right")):
+            if _m is not None and np.any(_m):
+                _color = self._mask_display_color(_m, width, fallback_side=_fallback)
+                if _color is not None:
+                    masks_view[_m > 0] = _color
         for idx, line in enumerate(lane_points):
             if len(line) < 2:
                 continue
