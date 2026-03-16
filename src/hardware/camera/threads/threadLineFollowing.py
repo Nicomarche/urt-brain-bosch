@@ -2890,6 +2890,13 @@ Args:
     def _detect_with_local_ai(self, frame):
         """Consume locally inferred lane geometry and keep BFMC/Stanley as the controller."""
         height, width = frame.shape[:2]
+
+        # Initialize perspective/BEV transform if not already done.
+        # This is required for _reclassify_masks_via_bev() to work; without it
+        # perspective_initialized stays False and BEV is always skipped.
+        if not self.perspective_initialized:
+            self._init_perspective_transform(width, height)
+
         debug_info = {
             'pipeline_label': 'AI Local + BFMC Control',
         }
@@ -7928,12 +7935,16 @@ Returns:
             raw_str = ' '.join(raw_parts)
 
             # ── PREP (mask_side_resolution from debug_info) ───────────────────
-            det_side = debug_info.get('single_line_detected_side', '?')
-            res_side = debug_info.get('single_line_resolved_side', '?')
-            res_src = debug_info.get('single_line_side_source', '?')
+            det_side = debug_info.get('single_line_detected_side')
+            res_side = debug_info.get('single_line_resolved_side')
+            res_src  = debug_info.get('single_line_side_source')
             dup = debug_info.get('duplicate_line_collapse')
             dup_str = f" dup={dup.get('resolution_source','?')}" if isinstance(dup, dict) else ''
-            prep_str = f"det={det_side} res={res_side} via={res_src}{dup_str}"
+            if det_side is None and res_side is None:
+                # Two-line or no-line mode — single-line resolution not applicable
+                prep_str = f"2-line{dup_str}" if not dup_str else f"n/a{dup_str}"
+            else:
+                prep_str = f"det={det_side} res={res_side} via={res_src or '?'}{dup_str}"
 
             # ── BEV reclassify ────────────────────────────────────────────────
             bev = getattr(self, '_last_bev_reclassify_debug', {})
@@ -7969,7 +7980,9 @@ Returns:
             else:
                 err_m2 = mguid.get('error_px')
                 err_str = f"err={err_m2:.0f}px" if err_m2 is not None else "err=?"
-            hdg_deg = debug_info.get('heading_error_deg')
+            # Read heading directly from the computed state (not in debug_info dict)
+            _hdg_rad = getattr(self, '_heading_error', None)
+            hdg_deg = math.degrees(float(_hdg_rad)) if _hdg_rad is not None else None
             hdg_str = f"hdg={hdg_deg:+.1f}°" if hdg_deg is not None else "hdg=?"
             guide_str = f"{guide_mode} sides={guide_sides} {err_str} {hdg_str}"
 
