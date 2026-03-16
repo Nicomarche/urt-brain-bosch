@@ -134,9 +134,9 @@ class threadTracking(ThreadWithStop):
         # Load the track graph
         graphml_path = _GRAPHML_PATH
         if not os.path.isabs(graphml_path):
-            # Resolve relative to workspace root (two levels up from this file)
+            # Resolve relative to workspace root: src/hardware/tracking/ → 3 levels up
             _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.join(_here, "..", "..", "..", "..")
+            _root = os.path.join(_here, "..", "..", "..")
             graphml_path = os.path.normpath(os.path.join(_root, graphml_path))
 
         self._graph = None

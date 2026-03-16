@@ -229,8 +229,11 @@ class processCamera(WorkerProcess):
                         _graphml = os.path.join(_root, _graphml)
                     graph = TrackGraph(_graphml, step_m=_step)
                     visualizer = TrackVisualizer(graph)
+                    # Start manually — do NOT add to self.threads because
+                    # workerprocess.run() would try to set .daemon on an already-running
+                    # thread, which Python forbids.  TrackVisualizer is already daemon=True
+                    # so it will terminate automatically when the process exits.
                     visualizer.start()
-                    self.threads.append(visualizer)
                 except Exception as _vis_err:
                     print(f"[ processCamera ] WARNING - visualizer failed: {_vis_err}")
                     visualizer = None
