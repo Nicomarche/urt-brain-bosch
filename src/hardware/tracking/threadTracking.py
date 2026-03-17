@@ -79,6 +79,7 @@ class TrackingState:
         self.error_m = 0.0
         self.heading_rad = 0.0
         self.path_psi = 0.0
+        self.path_kappa = 0.0   # Signed path curvature at current wp (1/m)
         self.speed_mps = 0.0
         self.wp_idx = 0
         self.waypoint_mode_active = False
@@ -89,8 +90,8 @@ class TrackingState:
         # threadLineFollowing can push lane-based lateral corrections.
         self._dr = None
 
-    def update(self, x, y, yaw, error_m, heading_rad, path_psi, speed_mps,
-               wp_idx, waypoint_mode, node_attr, imu_received=False):
+    def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
+               speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False):
         with self._lock:
             self.x = x
             self.y = y
@@ -98,6 +99,7 @@ class TrackingState:
             self.error_m = error_m
             self.heading_rad = heading_rad
             self.path_psi = path_psi
+            self.path_kappa = path_kappa
             self.speed_mps = speed_mps
             self.wp_idx = wp_idx
             self.waypoint_mode_active = waypoint_mode
@@ -128,7 +130,7 @@ class TrackingState:
             return dict(
                 x=self.x, y=self.y, yaw=self.yaw,
                 error_m=self.error_m, heading_rad=self.heading_rad,
-                path_psi=self.path_psi,
+                path_psi=self.path_psi, path_kappa=self.path_kappa,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
                 waypoint_mode_active=self.waypoint_mode_active,
                 node_attr=self.node_attr,
@@ -283,7 +285,20 @@ class threadTracking(ThreadWithStop):
                         )
 
                 # Apply offset: corrected yaw is in the same frame as the GraphML map
-                self._last_yaw_rad = yaw_raw_rad + self._yaw_offset
+                corrected_yaw = yaw_raw_rad + self._yaw_offset
+                # Continuity unwrapping: compute delta from previous corrected yaw
+                # and wrap it to [-pi, pi] to handle ±180° roll-overs.
+                delta_yaw = corrected_yaw - self._last_yaw_rad
+                while delta_yaw > math.pi:
+                    delta_yaw -= 2.0 * math.pi
+                while delta_yaw < -math.pi:
+                    delta_yaw += 2.0 * math.pi
+                # Glitch filter: discard any single-step jump larger than 45°
+                # (physically impossible at the car's max yaw rate).
+                _MAX_YAW_JUMP = math.radians(45.0)
+                if abs(delta_yaw) <= _MAX_YAW_JUMP:
+                    self._last_yaw_rad = self._last_yaw_rad + delta_yaw
+                # else: keep previous yaw (discard the glitched sample)
                 self._imu_received = True
             except Exception:
                 pass
@@ -313,8 +328,9 @@ class threadTracking(ThreadWithStop):
         # ---- Compute tracking errors
         error_m, heading_rad = self._graph.compute_tracking_error(x, y, yaw, target_idx)
 
-        # ---- Path tangent at the target waypoint (used for lateral correction)
+        # ---- Path tangent and curvature at the target waypoint
         path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
+        path_kappa = self._graph.get_curvature(target_idx)
 
         # ---- Detect precision zone (intersection / stop-line ahead)
         in_precision_zone = self._graph.is_precision_zone(
@@ -326,7 +342,7 @@ class threadTracking(ThreadWithStop):
         self.tracking_state.update(
             x=x, y=y, yaw=yaw,
             error_m=error_m, heading_rad=heading_rad,
-            path_psi=path_psi,
+            path_psi=path_psi, path_kappa=path_kappa,
             speed_mps=self._last_speed,
             wp_idx=target_idx,
             waypoint_mode=in_precision_zone,
@@ -411,13 +427,16 @@ class threadTracking(ThreadWithStop):
                     drift_warn = f" ⚠ DRIFT_WITH_ZERO_SPEED (moved {moved*100:.1f}cm)"
             self._log_prev_xy = (x, y)
 
+            path_kappa = self._graph.get_curvature(wp_idx)
+            ff_deg = math.degrees(math.atan(path_kappa * 0.258)) if abs(path_kappa) > 0.01 else 0.0
             line = (
                 f"F{self._frame_idx:06d} | "
                 f"{spd_str} | "
                 f"{imu_str} | "
                 f"x={x:.4f}m y={y:.4f}m yaw={math.degrees(yaw):.1f}° | "
                 f"wp={wp_idx}/{n_wp} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
-                f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° | "
+                f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° "
+                f"kappa={path_kappa:+.3f}/m ff={ff_deg:+.1f}° | "
                 f"zone={zone_str} | dt={dt*1000:.1f}ms"
                 f"{drift_warn}\n"
             )

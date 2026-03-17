@@ -5556,9 +5556,12 @@ Args:
                     speed_value, speed_cap=speed_cap
                 )
             if getattr(self, "use_lateral_mpc", False):
+                wp_kappa = float(getattr(ts, 'path_kappa', 0.0))
+                wp_psi_ss = (math.atan(wp_kappa * float(self.lateral_mpc.L))
+                             if abs(wp_kappa) > 0.01 else 0.0)
                 return self.lateral_mpc.compute(
                     wp_error_m, wp_heading_rad, wp_speed_mps,
-                    steady_state_heading=0.0,
+                    steady_state_heading=wp_psi_ss,
                 )
             return self.stanley.compute(
                 wp_error_m, wp_heading_rad, wp_speed_mps,
@@ -5659,9 +5662,20 @@ Args:
             # Both accept the same arguments; MPC ignores yaw_rate / traj_yaw_rate /
             # steer_damping_delta (predictive horizon replaces damping terms).
             if getattr(self, 'use_lateral_mpc', False):
+                # Override steady_state_heading with path curvature feedforward when
+                # the track graph is available.  Using atan(kappa * L) shifts the
+                # initial psi0 seen by the MPC so it commands extra steer to maintain
+                # the curve — without this the MPC under-steers in corners.
+                effective_psi_ss = psi_ss
+                if ts is not None and getattr(ts, 'initialized', False) and _imu_ready:
+                    path_kappa = float(getattr(ts, 'path_kappa', 0.0))
+                    if abs(path_kappa) > 0.01:  # ignore negligible curvature
+                        effective_psi_ss = math.atan(
+                            path_kappa * float(self.lateral_mpc.L)
+                        )
                 return self.lateral_mpc.compute(
                     error_m, heading, speed_mps,
-                    steady_state_heading=psi_ss,
+                    steady_state_heading=effective_psi_ss,
                 )
             return self.stanley.compute(
                 error_m, heading, speed_mps,

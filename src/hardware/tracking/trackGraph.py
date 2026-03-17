@@ -275,6 +275,27 @@ class TrackGraph:
                 return True
         return False
 
+    def get_curvature(self, wp_idx: int) -> float:
+        """Return signed path curvature kappa at waypoint wp_idx (1/m).
+
+        Positive = left curve (counterclockwise), Negative = right curve.
+        Estimated via central finite differences of the tangent angle psi
+        over the two adjacent waypoints, divided by 2 * step_m.
+        """
+        n = len(self.waypoints)
+        if n < 3:
+            return 0.0
+        idx = wp_idx % n
+        i_next = (idx + 1) % n
+        i_prev = (idx - 1) % n
+        dpsi = float(self.waypoints[i_next][2]) - float(self.waypoints[i_prev][2])
+        # Wrap difference to [-pi, pi]
+        while dpsi > math.pi:
+            dpsi -= 2.0 * math.pi
+        while dpsi < -math.pi:
+            dpsi += 2.0 * math.pi
+        return dpsi / max(2.0 * self.step_m, 1e-6)
+
     def get_start_pose(self) -> tuple[float, float, float]:
         """Return (x, y, yaw) of the start waypoint."""
         if len(self.waypoints) == 0:
