@@ -198,6 +198,13 @@ class threadTracking(ThreadWithStop):
         # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
         self._last_yaw_rad = self._start_yaw_rad
         self._imu_received = False  # True once at least one real IMU message arrives
+        # Yaw offset to align IMU reference frame with the GraphML map frame.
+        # Computed on the first IMU message: offset = start_yaw_map - first_imu_yaw_raw
+        # This compensates for the IMU having an arbitrary reference direction
+        # (e.g. wherever the Nucleo was powered on), so that yaw_corrected = 0°
+        # when the car faces the track-start tangent direction.
+        self._yaw_offset = 0.0
+        self._yaw_offset_calibrated = False
         self._last_raw_speed = None   # raw value from message queue (for log)
         self._last_raw_imu = None     # raw imu dict (for log)
         self._last_imu_t = None       # monotonic time of last IMU message
@@ -252,7 +259,31 @@ class threadTracking(ThreadWithStop):
                 self._last_raw_imu = imu_dict
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
-                self._last_yaw_rad = math.radians(yaw_deg)
+                yaw_raw_rad = math.radians(yaw_deg)
+
+                if not self._yaw_offset_calibrated:
+                    # First IMU message: compute offset so that corrected_yaw == track-
+                    # start tangent when the car is physically aligned with the track.
+                    # IMU has an arbitrary reference (wherever Nucleo was powered on),
+                    # while the GraphML uses its own coordinate system.
+                    # offset = map_start_yaw - raw_imu_yaw_at_start
+                    self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
+                    self._yaw_offset_calibrated = True
+                    if self.logging:
+                        self.logging.info(
+                            f"[threadTracking] IMU calibrated: raw_yaw={yaw_deg:.1f}°, "
+                            f"start_yaw={math.degrees(self._start_yaw_rad):.1f}°, "
+                            f"offset={math.degrees(self._yaw_offset):.1f}°"
+                        )
+                    else:
+                        print(
+                            f"[threadTracking] IMU calibrated: raw={yaw_deg:.1f}°  "
+                            f"start_map={math.degrees(self._start_yaw_rad):.1f}°  "
+                            f"offset={math.degrees(self._yaw_offset):.1f}°"
+                        )
+
+                # Apply offset: corrected yaw is in the same frame as the GraphML map
+                self._last_yaw_rad = yaw_raw_rad + self._yaw_offset
                 self._imu_received = True
             except Exception:
                 pass
@@ -348,10 +379,18 @@ class threadTracking(ThreadWithStop):
             imu = self._last_raw_imu
             imu_ok = "✓" if self._imu_received else "✗NO_IMU"
             if imu:
-                imu_yaw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
+                imu_yaw_raw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
+                imu_yaw_corrected = imu_yaw_raw + math.degrees(self._yaw_offset)
                 pitch = imu.get("pitch", "?")
                 roll  = imu.get("roll",  "?")
-                imu_str = f"imu{imu_ok} yaw={imu_yaw:.1f}° pitch={pitch} roll={roll} (age={imu_age})"
+                cal_str = (
+                    f"offset={math.degrees(self._yaw_offset):.1f}°"
+                    if self._yaw_offset_calibrated else "uncal"
+                )
+                imu_str = (
+                    f"imu{imu_ok} raw={imu_yaw_raw:.1f}° corr={imu_yaw_corrected:.1f}° "
+                    f"({cal_str}) pitch={pitch} roll={roll} (age={imu_age})"
+                )
             else:
                 imu_str = (
                     f"imu{imu_ok} yaw={math.degrees(self._last_yaw_rad):.1f}°"
@@ -362,10 +401,15 @@ class threadTracking(ThreadWithStop):
             if in_precision_zone:
                 zone_str += "★"
 
-            # Drift warning: position changed but speed was 0
+            # Drift warning: speed=0 but DR position actually moved since last log
+            # (avoids false positive when car stops with large accumulated error)
             drift_warn = ""
-            if abs(self._last_speed) < 1e-4 and abs(error_m) > 0.05:
-                drift_warn = " ⚠ DRIFT_WITH_ZERO_SPEED"
+            prev_xy = getattr(self, "_log_prev_xy", None)
+            if prev_xy is not None and abs(self._last_speed) < 1e-4:
+                moved = math.hypot(x - prev_xy[0], y - prev_xy[1])
+                if moved > 0.005:  # more than 5mm movement at zero speed = real drift
+                    drift_warn = f" ⚠ DRIFT_WITH_ZERO_SPEED (moved {moved*100:.1f}cm)"
+            self._log_prev_xy = (x, y)
 
             line = (
                 f"F{self._frame_idx:06d} | "
