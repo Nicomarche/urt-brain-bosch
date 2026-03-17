@@ -56,6 +56,7 @@ class TrackingState:
         x, y, yaw        Current pose from dead reckoning (metres, radians).
         error_m          Lateral crosstrack error vs. current waypoint.
         heading_rad      Heading error vs. current waypoint tangent.
+        path_psi         Path tangent angle at the current waypoint (radians).
         speed_mps        Last received forward speed.
         wp_idx           Current waypoint index in the dense spline array.
         waypoint_mode_active  True when the car should use graph waypoints
@@ -70,13 +71,17 @@ class TrackingState:
         self.yaw = 0.0
         self.error_m = 0.0
         self.heading_rad = 0.0
+        self.path_psi = 0.0
         self.speed_mps = 0.0
         self.wp_idx = 0
         self.waypoint_mode_active = False
         self.node_attr = 0
         self.initialized = False
+        # Reference to the dead reckoning instance — set by threadTracking so
+        # threadLineFollowing can push lane-based lateral corrections.
+        self._dr = None
 
-    def update(self, x, y, yaw, error_m, heading_rad, speed_mps,
+    def update(self, x, y, yaw, error_m, heading_rad, path_psi, speed_mps,
                wp_idx, waypoint_mode, node_attr):
         with self._lock:
             self.x = x
@@ -84,17 +89,36 @@ class TrackingState:
             self.yaw = yaw
             self.error_m = error_m
             self.heading_rad = heading_rad
+            self.path_psi = path_psi
             self.speed_mps = speed_mps
             self.wp_idx = wp_idx
             self.waypoint_mode_active = waypoint_mode
             self.node_attr = node_attr
             self.initialized = True
 
+    def correct_lateral(self, lateral_error_m: float) -> None:
+        """Push a lane-detection-based lateral correction into dead reckoning.
+
+        Called by threadLineFollowing when two lane lines are visible and the
+        measured crosstrack error is reliable.  Nudges the DR position so the
+        next heading/error computation is more accurate.
+
+        Args:
+            lateral_error_m: Signed lane error from lane detection (m).
+                             Positive = car right of lane centre.
+        """
+        with self._lock:
+            dr = self._dr
+            psi = self.path_psi
+        if dr is not None:
+            dr.correct_lateral(lateral_error_m, psi)
+
     def snapshot(self):
         with self._lock:
             return dict(
                 x=self.x, y=self.y, yaw=self.yaw,
                 error_m=self.error_m, heading_rad=self.heading_rad,
+                path_psi=self.path_psi,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
                 waypoint_mode_active=self.waypoint_mode_active,
                 node_attr=self.node_attr,
@@ -145,6 +169,8 @@ class threadTracking(ThreadWithStop):
             self._graph = TrackGraph(graphml_path, step_m=_STEP_M)
             x0, y0, yaw0 = self._graph.get_start_pose()
             self._dr = DeadReckoning(x0, y0, yaw0)
+            # Share DR reference so threadLineFollowing can push lateral corrections
+            tracking_state._dr = self._dr
             if debugging:
                 print(
                     f"[threadTracking] loaded {len(self._graph.waypoints)} waypoints, "
@@ -207,6 +233,9 @@ class threadTracking(ThreadWithStop):
         # ---- Compute tracking errors
         error_m, heading_rad = self._graph.compute_tracking_error(x, y, yaw, target_idx)
 
+        # ---- Path tangent at the target waypoint (used for lateral correction)
+        path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
+
         # ---- Detect precision zone (intersection / stop-line ahead)
         in_precision_zone = self._graph.is_precision_zone(
             target_idx, lookahead_pts=_LOOKAHEAD_PTS
@@ -217,6 +246,7 @@ class threadTracking(ThreadWithStop):
         self.tracking_state.update(
             x=x, y=y, yaw=yaw,
             error_m=error_m, heading_rad=heading_rad,
+            path_psi=path_psi,
             speed_mps=self._last_speed,
             wp_idx=target_idx,
             waypoint_mode=in_precision_zone,

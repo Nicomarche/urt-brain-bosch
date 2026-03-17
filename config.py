@@ -255,6 +255,12 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True
 
+# TRACKING_USE_PATH_HEADING: True = usa el heading del IMU vs tangente del path
+# (como hace el repo de referencia) en lugar del ángulo estimado por detección
+# de líneas. Más estable en modo una-sola-línea: evita el spike a ±25° cuando
+# se pierde una línea.  False = comportamiento anterior (heading de visión).
+TRACKING_USE_PATH_HEADING = True
+
 # ── Lane mask classification debug log ──────────────────────────────────────
 # Set True to write temp/lane_mask_debug.log continuously while the car runs.
 # Each line shows: raw YOLO output → after prep → BEV centroid → guidance result → steering.

@@ -54,6 +54,26 @@ class DeadReckoning:
             self._y = float(y)
             self._yaw = float(yaw)
 
+    def correct_lateral(self, lateral_error_m: float, path_psi: float) -> None:
+        """Nudge the estimated position by the measured lane lateral error.
+
+        Called when lane detection gives a reliable crosstrack measurement
+        (e.g. two lines visible) to reduce dead-reckoning drift.
+
+        Args:
+            lateral_error_m: Signed lateral error from lane centre (m).
+                             Positive = car is right of lane centre (same sign
+                             convention as LateralMPC and trackGraph).
+            path_psi:        Path tangent angle at the nearest waypoint (rad).
+                             Used to convert the lateral offset into (dx, dy).
+        """
+        perp_psi = path_psi + math.pi / 2.0
+        dx = lateral_error_m * math.cos(perp_psi)
+        dy = lateral_error_m * math.sin(perp_psi)
+        with self._lock:
+            self._x -= dx
+            self._y -= dy
+
     # ------------------------------------------------------------------
     @property
     def x(self) -> float:
