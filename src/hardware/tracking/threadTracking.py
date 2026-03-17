@@ -84,12 +84,13 @@ class TrackingState:
         self.waypoint_mode_active = False
         self.node_attr = 0
         self.initialized = False
+        self.imu_received = False   # True once a real IMU message has been parsed
         # Reference to the dead reckoning instance — set by threadTracking so
         # threadLineFollowing can push lane-based lateral corrections.
         self._dr = None
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, speed_mps,
-               wp_idx, waypoint_mode, node_attr):
+               wp_idx, waypoint_mode, node_attr, imu_received=False):
         with self._lock:
             self.x = x
             self.y = y
@@ -102,6 +103,8 @@ class TrackingState:
             self.waypoint_mode_active = waypoint_mode
             self.node_attr = node_attr
             self.initialized = True
+            if imu_received:
+                self.imu_received = True
 
     def correct_lateral(self, lateral_error_m: float) -> None:
         """Push a lane-detection-based lateral correction into dead reckoning.
@@ -172,10 +175,12 @@ class threadTracking(ThreadWithStop):
 
         self._graph = None
         self._dr = None
+        self._start_yaw_rad = 0.0   # path tangent at start — used as yaw fallback
         try:
             self._graph = TrackGraph(graphml_path, step_m=_STEP_M)
             x0, y0, yaw0 = self._graph.get_start_pose()
             self._dr = DeadReckoning(x0, y0, yaw0)
+            self._start_yaw_rad = yaw0  # remember so IMU can be seeded from this
             # Share DR reference so threadLineFollowing can push lateral corrections
             tracking_state._dr = self._dr
             if debugging:
@@ -189,9 +194,14 @@ class threadTracking(ThreadWithStop):
         self._wp_idx = 0
         self._last_t = time.monotonic()
         self._last_speed = 0.0
-        self._last_yaw_rad = 0.0
+        # Seed yaw from track start pose so heading error is ~0 before IMU arrives.
+        # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
+        self._last_yaw_rad = self._start_yaw_rad
+        self._imu_received = False  # True once at least one real IMU message arrives
         self._last_raw_speed = None   # raw value from message queue (for log)
         self._last_raw_imu = None     # raw imu dict (for log)
+        self._last_imu_t = None       # monotonic time of last IMU message
+        self._last_speed_t = None     # monotonic time of last speed message
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
 
@@ -226,19 +236,24 @@ class threadTracking(ThreadWithStop):
         speed_raw = self._speed_sub.receive()
         if speed_raw is not None:
             self._last_raw_speed = speed_raw
+            self._last_speed_t = now
             try:
                 self._last_speed = float(speed_raw) * 0.001  # → m/s
             except (TypeError, ValueError):
                 pass
 
         # ---- Read latest IMU data (str repr of dict, yaw in degrees)
+        # Nucleo format: @imu:roll;pitch;yaw;accelx;accely;accelz;;
+        # threadRead parses this and sends str({'roll':..., 'yaw':..., ...})
         imu_raw = self._imu_sub.receive()
         if imu_raw is not None:
             try:
                 imu_dict = ast.literal_eval(str(imu_raw))
                 self._last_raw_imu = imu_dict
+                self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 self._last_yaw_rad = math.radians(yaw_deg)
+                self._imu_received = True
             except Exception:
                 pass
 
@@ -285,6 +300,7 @@ class threadTracking(ThreadWithStop):
             wp_idx=target_idx,
             waypoint_mode=in_precision_zone,
             node_attr=node_attr,
+            imu_received=self._imu_received,
         )
 
         # ---- Push state to visualizer if attached
@@ -314,37 +330,52 @@ class threadTracking(ThreadWithStop):
 
     def _write_tracking_log(self, x, y, yaw, error_m, heading_rad,
                              wp_idx, n_wp, in_precision_zone, node_attr, dt):
-        """Write one line to temp/tracking_debug.log."""
+        """Write one line to temp/tracking_debug.txt."""
         try:
+            now = time.monotonic()
             wp = self._graph.waypoints[wp_idx % n_wp]
             dist_to_wp = math.hypot(x - wp[0], y - wp[1])
 
+            # Speed field
             raw_spd = self._last_raw_speed
-            spd_str = f"speed_raw={raw_spd}" if raw_spd is not None else "speed_raw=none"
-            spd_mps_str = f"spd={self._last_speed*100:.1f}cm/s"
+            spd_age = f"{now - self._last_speed_t:.1f}s" if self._last_speed_t else "never"
+            spd_str = (
+                f"speed_raw={raw_spd} spd={self._last_speed*100:.1f}cm/s (age={spd_age})"
+            )
 
+            # IMU field
+            imu_age = f"{now - self._last_imu_t:.1f}s" if self._last_imu_t else "never"
             imu = self._last_raw_imu
+            imu_ok = "✓" if self._imu_received else "✗NO_IMU"
             if imu:
                 imu_yaw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
                 pitch = imu.get("pitch", "?")
                 roll  = imu.get("roll",  "?")
-                imu_str = f"imu_yaw={imu_yaw:.1f}° pitch={pitch} roll={roll}"
+                imu_str = f"imu{imu_ok} yaw={imu_yaw:.1f}° pitch={pitch} roll={roll} (age={imu_age})"
             else:
-                imu_str = f"imu_yaw={math.degrees(self._last_yaw_rad):.1f}° (no new msg)"
+                imu_str = (
+                    f"imu{imu_ok} yaw={math.degrees(self._last_yaw_rad):.1f}°"
+                    f" (seeded_from_track, age={imu_age})"
+                )
 
             zone_str = _ATTR_NAMES.get(node_attr, str(node_attr))
             if in_precision_zone:
                 zone_str += "★"
 
+            # Drift warning: position changed but speed was 0
+            drift_warn = ""
+            if abs(self._last_speed) < 1e-4 and abs(error_m) > 0.05:
+                drift_warn = " ⚠ DRIFT_WITH_ZERO_SPEED"
+
             line = (
                 f"F{self._frame_idx:06d} | "
-                f"{spd_str} {spd_mps_str} | "
+                f"{spd_str} | "
                 f"{imu_str} | "
                 f"x={x:.4f}m y={y:.4f}m yaw={math.degrees(yaw):.1f}° | "
                 f"wp={wp_idx}/{n_wp} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
                 f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° | "
-                f"zone={zone_str} | "
-                f"dt={dt*1000:.1f}ms\n"
+                f"zone={zone_str} | dt={dt*1000:.1f}ms"
+                f"{drift_warn}\n"
             )
             with open(self._debug_log_path, "a") as f:
                 f.write(line)

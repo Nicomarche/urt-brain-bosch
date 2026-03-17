@@ -5569,14 +5569,21 @@ Args:
             )
         # ── End waypoint-mode override ─────────────────────────────────────────
 
-        # ── Path-heading override (active when track graph is loaded) ──────────
+        # ── Path-heading override (active when track graph + IMU are ready) ──────
         # Like the reference repo, always derive heading error from IMU yaw vs
         # the path tangent computed by dead reckoning + TrackGraph, instead of
         # the noisy angle estimate from a single visible lane line.
         # This eliminates the steering spike to ±25° when one line is lost.
+        #
+        # GUARD: only activate once the IMU has sent at least one real message.
+        # Without this guard, yaw stays at 0° (or track-start yaw) and
+        # heading_rad = 0 - path_psi can be very large → MPC saturates.
+        #
         # When no lane line error is available (no detection), also fall back to
         # the dead-reckoning lateral error so the MPC has something to work with.
-        if ts is not None and getattr(ts, "initialized", False) and _track_heading_enabled:
+        _imu_ready = getattr(ts, "imu_received", False) if ts is not None else False
+        if ts is not None and getattr(ts, "initialized", False) \
+                and _track_heading_enabled and _imu_ready:
             heading = float(ts.heading_rad)
             self._heading_error = heading
             # Lateral fallback: use DR error only when lane detection gave nothing
@@ -8978,19 +8985,6 @@ Returns:
                     debug_info['two_line_ref_lw_px']  = round(_ref_lw_px, 1)
                     debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
                     debug_info['two_line_offtrack_cm']    = round(_offtrack_cm, 2)
-
-                    # ── Lateral correction for dead reckoning ──────────────
-                    # When two lines give a reliable crosstrack measurement,
-                    # nudge the DR position to prevent long-term drift.
-                    # This is the equivalent of a GPS lateral fix in the
-                    # reference repo's EKF.
-                    _ts = self._tracking_state
-                    if _ts is not None and getattr(_ts, 'initialized', False):
-                        try:
-                            _ts.correct_lateral(direct_error_m)
-                        except Exception:
-                            pass
-                    # ── End lateral correction ─────────────────────────────
 
                 # In 2-line mode with a physical direct_error_m the heading from the
                 # mask geometry is dominated by the car's YAW angle, not road curvature.
