@@ -32,6 +32,7 @@ try:
     _ADVANCE_DIST = getattr(cfg, "TRACKING_ADVANCE_DIST_M", 0.15)
     _INTERSECTION_LOOKAHEAD = getattr(cfg, "TRACKING_INTERSECTION_LOOKAHEAD_M", 0.40)
     _SHOW_WINDOW = getattr(cfg, "TRACKING_SHOW_WINDOW", True)
+    _DEBUG_LOG = getattr(cfg, "TRACKING_DEBUG_LOG", False)
     _LOOP_HZ = 50
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
@@ -39,7 +40,13 @@ except Exception:
     _ADVANCE_DIST = 0.15
     _INTERSECTION_LOOKAHEAD = 0.40
     _SHOW_WINDOW = True
+    _DEBUG_LOG = False
     _LOOP_HZ = 50
+
+# Attribute name → human label for the log
+_ATTR_NAMES = {0: "normal", 1: "crosswalk", 2: "intersection", 3: "oneway",
+               4: "hw_left", 5: "hw_right", 6: "roundabout", 7: "stopline",
+               8: "dotted", 9: "dotted_xwalk"}
 
 # How many dense waypoints correspond to the intersection lookahead distance
 _LOOKAHEAD_PTS = max(2, int(_INTERSECTION_LOOKAHEAD / _STEP_M))
@@ -183,6 +190,31 @@ class threadTracking(ThreadWithStop):
         self._last_t = time.monotonic()
         self._last_speed = 0.0
         self._last_yaw_rad = 0.0
+        self._last_raw_speed = None   # raw value from message queue (for log)
+        self._last_raw_imu = None     # raw imu dict (for log)
+        self._frame_idx = 0
+        self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
+
+        # ── Tracking debug log ──────────────────────────────────────────────
+        self._debug_log_enabled = _DEBUG_LOG
+        self._debug_log_path = None
+        if _DEBUG_LOG:
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _root = os.path.normpath(os.path.join(_here, "..", "..", ".."))
+            _log_dir = os.path.join(_root, "temp")
+            os.makedirs(_log_dir, exist_ok=True)
+            self._debug_log_path = os.path.join(_log_dir, "tracking_debug.txt")
+            try:
+                with open(self._debug_log_path, "w") as _f:
+                    _f.write(
+                        "# tracking_debug.log — dead reckoning + waypoint state\n"
+                        "# Each line: F<idx> | speed_raw=<raw> spd=<m/s> | "
+                        "imu_yaw=<deg> | x=<m> y=<m> yaw=<deg> | "
+                        "wp=<idx>/<total> wp_xy=(<x>,<y>) dist=<m> | "
+                        "err=<m> hdg=<deg> | zone=<attr> | dt=<ms>\n"
+                    )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     def thread_work(self):
@@ -193,6 +225,7 @@ class threadTracking(ThreadWithStop):
         # ---- Read latest speed (float, raw units = 10 cm/s)
         speed_raw = self._speed_sub.receive()
         if speed_raw is not None:
+            self._last_raw_speed = speed_raw
             try:
                 self._last_speed = float(speed_raw) * 0.001  # → m/s
             except (TypeError, ValueError):
@@ -203,6 +236,7 @@ class threadTracking(ThreadWithStop):
         if imu_raw is not None:
             try:
                 imu_dict = ast.literal_eval(str(imu_raw))
+                self._last_raw_imu = imu_dict
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 self._last_yaw_rad = math.radians(yaw_deg)
             except Exception:
@@ -266,5 +300,53 @@ class threadTracking(ThreadWithStop):
         # dashboard scale.  Y is inverted because SVG y=0 is at the top.
         try:
             self._loc_sender.send({"x": round(x, 4), "y": round(y, 4)})
+        except Exception:
+            pass
+
+        # ---- Tracking debug log ───────────────────────────────────────────
+        self._frame_idx += 1
+        if self._debug_log_enabled and self._debug_log_path and \
+                (self._frame_idx % self._log_every == 0):
+            self._write_tracking_log(
+                x, y, yaw, error_m, heading_rad,
+                target_idx, n_wp, in_precision_zone, node_attr, dt,
+            )
+
+    def _write_tracking_log(self, x, y, yaw, error_m, heading_rad,
+                             wp_idx, n_wp, in_precision_zone, node_attr, dt):
+        """Write one line to temp/tracking_debug.log."""
+        try:
+            wp = self._graph.waypoints[wp_idx % n_wp]
+            dist_to_wp = math.hypot(x - wp[0], y - wp[1])
+
+            raw_spd = self._last_raw_speed
+            spd_str = f"speed_raw={raw_spd}" if raw_spd is not None else "speed_raw=none"
+            spd_mps_str = f"spd={self._last_speed*100:.1f}cm/s"
+
+            imu = self._last_raw_imu
+            if imu:
+                imu_yaw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
+                pitch = imu.get("pitch", "?")
+                roll  = imu.get("roll",  "?")
+                imu_str = f"imu_yaw={imu_yaw:.1f}° pitch={pitch} roll={roll}"
+            else:
+                imu_str = f"imu_yaw={math.degrees(self._last_yaw_rad):.1f}° (no new msg)"
+
+            zone_str = _ATTR_NAMES.get(node_attr, str(node_attr))
+            if in_precision_zone:
+                zone_str += "★"
+
+            line = (
+                f"F{self._frame_idx:06d} | "
+                f"{spd_str} {spd_mps_str} | "
+                f"{imu_str} | "
+                f"x={x:.4f}m y={y:.4f}m yaw={math.degrees(yaw):.1f}° | "
+                f"wp={wp_idx}/{n_wp} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
+                f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° | "
+                f"zone={zone_str} | "
+                f"dt={dt*1000:.1f}ms\n"
+            )
+            with open(self._debug_log_path, "a") as f:
+                f.write(line)
         except Exception:
             pass

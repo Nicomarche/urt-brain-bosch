@@ -255,6 +255,11 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True
 
+# TRACKING_DEBUG_LOG: True = escribe temp/tracking_debug.log con posición DR,
+# velocidad, yaw, waypoint actual, errores de tracking, etc.
+# Útil para diagnosticar por qué el mapa muestra movimiento cuando el auto está quieto.
+TRACKING_DEBUG_LOG = True
+
 # TRACKING_USE_PATH_HEADING: True = usa el heading del IMU vs tangente del path
 # (como hace el repo de referencia) en lugar del ángulo estimado por detección
 # de líneas. Más estable en modo una-sola-línea: evita el spike a ±25° cuando
