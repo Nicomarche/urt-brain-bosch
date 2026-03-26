@@ -2,168 +2,168 @@
 {
   "log": "line_following_manual_last_run",
   "note": "dashboard_command = speed/steer sent by PC web dashboard (raw units). nucleo_feedback = actual values reported by Nucleo encoder/servo. speed units: x10 cm/s (divide by 10 for cm/s). steer units: x10 deg (divide by 10 for degrees).",
-  "reset_timestamp": 1774565305.837,
+  "reset_timestamp": 1774568534.589,
   "state_message": "MANUAL"
 }
 
 === FRAME 0001 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 1,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.312,
+    "roll_deg": -5.75,
+    "yaw_deg": -16.803,
+    "yaw_rate_degs": -6.084
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565305.9
+  "wall_time": 1774568534.594
 }
 
 === FRAME 0002 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 2,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.187,
+    "roll_deg": -5.625,
+    "yaw_deg": -17.803,
+    "yaw_rate_degs": -17.965
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565306.027
+  "wall_time": 1774568534.65
 }
 
 === FRAME 0003 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 3,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.0,
+    "roll_deg": -5.5,
+    "yaw_deg": -19.24,
+    "yaw_rate_degs": -5.875
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565306.148
+  "wall_time": 1774568534.893
 }
 
 === FRAME 0004 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 4,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.125,
+    "roll_deg": -5.562,
+    "yaw_deg": -20.303,
+    "yaw_rate_degs": -19.0
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565306.422
+  "wall_time": 1774568534.95
 }
 
 === FRAME 0005 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 5,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.125,
+    "roll_deg": -5.562,
+    "yaw_deg": -20.303,
+    "yaw_rate_degs": -19.0
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565306.546
+  "wall_time": 1774568535.005
 }
 
 === FRAME 0006 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 6,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.062,
+    "roll_deg": -5.562,
+    "yaw_deg": -21.553,
+    "yaw_rate_degs": -11.215
   },
   "nucleo_feedback": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
-  "wall_time": 1774565306.674
+  "wall_time": 1774568535.06
 }
 
 === FRAME 0007 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 7,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.125,
+    "roll_deg": -5.5,
+    "yaw_deg": -22.615,
+    "yaw_rate_degs": -4.437
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -171,23 +171,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565306.906
+  "wall_time": 1774568535.3
 }
 
 === FRAME 0008 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 8,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.125,
+    "roll_deg": -5.5,
+    "yaw_deg": -22.615,
+    "yaw_rate_degs": -4.437
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -195,23 +195,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565307.025
+  "wall_time": 1774568535.356
 }
 
 === FRAME 0009 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 9,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.312,
+    "roll_deg": -5.5,
+    "yaw_deg": -21.99,
+    "yaw_rate_degs": 5.559
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -219,23 +219,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565307.142
+  "wall_time": 1774568535.413
 }
 
 === FRAME 0010 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 10,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.312,
+    "roll_deg": -5.5,
+    "yaw_deg": -21.99,
+    "yaw_rate_degs": 5.559
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -243,23 +243,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565307.415
+  "wall_time": 1774568535.467
 }
 
 === FRAME 0011 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 11,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 0.125,
+    "roll_deg": -2.187,
+    "yaw_deg": -17.803,
+    "yaw_rate_degs": 21.277
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -267,23 +267,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565307.565
+  "wall_time": 1774568535.609
 }
 
 === FRAME 0012 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 12,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 2.437,
+    "roll_deg": 0.375,
+    "yaw_deg": -10.928,
+    "yaw_rate_degs": 125.629
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -291,23 +291,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565307.719
+  "wall_time": 1774568535.664
 }
 
 === FRAME 0013 ===
 {
   "dashboard_command": {
-    "speed_cms": 0.0,
-    "speed_x10": 0.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 13,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 2.437,
+    "roll_deg": 0.375,
+    "yaw_deg": -10.928,
+    "yaw_rate_degs": 125.629
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -315,23 +315,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.036
+  "wall_time": 1774568535.72
 }
 
 === FRAME 0014 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 14,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": 2.437,
+    "roll_deg": 0.375,
+    "yaw_deg": -10.928,
+    "yaw_rate_degs": 125.629
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -339,23 +339,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.165
+  "wall_time": 1774568535.774
 }
 
 === FRAME 0015 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 15,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": -1.875,
+    "roll_deg": -6.687,
+    "yaw_deg": 2.822,
+    "yaw_rate_degs": 39.478
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -363,23 +363,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.296
+  "wall_time": 1774568536.012
 }
 
 === FRAME 0016 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 16,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": -1.875,
+    "roll_deg": -6.687,
+    "yaw_deg": 2.822,
+    "yaw_rate_degs": 39.478
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -387,23 +387,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.518
+  "wall_time": 1774568536.094
 }
 
 === FRAME 0017 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 17,
   "imu": {
-    "pitch_deg": 0.5,
+    "pitch_deg": -4.0,
     "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "yaw_deg": 11.572,
+    "yaw_rate_degs": 63.312
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -411,23 +411,23 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.65
+  "wall_time": 1774568536.176
 }
 
 === FRAME 0018 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 5.0,
-    "steer_x10": 50.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 18,
   "imu": {
-    "pitch_deg": 0.5,
+    "pitch_deg": -4.0,
     "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "yaw_deg": 11.572,
+    "yaw_rate_degs": 63.312
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
@@ -435,3150 +435,582 @@
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565308.759
+  "wall_time": 1774568536.288
 }
 
 === FRAME 0019 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 19,
   "imu": {
-    "pitch_deg": 0.5,
+    "pitch_deg": -4.0,
     "roll_deg": -4.875,
-    "yaw_deg": -2.553,
-    "yaw_rate_degs": 0.0
+    "yaw_deg": 11.572,
+    "yaw_rate_degs": 63.312
   },
   "nucleo_feedback": {
     "speed_cms": 0.0,
     "speed_x10": 0.0,
-    "steer_deg": 2.5,
-    "steer_x10": 25.0
+    "steer_deg": 0.0,
+    "steer_x10": 0.0
   },
-  "wall_time": 1774565309.041
+  "wall_time": 1774568536.551
 }
 
 === FRAME 0020 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 20,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.937,
-    "yaw_deg": -2.615,
-    "yaw_rate_degs": -0.508
+    "pitch_deg": -4.25,
+    "roll_deg": 3.187,
+    "yaw_deg": 25.01,
+    "yaw_rate_degs": 29.265
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.188
+  "wall_time": 1774568536.64
 }
 
 === FRAME 0021 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 21,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.937,
-    "yaw_deg": -2.615,
-    "yaw_rate_degs": 0.0
+    "pitch_deg": -4.375,
+    "roll_deg": -1.125,
+    "yaw_deg": 25.447,
+    "yaw_rate_degs": 5.097
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.312
+  "wall_time": 1774568536.698
 }
 
 === FRAME 0022 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 22,
   "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -5.0,
-    "yaw_deg": -2.99,
-    "yaw_rate_degs": -1.576
+    "pitch_deg": -3.312,
+    "roll_deg": -1.25,
+    "yaw_deg": 22.635,
+    "yaw_rate_degs": -12.826
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.551
+  "wall_time": 1774568536.937
 }
 
 === FRAME 0023 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 23,
   "imu": {
-    "pitch_deg": 0.437,
-    "roll_deg": -5.062,
-    "yaw_deg": -3.24,
-    "yaw_rate_degs": -2.004
+    "pitch_deg": -1.875,
+    "roll_deg": -2.375,
+    "yaw_deg": 20.635,
+    "yaw_rate_degs": -25.556
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.672
+  "wall_time": 1774568537.027
 }
 
 === FRAME 0024 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 24,
   "imu": {
-    "pitch_deg": 0.437,
-    "roll_deg": -5.062,
-    "yaw_deg": -3.24,
-    "yaw_rate_degs": -2.004
+    "pitch_deg": -1.062,
+    "roll_deg": -2.625,
+    "yaw_deg": 20.072,
+    "yaw_rate_degs": -6.155
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.794
+  "wall_time": 1774568537.139
 }
 
 === FRAME 0025 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 25,
   "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.125,
-    "yaw_deg": -3.49,
-    "yaw_rate_degs": -0.88
+    "pitch_deg": 0.125,
+    "roll_deg": -6.25,
+    "yaw_deg": 20.635,
+    "yaw_rate_degs": 2.357
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565309.962
+  "wall_time": 1774568537.384
 }
 
 === FRAME 0026 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 26,
   "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.125,
-    "yaw_deg": -3.49,
-    "yaw_rate_degs": -0.88
+    "pitch_deg": 1.062,
+    "roll_deg": -5.562,
+    "yaw_deg": 20.822,
+    "yaw_rate_degs": 1.584
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.1
+  "wall_time": 1774568537.497
 }
 
 === FRAME 0027 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 27,
   "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -5.125,
-    "yaw_deg": -3.678,
-    "yaw_rate_degs": -0.709
+    "pitch_deg": 1.25,
+    "roll_deg": -5.625,
+    "yaw_deg": 20.822,
+    "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.209
+  "wall_time": 1774568537.598
 }
 
 === FRAME 0028 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 28,
   "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -5.125,
-    "yaw_deg": -3.678,
-    "yaw_rate_degs": -0.709
+    "pitch_deg": 1.25,
+    "roll_deg": -5.625,
+    "yaw_deg": 20.822,
+    "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.472
+  "wall_time": 1774568537.866
 }
 
 === FRAME 0029 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 29,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.25,
-    "yaw_deg": -4.053,
-    "yaw_rate_degs": -1.006
+    "pitch_deg": 0.875,
+    "roll_deg": -5.625,
+    "yaw_deg": 20.885,
+    "yaw_rate_degs": 0.17
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.61
+  "wall_time": 1774568537.967
 }
 
 === FRAME 0030 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 30,
   "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.312,
-    "yaw_deg": -4.428,
-    "yaw_rate_degs": -2.727
+    "pitch_deg": 0.875,
+    "roll_deg": -5.625,
+    "yaw_deg": 20.822,
+    "yaw_rate_degs": -0.634
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.737
+  "wall_time": 1774568538.082
 }
 
 === FRAME 0031 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 31,
   "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.312,
-    "yaw_deg": -4.428,
-    "yaw_rate_degs": -2.727
+    "pitch_deg": 0.875,
+    "roll_deg": -5.625,
+    "yaw_deg": 20.76,
+    "yaw_rate_degs": -0.203
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565310.957
+  "wall_time": 1774568538.382
 }
 
 === FRAME 0032 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 32,
   "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.312,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": -0.358
+    "pitch_deg": 0.25,
+    "roll_deg": -6.125,
+    "yaw_deg": 22.822,
+    "yaw_rate_degs": 18.372
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.089
+  "wall_time": 1774568538.5
 }
 
 === FRAME 0033 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 33,
   "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.312,
-    "yaw_deg": -4.678,
-    "yaw_rate_degs": -0.965
+    "pitch_deg": 0.375,
+    "roll_deg": -6.125,
+    "yaw_deg": 22.447,
+    "yaw_rate_degs": -3.22
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.217
+  "wall_time": 1774568538.612
 }
 
 === FRAME 0034 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 34,
   "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.375,
-    "yaw_deg": -4.865,
-    "yaw_rate_degs": -0.715
+    "pitch_deg": 0.625,
+    "roll_deg": -5.937,
+    "yaw_deg": 22.447,
+    "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.487
+  "wall_time": 1774568538.899
 }
 
 === FRAME 0035 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 35,
   "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -4.928,
-    "yaw_rate_degs": -0.457
+    "pitch_deg": 0.875,
+    "roll_deg": -5.812,
+    "yaw_deg": 22.51,
+    "yaw_rate_degs": 0.484
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.607
+  "wall_time": 1774568539.039
 }
 
 === FRAME 0036 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 36,
   "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -4.928,
-    "yaw_rate_degs": -0.457
+    "pitch_deg": 0.812,
+    "roll_deg": -5.812,
+    "yaw_deg": 22.51,
+    "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.751
+  "wall_time": 1774568539.166
 }
 
 === FRAME 0037 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 37,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.125,
-    "yaw_deg": -4.928,
+    "pitch_deg": 0.375,
+    "roll_deg": -5.875,
+    "yaw_deg": 22.51,
     "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565311.982
+  "wall_time": 1774568539.382
 }
 
 === FRAME 0038 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 38,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.062,
-    "yaw_deg": -5.053,
-    "yaw_rate_degs": -0.981
+    "pitch_deg": 0.375,
+    "roll_deg": -5.875,
+    "yaw_deg": 22.51,
+    "yaw_rate_degs": 0.0
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565312.116
+  "wall_time": 1774568539.471
 }
 
 === FRAME 0039 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 39,
   "imu": {
     "pitch_deg": 0.125,
-    "roll_deg": -5.062,
-    "yaw_deg": -5.053,
-    "yaw_rate_degs": -0.981
+    "roll_deg": -5.75,
+    "yaw_deg": 22.135,
+    "yaw_rate_degs": -1.918
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565312.256
+  "wall_time": 1774568539.565
 }
 
 === FRAME 0040 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 40,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.062,
-    "yaw_deg": -5.178,
-    "yaw_rate_degs": -0.332
+    "pitch_deg": -3.937,
+    "roll_deg": -2.812,
+    "yaw_deg": 22.01,
+    "yaw_rate_degs": -0.607
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565312.486
+  "wall_time": 1774568539.762
 }
 
 === FRAME 0041 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 41,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.062,
-    "yaw_deg": -5.303,
-    "yaw_rate_degs": -0.996
+    "pitch_deg": -1.937,
+    "roll_deg": 0.25,
+    "yaw_deg": 21.01,
+    "yaw_rate_degs": -11.113
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
+    "steer_deg": 0.0,
+    "steer_x10": 0.0
   },
-  "wall_time": 1774565312.631
+  "wall_time": 1774568539.856
 }
 
 === FRAME 0042 ===
 {
   "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -10.0,
-    "steer_x10": -100.0
+    "speed_cms": 10.0,
+    "speed_x10": 100.0,
+    "steer_deg": 25.0,
+    "steer_x10": 250.0
   },
   "frame_index": 42,
   "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.0,
-    "yaw_deg": -5.365,
-    "yaw_rate_degs": -0.426
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
-  },
-  "wall_time": 1774565312.739
-}
-
-=== FRAME 0043 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 43,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.875,
-    "yaw_deg": -5.49,
-    "yaw_rate_degs": -0.532
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
-  },
-  "wall_time": 1774565312.988
-}
-
-=== FRAME 0044 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 44,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.812,
-    "yaw_deg": -5.49,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565313.133
-}
-
-=== FRAME 0045 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 45,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.812,
-    "yaw_deg": -5.49,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565313.257
-}
-
-=== FRAME 0046 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 46,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.812,
-    "yaw_deg": -5.49,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565313.478
-}
-
-=== FRAME 0047 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 47,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.75,
-    "yaw_deg": -5.553,
-    "yaw_rate_degs": -0.538
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565313.625
-}
-
-=== FRAME 0048 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 48,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.75,
-    "yaw_deg": -5.553,
-    "yaw_rate_degs": -0.538
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565313.766
-}
-
-=== FRAME 0049 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -15.0,
-    "steer_x10": -150.0
-  },
-  "frame_index": 49,
-  "imu": {
     "pitch_deg": 0.062,
-    "roll_deg": -4.812,
-    "yaw_deg": -5.553,
-    "yaw_rate_degs": 0.0
+    "roll_deg": 1.5,
+    "yaw_deg": 20.76,
+    "yaw_rate_degs": -2.743
   },
   "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -10.0,
-    "steer_x10": -100.0
-  },
-  "wall_time": 1774565314.013
-}
-
-=== FRAME 0050 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -20.0,
-    "steer_x10": -200.0
-  },
-  "frame_index": 50,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.687,
-    "yaw_deg": -5.615,
-    "yaw_rate_degs": -0.441
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "wall_time": 1774565314.127
-}
-
-=== FRAME 0051 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -20.0,
-    "steer_x10": -200.0
-  },
-  "frame_index": 51,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.562,
-    "yaw_deg": -5.49,
-    "yaw_rate_degs": 1.074
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "wall_time": 1774565314.249
-}
-
-=== FRAME 0052 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
-  },
-  "frame_index": 52,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.437,
-    "yaw_deg": -5.115,
-    "yaw_rate_degs": 1.513
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -7.5,
-    "steer_x10": -75.0
-  },
-  "wall_time": 1774565314.501
-}
-
-=== FRAME 0053 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 53,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.625,
-    "yaw_deg": -4.428,
-    "yaw_rate_degs": 5.553
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565314.616
-}
-
-=== FRAME 0054 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 54,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.625,
-    "yaw_deg": -4.428,
-    "yaw_rate_degs": 5.553
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565314.741
-}
-
-=== FRAME 0055 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 55,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.334
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565314.997
-}
-
-=== FRAME 0056 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 56,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565315.122
-}
-
-=== FRAME 0057 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 57,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565315.254
-}
-
-=== FRAME 0058 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 58,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565315.523
-}
-
-=== FRAME 0059 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 59,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565315.657
-}
-
-=== FRAME 0060 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 60,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565315.784
-}
-
-=== FRAME 0061 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 61,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.812,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.04
-}
-
-=== FRAME 0062 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 62,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.812,
-    "yaw_deg": -4.303,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.187
-}
-
-=== FRAME 0063 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 63,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.75,
-    "yaw_deg": -4.365,
-    "yaw_rate_degs": -0.155
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.423
-}
-
-=== FRAME 0064 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 64,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.687,
-    "yaw_deg": -4.365,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.532
-}
-
-=== FRAME 0065 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 65,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.687,
-    "yaw_deg": -4.428,
-    "yaw_rate_degs": -0.566
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.65
-}
-
-=== FRAME 0066 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 66,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.625,
-    "yaw_deg": -4.49,
-    "yaw_rate_degs": -0.236
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565316.925
-}
-
-=== FRAME 0067 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 67,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.625,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": -0.493
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565317.054
-}
-
-=== FRAME 0068 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 68,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.625,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": -0.493
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565317.166
-}
-
-=== FRAME 0069 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
-  },
-  "frame_index": 69,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.437,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -2.5,
-    "steer_x10": -25.0
-  },
-  "wall_time": 1774565317.44
-}
-
-=== FRAME 0070 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -12.5,
-    "steer_x10": -125.0
-  },
-  "frame_index": 70,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.437,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -7.5,
-    "steer_x10": -75.0
-  },
-  "wall_time": 1774565317.603
-}
-
-=== FRAME 0071 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -20.0,
-    "steer_x10": -200.0
-  },
-  "frame_index": 71,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.375,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -17.5,
-    "steer_x10": -175.0
-  },
-  "wall_time": 1774565317.757
-}
-
-=== FRAME 0072 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -15.0,
-    "steer_x10": -150.0
-  },
-  "frame_index": 72,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.25,
-    "yaw_deg": -4.553,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -20.0,
-    "steer_x10": -200.0
-  },
-  "wall_time": 1774565318.014
-}
-
-=== FRAME 0073 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -10.0,
-    "steer_x10": -100.0
-  },
-  "frame_index": 73,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.187,
-    "yaw_deg": -3.803,
-    "yaw_rate_degs": 6.695
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -15.0,
-    "steer_x10": -150.0
-  },
-  "wall_time": 1774565318.142
-}
-
-=== FRAME 0074 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -2.5,
-    "steer_x10": -25.0
-  },
-  "frame_index": 74,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -4.312,
-    "yaw_deg": -3.24,
-    "yaw_rate_degs": 4.48
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -10.0,
-    "steer_x10": -100.0
-  },
-  "wall_time": 1774565318.261
-}
-
-=== FRAME 0075 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 75,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -4.375,
-    "yaw_deg": -2.928,
-    "yaw_rate_degs": 1.186
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565318.539
-}
-
-=== FRAME 0076 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 76,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.375,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 1.377
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565318.652
-}
-
-=== FRAME 0077 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 77,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.375,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 1.377
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565318.782
-}
-
-=== FRAME 0078 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 78,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.437,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.015
-}
-
-=== FRAME 0079 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 79,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.562,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.131
-}
-
-=== FRAME 0080 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 80,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.562,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.248
-}
-
-=== FRAME 0081 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 81,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.625,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.53
-}
-
-=== FRAME 0082 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 82,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.687,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.659
-}
-
-=== FRAME 0083 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 83,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.687,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.764
-}
-
-=== FRAME 0084 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 84,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.687,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565319.967
-}
-
-=== FRAME 0085 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 85,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.75,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565320.076
-}
-
-=== FRAME 0086 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -5.0,
-    "steer_x10": -50.0
-  },
-  "frame_index": 86,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.75,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565320.213
-}
-
-=== FRAME 0087 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -15.0,
-    "steer_x10": -150.0
-  },
-  "frame_index": 87,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.75,
-    "yaw_deg": -2.74,
-    "yaw_rate_degs": 0.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -7.5,
-    "steer_x10": -75.0
-  },
-  "wall_time": 1774565320.476
-}
-
-=== FRAME 0088 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "frame_index": 88,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.625,
-    "yaw_deg": -2.615,
-    "yaw_rate_degs": 0.903
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "wall_time": 1774565320.615
-}
-
-=== FRAME 0089 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "frame_index": 89,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.625,
-    "yaw_deg": -2.615,
-    "yaw_rate_degs": 0.903
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "wall_time": 1774565320.76
-}
-
-=== FRAME 0090 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "frame_index": 90,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -4.5,
-    "yaw_deg": -2.303,
-    "yaw_rate_degs": 0.654
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -22.5,
-    "steer_x10": -225.0
-  },
-  "wall_time": 1774565321.086
-}
-
-=== FRAME 0091 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "frame_index": 91,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.25,
-    "yaw_deg": -0.928,
-    "yaw_rate_degs": 10.354
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "wall_time": 1774565321.208
-}
-
-=== FRAME 0092 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "frame_index": 92,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.25,
-    "yaw_deg": -0.553,
-    "yaw_rate_degs": 3.074
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "wall_time": 1774565321.353
-}
-
-=== FRAME 0093 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "frame_index": 93,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.25,
-    "yaw_deg": -0.553,
-    "yaw_rate_degs": 3.074
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "wall_time": 1774565322.0
-}
-
-=== FRAME 0094 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "frame_index": 94,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.312,
-    "yaw_deg": -0.447,
-    "yaw_rate_degs": 0.134
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "wall_time": 1774565322.127
-}
-
-=== FRAME 0095 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -17.5,
-    "steer_x10": -175.0
-  },
-  "frame_index": 95,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.312,
-    "yaw_deg": 1.51,
-    "yaw_rate_degs": 7.602
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -25.0,
-    "steer_x10": -250.0
-  },
-  "wall_time": 1774565322.378
-}
-
-=== FRAME 0096 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 96,
-  "imu": {
-    "pitch_deg": 0.687,
-    "roll_deg": -4.187,
-    "yaw_deg": 3.197,
-    "yaw_rate_degs": 14.117
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": -17.5,
-    "steer_x10": -175.0
-  },
-  "wall_time": 1774565322.492
-}
-
-=== FRAME 0097 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 97,
-  "imu": {
-    "pitch_deg": 0.687,
-    "roll_deg": -4.25,
-    "yaw_deg": 3.635,
-    "yaw_rate_degs": 3.84
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565322.613
-}
-
-=== FRAME 0098 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 98,
-  "imu": {
-    "pitch_deg": 0.687,
-    "roll_deg": -4.25,
-    "yaw_deg": 3.635,
-    "yaw_rate_degs": 3.84
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565322.9
-}
-
-=== FRAME 0099 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 7.5,
-    "steer_x10": 75.0
-  },
-  "frame_index": 99,
-  "imu": {
-    "pitch_deg": 0.687,
-    "roll_deg": -4.562,
-    "yaw_deg": 4.01,
-    "yaw_rate_degs": 0.916
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565323.021
-}
-
-=== FRAME 0100 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 17.5,
-    "steer_x10": 175.0
-  },
-  "frame_index": 100,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -4.687,
-    "yaw_deg": 3.947,
-    "yaw_rate_degs": -0.485
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "wall_time": 1774565323.15
-}
-
-=== FRAME 0101 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 17.5,
-    "steer_x10": 175.0
-  },
-  "frame_index": 101,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -4.812,
-    "yaw_deg": 3.697,
-    "yaw_rate_degs": -1.024
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 22.5,
-    "steer_x10": 225.0
-  },
-  "wall_time": 1774565323.397
-}
-
-=== FRAME 0102 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 7.5,
-    "steer_x10": 75.0
-  },
-  "frame_index": 102,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -5.0,
-    "yaw_deg": 3.197,
-    "yaw_rate_degs": -4.073
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 15.0,
-    "steer_x10": 150.0
-  },
-  "wall_time": 1774565323.528
-}
-
-=== FRAME 0103 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 7.5,
-    "steer_x10": 75.0
-  },
-  "frame_index": 103,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -5.0,
-    "yaw_deg": 3.197,
-    "yaw_rate_degs": -4.073
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 15.0,
-    "steer_x10": 150.0
-  },
-  "wall_time": 1774565323.639
-}
-
-=== FRAME 0104 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 104,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.937,
-    "yaw_deg": 1.76,
-    "yaw_rate_degs": -3.728
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565323.887
-}
-
-=== FRAME 0105 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 105,
-  "imu": {
-    "pitch_deg": 0.437,
-    "roll_deg": -4.875,
-    "yaw_deg": 1.322,
-    "yaw_rate_degs": -4.237
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.002
-}
-
-=== FRAME 0106 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 106,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -4.875,
-    "yaw_deg": 1.072,
-    "yaw_rate_degs": -2.155
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.117
-}
-
-=== FRAME 0107 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 107,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -4.875,
-    "yaw_deg": -0.885,
-    "yaw_rate_degs": -6.801
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.4
-}
-
-=== FRAME 0108 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 108,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.937,
-    "yaw_deg": -0.51,
-    "yaw_rate_degs": 3.452
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.506
-}
-
-=== FRAME 0109 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 109,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.937,
-    "yaw_deg": -0.51,
-    "yaw_rate_degs": 3.452
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.612
-}
-
-=== FRAME 0110 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 110,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -4.937,
-    "yaw_deg": -0.385,
-    "yaw_rate_degs": 0.312
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.881
-}
-
-=== FRAME 0111 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 111,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.937,
-    "yaw_deg": -0.135,
-    "yaw_rate_degs": 3.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565324.962
-}
-
-=== FRAME 0112 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 112,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -4.937,
-    "yaw_deg": -0.135,
-    "yaw_rate_degs": 3.0
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.041
-}
-
-=== FRAME 0113 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 113,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -4.875,
-    "yaw_deg": -0.01,
-    "yaw_rate_degs": 0.388
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.314
-}
-
-=== FRAME 0114 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 114,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.115,
-    "yaw_rate_degs": -0.955
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.422
-}
-
-=== FRAME 0115 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 115,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.303,
-    "yaw_rate_degs": -1.761
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.53
-}
-
-=== FRAME 0116 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 116,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.303,
-    "yaw_rate_degs": -1.761
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.831
-}
-
-=== FRAME 0117 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 5.0,
-    "steer_x10": 50.0
-  },
-  "frame_index": 117,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.428,
-    "yaw_rate_degs": -0.303
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565325.938
-}
-
-=== FRAME 0118 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "frame_index": 118,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.49,
-    "yaw_rate_degs": -0.594
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "wall_time": 1774565326.028
-}
-
-=== FRAME 0119 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "frame_index": 119,
-  "imu": {
-    "pitch_deg": 0.562,
-    "roll_deg": -4.812,
-    "yaw_deg": -0.49,
-    "yaw_rate_degs": -0.594
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "wall_time": 1774565326.311
-}
-
-=== FRAME 0120 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "frame_index": 120,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -5.125,
-    "yaw_deg": -1.053,
-    "yaw_rate_degs": -1.499
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 10.0,
-    "steer_x10": 100.0
-  },
-  "wall_time": 1774565326.415
-}
-
-=== FRAME 0121 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "frame_index": 121,
-  "imu": {
-    "pitch_deg": 0.437,
-    "roll_deg": -5.125,
-    "yaw_deg": -1.49,
-    "yaw_rate_degs": -4.195
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 20.0,
-    "steer_x10": 200.0
-  },
-  "wall_time": 1774565326.561
-}
-
-=== FRAME 0122 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "frame_index": 122,
-  "imu": {
-    "pitch_deg": 0.5,
-    "roll_deg": -5.25,
-    "yaw_deg": -1.928,
-    "yaw_rate_degs": -2.056
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "wall_time": 1774565326.718
-}
-
-=== FRAME 0123 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "frame_index": 123,
-  "imu": {
-    "pitch_deg": 0.437,
-    "roll_deg": -5.312,
-    "yaw_deg": -2.49,
-    "yaw_rate_degs": -6.52
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "wall_time": 1774565326.817
-}
-
-=== FRAME 0124 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 20.0,
-    "steer_x10": 200.0
-  },
-  "frame_index": 124,
-  "imu": {
-    "pitch_deg": 0.375,
-    "roll_deg": -5.375,
-    "yaw_deg": -3.115,
-    "yaw_rate_degs": -6.09
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 25.0,
-    "steer_x10": 250.0
-  },
-  "wall_time": 1774565326.926
-}
-
-=== FRAME 0125 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 12.5,
-    "steer_x10": 125.0
-  },
-  "frame_index": 125,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.437,
-    "yaw_deg": -4.053,
-    "yaw_rate_degs": -2.861
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 15.0,
-    "steer_x10": 150.0
-  },
-  "wall_time": 1774565327.276
-}
-
-=== FRAME 0126 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 7.5,
-    "steer_x10": 75.0
-  },
-  "frame_index": 126,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.437,
-    "yaw_deg": -4.803,
-    "yaw_rate_degs": -5.759
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 12.5,
-    "steer_x10": 125.0
-  },
-  "wall_time": 1774565327.397
-}
-
-=== FRAME 0127 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 127,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -5.437,
-    "yaw_deg": -6.178,
-    "yaw_rate_degs": -11.591
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565327.481
-}
-
-=== FRAME 0128 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 128,
-  "imu": {
-    "pitch_deg": 0.187,
-    "roll_deg": -5.437,
-    "yaw_deg": -6.178,
-    "yaw_rate_degs": -11.591
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565327.761
-}
-
-=== FRAME 0129 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 129,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.312,
-    "yaw_deg": -6.928,
-    "yaw_rate_degs": -2.043
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565327.883
-}
-
-=== FRAME 0130 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 130,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.312,
-    "yaw_deg": -6.928,
-    "yaw_rate_degs": -2.043
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.009
-}
-
-=== FRAME 0131 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 131,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.062,
-    "yaw_deg": -7.24,
-    "yaw_rate_degs": -0.795
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.245
-}
-
-=== FRAME 0132 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 132,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.0,
-    "yaw_deg": -7.303,
-    "yaw_rate_degs": -0.716
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.335
-}
-
-=== FRAME 0133 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 133,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.875,
-    "yaw_deg": -7.428,
-    "yaw_rate_degs": -1.335
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.442
-}
-
-=== FRAME 0134 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 134,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.937,
-    "yaw_deg": -7.49,
-    "yaw_rate_degs": -0.281
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.651
-}
-
-=== FRAME 0135 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 135,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.937,
-    "yaw_deg": -7.615,
-    "yaw_rate_degs": -1.322
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.749
-}
-
-=== FRAME 0136 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 136,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -4.937,
-    "yaw_deg": -7.615,
-    "yaw_rate_degs": -1.322
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565328.828
-}
-
-=== FRAME 0137 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 137,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.062,
-    "yaw_deg": -7.803,
-    "yaw_rate_degs": -0.619
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.035
-}
-
-=== FRAME 0138 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 138,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.062,
-    "yaw_deg": -7.803,
-    "yaw_rate_degs": -0.619
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.116
-}
-
-=== FRAME 0139 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 139,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.062,
-    "yaw_deg": -7.865,
-    "yaw_rate_degs": -0.393
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.196
-}
-
-=== FRAME 0140 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 140,
-  "imu": {
-    "pitch_deg": 0.312,
-    "roll_deg": -5.062,
-    "yaw_deg": -7.928,
-    "yaw_rate_degs": -0.253
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.444
-}
-
-=== FRAME 0141 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 141,
-  "imu": {
-    "pitch_deg": 0.25,
-    "roll_deg": -5.062,
-    "yaw_deg": -8.053,
-    "yaw_rate_degs": -1.529
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.535
-}
-
-=== FRAME 0142 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 142,
-  "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.303,
-    "yaw_rate_degs": -2.731
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.611
-}
-
-=== FRAME 0143 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 143,
-  "imu": {
-    "pitch_deg": 0.125,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.428,
-    "yaw_rate_degs": -0.549
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.842
-}
-
-=== FRAME 0144 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 144,
-  "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.553,
-    "yaw_rate_degs": -1.606
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565329.921
-}
-
-=== FRAME 0145 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 145,
-  "imu": {
-    "pitch_deg": 0.062,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.553,
-    "yaw_rate_degs": -1.606
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565330.017
-}
-
-=== FRAME 0146 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 146,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.74,
-    "yaw_rate_degs": -0.576
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565330.259
-}
-
-=== FRAME 0147 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 147,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.865,
-    "yaw_rate_degs": -1.333
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565330.354
-}
-
-=== FRAME 0148 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 148,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -8.99,
-    "yaw_rate_degs": -1.346
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "wall_time": 1774565330.443
-}
-
-=== FRAME 0149 ===
-{
-  "dashboard_command": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
-    "steer_deg": 0.0,
-    "steer_x10": 0.0
-  },
-  "frame_index": 149,
-  "imu": {
-    "pitch_deg": 0.0,
-    "roll_deg": -5.187,
-    "yaw_deg": -9.178,
-    "yaw_rate_degs": -0.879
-  },
-  "nucleo_feedback": {
-    "speed_cms": 5.0,
-    "speed_x10": 50.0,
+    "speed_cms": 0.0,
+    "speed_x10": 0.0,
     "steer_deg": 0.0,
     "steer_x10": 0.0
   },
-  "wall_time": 1774565330.644
+  "wall_time": 1774568539.952
 }
 
