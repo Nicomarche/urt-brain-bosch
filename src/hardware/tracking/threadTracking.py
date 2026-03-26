@@ -53,6 +53,19 @@ except Exception:
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
 
+# Maximum plausible physical yaw rate of the vehicle (rad/s).
+# Used to compute a dynamic re-zero detection threshold that scales with the
+# actual time since the last IMU sample, instead of a fixed angle.
+# 150°/s is a generous upper bound for this car at any realistic speed.
+_MAX_PHYSICAL_YAW_RATE_RADS = math.radians(150.0)
+
+# Maximum dt (seconds) used for integration steps (yaw bicycle model and DR
+# position update).  Caps the error introduced by frame drops: a 440ms gap at
+# high speed would otherwise produce ~6-7cm of position error in an unknown
+# direction.  When a gap exceeds this limit the integration is truncated; the
+# IMU absolute yaw correction on the next frame recovers heading accuracy.
+_MAX_INTEGRATION_DT = 0.15
+
 # Attribute name → human label for the log
 _ATTR_NAMES = {0: "normal", 1: "crosswalk", 2: "intersection", 3: "oneway",
                4: "hw_left", 5: "hw_right", 6: "roundabout", 7: "stopline",
@@ -321,19 +334,24 @@ class threadTracking(ThreadWithStop):
                     delta_yaw += 2.0 * math.pi
                 # Re-zero detection: the BNO055 occasionally resets its heading
                 # reference internally (NDOF magnetometer recalibration). This
-                # produces a jump that is physically impossible given the car's
-                # max yaw rate (~120 deg/s) and IMU update rate (~10 Hz), which
-                # caps the maximum real delta at ~12°. Any jump above 20° is
-                # therefore a re-zero event, not an actual rotation.
-                # When detected: recompute the offset so that the car's current
-                # heading (_last_yaw_rad) stays unchanged and future samples from
-                # the new sensor reference frame remain coherent.
-                _MAX_YAW_STEP = math.radians(20.0)
-                if abs(delta_yaw) > _MAX_YAW_STEP:
+                # produces a physically impossible yaw jump that must be caught.
+                # The threshold scales with the actual time since the last IMU
+                # sample (imu_gap) so that legitimate fast turns at high speed
+                # with slow IMU updates are not mistakenly rejected.
+                # A fixed 20° was too conservative: at 150°/s max yaw-rate with
+                # 250ms IMU gaps the real delta can reach ~37°, causing valid
+                # corrections to be silently discarded and heading to freeze at
+                # the (possibly wrong) bicycle-model prediction.
+                imu_gap = (now - self._last_imu_t) if self._last_imu_t is not None else 0.15
+                _max_yaw_step = min(math.radians(60.0),
+                                    _MAX_PHYSICAL_YAW_RATE_RADS * imu_gap)
+                if abs(delta_yaw) > _max_yaw_step:
                     self._yaw_offset = self._last_yaw_rad - yaw_raw_rad
                     _msg = (
                         f"[threadTracking] BNO055 re-zero detected: "
                         f"raw={yaw_deg:.1f}°  delta={math.degrees(delta_yaw):.1f}°  "
+                        f"threshold={math.degrees(_max_yaw_step):.1f}°  "
+                        f"imu_gap={imu_gap*1000:.0f}ms  "
                         f"new_offset={math.degrees(self._yaw_offset):.1f}°"
                     )
                     if self.logging:
@@ -351,15 +369,24 @@ class threadTracking(ThreadWithStop):
             # dead reckoning stays accurate between the ~250ms IMU gaps.
             # yaw_rate = (v / L) * tan(steer)
             # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases
+            # dt is capped at _MAX_INTEGRATION_DT: extrapolating a stale steer angle
+            # over a large frame-drop gap produces larger heading errors at high speed
+            # than simply freezing the heading until the next IMU absolute fix.
             if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
+                yaw_dt = min(dt, _MAX_INTEGRATION_DT)
                 yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
-                self._last_yaw_rad -= yaw_rate * dt
+                self._last_yaw_rad -= yaw_rate * yaw_dt
 
         if self._dr is None or self._graph is None:
             return
 
         # ---- Dead reckoning update
-        self._dr.update(self._last_speed, self._last_yaw_rad, dt)
+        # Cap dt for position integration: at high speed a 440ms frame-drop gap
+        # integrates ~6cm in a direction that may be wrong (stale bicycle model
+        # heading).  Capping at _MAX_INTEGRATION_DT limits that overshoot; the
+        # IMU absolute yaw on the next frame corrects the heading anyway.
+        dr_dt = min(dt, _MAX_INTEGRATION_DT)
+        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt)
         x, y, yaw = self._dr.get_state()
 
         # ---- Advance waypoint index when car is close enough
