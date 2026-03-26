@@ -9106,6 +9106,15 @@ Returns:
                     debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
                     debug_info['two_line_offtrack_cm']    = round(_offtrack_cm, 2)
 
+                # ---- Dead-reckoning lateral correction from lane geometry.
+                # Two visible lines give a precise physical crosstrack measurement.
+                # Sign flip: direct_error_m > 0 = car LEFT of center (Stanley convention),
+                # but correct_lateral(positive) = car RIGHT of center (DR convention).
+                if direct_error_m is not None and not self._is_stabilization_frame:
+                    ts = self._tracking_state
+                    if ts is not None:
+                        ts.correct_lateral(-direct_error_m)
+
                 # In 2-line mode with a physical direct_error_m the heading from the
                 # mask geometry is dominated by the car's YAW angle, not road curvature.
                 # As the Stanley crosstrack correction turns the car body, the heading
