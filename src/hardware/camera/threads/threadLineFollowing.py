@@ -9108,12 +9108,17 @@ Returns:
 
                 # ---- Dead-reckoning lateral correction from lane geometry.
                 # Two visible lines give a precise physical crosstrack measurement.
+                # Apply only a small fraction per frame (complementary filter) —
+                # applying the full error every frame at 30fps would cause massive drift.
+                # At alpha=0.04, a 2cm constant error converges in ~25 frames (~0.8s).
                 # Sign flip: direct_error_m > 0 = car LEFT of center (Stanley convention),
                 # but correct_lateral(positive) = car RIGHT of center (DR convention).
-                if direct_error_m is not None and not self._is_stabilization_frame:
+                _LANE_DR_ALPHA = 0.04
+                if (direct_error_m is not None and not self._is_stabilization_frame
+                        and abs(direct_error_m) > 0.005):  # ignore sub-5mm noise
                     ts = self._tracking_state
                     if ts is not None:
-                        ts.correct_lateral(-direct_error_m)
+                        ts.correct_lateral(-direct_error_m * _LANE_DR_ALPHA)
 
                 # In 2-line mode with a physical direct_error_m the heading from the
                 # mask geometry is dominated by the car's YAW angle, not road curvature.
