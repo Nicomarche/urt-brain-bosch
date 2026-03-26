@@ -20,7 +20,7 @@ import time
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.allMessages import CurrentSpeed, ImuData, Location
+from src.utils.messages.allMessages import CurrentSpeed, ImuData, Location, CurrentSteer
 
 from src.hardware.tracking.deadReckoning import DeadReckoning
 from src.hardware.tracking.trackGraph import TrackGraph
@@ -34,6 +34,13 @@ try:
     _SHOW_WINDOW = getattr(cfg, "TRACKING_SHOW_WINDOW", True)
     _DEBUG_LOG = getattr(cfg, "TRACKING_DEBUG_LOG", False)
     _LOOP_HZ = 50
+    # Speed-adaptive lookahead: lookahead_m = max(_ADVANCE_DIST, v * _LOOKAHEAD_TIME_S).
+    # Compensates for servo + control-loop lag (~270ms measured). At 50cm/s this
+    # gives 30cm lookahead instead of 15cm, matching actual system latency.
+    _LOOKAHEAD_TIME_S  = getattr(cfg, "TRACKING_LOOKAHEAD_TIME_S", 0.6)
+    _MAX_LOOKAHEAD_M   = getattr(cfg, "TRACKING_MAX_LOOKAHEAD_M",  0.80)
+    # Bicycle model dead-reckoning between IMU updates
+    _WHEELBASE_M       = getattr(cfg, "TRACKING_WHEELBASE_M", 0.260)
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
     _STEP_M = 0.05
@@ -42,6 +49,9 @@ except Exception:
     _SHOW_WINDOW = True
     _DEBUG_LOG = False
     _LOOP_HZ = 50
+    _LOOKAHEAD_TIME_S  = 0.6
+    _MAX_LOOKAHEAD_M   = 0.80
+    _WHEELBASE_M       = 0.260
 
 # Attribute name → human label for the log
 _ATTR_NAMES = {0: "normal", 1: "crosswalk", 2: "intersection", 3: "oneway",
@@ -164,6 +174,10 @@ class threadTracking(ThreadWithStop):
         self._imu_sub = messageHandlerSubscriber(
             queuesList, ImuData, "lastOnly", subscribe=True
         )
+        self._steer_sub = messageHandlerSubscriber(
+            queuesList, CurrentSteer, "lastOnly", subscribe=True
+        )
+        self._last_steer_rad = 0.0   # latest steering angle in radians (math convention)
         # Location sender → dashboard map display
         self._loc_sender = messageHandlerSender(queuesList, Location)
 
@@ -251,6 +265,15 @@ class threadTracking(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
+        # ---- Read latest steering angle (degrees, same sign as servo command)
+        steer_raw = self._steer_sub.receive()
+        if steer_raw is not None:
+            try:
+                # CurrentSteer > 0 → right turn (CW in world) → yaw decreases in math convention
+                self._last_steer_rad = math.radians(float(steer_raw))
+            except (TypeError, ValueError):
+                pass
+
         # ---- Read latest IMU data (str repr of dict, yaw in degrees)
         # Nucleo format: @imu:roll;pitch;yaw;accelx;accely;accelz;;
         # threadRead parses this and sends str({'roll':..., 'yaw':..., ...})
@@ -323,6 +346,14 @@ class threadTracking(ThreadWithStop):
                 self._imu_received = True
             except Exception:
                 pass
+        else:
+            # No IMU message this frame — integrate yaw using bicycle model so that
+            # dead reckoning stays accurate between the ~250ms IMU gaps.
+            # yaw_rate = (v / L) * tan(steer)
+            # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases
+            if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
+                yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
+                self._last_yaw_rad -= yaw_rate * dt
 
         if self._dr is None or self._graph is None:
             return
@@ -341,9 +372,16 @@ class threadTracking(ThreadWithStop):
         if dist_to_wp < _ADVANCE_DIST:
             self._wp_idx = (self._wp_idx + 1) % n_wp
 
+        # ---- Speed-adaptive lookahead: scale with velocity to compensate for
+        #      servo + control-loop lag (~270ms). Clamped to [_ADVANCE_DIST, _MAX_LOOKAHEAD_M].
+        lookahead_m = min(
+            max(_ADVANCE_DIST, abs(self._last_speed) * _LOOKAHEAD_TIME_S),
+            _MAX_LOOKAHEAD_M,
+        )
+
         # ---- Find the lookahead waypoint (used for control)
         target_idx = self._graph.find_waypoint_ahead(
-            x, y, self._wp_idx, lookahead_m=_ADVANCE_DIST
+            x, y, self._wp_idx, lookahead_m=lookahead_m
         )
 
         # ---- Compute tracking errors
@@ -427,11 +465,13 @@ class threadTracking(ThreadWithStop):
                 imu_str = (
                     f"imu{imu_ok} raw={imu_yaw_raw:.1f}° corr={imu_yaw_corrected:.1f}° "
                     f"({cal_str}) pitch={pitch} roll={roll} (age={imu_age})"
+                    f" steer={math.degrees(self._last_steer_rad):.1f}°"
                 )
             else:
                 imu_str = (
                     f"imu{imu_ok} yaw={math.degrees(self._last_yaw_rad):.1f}°"
                     f" (seeded_from_track, age={imu_age})"
+                    f" steer={math.degrees(self._last_steer_rad):.1f}°"
                 )
 
             zone_str = _ATTR_NAMES.get(node_attr, str(node_attr))
