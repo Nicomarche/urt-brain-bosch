@@ -287,9 +287,15 @@ class threadTracking(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
-        # ---- Read latest IMU data (str repr of dict, yaw in degrees)
-        # Nucleo format: @imu:roll;pitch;yaw;accelx;accely;accelz;;
-        # threadRead parses this and sends str({'roll':..., 'yaw':..., ...})
+        # ---- Read latest IMU data (used only for startup logging; yaw is NOT
+        #      taken from the IMU after the first message).
+        # The BNO055 magnetometer is affected by electromagnetic interference
+        # from the steering servo: when the steering angle changes, the reported
+        # yaw changes even though the car is stationary.  Using the IMU as an
+        # absolute heading reference therefore causes false heading jumps on the
+        # map every time the steering wheel moves.
+        # Heading is maintained exclusively by integrating the bicycle model
+        # (speed × steering angle) below.
         imu_raw = self._imu_sub.receive()
         if imu_raw is not None:
             try:
@@ -297,92 +303,44 @@ class threadTracking(ThreadWithStop):
                 self._last_raw_imu = imu_dict
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
-                # BNO055 reports yaw as compass heading (CW-positive, 0-360°).
-                # The map and controller use math convention (CCW-positive).
-                # Negate to convert: right turn → yaw decreases (as math expects).
                 yaw_raw_rad = -math.radians(yaw_deg)
 
                 if not self._yaw_offset_calibrated:
-                    # First IMU message: compute offset so that corrected_yaw == track-
-                    # start tangent when the car is physically aligned with the track.
-                    # IMU has an arbitrary reference (wherever Nucleo was powered on),
-                    # while the GraphML uses its own coordinate system.
-                    # offset = map_start_yaw - raw_imu_yaw_at_start
+                    # First IMU message: record offset for log reference only.
+                    # _last_yaw_rad is already seeded from track-start tangent
+                    # (_start_yaw_rad) in __init__; do not overwrite it here.
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
-                    if self.logging:
-                        self.logging.info(
-                            f"[threadTracking] IMU calibrated: raw_yaw={yaw_deg:.1f}°, "
-                            f"start_yaw={math.degrees(self._start_yaw_rad):.1f}°, "
-                            f"offset={math.degrees(self._yaw_offset):.1f}°"
-                        )
-                    else:
-                        print(
-                            f"[threadTracking] IMU calibrated: raw={yaw_deg:.1f}°  "
-                            f"start_map={math.degrees(self._start_yaw_rad):.1f}°  "
-                            f"offset={math.degrees(self._yaw_offset):.1f}°"
-                        )
-
-                # Apply offset: corrected yaw is in the same frame as the GraphML map
-                corrected_yaw = yaw_raw_rad + self._yaw_offset
-                # Continuity unwrapping: compute delta from previous corrected yaw
-                # and wrap it to [-pi, pi] to handle ±180° roll-overs.
-                delta_yaw = corrected_yaw - self._last_yaw_rad
-                while delta_yaw > math.pi:
-                    delta_yaw -= 2.0 * math.pi
-                while delta_yaw < -math.pi:
-                    delta_yaw += 2.0 * math.pi
-                # Re-zero detection: the BNO055 occasionally resets its heading
-                # reference internally (NDOF magnetometer recalibration). This
-                # produces a physically impossible yaw jump that must be caught.
-                # The threshold scales with the actual time since the last IMU
-                # sample (imu_gap) so that legitimate fast turns at high speed
-                # with slow IMU updates are not mistakenly rejected.
-                # A fixed 20° was too conservative: at 150°/s max yaw-rate with
-                # 250ms IMU gaps the real delta can reach ~37°, causing valid
-                # corrections to be silently discarded and heading to freeze at
-                # the (possibly wrong) bicycle-model prediction.
-                imu_gap = (now - self._last_imu_t) if self._last_imu_t is not None else 0.15
-                _max_yaw_step = min(math.radians(60.0),
-                                    _MAX_PHYSICAL_YAW_RATE_RADS * imu_gap)
-                if abs(delta_yaw) > _max_yaw_step:
-                    self._yaw_offset = self._last_yaw_rad - yaw_raw_rad
                     _msg = (
-                        f"[threadTracking] BNO055 re-zero detected: "
-                        f"raw={yaw_deg:.1f}°  delta={math.degrees(delta_yaw):.1f}°  "
-                        f"threshold={math.degrees(_max_yaw_step):.1f}°  "
-                        f"imu_gap={imu_gap*1000:.0f}ms  "
-                        f"new_offset={math.degrees(self._yaw_offset):.1f}°"
+                        f"[threadTracking] IMU ready (yaw used for odometry only): "
+                        f"raw={yaw_deg:.1f}°  "
+                        f"start_map={math.degrees(self._start_yaw_rad):.1f}°  "
+                        f"offset={math.degrees(self._yaw_offset):.1f}°"
                     )
                     if self.logging:
-                        self.logging.warning(_msg)
+                        self.logging.info(_msg)
                     else:
                         print(_msg)
-                    # _last_yaw_rad unchanged — heading is continuous
-                else:
-                    self._last_yaw_rad = self._last_yaw_rad + delta_yaw
+
                 self._imu_received = True
             except Exception:
                 pass
-        else:
-            # No IMU message this frame — integrate yaw using bicycle model so that
-            # dead reckoning stays accurate between the ~250ms IMU gaps.
-            # yaw_rate = (v / L) * tan(steer)
-            # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases
-            # dt is capped at _MAX_INTEGRATION_DT: extrapolating a stale steer angle
-            # over a large frame-drop gap produces larger heading errors at high speed
-            # than simply freezing the heading until the next IMU absolute fix.
-            if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
-                yaw_dt = min(dt, _MAX_INTEGRATION_DT)
-                yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
-                self._last_yaw_rad -= yaw_rate * yaw_dt
+
+        # ---- Yaw integration via bicycle model (primary heading source).
+        # Runs every frame regardless of whether an IMU message arrived.
+        # yaw_rate = (v / L) * tan(steer)
+        # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases.
+        # dt is capped at _MAX_INTEGRATION_DT to limit error from frame drops.
+        if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
+            yaw_dt = min(dt, _MAX_INTEGRATION_DT)
+            yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
+            self._last_yaw_rad -= yaw_rate * yaw_dt
 
         if self._dr is None or self._graph is None:
             return
 
         # ---- Dead reckoning update (RK4)
-        # Cap dt to limit position error during frame drops; the IMU absolute
-        # yaw on the next frame corrects heading regardless.
+        # Cap dt to limit position error during frame drops.
         # Pass steer_rad so RK4 can account for heading change within the step —
         # critical at high speed where Euler accumulates O(dt²) error per step.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
