@@ -20,7 +20,7 @@ import time
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.allMessages import CurrentSpeed, ImuData, Location, CurrentSteer
+from src.utils.messages.allMessages import CurrentSpeed, ImuData, Location, SteerMotor
 
 from src.hardware.tracking.deadReckoning import DeadReckoning
 from src.hardware.tracking.trackGraph import TrackGraph
@@ -192,7 +192,7 @@ class threadTracking(ThreadWithStop):
             queuesList, ImuData, "lastOnly", subscribe=True
         )
         self._steer_sub = messageHandlerSubscriber(
-            queuesList, CurrentSteer, "lastOnly", subscribe=True
+            queuesList, SteerMotor, "lastOnly", subscribe=True
         )
         self._last_steer_rad = 0.0   # latest steering angle in radians (math convention)
         # Location sender → dashboard map display
