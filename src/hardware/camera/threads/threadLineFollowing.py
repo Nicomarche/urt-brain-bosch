@@ -671,8 +671,12 @@ Args:
         self._measured_steer = 0.0       # Last steering angle feedback
         self._measured_steer_delta = 0.0 # Previous steer - current steer (deg)
         self._last_yaw = 0.0             # Last IMU yaw reading (degrees)
+        self._last_imu_roll = 0.0        # Last IMU roll reading (degrees)
+        self._last_imu_pitch = 0.0       # Last IMU pitch reading (degrees)
         self._yaw_rate = 0.0             # Computed yaw rate (rad/s)
         self._last_imu_time = None       # Timestamp of last IMU reading
+        self._last_cmd_speed = 0.0       # Last SpeedMotor command from dashboard (raw str→float)
+        self._last_cmd_steer = 0.0       # Last SteerMotor command from dashboard (raw str→float)
         self._heading_error = 0.0        # Last computed heading error (rad)
         self._stanley_last_psi_ss = 0.0  # Last steady-state heading bias (rad)
         self._stanley_last_traj_yaw_rate = 0.0  # Last reference yaw rate (rad/s)
@@ -910,6 +914,16 @@ Args:
         self._auto_run_log_enabled = False
         self._auto_run_log_frame_idx = 0
         self._last_frame_trace = {}
+        self.manual_run_log_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..", "..", "..", "..",
+                "temp",
+                "line_following_manual_last_run.txt",
+            )
+        )
+        self._manual_run_log_enabled = False
+        self._manual_run_log_frame_idx = 0
 
         # Lane mask classification debug log (always-on, controlled by config)
         self._mask_debug_log_enabled = bool(getattr(_config, 'LANE_MASK_DEBUG_LOG', False))
@@ -1071,6 +1085,10 @@ Args:
         self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
         self.currentSpeedSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
         self.currentSteerSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSteer, "lastOnly", True)
+
+        # Dashboard command subscribers — used to capture PC commands in the manual-run log
+        self.speedMotorSubscriber = messageHandlerSubscriber(self.queuesList, SpeedMotor, "lastOnly", True)
+        self.steerMotorSubscriber = messageHandlerSubscriber(self.queuesList, SteerMotor, "lastOnly", True)
 
         # Parking spot detection subscriber
         self.signDetectedSubscriber = messageHandlerSubscriber(self.queuesList, SignDetected, "lastOnly", True)
@@ -5133,6 +5151,8 @@ Args:
                     if dt > 0.001:
                         self._yaw_rate = math.radians(new_yaw - self._last_yaw) / dt
                 self._last_yaw = new_yaw
+                self._last_imu_roll = float(data.get('roll', self._last_imu_roll))
+                self._last_imu_pitch = float(data.get('pitch', self._last_imu_pitch))
                 self._last_imu_time = current_time
             except (ValueError, SyntaxError):
                 pass
@@ -5152,6 +5172,20 @@ Args:
                 new_steer = float(steer_msg)
                 self._measured_steer_delta = self._measured_steer - new_steer
                 self._measured_steer = new_steer
+            except (ValueError, TypeError):
+                pass
+
+        # Dashboard commands — always drained so the pipe stays clean; values used by manual log
+        cmd_speed_msg = self.speedMotorSubscriber.receive()
+        if cmd_speed_msg is not None:
+            try:
+                self._last_cmd_speed = float(cmd_speed_msg)
+            except (ValueError, TypeError):
+                pass
+        cmd_steer_msg = self.steerMotorSubscriber.receive()
+        if cmd_steer_msg is not None:
+            try:
+                self._last_cmd_steer = float(cmd_steer_msg)
             except (ValueError, TypeError):
                 pass
 
@@ -7939,6 +7973,76 @@ Returns:
             log_file.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
             log_file.write("\n\n")
 
+    def _reset_manual_run_log(self, state_message):
+        """Reset (overwrite) the manual-run log when entering MANUAL mode.
+
+        Always replaces the previous file so the log only ever contains data
+        from the most recent manual session — same behaviour as the auto-run log.
+        """
+        log_dir = os.path.dirname(self.manual_run_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        self._manual_run_log_enabled = True
+        self._manual_run_log_frame_idx = 0
+        header = {
+            "log": "line_following_manual_last_run",
+            "reset_timestamp": round(time.time(), 3),
+            "state_message": str(state_message),
+            "note": (
+                "dashboard_command = speed/steer sent by PC web dashboard (raw units). "
+                "nucleo_feedback = actual values reported by Nucleo encoder/servo. "
+                "speed units: x10 cm/s (divide by 10 for cm/s). "
+                "steer units: x10 deg (divide by 10 for degrees)."
+            ),
+        }
+        with open(self.manual_run_log_path, "w", encoding="utf-8") as f:
+            f.write("=== MANUAL RUN RESET ===\n")
+            f.write(json.dumps(header, indent=2, sort_keys=True))
+            f.write("\n\n")
+
+    def _log_manual_run_frame(self):
+        """Append one per-frame sensor snapshot to the manual-run log.
+
+        Captures everything relevant during manual driving:
+        - IMU yaw / roll / pitch and computed yaw rate
+        - Nucleo encoder speed and servo steer feedback
+        - Last speed / steer command received from the PC dashboard
+        """
+        if not self._manual_run_log_enabled:
+            return
+        self._manual_run_log_frame_idx += 1
+        speed_cms = round(abs(float(self._measured_speed)) * 0.1, 2)  # x10 cm/s → cm/s
+        steer_deg = round(float(self._measured_steer) * 0.1, 2)       # x10 deg → deg
+        cmd_speed_cms = round(abs(float(self._last_cmd_speed)) * 0.1, 2)
+        cmd_steer_deg = round(float(self._last_cmd_steer) * 0.1, 2)
+        payload = {
+            "frame_index": self._manual_run_log_frame_idx,
+            "wall_time": round(time.time(), 3),
+            "imu": {
+                "yaw_deg": round(float(self._last_yaw), 3),
+                "roll_deg": round(float(self._last_imu_roll), 3),
+                "pitch_deg": round(float(self._last_imu_pitch), 3),
+                "yaw_rate_degs": round(math.degrees(float(self._yaw_rate)), 3),
+            },
+            "nucleo_feedback": {
+                "speed_x10": round(float(self._measured_speed), 1),
+                "speed_cms": speed_cms,
+                "steer_x10": round(float(self._measured_steer), 1),
+                "steer_deg": steer_deg,
+            },
+            "dashboard_command": {
+                "speed_x10": round(float(self._last_cmd_speed), 1),
+                "speed_cms": cmd_speed_cms,
+                "steer_x10": round(float(self._last_cmd_steer), 1),
+                "steer_deg": cmd_steer_deg,
+            },
+        }
+        log_dir = os.path.dirname(self.manual_run_log_path)
+        os.makedirs(log_dir, exist_ok=True)
+        with open(self.manual_run_log_path, "a", encoding="utf-8") as f:
+            f.write(f"=== FRAME {self._manual_run_log_frame_idx:04d} ===\n")
+            f.write(json.dumps(payload, indent=2, sort_keys=True))
+            f.write("\n\n")
+
     def _write_mask_debug_entry(self, debug_info, steering_angle, speed):
         """Write one compact line to the always-on mask classification debug log.
 
@@ -8524,6 +8628,7 @@ Returns:
                 commanded_speed=commanded_speed,
                 command_source=command_source,
             )
+            self._log_manual_run_frame()
             # Always-on mask classification debug log (enabled via LANE_MASK_DEBUG_LOG in config)
             if self._mask_debug_log_enabled and self._last_frame_trace:
                 _di = self._last_frame_trace.get('debug') or self._last_frame_trace
@@ -9858,6 +9963,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 if mode_dict.get("enabled", False):
                     self.is_line_following_active = True
                     self._last_inactive_log = False  # Reset inactive log flag
+                    self._manual_run_log_enabled = False  # Stop manual log when entering active mode
                     if str(message) == "AUTO":
                         self._reset_auto_run_log(message)
                     elif str(message) == "PARKING":
@@ -9871,6 +9977,10 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     if self._parking_state != ParkingState.IDLE:
                         self._reset_parking_state()
                         print("\033[1;97m[ Parking ] :\033[0m \033[1;93mCANCELLED\033[0m - Parking aborted due to mode change")
+                    if str(message) == "MANUAL":
+                        self._reset_manual_run_log(message)
+                    else:
+                        self._manual_run_log_enabled = False
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mDEACTIVATED\033[0m - Line following is now INACTIVE")
             except KeyError as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
