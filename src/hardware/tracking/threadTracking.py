@@ -286,8 +286,10 @@ class threadTracking(ThreadWithStop):
         steer_raw = self._steer_sub.receive()
         if steer_raw is not None:
             try:
-                # CurrentSteer > 0 → right turn (CW in world) → yaw decreases in math convention
-                self._last_steer_rad = math.radians(float(steer_raw))
+                # CurrentSteer is in tenths of degrees (angle × 10) — divide before converting.
+                # Protocol: send_motor_commands sends int(angle_deg * 10), firmware echoes same units.
+                # CurrentSteer > 0 → right turn (CW in world) → yaw decreases in math convention.
+                self._last_steer_rad = math.radians(float(steer_raw) / 10.0)
             except (TypeError, ValueError):
                 pass
 

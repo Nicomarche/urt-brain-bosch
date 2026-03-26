@@ -251,9 +251,11 @@ class TrackVisualizer(threading.Thread):
             wp_idx    = state.get("wp_idx",    0)
 
             # The arrow always points where the front wheels face:
-            #   display_yaw = car body heading + current steering angle
+            #   display_yaw = car body heading - steering angle
+            # Minus because in screen coords (Y-axis flipped), CW rotation = decreasing angle.
+            # Steer > 0 = right turn = CW on screen → display_yaw must decrease.
             # This updates even when the car is stopped and only the steering changes.
-            display_yaw = yaw + steer_rad
+            display_yaw = yaw - steer_rad
 
             # Current target waypoint
             wps = self._graph.waypoints
