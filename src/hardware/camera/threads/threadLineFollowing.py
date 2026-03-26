@@ -5144,7 +5144,8 @@ Args:
         if imu_msg is not None:
             try:
                 data = ast.literal_eval(imu_msg)
-                new_yaw = float(data.get('yaw', 0))
+                # BNO055 compass convention (CW-positive) → math convention (CCW-positive)
+                new_yaw = -float(data.get('yaw', 0))
                 current_time = time.time()
                 if self._last_imu_time is not None:
                     dt = current_time - self._last_imu_time
