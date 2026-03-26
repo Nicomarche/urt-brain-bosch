@@ -1,24 +1,33 @@
 """
 Dead reckoning position estimator using a kinematic bicycle model.
 
-Same formulation as the reference repo (mpc_acados2_clean.py / Utility.cpp):
-    x   += v * cos(yaw) * dt
-    y   += v * sin(yaw) * dt
-    yaw  = IMU yaw (absolute, not integrated)
+Position is integrated using Runge-Kutta 4th order (RK4), which accounts for
+the heading change *within* each timestep.  This is critical at high speed or
+with large dt (frame drops): Euler integration uses only the start-of-step
+heading, accumulating O(dt²) position error per step, while RK4 reduces that
+to O(dt⁴).
 
-The IMU provides absolute yaw (degrees, from the NUCLEO), so heading never
-drifts.  Only position drifts over time — that is corrected by re-anchoring
-to a known node whenever the car passes close to a stop-line node.
+The ODE being integrated:
+    dx/dt   = v * cos(yaw)
+    dy/dt   = v * sin(yaw)
+    dyaw/dt = -(v / L) * tan(steer)   [sign: right turn → yaw decreases]
+
+yaw is corrected to IMU absolute heading whenever a fresh IMU sample arrives
+(handled in threadTracking), so heading never accumulates drift.  Only
+position drifts over time — corrected by re-anchoring to a known node whenever
+the car passes close to a stop-line node.
 """
 
 import math
 import threading
 
+# Wheelbase default (m) — overridden by threadTracking via steer_rad argument
+_WHEELBASE_M = 0.260
+
 
 class DeadReckoning:
-    """Kinematic dead-reckoning estimator.
+    """Kinematic dead-reckoning estimator with RK4 position integration.
 
-    Integrates forward velocity over time using the IMU yaw as heading.
     Thread-safe: all public methods acquire ``_lock``.
     """
 
@@ -30,18 +39,47 @@ class DeadReckoning:
         self._last_update = None
 
     # ------------------------------------------------------------------
-    def update(self, speed_mps: float, yaw_rad: float, dt: float) -> None:
-        """Integrate one time step.
+    def update(self, speed_mps: float, yaw_rad: float, dt: float,
+               steer_rad: float = 0.0, wheelbase_m: float = _WHEELBASE_M) -> None:
+        """Integrate one time step using RK4.
+
+        RK4 evaluates the heading at the start, midpoint, and end of the step
+        so position is accurate even when the car is turning at high speed or
+        when dt is large due to a frame drop.
 
         Args:
-            speed_mps: Forward speed in m/s (positive = forward).
-            yaw_rad:   Absolute heading from the IMU in radians.
-            dt:        Time step in seconds.
+            speed_mps:   Forward speed in m/s (positive = forward).
+            yaw_rad:     Absolute heading from the IMU in radians (start of step).
+            dt:          Time step in seconds.
+            steer_rad:   Current steering angle in radians.
+                         Positive = right turn (same sign as servo command).
+            wheelbase_m: Distance between axles (m).
         """
         if dt <= 0.0 or dt > 1.0:
             return
-        dx = speed_mps * math.cos(yaw_rad) * dt
-        dy = speed_mps * math.sin(yaw_rad) * dt
+
+        # Yaw rate from bicycle model (right turn → yaw decreases in math convention)
+        yaw_rate = -(speed_mps / wheelbase_m) * math.tan(steer_rad)
+
+        # RK4 stages — v, steer are constant within the step, so yaw_rate is
+        # constant and the yaw trajectory is linear: yaw(t) = yaw_rad + yaw_rate*t.
+        # k values are *rates* (m/s); final displacement = dt/6*(k1+2k2+2k3+k4).
+        yaw_mid = yaw_rad + (dt * 0.5) * yaw_rate   # heading at t + dt/2
+        yaw_end = yaw_rad + dt * yaw_rate             # heading at t + dt
+
+        # k2 == k3 because yaw_rate is constant (straight-line yaw trajectory)
+        k1_x = speed_mps * math.cos(yaw_rad)
+        k1_y = speed_mps * math.sin(yaw_rad)
+
+        k24_x = speed_mps * math.cos(yaw_mid)   # k2 and k3 are identical
+        k24_y = speed_mps * math.sin(yaw_mid)
+
+        k4_x = speed_mps * math.cos(yaw_end)
+        k4_y = speed_mps * math.sin(yaw_end)
+
+        dx = (dt / 6.0) * (k1_x + 4.0 * k24_x + k4_x)
+        dy = (dt / 6.0) * (k1_y + 4.0 * k24_y + k4_y)
+
         with self._lock:
             self._x += dx
             self._y += dy

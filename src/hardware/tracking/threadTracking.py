@@ -380,13 +380,14 @@ class threadTracking(ThreadWithStop):
         if self._dr is None or self._graph is None:
             return
 
-        # ---- Dead reckoning update
-        # Cap dt for position integration: at high speed a 440ms frame-drop gap
-        # integrates ~6cm in a direction that may be wrong (stale bicycle model
-        # heading).  Capping at _MAX_INTEGRATION_DT limits that overshoot; the
-        # IMU absolute yaw on the next frame corrects the heading anyway.
+        # ---- Dead reckoning update (RK4)
+        # Cap dt to limit position error during frame drops; the IMU absolute
+        # yaw on the next frame corrects heading regardless.
+        # Pass steer_rad so RK4 can account for heading change within the step —
+        # critical at high speed where Euler accumulates O(dt²) error per step.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt)
+        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
+                        steer_rad=self._last_steer_rad, wheelbase_m=_WHEELBASE_M)
         x, y, yaw = self._dr.get_state()
 
         # ---- Advance waypoint index when car is close enough
