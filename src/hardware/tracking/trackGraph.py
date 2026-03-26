@@ -297,11 +297,22 @@ class TrackGraph:
         return dpsi / max(2.0 * self.step_m, 1e-6)
 
     def get_start_pose(self) -> tuple[float, float, float]:
-        """Return (x, y, yaw) of the start waypoint."""
-        if len(self.waypoints) == 0:
-            if self.ordered_nodes:
-                n = self.ordered_nodes[0]
-                return n.x, n.y, 0.0
+        """Return (x, y, yaw) of the start waypoint.
+
+        The heading is the chord direction from the start node to the next node,
+        matching the physical direction the car faces at startup.  Using the
+        spline tangent at waypoint-0 is wrong when the not-a-knot boundary
+        conditions pull the derivative away from the chord — that offset
+        mis-calibrates the IMU reference frame on the first message.
+        """
+        if not self.ordered_nodes:
             return 0.0, 0.0, 0.0
-        wp = self.waypoints[0]
-        return float(wp[0]), float(wp[1]), float(wp[2])
+        n0 = self.ordered_nodes[0]
+        if len(self.ordered_nodes) >= 2:
+            n1 = self.ordered_nodes[1]
+            yaw = math.atan2(n1.y - n0.y, n1.x - n0.x)
+        elif len(self.waypoints) > 0:
+            yaw = float(self.waypoints[0][2])
+        else:
+            yaw = 0.0
+        return n0.x, n0.y, yaw
