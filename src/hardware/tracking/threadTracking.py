@@ -261,7 +261,10 @@ class threadTracking(ThreadWithStop):
                 self._last_raw_imu = imu_dict
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
-                yaw_raw_rad = math.radians(yaw_deg)
+                # BNO055 reports yaw as compass heading (CW-positive, 0-360°).
+                # The map and controller use math convention (CCW-positive).
+                # Negate to convert: right turn → yaw decreases (as math expects).
+                yaw_raw_rad = -math.radians(yaw_deg)
 
                 if not self._yaw_offset_calibrated:
                     # First IMU message: compute offset so that corrected_yaw == track-
