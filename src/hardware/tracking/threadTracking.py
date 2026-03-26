@@ -293,12 +293,30 @@ class threadTracking(ThreadWithStop):
                     delta_yaw -= 2.0 * math.pi
                 while delta_yaw < -math.pi:
                     delta_yaw += 2.0 * math.pi
-                # Glitch filter: discard any single-step jump larger than 45°
-                # (physically impossible at the car's max yaw rate).
-                _MAX_YAW_JUMP = math.radians(45.0)
-                if abs(delta_yaw) <= _MAX_YAW_JUMP:
+                # Re-zero detection: the BNO055 occasionally resets its heading
+                # reference internally (NDOF magnetometer recalibration). This
+                # produces a jump that is physically impossible given the car's
+                # max yaw rate (~120 deg/s) and IMU update rate (~10 Hz), which
+                # caps the maximum real delta at ~12°. Any jump above 20° is
+                # therefore a re-zero event, not an actual rotation.
+                # When detected: recompute the offset so that the car's current
+                # heading (_last_yaw_rad) stays unchanged and future samples from
+                # the new sensor reference frame remain coherent.
+                _MAX_YAW_STEP = math.radians(20.0)
+                if abs(delta_yaw) > _MAX_YAW_STEP:
+                    self._yaw_offset = self._last_yaw_rad - yaw_raw_rad
+                    _msg = (
+                        f"[threadTracking] BNO055 re-zero detected: "
+                        f"raw={yaw_deg:.1f}°  delta={math.degrees(delta_yaw):.1f}°  "
+                        f"new_offset={math.degrees(self._yaw_offset):.1f}°"
+                    )
+                    if self.logging:
+                        self.logging.warning(_msg)
+                    else:
+                        print(_msg)
+                    # _last_yaw_rad unchanged — heading is continuous
+                else:
                     self._last_yaw_rad = self._last_yaw_rad + delta_yaw
-                # else: keep previous yaw (discard the glitched sample)
                 self._imu_received = True
             except Exception:
                 pass
