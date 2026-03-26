@@ -456,20 +456,24 @@ function computeDisplayGeometry() {
 document.getElementById('pngInput').addEventListener('change', e => {
   const file = e.target.files[0];
   if (!file) return;
-  const url = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = () => {
-    bgCanvas._img = img;
-    imgW = img.naturalWidth;
-    imgH = img.naturalHeight;
-    imageLoaded = true;
-    computeDisplayGeometry();
-    redrawBg();
-    renderGraph();
-    setHint('Imagen cargada. Calibra la escala con 📏 (C) y luego coloca nodos.');
-    URL.revokeObjectURL(url);
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const dataUrl = ev.target.result;
+    const img = new Image();
+    img.onload = () => {
+      bgCanvas._img       = img;
+      bgCanvas._imgDataUrl = dataUrl;   // persisted for JSON save
+      imgW = img.naturalWidth;
+      imgH = img.naturalHeight;
+      imageLoaded = true;
+      computeDisplayGeometry();
+      redrawBg();
+      renderGraph();
+      setHint('Imagen cargada. Calibra la escala con 📏 (C) y luego coloca nodos.');
+    };
+    img.src = dataUrl;
   };
-  img.src = url;
+  reader.readAsDataURL(file);
   e.target.value = '';
 });
 
@@ -906,7 +910,8 @@ document.getElementById('exportJsonBtn').addEventListener('click', () => {
     version: 2,
     nodes, edges, nextNodeId, nextEdgeId,
     imgW, imgH,
-    metersPerPixel
+    metersPerPixel,
+    backgroundImage: bgCanvas._imgDataUrl || null
   }, null, 2);
   download('track_editor_save.json', data, 'application/json');
 });
@@ -942,8 +947,23 @@ document.getElementById('loadJsonInput').addEventListener('change', e => {
       }
 
       updateScaleStatus();
-      renderGraph();
-      setHint('Sesión cargada. Recuerda cargar también la imagen PNG de fondo.');
+
+      if (data.backgroundImage) {
+        const img = new Image();
+        img.onload = () => {
+          bgCanvas._img        = img;
+          bgCanvas._imgDataUrl = data.backgroundImage;
+          imageLoaded = true;
+          computeDisplayGeometry();
+          redrawBg();
+          renderGraph();
+          setHint('Sesión cargada con imagen de fondo.');
+        };
+        img.src = data.backgroundImage;
+      } else {
+        renderGraph();
+        setHint('Sesión cargada. Carga también la imagen PNG de fondo.');
+      }
     } catch (err) { alert('Error al cargar el archivo: ' + err); }
   };
   reader.readAsText(file);

@@ -228,7 +228,13 @@ class processCamera(WorkerProcess):
                         )
                         _graphml = os.path.join(_root, _graphml)
                     graph = TrackGraph(_graphml, step_m=_step)
-                    visualizer = TrackVisualizer(graph)
+                    _json_path = os.path.join(_root, "Track Editor Save.json")
+                    _img_path  = os.path.join(_root, "CamScanner 16-3-26 18.52_1.JPG")
+                    visualizer = TrackVisualizer(
+                        graph,
+                        bg_image_path=_img_path,
+                        track_json_path=_json_path,
+                    )
                     # Start manually — do NOT add to self.threads because
                     # workerprocess.run() would try to set .daemon on an already-running
                     # thread, which Python forbids.  TrackVisualizer is already daemon=True

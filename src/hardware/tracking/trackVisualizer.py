@@ -3,7 +3,8 @@ trackVisualizer — real-time OpenCV map window.
 
 Runs at ~10 Hz in its own thread.  Reads the latest TrackingState snapshot
 and draws:
-  • Track edges (white lines)
+  • Track image background (from Track Editor Save.json + JPG)
+  • Track spline path
   • Nodes coloured by attribute:
       NORMAL        → green
       STOPLINE      → red
@@ -14,9 +15,11 @@ and draws:
   • Current target waypoint (cyan circle)
   • Car pose (white triangle pointing in heading direction)
 
-The window can be toggled on/off via TRACKING_SHOW_WINDOW in config.py.
+If bg_image_path / track_json_path are not provided, falls back to a plain
+black canvas with auto-scaled coordinates.
 """
 
+import json
 import math
 import threading
 import time
@@ -39,49 +42,67 @@ from src.hardware.tracking.trackGraph import (
 
 # BGR node colours
 _NODE_COLORS = {
-    ATTR_NORMAL:       (100, 220, 100),   # green
-    ATTR_CROSSWALK:    (220, 100, 220),   # magenta
-    ATTR_INTERSECTION: (220, 100, 100),   # blue
-    ATTR_ONEWAY:       (200, 200, 200),   # light grey
-    ATTR_HIGHWAY_LEFT: (50, 220, 220),    # yellow
-    ATTR_HIGHWAY_RIGHT:(50, 165, 255),    # orange
-    ATTR_ROUNDABOUT:   (255, 200, 50),    # teal-ish
-    ATTR_STOPLINE:     (50, 50, 220),     # red
+    ATTR_NORMAL:        (100, 220, 100),   # green
+    ATTR_CROSSWALK:     (220, 100, 220),   # magenta
+    ATTR_INTERSECTION:  (220, 100, 100),   # blue
+    ATTR_ONEWAY:        (200, 200, 200),   # light grey
+    ATTR_HIGHWAY_LEFT:  (50,  220, 220),   # yellow
+    ATTR_HIGHWAY_RIGHT: (50,  165, 255),   # orange
+    ATTR_ROUNDABOUT:    (255, 200,  50),   # teal-ish
+    ATTR_STOPLINE:      (50,   50, 220),   # red
 }
 _DEFAULT_COLOR = (180, 180, 180)
 
-_CANVAS_SIZE = 700          # pixels (square canvas)
-_MARGIN_PX = 40             # margin inside canvas
-_EDGE_COLOR = (60, 60, 60)  # dark grey
-_WP_COLOR = (255, 220, 50)  # cyan waypoint
-_CAR_COLOR = (255, 255, 255)
-_FPS = 10
+_CANVAS_SIZE  = 700
+_MARGIN_PX    = 40
+_EDGE_COLOR   = (80, 80, 80)
+_WP_COLOR     = (255, 220, 50)
+_CAR_COLOR    = (255, 255, 255)
+_FPS          = 10
+_IMG_DIM      = 0.55   # background image brightness (0–1)
 
 
 class TrackVisualizer(threading.Thread):
     """OpenCV visualisation thread.
 
     Args:
-        graph:          TrackGraph instance (for static geometry).
-        window_name:    cv2 window title.
-        canvas_size:    Window size in pixels (square).
+        graph:           TrackGraph instance (for static geometry).
+        window_name:     cv2 window title.
+        canvas_size:     Window size in pixels (square).
+        bg_image_path:   Path to the track photo (JPG/PNG).
+        track_json_path: Path to Track Editor Save.json (provides
+                         metersPerPixel, imgW, imgH).
     """
 
     def __init__(self, graph: TrackGraph,
                  window_name: str = "Track Navigation",
-                 canvas_size: int = _CANVAS_SIZE):
+                 canvas_size: int = _CANVAS_SIZE,
+                 bg_image_path: str = None,
+                 track_json_path: str = None):
         super().__init__(daemon=True)
-        self._graph = graph
-        self._window_name = window_name
-        self._canvas_size = canvas_size
-        self._stop_event = threading.Event()
-        self._state_lock = threading.Lock()
-        self._state = None           # latest TrackingState snapshot dict
-        self._base_canvas = None     # pre-rendered static background
-        self._scale = 1.0
-        self._ox = 0.0
-        self._oy = 0.0
-        self._prerender()
+        self._graph        = graph
+        self._window_name  = window_name
+        self._canvas_size  = canvas_size
+        self._stop_event   = threading.Event()
+        self._state_lock   = threading.Lock()
+        self._state        = None
+        self._base_canvas  = None
+
+        # Image-mode coordinate params (set in _prerender if image loads OK)
+        self._use_image_coords  = False
+        self._img_scale         = 1.0
+        self._img_offset_x      = 0
+        self._img_offset_y      = 0
+        self._meters_per_pixel  = None
+        self._img_w             = None
+        self._img_h             = None
+
+        # Legacy fallback params
+        self._scale  = 1.0
+        self._ox     = 0.0
+        self._y_min  = 0.0
+
+        self._prerender(bg_image_path, track_json_path)
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,124 +135,154 @@ class TrackVisualizer(threading.Thread):
         cv2.destroyWindow(self._window_name)
 
     # ------------------------------------------------------------------
-    # Rendering helpers
+    # Coordinate conversion
     # ------------------------------------------------------------------
     def _world_to_px(self, x: float, y: float):
-        """Convert world metres → integer pixel coordinates."""
-        px = int(self._ox + x * self._scale)
-        py = int(self._canvas_size - self._margin - y * self._scale)
-        return px, py
+        """Convert world metres → integer canvas pixel coordinates."""
+        if self._use_image_coords:
+            # world → image pixel (Y-flip: in the image y=0 is top, world y=0 is bottom)
+            img_x = x / self._meters_per_pixel
+            img_y = self._img_h - y / self._meters_per_pixel
+            px = int(self._img_offset_x + img_x * self._img_scale)
+            py = int(self._img_offset_y + img_y * self._img_scale)
+            return px, py
+        else:
+            px = int(self._ox + x * self._scale)
+            py = int(self._canvas_size - _MARGIN_PX - (y - self._y_min) * self._scale)
+            return px, py
 
-    @property
-    def _margin(self):
-        return _MARGIN_PX
-
-    def _prerender(self) -> None:
-        """Build a static background canvas with edges and nodes."""
+    # ------------------------------------------------------------------
+    # Pre-render (static background)
+    # ------------------------------------------------------------------
+    def _prerender(self, bg_image_path=None, track_json_path=None) -> None:
+        """Build the static background canvas with image + edges + nodes."""
         if not _CV2_OK:
             return
-        graph = self._graph
+
+        graph       = self._graph
         canvas_size = self._canvas_size
-        margin = _MARGIN_PX
 
-        # Compute bounding box
-        if len(graph.ordered_nodes) == 0:
-            self._base_canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
-            return
+        # ── Attempt image background ──────────────────────────────────────────
+        bg = None
+        if bg_image_path and track_json_path:
+            try:
+                with open(track_json_path) as f:
+                    jdata = json.load(f)
+                mpp  = jdata.get('metersPerPixel')
+                imgW = jdata.get('imgW')
+                imgH = jdata.get('imgH')
+                raw  = cv2.imread(bg_image_path)
+                if raw is not None and mpp and imgW and imgH:
+                    # Scale image to fit canvas preserving aspect ratio
+                    s     = min(canvas_size / imgW, canvas_size / imgH)
+                    new_w = int(imgW * s)
+                    new_h = int(imgH * s)
+                    off_x = (canvas_size - new_w) // 2
+                    off_y = (canvas_size - new_h) // 2
+                    resized = cv2.resize(raw, (new_w, new_h),
+                                        interpolation=cv2.INTER_AREA)
+                    # Dim so overlaid nodes are clearly visible
+                    resized = (resized * _IMG_DIM).astype(np.uint8)
+                    bg = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+                    bg[off_y:off_y + new_h, off_x:off_x + new_w] = resized
+                    self._use_image_coords = True
+                    self._meters_per_pixel = mpp
+                    self._img_w      = imgW
+                    self._img_h      = imgH
+                    self._img_scale  = s
+                    self._img_offset_x = off_x
+                    self._img_offset_y = off_y
+                    print(f"[TrackVisualizer] Background loaded: {bg_image_path} "
+                          f"({imgW}×{imgH}px, {mpp:.6f} m/px)")
+            except Exception as e:
+                print(f"[TrackVisualizer] Warning — background not loaded: {e}")
 
-        xs = [n.x for n in graph.ordered_nodes]
-        ys = [n.y for n in graph.ordered_nodes]
-        x_min, x_max = min(xs), max(xs)
-        y_min, y_max = min(ys), max(ys)
-        w = max(x_max - x_min, 0.01)
-        h = max(y_max - y_min, 0.01)
-        drawable = canvas_size - 2 * margin
-        self._scale = min(drawable / w, drawable / h)
-        self._ox = margin - x_min * self._scale
-        self._oy_base = margin - y_min * self._scale  # stored for y inversion
+        # ── Fallback: plain dark canvas ───────────────────────────────────────
+        if bg is None:
+            bg = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
+            if len(graph.ordered_nodes) > 0:
+                xs = [n.x for n in graph.ordered_nodes]
+                ys = [n.y for n in graph.ordered_nodes]
+                x_min, x_max = min(xs), max(xs)
+                y_min, y_max = min(ys), max(ys)
+                w = max(x_max - x_min, 0.01)
+                h = max(y_max - y_min, 0.01)
+                drawable     = canvas_size - 2 * _MARGIN_PX
+                self._scale  = min(drawable / w, drawable / h)
+                self._ox     = _MARGIN_PX - x_min * self._scale
+                self._y_min  = y_min
 
-        canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
-
-        # Draw edges along the spline path
+        # ── Draw spline path ──────────────────────────────────────────────────
         wps = graph.waypoints
         if len(wps) > 1:
-            pts = np.array([
-                [int(self._ox + wps[i, 0] * self._scale),
-                 int(canvas_size - margin - (wps[i, 1] - y_min) * self._scale)]
-                for i in range(0, len(wps), max(1, len(wps) // 500))
-            ], dtype=np.int32)
-            for i in range(len(pts) - 1):
-                cv2.line(canvas, tuple(pts[i]), tuple(pts[i + 1]), _EDGE_COLOR, 1)
+            step = max(1, len(wps) // 500)
+            for i in range(0, len(wps) - 1, step):
+                p1 = self._world_to_px(float(wps[i, 0]),     float(wps[i, 1]))
+                p2 = self._world_to_px(float(wps[i + 1, 0]), float(wps[i + 1, 1]))
+                cv2.line(bg, p1, p2, _EDGE_COLOR, 1)
 
-        # Draw nodes
+        # ── Draw nodes ────────────────────────────────────────────────────────
         for node in graph.ordered_nodes:
-            px = int(self._ox + node.x * self._scale)
-            py = int(canvas_size - margin - (node.y - y_min) * self._scale)
-            color = _NODE_COLORS.get(node.attribute, _DEFAULT_COLOR)
-            cv2.circle(canvas, (px, py), 5, color, -1)
+            px, py = self._world_to_px(node.x, node.y)
+            color  = _NODE_COLORS.get(node.attribute, _DEFAULT_COLOR)
+            cv2.circle(bg, (px, py), 5, color, -1)
+            cv2.circle(bg, (px, py), 6, (0, 0, 0), 1)   # thin outline
 
-        # Store y_min for dynamic rendering
-        self._y_min = y_min
-        self._base_canvas = canvas
+        self._base_canvas = bg
 
+    # ------------------------------------------------------------------
+    # Dynamic frame
+    # ------------------------------------------------------------------
     def _draw_frame(self) -> None:
-        """Render one frame and display it."""
+        """Render one frame (static bg + dynamic car/waypoint) and display."""
         if self._base_canvas is None:
             return
-        canvas = self._base_canvas.copy()
+        canvas      = self._base_canvas.copy()
         canvas_size = self._canvas_size
-        margin = _MARGIN_PX
 
         with self._state_lock:
             state = dict(self._state) if self._state is not None else None
 
         if state is not None:
-            x = state.get("x", 0.0)
-            y = state.get("y", 0.0)
-            yaw = state.get("yaw", 0.0)
+            x      = state.get("x",   0.0)
+            y      = state.get("y",   0.0)
+            yaw    = state.get("yaw", 0.0)
             wp_idx = state.get("wp_idx", 0)
 
-            # Current target waypoint (cyan circle)
+            # Current target waypoint
             wps = self._graph.waypoints
             if len(wps) > 0 and wp_idx < len(wps):
-                wx, wy = wps[wp_idx % len(wps), :2]
-                wpx = int(self._ox + wx * self._scale)
-                wpy = int(canvas_size - margin - (wy - self._y_min) * self._scale)
+                wx, wy   = wps[wp_idx % len(wps), :2]
+                wpx, wpy = self._world_to_px(float(wx), float(wy))
                 cv2.circle(canvas, (wpx, wpy), 7, _WP_COLOR, 2)
 
-            # Car: small triangle pointing in yaw direction
-            cx = int(self._ox + x * self._scale)
-            cy = int(canvas_size - margin - (y - self._y_min) * self._scale)
-            car_len = 14
-            car_w = 7
-            # Triangle tip
-            tip = (
-                int(cx + car_len * math.cos(yaw)),
-                int(cy - car_len * math.sin(yaw)),
-            )
-            left = (
-                int(cx + car_w * math.cos(yaw + math.pi * 0.7)),
-                int(cy - car_w * math.sin(yaw + math.pi * 0.7)),
-            )
-            right = (
-                int(cx + car_w * math.cos(yaw - math.pi * 0.7)),
-                int(cy - car_w * math.sin(yaw - math.pi * 0.7)),
-            )
+            # Car triangle
+            cx, cy   = self._world_to_px(x, y)
+            car_len  = 14
+            car_w    = 7
+            tip   = (int(cx + car_len * math.cos(yaw)),
+                     int(cy - car_len * math.sin(yaw)))
+            left  = (int(cx + car_w * math.cos(yaw + math.pi * 0.7)),
+                     int(cy - car_w * math.sin(yaw + math.pi * 0.7)))
+            right = (int(cx + car_w * math.cos(yaw - math.pi * 0.7)),
+                     int(cy - car_w * math.sin(yaw - math.pi * 0.7)))
             pts = np.array([tip, left, right], dtype=np.int32)
             cv2.fillPoly(canvas, [pts], _CAR_COLOR)
-            cv2.polylines(canvas, [pts], isClosed=True, color=(100, 200, 255), thickness=1)
+            cv2.polylines(canvas, [pts], isClosed=True,
+                          color=(100, 200, 255), thickness=1)
 
-            # Telemetry overlay
-            mode_label = "WP MODE" if state.get("waypoint_mode_active") else "VISUAL"
+            # Telemetry text
+            mode = "WP MODE" if state.get("waypoint_mode_active") else "VISUAL"
+            spd  = state.get("speed_mps", 0.0)
             cv2.putText(canvas,
                         f"x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°",
-                        (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                        (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
-                        f"e={state.get('error_m', 0):.3f}m  h={math.degrees(state.get('heading_rad', 0)):.1f}°  [{mode_label}]",
-                        (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            spd = state.get("speed_mps", 0.0)
+                        f"e={state.get('error_m', 0):.3f}m  "
+                        f"h={math.degrees(state.get('heading_rad', 0)):.1f}°  [{mode}]",
+                        (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
                         f"v={spd * 100:.1f}cm/s  wp={wp_idx}",
-                        (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                        (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
 
         cv2.imshow(self._window_name, canvas)
