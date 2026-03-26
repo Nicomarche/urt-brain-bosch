@@ -99,6 +99,7 @@ class TrackingState:
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
+        self.steer_rad = 0.0     # Current steering angle (rad) — used for arrow display
         self.error_m = 0.0
         self.heading_rad = 0.0
         self.path_psi = 0.0
@@ -114,11 +115,13 @@ class TrackingState:
         self._dr = None
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
-               speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False):
+               speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
+               steer_rad=0.0):
         with self._lock:
             self.x = x
             self.y = y
             self.yaw = yaw
+            self.steer_rad = steer_rad
             self.error_m = error_m
             self.heading_rad = heading_rad
             self.path_psi = path_psi
@@ -152,6 +155,7 @@ class TrackingState:
         with self._lock:
             return dict(
                 x=self.x, y=self.y, yaw=self.yaw,
+                steer_rad=self.steer_rad,
                 error_m=self.error_m, heading_rad=self.heading_rad,
                 path_psi=self.path_psi, path_kappa=self.path_kappa,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
@@ -386,6 +390,7 @@ class threadTracking(ThreadWithStop):
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)
         self.tracking_state.update(
             x=x, y=y, yaw=yaw,
+            steer_rad=self._last_steer_rad,
             error_m=error_m, heading_rad=heading_rad,
             path_psi=path_psi, path_kappa=path_kappa,
             speed_mps=self._last_speed,

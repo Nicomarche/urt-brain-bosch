@@ -244,10 +244,16 @@ class TrackVisualizer(threading.Thread):
             state = dict(self._state) if self._state is not None else None
 
         if state is not None:
-            x      = state.get("x",   0.0)
-            y      = state.get("y",   0.0)
-            yaw    = state.get("yaw", 0.0)
-            wp_idx = state.get("wp_idx", 0)
+            x         = state.get("x",         0.0)
+            y         = state.get("y",         0.0)
+            yaw       = state.get("yaw",       0.0)
+            steer_rad = state.get("steer_rad", 0.0)
+            wp_idx    = state.get("wp_idx",    0)
+
+            # The arrow always points where the front wheels face:
+            #   display_yaw = car body heading + current steering angle
+            # This updates even when the car is stopped and only the steering changes.
+            display_yaw = yaw + steer_rad
 
             # Current target waypoint
             wps = self._graph.waypoints
@@ -256,16 +262,16 @@ class TrackVisualizer(threading.Thread):
                 wpx, wpy = self._world_to_px(float(wx), float(wy))
                 cv2.circle(canvas, (wpx, wpy), 7, _WP_COLOR, 2)
 
-            # Car triangle
+            # Car triangle — tip points toward display_yaw (wheel direction)
             cx, cy   = self._world_to_px(x, y)
             car_len  = 14
             car_w    = 7
-            tip   = (int(cx + car_len * math.cos(yaw)),
-                     int(cy - car_len * math.sin(yaw)))
-            left  = (int(cx + car_w * math.cos(yaw + math.pi * 0.7)),
-                     int(cy - car_w * math.sin(yaw + math.pi * 0.7)))
-            right = (int(cx + car_w * math.cos(yaw - math.pi * 0.7)),
-                     int(cy - car_w * math.sin(yaw - math.pi * 0.7)))
+            tip   = (int(cx + car_len * math.cos(display_yaw)),
+                     int(cy - car_len * math.sin(display_yaw)))
+            left  = (int(cx + car_w * math.cos(display_yaw + math.pi * 0.7)),
+                     int(cy - car_w * math.sin(display_yaw + math.pi * 0.7)))
+            right = (int(cx + car_w * math.cos(display_yaw - math.pi * 0.7)),
+                     int(cy - car_w * math.sin(display_yaw - math.pi * 0.7)))
             pts = np.array([tip, left, right], dtype=np.int32)
             cv2.fillPoly(canvas, [pts], _CAR_COLOR)
             cv2.polylines(canvas, [pts], isClosed=True,
@@ -275,7 +281,8 @@ class TrackVisualizer(threading.Thread):
             mode = "WP MODE" if state.get("waypoint_mode_active") else "VISUAL"
             spd  = state.get("speed_mps", 0.0)
             cv2.putText(canvas,
-                        f"x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°",
+                        f"x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
+                        f"  steer={math.degrees(steer_rad):+.0f}°",
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
                         f"e={state.get('error_m', 0):.3f}m  "
