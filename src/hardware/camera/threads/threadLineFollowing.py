@@ -372,6 +372,7 @@ class LateralMPC:
         self._fb_k = float(stanley_k)
         self._fb_k_soft = float(stanley_k_soft)
         self._prev_delta = 0.0
+        self._last_debug = {}  # Stores internal state from the last compute() call
 
     def _rollout(self, e0, psi0, deltas, v):
         """Simulate N steps of the error-space bicycle model.
@@ -425,14 +426,18 @@ class LateralMPC:
         Returns:
             float: Optimal steering angle in degrees, clamped to ±max_steering.
         """
-        e0 = float(crosstrack_error)
-        psi0 = float(heading_error) - float(steady_state_heading)
+        e0_raw = float(crosstrack_error)
+        psi0_raw = float(heading_error) - float(steady_state_heading)
         v = max(0.01, abs(float(speed)))
 
+        e0 = e0_raw
+        psi0 = psi0_raw
         if abs(e0) < self.crosstrack_deadband:
             e0 = 0.0
         if abs(psi0) < self.heading_deadband_rad:
             psi0 = 0.0
+
+        prev_delta_snapshot = self._prev_delta
 
         if not _SCIPY_AVAILABLE:
             speed_denom = max(self._fb_k_soft + v, 1e-3)
@@ -440,11 +445,21 @@ class LateralMPC:
             delta_deg = math.degrees(delta_rad)
             delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
             self._prev_delta = math.radians(delta_deg)
+            self._last_debug = {
+                'scipy': False, 'fallback': True,
+                'e0_raw_m': round(e0_raw, 5), 'psi0_raw_deg': round(math.degrees(psi0_raw), 3),
+                'e0_m': round(e0, 5), 'psi0_deg': round(math.degrees(psi0), 3),
+                'v_mps': round(v, 4), 'prev_delta_deg': round(math.degrees(prev_delta_snapshot), 3),
+                'delta_opt_deg': round(delta_deg, 3), 'output_deg': round(delta_deg, 3),
+            }
             return delta_deg
 
         x0 = np.full(self.N, self._prev_delta)
         bounds = [(-self.delta_max, self.delta_max)] * self.N
 
+        solver_ok = False
+        solver_msg = 'exception'
+        delta_opt_raw = 0.0
         try:
             result = _scipy_minimize(
                 self._cost,
@@ -455,28 +470,49 @@ class LateralMPC:
                 options={'maxiter': 50, 'ftol': 1e-5},
             )
             optimal_deltas = result.x
-        except Exception:
+            solver_ok = result.success
+            solver_msg = result.message if hasattr(result, 'message') else str(result.status)
+            delta_opt_raw = float(optimal_deltas[0])
+        except Exception as _exc:
             # On any solver failure fall back to Stanley
             speed_denom = max(self._fb_k_soft + v, 1e-3)
             delta_rad = psi0 + math.atan2(self._fb_k * e0, speed_denom)
             delta_deg = math.degrees(delta_rad)
             delta_deg = max(-self.max_steering, min(self.max_steering, delta_deg))
             self._prev_delta = math.radians(delta_deg)
+            self._last_debug = {
+                'scipy': True, 'fallback': True, 'solver_ok': False,
+                'solver_msg': str(_exc)[:80],
+                'e0_raw_m': round(e0_raw, 5), 'psi0_raw_deg': round(math.degrees(psi0_raw), 3),
+                'e0_m': round(e0, 5), 'psi0_deg': round(math.degrees(psi0), 3),
+                'v_mps': round(v, 4), 'prev_delta_deg': round(math.degrees(prev_delta_snapshot), 3),
+                'delta_opt_deg': round(delta_deg, 3), 'output_deg': round(delta_deg, 3),
+            }
             return delta_deg
 
         # Apply only the first control in the receding-horizon fashion.
-        delta_opt = float(optimal_deltas[0])
+        delta_opt = float(delta_opt_raw)
         delta_opt = max(-self.delta_max, min(self.delta_max, delta_opt))
         self._prev_delta = delta_opt
 
         delta_deg = math.degrees(delta_opt)
+        delta_opt_deg_clamped = delta_deg
         if abs(delta_deg) < self.output_deadband_deg:
             delta_deg = 0.0
+        self._last_debug = {
+            'scipy': True, 'fallback': False, 'solver_ok': bool(solver_ok),
+            'solver_msg': str(solver_msg)[:80],
+            'e0_raw_m': round(e0_raw, 5), 'psi0_raw_deg': round(math.degrees(psi0_raw), 3),
+            'e0_m': round(e0, 5), 'psi0_deg': round(math.degrees(psi0), 3),
+            'v_mps': round(v, 4), 'prev_delta_deg': round(math.degrees(prev_delta_snapshot), 3),
+            'delta_opt_deg': round(delta_opt_deg_clamped, 3), 'output_deg': round(delta_deg, 3),
+        }
         return delta_deg
 
     def reset(self):
         """Reset controller state."""
         self._prev_delta = 0.0
+        self._last_debug = {}
 
 
 class threadLineFollowing(ThreadWithStop):
@@ -8451,6 +8487,27 @@ Returns:
                 "last_seen_side": self.last_seen_side,
                 "curve_state": self._curve_state,
                 "curve_direction": self._curve_direction,
+                # Noise filter state
+                "noise_reject_count": int(self._noise_reject_count),
+                "noise_last_good_steer_deg": round(float(self._last_good_steering), 3),
+                # Controller selection
+                "use_lateral_mpc": bool(getattr(self, 'use_lateral_mpc', False)),
+                # MPC last call debug (empty dict if MPC not called)
+                "mpc_debug": dict(getattr(self.lateral_mpc, '_last_debug', {})),
+                # Tracking state
+                "tracking": (
+                    {
+                        "initialized": bool(getattr(self._tracking_state, 'initialized', False)),
+                        "imu_received": bool(getattr(self._tracking_state, 'imu_received', False)),
+                        "heading_rad": round(float(getattr(self._tracking_state, 'heading_rad', 0.0)), 5),
+                        "heading_deg": round(math.degrees(float(getattr(self._tracking_state, 'heading_rad', 0.0))), 3),
+                        "error_m": round(float(getattr(self._tracking_state, 'error_m', 0.0)), 5),
+                        "waypoint_mode": bool(getattr(self._tracking_state, 'waypoint_mode_active', False)),
+                        "path_kappa": round(float(getattr(self._tracking_state, 'path_kappa', 0.0)), 5),
+                        "target_idx": getattr(self._tracking_state, 'target_idx', None),
+                    }
+                    if self._tracking_state is not None else None
+                ),
             },
         }
         self._append_auto_run_log_entry(
