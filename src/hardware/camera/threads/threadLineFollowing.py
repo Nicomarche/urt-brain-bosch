@@ -8530,6 +8530,9 @@ Returns:
                     {
                         "initialized": bool(getattr(self._tracking_state, 'initialized', False)),
                         "imu_received": bool(getattr(self._tracking_state, 'imu_received', False)),
+                        "x_m": round(float(getattr(self._tracking_state, 'x', 0.0)), 4),
+                        "y_m": round(float(getattr(self._tracking_state, 'y', 0.0)), 4),
+                        "yaw_deg": round(math.degrees(float(getattr(self._tracking_state, 'yaw', 0.0))), 2),
                         "heading_rad": round(float(getattr(self._tracking_state, 'heading_rad', 0.0)), 5),
                         "heading_deg": round(math.degrees(float(getattr(self._tracking_state, 'heading_rad', 0.0))), 3),
                         "error_m": round(float(getattr(self._tracking_state, 'error_m', 0.0)), 5),
