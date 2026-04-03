@@ -5758,6 +5758,12 @@ Args:
                 effective_psi_ss = psi_ss
                 if ts is not None and getattr(ts, 'initialized', False) and _imu_ready:
                     path_kappa = float(getattr(ts, 'path_kappa', 0.0))
+                    # Clamp to the maximum physically plausible curvature for
+                    # this track (1 rad/m ≈ 1 m turning radius).  If the DR
+                    # waypoint tracker drifts, path_kappa can reach absurd
+                    # values (e.g. -2.2 rad/m) that push effective_psi_ss to
+                    # ±26°, saturating the MPC at maximum steering indefinitely.
+                    path_kappa = max(min(path_kappa, 1.0), -1.0)
                     if abs(path_kappa) > 0.01:  # ignore negligible curvature
                         effective_psi_ss = math.atan(
                             path_kappa * float(self.lateral_mpc.L)

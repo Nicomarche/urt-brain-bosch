@@ -59,6 +59,15 @@ except Exception:
 # 150°/s is a generous upper bound for this car at any realistic speed.
 _MAX_PHYSICAL_YAW_RATE_RADS = math.radians(150.0)
 
+# Measured servo angle (degrees) above which the IMU absolute heading
+# correction is SUPPRESSED.  The BNO055 magnetometer is biased by the
+# steering servo's permanent magnets at large deflections — applying the
+# correction in that regime pulls the DR heading in the wrong direction,
+# causing runaway heading drift in curves.  The bicycle model alone is
+# used for heading integration while the servo exceeds this threshold;
+# the IMU re-activates once steering returns below the limit.
+_IMU_STEER_INHIBIT_DEG = 10.0
+
 # Maximum dt (seconds) used for integration steps (yaw bicycle model and DR
 # position update).  Caps the error introduced by frame drops: a 440ms gap at
 # high speed would otherwise produce ~6-7cm of position error in an unknown
@@ -333,15 +342,26 @@ class threadTracking(ThreadWithStop):
                     # Rate-limited to at most _MAX_PHYSICAL_YAW_RATE_RADS × dt_imu
                     # to reject servo-EMI step spikes (magnetometer interference
                     # when steering angle changes sharply).
-                    yaw_imu = yaw_raw_rad + self._yaw_offset
-                    dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
-                    delta = yaw_imu - self._last_yaw_rad
-                    while delta > math.pi:
-                        delta -= 2.0 * math.pi
-                    while delta < -math.pi:
-                        delta += 2.0 * math.pi
-                    max_delta = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                    self._last_yaw_rad += max(-max_delta, min(max_delta, delta))
+                    #
+                    # SERVO EMI INHIBIT: at large steering angles the servo's
+                    # static magnetic field creates a sustained bias in the
+                    # BNO055 magnetometer.  Applying the absolute correction
+                    # during those frames pulls _last_yaw_rad toward the biased
+                    # reading instead of the true heading, accelerating drift.
+                    # When |steer| >= _IMU_STEER_INHIBIT_DEG we skip the IMU
+                    # correction entirely; the bicycle model (below) provides
+                    # per-frame heading integration instead.
+                    _steer_abs_deg = abs(math.degrees(self._last_steer_rad))
+                    if _steer_abs_deg < _IMU_STEER_INHIBIT_DEG:
+                        yaw_imu = yaw_raw_rad + self._yaw_offset
+                        dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
+                        delta = yaw_imu - self._last_yaw_rad
+                        while delta > math.pi:
+                            delta -= 2.0 * math.pi
+                        while delta < -math.pi:
+                            delta += 2.0 * math.pi
+                        max_delta = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                        self._last_yaw_rad += max(-max_delta, min(max_delta, delta))
 
                 self._imu_received = True
             except Exception:
