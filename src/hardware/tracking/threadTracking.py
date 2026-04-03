@@ -60,13 +60,16 @@ except Exception:
 _MAX_PHYSICAL_YAW_RATE_RADS = math.radians(150.0)
 
 # Measured servo angle (degrees) above which the IMU absolute heading
-# correction is SUPPRESSED.  The BNO055 magnetometer is biased by the
-# steering servo's permanent magnets at large deflections — applying the
-# correction in that regime pulls the DR heading in the wrong direction,
-# causing runaway heading drift in curves.  The bicycle model alone is
-# used for heading integration while the servo exceeds this threshold;
-# the IMU re-activates once steering returns below the limit.
-_IMU_STEER_INHIBIT_DEG = 10.0
+# correction is SUPPRESSED.  Set to 0.0 (i.e. the condition
+# `abs_steer < 0.0` is always False) to disable the correction entirely.
+# The BNO055 magnetometer stays corrupted *after* heavy steering ends —
+# not just during it.  When the servo returns below any finite threshold
+# the magnetometer still reads the biased value accumulated during the
+# heavy-steer period, and the rate-limited correction applies 15°/frame
+# of wrong heading, destroying the DR estimate.
+# The bicycle model alone provides heading integration; the initial
+# calibration (first IMU message, _yaw_offset) is still used.
+_IMU_STEER_INHIBIT_DEG = 0.0
 
 # Maximum dt (seconds) used for integration steps (yaw bicycle model and DR
 # position update).  Caps the error introduced by frame drops: a 440ms gap at
