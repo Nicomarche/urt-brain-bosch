@@ -400,8 +400,17 @@ class threadTracking(ThreadWithStop):
             return
 
         wp = self._graph.waypoints[self._wp_idx % n_wp]
-        dist_to_wp = math.hypot(x - wp[0], y - wp[1])
-        if dist_to_wp < _ADVANCE_DIST:
+        # Use along-track projection instead of Euclidean distance.
+        # Euclidean distance fires when DR is within _ADVANCE_DIST of ANY of
+        # the next several waypoints simultaneously (when there is even a small
+        # lateral offset), causing _wp_idx to race 3× ahead and target_idx to
+        # land deep in the tightest part of the upcoming curve — the root cause
+        # of premature turning.  Along-track projection is immune to lateral
+        # offset: only forward progress along the path tangent triggers advance.
+        _psi_wp = float(wp[2])
+        _along_track = ((x - float(wp[0])) * math.cos(_psi_wp)
+                        + (y - float(wp[1])) * math.sin(_psi_wp))
+        if _along_track > 0:
             self._wp_idx = (self._wp_idx + 1) % n_wp
 
         # ---- Speed-adaptive lookahead: scale with velocity to compensate for
