@@ -648,6 +648,7 @@ Args:
         self.mpc_R_rate = float(getattr(_config, "MPC_R_RATE", 2.0))
         self.mpc_Q_e_N = float(getattr(_config, "MPC_Q_E_N", 20.0))
         self.mpc_Q_psi_N = float(getattr(_config, "MPC_Q_PSI_N", 10.0))
+        self.mpc_output_deadband_deg = float(getattr(_config, "MPC_OUTPUT_DEADBAND_DEG", 0.5))
         self.lateral_mpc = LateralMPC(
             L=self.mpc_L,
             N=self.mpc_N,
@@ -661,7 +662,7 @@ Args:
             max_steering=self.max_steering,
             crosstrack_deadband=self.stanley_deadband_crosstrack_m,
             heading_deadband_rad=math.radians(self.stanley_deadband_heading_deg),
-            output_deadband_deg=self.stanley_deadband_output_deg,
+            output_deadband_deg=self.mpc_output_deadband_deg,
             stanley_k=self.stanley_k,
             stanley_k_soft=self.stanley_k_soft,
         )
@@ -5752,8 +5753,18 @@ Args:
                         effective_psi_ss = math.atan(
                             path_kappa * float(self.lateral_mpc.L)
                         )
+                # When both lane lines provide a direct physical error (psi≈0 is common),
+                # augment heading with a Stanley crosstrack term so the MPC sees a
+                # non-zero psi even when the car is aligned.  This avoids the degenerate
+                # case where de/dt = v·sin(0) = 0 renders the MPC horizon useless.
+                heading_mpc = heading
+                if direct_error_m is not None:
+                    heading_mpc = heading + math.atan2(
+                        float(self.stanley_k) * float(error_m),
+                        float(self.stanley_k_soft) + float(speed_mps),
+                    )
                 return self.lateral_mpc.compute(
-                    error_m, heading, speed_mps,
+                    error_m, heading_mpc, speed_mps,
                     steady_state_heading=effective_psi_ss,
                 )
             return self.stanley.compute(
@@ -7845,6 +7856,7 @@ Returns:
                     max(0.0, float(self.stanley_deadband_heading_deg))
                 )
                 self.stanley.output_deadband_deg = max(0.0, float(self.stanley_deadband_output_deg))
+                self.lateral_mpc.output_deadband_deg = max(0.0, float(self.mpc_output_deadband_deg))
                 mode_str = "STANLEY" if self._should_use_stanley_controller() else "PID"
                 if self._is_ai_local_active():
                     mode_str = "STANLEY (forced in AI_LOCAL)"
@@ -10032,6 +10044,9 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     self._manual_run_log_enabled = False  # Stop manual log when entering active mode
                     if str(message) == "AUTO":
                         self._reset_auto_run_log(message)
+                        self._reset_pid_state()
+                        self._last_good_steering = 0.0
+                        self._noise_reject_count = 0
                     elif str(message) == "PARKING":
                         self._reset_parking_state()
                         self._parking_state = ParkingState.LANE_KEEPING

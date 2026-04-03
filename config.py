@@ -234,6 +234,12 @@ MPC_R_RATE = 2.0
 MPC_Q_E_N  = 20.0
 MPC_Q_PSI_N = 10.0
 
+# MPC_OUTPUT_DEADBAND_DEG: zona muerta de salida del MPC [°].
+# Stanley usa 1.2° — el MPC necesita una zona muerta más pequeña porque
+# con el término crosstrack augmentado la salida óptima es pequeña para
+# errores moderados (~5-8 cm). 0.5° permite correcciones finas sin chattering.
+MPC_OUTPUT_DEADBAND_DEG = 0.5
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GPS-FREE TRACKING (dead reckoning + GraphML waypoints)
 # ═══════════════════════════════════════════════════════════════════════════════
