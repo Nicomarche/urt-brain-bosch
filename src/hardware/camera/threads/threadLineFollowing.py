@@ -5689,6 +5689,13 @@ Args:
             if direct_error_m is not None:
                 # Physical error supplied directly: no pixel conversion or cache needed.
                 error_m = float(direct_error_m)
+                # Rate-limit: cap frame-to-frame jump at 10 cm to suppress single-line
+                # extrapolation spikes (e.g. at curve entry when one line disappears).
+                _prev_em = getattr(self, '_prev_direct_error_m', None)
+                if _prev_em is not None:
+                    _max_step = 0.10  # 10 cm/frame max change
+                    error_m = max(_prev_em - _max_step, min(_prev_em + _max_step, error_m))
+                self._prev_direct_error_m = error_m
                 # px_per_cm is still needed for the legacy deadband path; compute from
                 # current-frame lane width if available, otherwise fall back to cache.
                 if lane_width_px is not None and float(lane_width_px) > 1.0:
@@ -9293,6 +9300,13 @@ Returns:
                     _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
                     if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_left_line is not None:
                         _sl_ref_x = self._interp_line_x_at_y(mask_guidance_left_line, _std_ref_y)
+                        # A nearly-horizontal line (e.g. at curve entry) extrapolates far
+                        # outside the image when projected to a different reference_y.
+                        # Fall back to the native single-line position to avoid a huge
+                        # spurious direct_error_m spike.
+                        if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                            _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                            _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
                     else:
                         _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
                         _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
@@ -9379,6 +9393,13 @@ Returns:
                     _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
                     if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_right_line is not None:
                         _sl_ref_x = self._interp_line_x_at_y(mask_guidance_right_line, _std_ref_y)
+                        # A nearly-horizontal line (e.g. at curve entry) extrapolates far
+                        # outside the image when projected to a different reference_y.
+                        # Fall back to the native single-line position to avoid a huge
+                        # spurious direct_error_m spike.
+                        if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                            _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                            _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
                     else:
                         _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
                         _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
