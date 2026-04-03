@@ -649,6 +649,8 @@ Args:
         self.mpc_Q_e_N = float(getattr(_config, "MPC_Q_E_N", 20.0))
         self.mpc_Q_psi_N = float(getattr(_config, "MPC_Q_PSI_N", 10.0))
         self.mpc_output_deadband_deg = float(getattr(_config, "MPC_OUTPUT_DEADBAND_DEG", 0.5))
+        self.mpc_heading_deadband_deg = float(getattr(_config, "MPC_HEADING_DEADBAND_DEG", 0.0))
+        self.mpc_crosstrack_k_mult = float(getattr(_config, "MPC_CROSSTRACK_K_MULT", 1.4))
         self.lateral_mpc = LateralMPC(
             L=self.mpc_L,
             N=self.mpc_N,
@@ -661,7 +663,7 @@ Args:
             Q_psi_N=self.mpc_Q_psi_N,
             max_steering=self.max_steering,
             crosstrack_deadband=self.stanley_deadband_crosstrack_m,
-            heading_deadband_rad=math.radians(self.stanley_deadband_heading_deg),
+            heading_deadband_rad=math.radians(self.mpc_heading_deadband_deg),
             output_deadband_deg=self.mpc_output_deadband_deg,
             stanley_k=self.stanley_k,
             stanley_k_soft=self.stanley_k_soft,
@@ -5759,8 +5761,9 @@ Args:
                 # case where de/dt = v·sin(0) = 0 renders the MPC horizon useless.
                 heading_mpc = heading
                 if direct_error_m is not None:
+                    k_eff = float(self.stanley_k) * float(self.mpc_crosstrack_k_mult)
                     heading_mpc = heading + math.atan2(
-                        float(self.stanley_k) * float(error_m),
+                        k_eff * float(error_m),
                         float(self.stanley_k_soft) + float(speed_mps),
                     )
                 return self.lateral_mpc.compute(

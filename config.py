@@ -230,9 +230,24 @@ MPC_DT = 0.033
 MPC_Q_E    = 10.0
 MPC_Q_PSI  = 5.0
 MPC_R      = 0.5
-MPC_R_RATE = 2.0
+# R_RATE=2.0 era demasiado alto: bloqueaba el optimizador cerca del prev_delta
+# y causaba salidas con signo incorrecto cuando la inercia venía de una
+# corrección anterior en sentido contrario.  0.1 permite reversiones rápidas.
+MPC_R_RATE = 0.1
 MPC_Q_E_N  = 20.0
 MPC_Q_PSI_N = 10.0
+
+# MPC_HEADING_DEADBAND_DEG: zona muerta de heading del MPC [°].
+# Stanley usa 1.0° — en el MPC se fija en 0° porque el término crosstrack
+# aumentado puede producir psi_raw muy pequeño (~0.05°) por cancelación con el
+# heading real del IMU; zeroing ese valor deja el degenerate case psi=0.
+MPC_HEADING_DEADBAND_DEG = 0.0
+
+# MPC_CROSSTRACK_K_MULT: multiplicador del término crosstrack en el MPC.
+# El heading real del IMU puede cancelar el término crosstrack (k=2.5) cuando
+# el auto está offset pero ya apuntando en la dirección correcta.  Un factor
+# > 1 evita la cancelación y garantiza una corrección neta.  1.4 ≈ k_eff=3.5.
+MPC_CROSSTRACK_K_MULT = 1.4
 
 # MPC_OUTPUT_DEADBAND_DEG: zona muerta de salida del MPC [°].
 # Stanley usa 1.2° — el MPC necesita una zona muerta más pequeña porque
