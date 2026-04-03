@@ -374,12 +374,18 @@ class LateralMPC:
         self._prev_delta = 0.0
 
     def _rollout(self, e0, psi0, deltas, v):
-        """Simulate N steps of the error-space bicycle model."""
+        """Simulate N steps of the error-space bicycle model.
+
+        Sign convention (matches compute() interface and Stanley):
+            e     > 0  →  car is LEFT of lane centre
+            psi_e > 0  →  car is heading LEFT of path tangent
+            delta > 0  →  RIGHT turn (positive steering = right, as in the actuator)
+        """
         e, psi = e0, psi0
         states = [(e, psi)]
         for d in deltas:
             e = e + self.dt * v * math.sin(psi)
-            psi = psi + self.dt * (v / max(self.L, 0.01)) * math.tan(
+            psi = psi - self.dt * (v / max(self.L, 0.01)) * math.tan(
                 max(-self.delta_max, min(self.delta_max, d))
             )
             states.append((e, psi))
@@ -3615,6 +3621,7 @@ Args:
         """Reset PID/Stanley state when changing modes to prevent corrupted values."""
         self.pid.reset()
         self.stanley.reset()
+        self.lateral_mpc.reset()
         self._init_error_kalman()
         self._heading_error = 0.0
         self._yaw_rate = 0.0
@@ -4868,6 +4875,7 @@ Args:
                     self._recovery_reverse_steer_angle = 0.0
                     self.pid.reset()
                     self.stanley.reset()
+                    self.lateral_mpc.reset()
                     print(f"\033[1;97m[ Recovery ] :\033[0m \033[1;92mCOMPLETE\033[0m - Resuming normal operation")
                     return steering_angle, speed, False
                 # Keep max curve steer while briefly stopped before resuming
