@@ -293,32 +293,32 @@ class threadTracking(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
-        # ---- Read latest IMU data (used only for startup logging; yaw is NOT
-        #      taken from the IMU after the first message).
+        # ---- Read latest IMU data and apply absolute heading correction.
         # The BNO055 magnetometer is affected by electromagnetic interference
-        # from the steering servo: when the steering angle changes, the reported
-        # yaw changes even though the car is stationary.  Using the IMU as an
-        # absolute heading reference therefore causes false heading jumps on the
-        # map every time the steering wheel moves.
-        # Heading is maintained exclusively by integrating the bicycle model
-        # (speed × steering angle) below.
+        # from the steering servo (yaw jumps when steering angle changes sharply).
+        # We still use it as the primary heading reference (same as the reference
+        # repo: `self.yaw = imu.yaw`) but rate-limit each correction to at most
+        # _MAX_PHYSICAL_YAW_RATE_RADS × dt so that EMI step spikes are clipped.
+        # Between IMU messages, the bicycle model provides per-frame updates.
         imu_raw = self._imu_sub.receive()
         if imu_raw is not None:
             try:
                 imu_dict = ast.literal_eval(str(imu_raw))
                 self._last_raw_imu = imu_dict
+                _prev_imu_t = self._last_imu_t          # save before overwrite
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 yaw_raw_rad = -math.radians(yaw_deg)
 
                 if not self._yaw_offset_calibrated:
-                    # First IMU message: record offset for log reference only.
-                    # _last_yaw_rad is already seeded from track-start tangent
-                    # (_start_yaw_rad) in __init__; do not overwrite it here.
+                    # First IMU message: compute frame-alignment offset so that
+                    # yaw_imu = yaw_raw_rad + _yaw_offset maps IMU readings to
+                    # the GraphML map frame.  _last_yaw_rad is already seeded
+                    # from the track-start tangent in __init__; do not overwrite.
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
                     _msg = (
-                        f"[threadTracking] IMU ready (yaw used for odometry only): "
+                        f"[threadTracking] IMU ready: "
                         f"raw={yaw_deg:.1f}°  "
                         f"start_map={math.degrees(self._start_yaw_rad):.1f}°  "
                         f"offset={math.degrees(self._yaw_offset):.1f}°"
@@ -327,13 +327,30 @@ class threadTracking(ThreadWithStop):
                         self.logging.info(_msg)
                     else:
                         print(_msg)
+                else:
+                    # Subsequent IMU messages: use as absolute heading reference,
+                    # same as the reference repo's `self.yaw = imu.yaw`.
+                    # Rate-limited to at most _MAX_PHYSICAL_YAW_RATE_RADS × dt_imu
+                    # to reject servo-EMI step spikes (magnetometer interference
+                    # when steering angle changes sharply).
+                    yaw_imu = yaw_raw_rad + self._yaw_offset
+                    dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
+                    delta = yaw_imu - self._last_yaw_rad
+                    while delta > math.pi:
+                        delta -= 2.0 * math.pi
+                    while delta < -math.pi:
+                        delta += 2.0 * math.pi
+                    max_delta = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                    self._last_yaw_rad += max(-max_delta, min(max_delta, delta))
 
                 self._imu_received = True
             except Exception:
                 pass
 
-        # ---- Yaw integration via bicycle model (primary heading source).
-        # Runs every frame regardless of whether an IMU message arrived.
+        # ---- Bicycle model yaw integration (per-frame heading update).
+        # On frames where an IMU message arrived, this adds the instantaneous
+        # turning increment on top of the IMU absolute correction above.
+        # On frames without an IMU message, this is the sole heading source.
         # yaw_rate = (v / L) * tan(steer)
         # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases.
         # dt is capped at _MAX_INTEGRATION_DT to limit error from frame drops.
