@@ -224,19 +224,20 @@ class TrackGraph:
 
     def find_waypoint_ahead(self, x: float, y: float, current_idx: int,
                              lookahead_m: float = 0.30) -> int:
-        """Advance current_idx until we reach a waypoint ≥ lookahead_m ahead."""
+        """Return the waypoint index lookahead_m ahead of current_idx along
+        the path arc.
+
+        Uses path arc-length (step_m × N steps) rather than Euclidean
+        distance from the car, so that a large lateral offset (e.g. 19 cm)
+        does not incorrectly prevent the lookahead from advancing — with
+        Euclidean distance every waypoint appears > lookahead_m away and
+        the function would return current_idx (zero effective lookahead).
+        """
         n = len(self.waypoints)
         if n == 0:
             return 0
-        idx = current_idx % n
-        # Skip waypoints that are already behind the car (within lookahead)
-        for _ in range(n):
-            wp = self.waypoints[idx % n]
-            dist = math.hypot(wp[0] - x, wp[1] - y)
-            if dist >= lookahead_m:
-                break
-            idx = (idx + 1) % n
-        return idx % n
+        steps = max(1, round(lookahead_m / self.step_m))
+        return (current_idx + steps) % n
 
     def compute_tracking_error(self, x: float, y: float, yaw: float,
                                 wp_idx: int) -> tuple[float, float]:
