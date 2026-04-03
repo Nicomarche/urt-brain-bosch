@@ -244,10 +244,13 @@ MPC_Q_PSI_N = 10.0
 MPC_HEADING_DEADBAND_DEG = 0.0
 
 # MPC_CROSSTRACK_K_MULT: multiplicador del término crosstrack en el MPC.
-# El heading real del IMU puede cancelar el término crosstrack (k=2.5) cuando
-# el auto está offset pero ya apuntando en la dirección correcta.  Un factor
-# > 1 evita la cancelación y garantiza una corrección neta.  1.4 ≈ k_eff=3.5.
-MPC_CROSSTRACK_K_MULT = 1.4
+# k_eff = STANLEY_K × k_mult.  Con k_mult=1.0 el término es idéntico al
+# Stanley clásico (atan2(k×e, k_soft+v)).  Valores > 1 hacen la corrección
+# más agresiva. 1.4 era necesario para superar la cancelación causada por el
+# override de heading del IMU en modo 2-líneas; ese override fue corregido
+# (ahora solo activa cuando no hay detección de líneas), así que k_mult=1.0
+# es suficiente y corresponde exactamente al gain probado de Stanley.
+MPC_CROSSTRACK_K_MULT = 1.0
 
 # MPC_OUTPUT_DEADBAND_DEG: zona muerta de salida del MPC [°].
 # Stanley usa 1.2° — el MPC necesita una zona muerta más pequeña porque

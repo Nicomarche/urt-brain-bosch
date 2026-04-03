@@ -5654,26 +5654,33 @@ Args:
             )
         # ── End waypoint-mode override ─────────────────────────────────────────
 
-        # ── Path-heading override (active when track graph + IMU are ready) ──────
-        # Like the reference repo, always derive heading error from IMU yaw vs
-        # the path tangent computed by dead reckoning + TrackGraph, instead of
-        # the noisy angle estimate from a single visible lane line.
-        # This eliminates the steering spike to ±25° when one line is lost.
+        # ── Path-heading override (blind fallback only) ────────────────────────
+        # Only replace heading with the IMU-vs-path-tangent estimate when lane
+        # detection has completely failed (direct_error_m is None = no lines).
+        #
+        # Activating this override when lane lines ARE visible causes two bugs:
+        #
+        #   1. Two-line mode always passes heading=0.0 intentionally, because the
+        #      visual heading is dominated by the car's yaw (body rotation) rather
+        #      than actual road curvature.  Replacing 0.0 with ts.heading_rad
+        #      (IMU body yaw) reintroduces exactly the yaw the caller removed.
+        #
+        #   2. The crosstrack augmentation then sums ts.heading_rad + crosstrack_term.
+        #      When the IMU shows body yaw in the opposite direction to the required
+        #      correction (e.g. car heading left while physically right of center),
+        #      the two terms cancel → psi_mpc ≈ 0 → degenerate case where the MPC
+        #      horizon sees no gradient to correct lateral error.
         #
         # GUARD: only activate once the IMU has sent at least one real message.
         # Without this guard, yaw stays at 0° (or track-start yaw) and
         # heading_rad = 0 - path_psi can be very large → MPC saturates.
-        #
-        # When no lane line error is available (no detection), also fall back to
-        # the dead-reckoning lateral error so the MPC has something to work with.
         _imu_ready = getattr(ts, "imu_received", False) if ts is not None else False
         if ts is not None and getattr(ts, "initialized", False) \
-                and _track_heading_enabled and _imu_ready:
+                and _track_heading_enabled and _imu_ready \
+                and direct_error_m is None:
             heading = float(ts.heading_rad)
             self._heading_error = heading
-            # Lateral fallback: use DR error only when lane detection gave nothing
-            if direct_error_m is None:
-                direct_error_m = float(getattr(ts, "error_m", 0.0))
+            direct_error_m = float(getattr(ts, "error_m", 0.0))
         # ── End path-heading override ──────────────────────────────────────────
 
         if self._should_use_stanley_controller():
