@@ -92,6 +92,19 @@ class DeadReckoning:
             self._y = float(y)
             self._yaw = float(yaw)
 
+    def correct_yaw(self, yaw_correction_rad: float) -> None:
+        """Nudge the estimated yaw by a camera-derived correction.
+
+        Called by threadTracking when the camera (two-line mode) provides a
+        reliable world-frame yaw estimate.  Only the internal yaw store is
+        touched; x/y are NOT modified here.
+
+        Args:
+            yaw_correction_rad: Signed correction to add to the current yaw (rad).
+        """
+        with self._lock:
+            self._yaw += float(yaw_correction_rad)
+
     def correct_lateral(self, lateral_error_m: float, path_psi: float) -> None:
         """Nudge the estimated position by the measured lane lateral error.
 

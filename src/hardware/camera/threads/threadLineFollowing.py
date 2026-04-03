@@ -2202,6 +2202,25 @@ Args:
         single_line_prefer_center = None
         single_line_streak = None
 
+        # ── Camera-based DR yaw correction ────────────────────────────────────
+        # With both lines visible the camera heading is reliable.  Compute the
+        # car's estimated world-frame yaw = lane_tangent_at_waypoint + heading_rad
+        # and push it to the tracking thread as a soft yaw correction hint.
+        # Conditions: both lines, heading < 20°, car is moving.
+        _dr_yaw_hint_deg = 0.0
+        _dr_yaw_hint_conf = 0.0
+        _ts_for_yaw = getattr(self, '_tracking_state', None)
+        if (_ts_for_yaw is not None
+                and abs(heading_rad) < math.radians(20.0)
+                and abs(float(getattr(_ts_for_yaw, 'speed_mps', 0.0) or 0.0)) > 0.02):
+            _path_psi = float(getattr(_ts_for_yaw, 'path_psi', 0.0) or 0.0)
+            _cam_world_yaw = _path_psi + heading_rad
+            # Confidence: 1.0 when perfectly aligned, 0.0 at ±20°.
+            _dr_yaw_hint_conf = max(0.0, 1.0 - abs(heading_rad) / math.radians(20.0))
+            _ts_for_yaw.set_camera_yaw_hint(_cam_world_yaw, _dr_yaw_hint_conf)
+            _dr_yaw_hint_deg = math.degrees(_cam_world_yaw)
+        # ── End camera DR yaw correction ──────────────────────────────────────
+
         # Keep single-line heading references up to date from AI mask lines during
         # two-line mode.  In AI local mode avg_left/avg_right (BFMC Hough lines) are
         # null, so the legacy BFMC calibration path updates the refs with 0.0 each
@@ -8546,6 +8565,10 @@ Returns:
                         "waypoint_mode": bool(getattr(self._tracking_state, 'waypoint_mode_active', False)),
                         "path_kappa": round(float(getattr(self._tracking_state, 'path_kappa', 0.0)), 5),
                         "target_idx": getattr(self._tracking_state, 'target_idx', None),
+                        # Camera-based yaw correction applied to DR this frame
+                        "dr_yaw_correction_deg": round(float(getattr(self._tracking_state, 'last_yaw_correction_deg', 0.0)), 4),
+                        "dr_yaw_cam_hint_deg": round(float(getattr(self._tracking_state, 'last_cam_yaw_hint_deg', 0.0)), 2),
+                        "dr_yaw_cam_conf": round(float(getattr(self._tracking_state, 'last_cam_yaw_hint_conf', 0.0)), 3),
                     }
                     if self._tracking_state is not None else None
                 ),

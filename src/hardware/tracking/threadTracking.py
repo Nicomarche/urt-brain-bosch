@@ -125,6 +125,15 @@ class TrackingState:
         # Reference to the dead reckoning instance — set by threadTracking so
         # threadLineFollowing can push lane-based lateral corrections.
         self._dr = None
+        # Camera-based yaw hint: set by threadLineFollowing, consumed by threadTracking.
+        self._cam_yaw_hint_rad = None
+        self._cam_yaw_hint_conf = 0.0
+        self._cam_yaw_hint_fresh = False
+        # Public snapshot of the last hint (for logging — never consumed, always readable).
+        self.last_cam_yaw_hint_deg = 0.0
+        self.last_cam_yaw_hint_conf = 0.0
+        # Last yaw correction applied (for logging only).
+        self.last_yaw_correction_deg = 0.0
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
@@ -145,6 +154,36 @@ class TrackingState:
             self.initialized = True
             if imu_received:
                 self.imu_received = True
+
+    def set_camera_yaw_hint(self, camera_yaw_rad: float, confidence: float) -> None:
+        """Store a camera-estimated world-frame yaw for threadTracking to consume.
+
+        Called by threadLineFollowing when both lane lines are visible and the
+        car heading relative to the lane is reliable.
+
+        Args:
+            camera_yaw_rad: Estimated absolute yaw in map frame (rad).
+            confidence:     Quality of the estimate, 0.0-1.0.
+        """
+        _conf = float(max(0.0, min(1.0, confidence)))
+        with self._lock:
+            self._cam_yaw_hint_rad = float(camera_yaw_rad)
+            self._cam_yaw_hint_conf = _conf
+            self._cam_yaw_hint_fresh = True
+            # Keep public snapshot for logging (never consumed).
+            self.last_cam_yaw_hint_deg = math.degrees(float(camera_yaw_rad))
+            self.last_cam_yaw_hint_conf = _conf
+
+    def consume_camera_yaw_hint(self):
+        """Return (camera_yaw_rad, confidence) if a fresh hint exists, else (None, 0).
+
+        Marks the hint as consumed so the same value is not applied twice.
+        """
+        with self._lock:
+            if not self._cam_yaw_hint_fresh:
+                return None, 0.0
+            self._cam_yaw_hint_fresh = False
+            return self._cam_yaw_hint_rad, self._cam_yaw_hint_conf
 
     def correct_lateral(self, lateral_error_m: float) -> None:
         """Push a lane-detection-based lateral correction into dead reckoning.
@@ -382,6 +421,28 @@ class threadTracking(ThreadWithStop):
             yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
             self._last_yaw_rad -= yaw_rate * yaw_dt
 
+        # ---- Camera-based yaw correction (soft blend toward camera estimate).
+        # When the camera sees both lane lines (two-line midpoint_ref mode), it can
+        # estimate the car's absolute world-frame yaw as:
+        #   cam_yaw = path_psi_at_waypoint + camera_heading_rad
+        # This corrects accumulated bicycle-model drift (servo bias, RK4 error)
+        # without depending on the BNO055 magnetometer.
+        # Alpha ≈ 0.08: corrects ~80 % of a 20° drift over ~20 camera frames (2 s).
+        _cam_yaw, _cam_conf = self.tracking_state.consume_camera_yaw_hint()
+        _yaw_correction_rad = 0.0
+        if _cam_yaw is not None and _cam_conf > 0.3:
+            _alpha = 0.08 * _cam_conf
+            _delta = _cam_yaw - self._last_yaw_rad
+            while _delta > math.pi:
+                _delta -= 2.0 * math.pi
+            while _delta < -math.pi:
+                _delta += 2.0 * math.pi
+            _yaw_correction_rad = _alpha * _delta
+            self._last_yaw_rad += _yaw_correction_rad
+            if self._dr is not None:
+                self._dr.correct_yaw(_yaw_correction_rad)
+        self.tracking_state.last_yaw_correction_deg = math.degrees(_yaw_correction_rad)
+
         if self._dr is None or self._graph is None:
             return
 
@@ -532,6 +593,13 @@ class threadTracking(ThreadWithStop):
 
             path_kappa = self._graph.get_curvature(wp_idx)
             ff_deg = math.degrees(math.atan(path_kappa * 0.258)) if abs(path_kappa) > 0.01 else 0.0
+            _corr_deg = getattr(self.tracking_state, 'last_yaw_correction_deg', 0.0)
+            _cam_hint = getattr(self.tracking_state, '_cam_yaw_hint_rad', None)
+            _cam_conf = getattr(self.tracking_state, '_cam_yaw_hint_conf', 0.0)
+            _cam_str = (
+                f"cam_yaw_hint={math.degrees(_cam_hint):.1f}° conf={_cam_conf:.2f} corr={_corr_deg:+.3f}°"
+                if _cam_hint is not None else "cam_yaw_hint=none"
+            )
             line = (
                 f"F{self._frame_idx:06d} | "
                 f"{spd_str} | "
@@ -540,7 +608,7 @@ class threadTracking(ThreadWithStop):
                 f"wp={wp_idx}/{n_wp} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
                 f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° "
                 f"kappa={path_kappa:+.3f}/m ff={ff_deg:+.1f}° | "
-                f"zone={zone_str} | dt={dt*1000:.1f}ms"
+                f"zone={zone_str} | {_cam_str} | dt={dt*1000:.1f}ms"
                 f"{drift_warn}\n"
             )
             with open(self._debug_log_path, "a") as f:
