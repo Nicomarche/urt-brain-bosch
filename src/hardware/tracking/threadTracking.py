@@ -41,6 +41,12 @@ try:
     _MAX_LOOKAHEAD_M   = getattr(cfg, "TRACKING_MAX_LOOKAHEAD_M",  0.80)
     # Bicycle model dead-reckoning between IMU updates
     _WHEELBASE_M       = getattr(cfg, "TRACKING_WHEELBASE_M", 0.260)
+    # Steering gain for dead reckoning: physical_wheel_angle / commanded_angle.
+    # The servo turns ~1.2× more than commanded at high steer (>20°).  Applying
+    # this gain makes the bicycle model use the correct turning radius, preventing
+    # the DR position from drifting to the outside of tight curves.
+    # Tune experimentally; increase if DR still drifts outside.
+    _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.2)
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
     _STEP_M = 0.05
@@ -52,6 +58,7 @@ except Exception:
     _LOOKAHEAD_TIME_S  = 0.6
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
+    _STEER_GAIN_DR     = 1.2
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -416,9 +423,10 @@ class threadTracking(ThreadWithStop):
         # yaw_rate = (v / L) * tan(steer)
         # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases.
         # dt is capped at _MAX_INTEGRATION_DT to limit error from frame drops.
+        _eff_steer_rad = self._last_steer_rad * _STEER_GAIN_DR
         if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
             yaw_dt = min(dt, _MAX_INTEGRATION_DT)
-            yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(self._last_steer_rad)
+            yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(_eff_steer_rad)
             self._last_yaw_rad -= yaw_rate * yaw_dt
 
         # ---- Camera-based yaw correction (soft blend toward camera estimate).
@@ -452,7 +460,7 @@ class threadTracking(ThreadWithStop):
         # critical at high speed where Euler accumulates O(dt²) error per step.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
         self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
-                        steer_rad=self._last_steer_rad, wheelbase_m=_WHEELBASE_M)
+                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
         x, y, yaw = self._dr.get_state()
 
         # ---- Advance waypoint index when car is close enough
