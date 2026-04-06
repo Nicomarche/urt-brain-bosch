@@ -13,7 +13,7 @@ and draws:
       HIGHWAY_RIGHT → orange
       CROSSWALK     → magenta
   • Current target waypoint (cyan circle)
-  • Car pose (white triangle pointing in heading direction)
+  • Car pose (scaled rectangle with Ackermann wheels, body heading)
 
 If bg_image_path / track_json_path are not provided, falls back to a plain
 black canvas with auto-scaled coordinates.
@@ -231,8 +231,36 @@ class TrackVisualizer(threading.Thread):
         self._base_canvas = bg
 
     # ------------------------------------------------------------------
-    # Dynamic frame
+    # Dynamic frame + car geometry (TC-04 physical dimensions, metres)
     # ------------------------------------------------------------------
+    _CAR_LEN       = 0.365   # total body length
+    _CAR_W         = 0.190   # total body width
+    _WHEELBASE     = 0.260   # rear axle → front axle
+    _REAR_OVERHANG = 0.018   # rear axle → rear bumper
+    _FRONT_OVERHANG= 0.072   # front axle → front bumper
+    _WHEEL_L       = 0.055   # wheel rectangle length (visual)
+    _WHEEL_W       = 0.022   # wheel rectangle width (visual)
+
+    def _world_offset_px(self, base_x: float, base_y: float,
+                         fwd: tuple, lat: tuple,
+                         long_m: float, lat_m: float):
+        """World point = base + long_m * fwd + lat_m * lat, converted to px."""
+        wx = base_x + long_m * fwd[0] + lat_m * lat[0]
+        wy = base_y + long_m * fwd[1] + lat_m * lat[1]
+        return self._world_to_px(wx, wy)
+
+    def _wheel_corners(self, axle_wx: float, axle_wy: float,
+                       angle_rad: float) -> list:
+        """Four pixel corners of one wheel rectangle centred on its axle point."""
+        c, s = math.cos(angle_rad), math.sin(angle_rad)
+        fw = (c,  s)
+        lw = (-s, c)
+        hl, hw = self._WHEEL_L / 2.0, self._WHEEL_W / 2.0
+        offsets = [(-hl, -hw), (-hl, +hw), (+hl, +hw), (+hl, -hw)]
+        return [self._world_to_px(axle_wx + lo * fw[0] + la * lw[0],
+                                  axle_wy + lo * fw[1] + la * lw[1])
+                for lo, la in offsets]
+
     def _draw_frame(self) -> None:
         """Render one frame (static bg + dynamic car/waypoint) and display."""
         if self._base_canvas is None:
@@ -250,13 +278,6 @@ class TrackVisualizer(threading.Thread):
             steer_rad = state.get("steer_rad", 0.0)
             wp_idx    = state.get("wp_idx",    0)
 
-            # The arrow always points where the front wheels face:
-            #   display_yaw = car body heading - steering angle
-            # Minus because in screen coords (Y-axis flipped), CW rotation = decreasing angle.
-            # Steer > 0 = right turn = CW on screen → display_yaw must decrease.
-            # This updates even when the car is stopped and only the steering changes.
-            display_yaw = yaw - steer_rad
-
             # Current target waypoint
             wps = self._graph.waypoints
             if len(wps) > 0 and wp_idx < len(wps):
@@ -264,22 +285,87 @@ class TrackVisualizer(threading.Thread):
                 wpx, wpy = self._world_to_px(float(wx), float(wy))
                 cv2.circle(canvas, (wpx, wpy), 7, _WP_COLOR, 2)
 
-            # Car triangle — tip points toward display_yaw (wheel direction)
-            cx, cy   = self._world_to_px(x, y)
-            car_len  = 14
-            car_w    = 7
-            tip   = (int(cx + car_len * math.cos(display_yaw)),
-                     int(cy - car_len * math.sin(display_yaw)))
-            left  = (int(cx + car_w * math.cos(display_yaw + math.pi * 0.7)),
-                     int(cy - car_w * math.sin(display_yaw + math.pi * 0.7)))
-            right = (int(cx + car_w * math.cos(display_yaw - math.pi * 0.7)),
-                     int(cy - car_w * math.sin(display_yaw - math.pi * 0.7)))
-            pts = np.array([tip, left, right], dtype=np.int32)
-            cv2.fillPoly(canvas, [pts], _CAR_COLOR)
-            cv2.polylines(canvas, [pts], isClosed=True,
-                          color=(100, 200, 255), thickness=1)
+            # ── Car geometry ──────────────────────────────────────────────────
+            # (x, y) is the rear-axle centre in world metres (DR reference pt).
+            # fwd = car-forward unit vector, lat = car-left unit vector.
+            cos_y = math.cos(yaw)
+            sin_y = math.sin(yaw)
+            fwd = (cos_y,  sin_y)
+            lat = (-sin_y, cos_y)
 
-            # Telemetry text
+            WB = self._WHEELBASE
+            FR = self._REAR_OVERHANG
+            FF = self._FRONT_OVERHANG
+            W2 = self._CAR_W / 2.0
+
+            # Body rectangle (rear-axle is the longitudinal origin)
+            body_pts = np.array([
+                self._world_offset_px(x, y, fwd, lat, -FR,    -W2),   # rear-right
+                self._world_offset_px(x, y, fwd, lat, -FR,    +W2),   # rear-left
+                self._world_offset_px(x, y, fwd, lat, WB+FF,  +W2),   # front-left
+                self._world_offset_px(x, y, fwd, lat, WB+FF,  -W2),   # front-right
+            ], dtype=np.int32)
+            cv2.fillPoly(canvas, [body_pts], _CAR_COLOR)
+            cv2.polylines(canvas, [body_pts.reshape(-1, 1, 2)],
+                          isClosed=True, color=(100, 200, 255), thickness=1)
+
+            # Axle dots
+            ra_px = self._world_to_px(x, y)
+            fa_wx = x + WB * fwd[0]
+            fa_wy = y + WB * fwd[1]
+            fa_px = self._world_to_px(fa_wx, fa_wy)
+            cv2.circle(canvas, ra_px, 2, (160, 160, 160), -1)
+            cv2.circle(canvas, fa_px, 2, (160, 160, 160), -1)
+
+            # ── Wheels ────────────────────────────────────────────────────────
+            # Ackermann: front-inner and front-outer wheels have different angles.
+            # R = WB / tan(steer);  inner_angle = atan(WB / (R - W2))
+            #                       outer_angle = atan(WB / (R + W2))
+            _WHEEL_COLOR = (40, 40, 40)
+
+            abs_steer = abs(steer_rad)
+            if abs_steer > 1e-3:
+                R = WB / math.tan(abs_steer)
+                sign = 1.0 if steer_rad > 0 else -1.0
+                steer_inner = sign * math.atan2(WB, R - W2)
+                steer_outer = sign * math.atan2(WB, R + W2)
+            else:
+                steer_inner = steer_outer = 0.0
+
+            # Front-left centre world
+            fl_wx = fa_wx + W2 * lat[0]
+            fl_wy = fa_wy + W2 * lat[1]
+            # Front-right centre world
+            fr_wx = fa_wx - W2 * lat[0]
+            fr_wy = fa_wy - W2 * lat[1]
+            # Rear-left centre world
+            rl_wx = x + W2 * lat[0]
+            rl_wy = y + W2 * lat[1]
+            # Rear-right centre world
+            rr_wx = x - W2 * lat[0]
+            rr_wy = y - W2 * lat[1]
+
+            # Ackermann inner/outer assignment depends on turn direction:
+            #   right turn (steer > 0): right wheel is inner (larger angle)
+            #   left  turn (steer < 0): left  wheel is inner (larger magnitude)
+            if steer_rad >= 0:
+                fl_steer, fr_steer = steer_outer, steer_inner
+            else:
+                fl_steer, fr_steer = steer_inner, steer_outer
+
+            for whl_wx, whl_wy, whl_angle in [
+                (fl_wx, fl_wy, yaw + fl_steer),
+                (fr_wx, fr_wy, yaw + fr_steer),
+                (rl_wx, rl_wy, yaw),
+                (rr_wx, rr_wy, yaw),
+            ]:
+                corners = self._wheel_corners(whl_wx, whl_wy, whl_angle)
+                whl_pts = np.array(corners, dtype=np.int32)
+                cv2.fillPoly(canvas, [whl_pts], _WHEEL_COLOR)
+                cv2.polylines(canvas, [whl_pts.reshape(-1, 1, 2)],
+                              isClosed=True, color=(180, 180, 180), thickness=1)
+
+            # ── Telemetry text ────────────────────────────────────────────────
             mode = "WP MODE" if state.get("waypoint_mode_active") else "VISUAL"
             spd  = state.get("speed_mps", 0.0)
             cv2.putText(canvas,

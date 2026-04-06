@@ -968,26 +968,22 @@ class LocalPerceptionEngine:
 
     @staticmethod
     def _mask_display_color(mask, width, fallback_side=None):
-        """Return BGR color for a mask based on its x-centroid position in the frame.
+        """Return BGR color for a mask based on its semantic side (left/right).
 
-        Coloring by centroid position (not by YOLO slot name) ensures the
-        visualization is correct even when YOLO's guessed_single label is wrong.
-        Left half → blue  (255, 120, 0)
-        Right half → yellow/orange  (0, 200, 255)
+        Color is determined by which slot the mask belongs to, not by its
+        position in the frame.  This keeps the color stable during curves,
+        where the outer line's centroid can shift past the frame centre and
+        would otherwise flip from blue to yellow mid-curve.
+        Left → blue  (255, 120, 0)
+        Right → yellow/orange  (0, 200, 255)
         """
         COLOR_LEFT  = (255, 120, 0)
         COLOR_RIGHT = (0, 200, 255)
         if mask is None or not np.any(mask):
             return None
-        cols = np.where(mask > 0)[1]
-        if len(cols) == 0:
-            if fallback_side == "left":
-                return COLOR_LEFT
-            if fallback_side == "right":
-                return COLOR_RIGHT
-            return COLOR_LEFT
-        cx = float(np.mean(cols))
-        return COLOR_LEFT if cx < width / 2.0 else COLOR_RIGHT
+        if fallback_side == "right":
+            return COLOR_RIGHT
+        return COLOR_LEFT
 
     def _draw_debug_views(self, frame, side_masks, lane_points, detections, infer_ms):
         overlay = frame.copy()
