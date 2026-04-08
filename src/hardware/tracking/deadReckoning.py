@@ -113,7 +113,7 @@ class DeadReckoning:
 
         Args:
             lateral_error_m: Signed lateral error from lane centre (m).
-                             Positive = car is right of lane centre (same sign
+                             Positive = car is left of lane centre (same sign
                              convention as LateralMPC and trackGraph).
             path_psi:        Path tangent angle at the nearest waypoint (rad).
                              Used to convert the lateral offset into (dx, dy).

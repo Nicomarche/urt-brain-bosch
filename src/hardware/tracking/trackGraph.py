@@ -216,11 +216,18 @@ class TrackGraph:
         n = len(self.waypoints)
         if n == 0:
             return 0
-        lo = max(0, search_start - 5)
-        hi = min(n, search_start + search_window)
-        sub = self.waypoints[lo:hi, :2]
+        start = int(search_start) % n
+        window = max(1, int(search_window))
+        if n <= window + 5:
+            idxs = np.arange(n, dtype=int)
+        else:
+            idxs = np.array(
+                [(start + off) % n for off in range(-5, window)],
+                dtype=int,
+            )
+        sub = self.waypoints[idxs, :2]
         dists = np.hypot(sub[:, 0] - x, sub[:, 1] - y)
-        return int(lo + np.argmin(dists))
+        return int(idxs[int(np.argmin(dists))])
 
     def find_waypoint_ahead(self, x: float, y: float, current_idx: int,
                              lookahead_m: float = 0.30) -> int:
@@ -239,13 +246,122 @@ class TrackGraph:
         steps = max(1, round(lookahead_m / self.step_m))
         return (current_idx + steps) % n
 
+    @staticmethod
+    def _wrap_angle(angle_rad: float) -> float:
+        while angle_rad > math.pi:
+            angle_rad -= 2.0 * math.pi
+        while angle_rad < -math.pi:
+            angle_rad += 2.0 * math.pi
+        return float(angle_rad)
+
+    def project_pose_to_path(
+        self,
+        x: float,
+        y: float,
+        yaw: float,
+        search_center: int = 0,
+        search_window: int = 18,
+        distance_weight: float = 1.0,
+        heading_weight: float = 0.35,
+    ) -> dict:
+        """Project a raw pose onto the local path and score candidate segments.
+
+        Returns a dict with the matched waypoint index, projected x/y on the
+        path, tangent angle at the match, and the local matching score/error.
+        """
+        n = len(self.waypoints)
+        if n == 0:
+            return {
+                "matched_idx": 0,
+                "matched_x": float(x),
+                "matched_y": float(y),
+                "path_psi": float(yaw),
+                "lateral_error_m": 0.0,
+                "heading_error_rad": 0.0,
+                "map_match_error_m": 0.0,
+                "score": 0.0,
+            }
+        if n == 1:
+            wx, wy, psi = self.waypoints[0]
+            return {
+                "matched_idx": 0,
+                "matched_x": float(wx),
+                "matched_y": float(wy),
+                "path_psi": float(psi),
+                "lateral_error_m": 0.0,
+                "heading_error_rad": self._wrap_angle(float(yaw) - float(psi)),
+                "map_match_error_m": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+                "score": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+            }
+
+        center = int(search_center) % n
+        window = max(1, int(search_window))
+        continuity_weight = max(0.05, 0.25 * float(distance_weight))
+        best = None
+
+        seg_offsets = range(-window, window + 1) if n > 2 else range(0, n)
+        for seg_offset in seg_offsets:
+            seg_idx = (center + seg_offset) % n
+            x0, y0, _ = self.waypoints[seg_idx]
+            x1, y1, _ = self.waypoints[(seg_idx + 1) % n]
+            seg_dx = float(x1) - float(x0)
+            seg_dy = float(y1) - float(y0)
+            seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
+            if seg_len2 <= 1e-9:
+                continue
+
+            rel_x = float(x) - float(x0)
+            rel_y = float(y) - float(y0)
+            proj_t = max(0.0, min(1.0, (rel_x * seg_dx + rel_y * seg_dy) / seg_len2))
+            proj_x = float(x0) + proj_t * seg_dx
+            proj_y = float(y0) + proj_t * seg_dy
+            seg_psi = math.atan2(seg_dy, seg_dx)
+            dx = float(x) - proj_x
+            dy = float(y) - proj_y
+            lateral_error_m = -dx * math.sin(seg_psi) + dy * math.cos(seg_psi)
+            heading_error_rad = self._wrap_angle(float(yaw) - seg_psi)
+            continuity_m = abs(seg_offset) * float(self.step_m)
+            score = (
+                float(distance_weight) * abs(lateral_error_m) +
+                float(heading_weight) * abs(heading_error_rad) +
+                continuity_weight * continuity_m
+            )
+            matched_idx = (seg_idx + 1) % n if proj_t >= 0.5 else seg_idx
+            candidate = {
+                "matched_idx": int(matched_idx),
+                "matched_x": float(proj_x),
+                "matched_y": float(proj_y),
+                "path_psi": float(seg_psi),
+                "lateral_error_m": float(lateral_error_m),
+                "heading_error_rad": float(heading_error_rad),
+                "map_match_error_m": float(abs(lateral_error_m)),
+                "score": float(score),
+            }
+            if best is None or candidate["score"] < best["score"]:
+                best = candidate
+
+        if best is None:
+            idx = self.find_closest_waypoint(float(x), float(y), search_start=center, search_window=window)
+            wx, wy, psi = self.waypoints[idx]
+            return {
+                "matched_idx": int(idx),
+                "matched_x": float(wx),
+                "matched_y": float(wy),
+                "path_psi": float(psi),
+                "lateral_error_m": 0.0,
+                "heading_error_rad": self._wrap_angle(float(yaw) - float(psi)),
+                "map_match_error_m": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+                "score": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+            }
+        return best
+
     def compute_tracking_error(self, x: float, y: float, yaw: float,
                                 wp_idx: int) -> tuple[float, float]:
         """Compute lateral (crosstrack) and heading errors vs. waypoint wp_idx.
 
         Returns:
             (error_m, heading_rad) — same convention as LateralMPC.compute()
-                error_m  > 0 → car is to the right of the path centre
+                error_m  > 0 → car is to the left of the path centre
                 heading_rad > 0 → car is heading left relative to path tangent
         """
         if len(self.waypoints) == 0:
@@ -257,11 +373,7 @@ class TrackGraph:
         # Crosstrack: signed lateral distance from path tangent
         error_m = -dx * math.sin(psi_r) + dy * math.cos(psi_r)
         # Heading error: wrap to [-pi, pi]
-        heading_rad = yaw - psi_r
-        while heading_rad > math.pi:
-            heading_rad -= 2.0 * math.pi
-        while heading_rad < -math.pi:
-            heading_rad += 2.0 * math.pi
+        heading_rad = self._wrap_angle(yaw - psi_r)
         return float(error_m), float(heading_rad)
 
     def is_precision_zone(self, wp_idx: int, lookahead_pts: int = 8) -> bool:

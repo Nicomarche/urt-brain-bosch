@@ -281,6 +281,20 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # jumping into the next curve before the car actually reaches the node.
 TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 
+# Steering gain used by dead reckoning.  1.0 = trust the measured steering
+# angle directly; values > 1.0 amplify the effective wheel angle.
+TRACKING_STEER_GAIN_DR = 1.0
+
+# Camera-based lateral correction applied to dead reckoning when both lane lines
+# are visible and the physical lane error is reliable.
+TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
+TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+
+# Local map-matching weights/search around the current dense waypoint index.
+TRACKING_MAP_MATCH_SEARCH_WP = 18
+TRACKING_MAP_MATCH_DISTANCE_W = 1.0
+TRACKING_MAP_MATCH_HEADING_W = 0.35
+
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True
 

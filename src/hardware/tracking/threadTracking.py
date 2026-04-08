@@ -32,6 +32,9 @@ try:
     _ADVANCE_DIST = getattr(cfg, "TRACKING_ADVANCE_DIST_M", 0.15)
     _INTERSECTION_LOOKAHEAD = getattr(cfg, "TRACKING_INTERSECTION_LOOKAHEAD_M", 0.40)
     _PRECISION_LOOKAHEAD_M = getattr(cfg, "TRACKING_PRECISION_LOOKAHEAD_M", 0.10)
+    _MAP_MATCH_SEARCH_WP = getattr(cfg, "TRACKING_MAP_MATCH_SEARCH_WP", 18)
+    _MAP_MATCH_DISTANCE_W = getattr(cfg, "TRACKING_MAP_MATCH_DISTANCE_W", 1.0)
+    _MAP_MATCH_HEADING_W = getattr(cfg, "TRACKING_MAP_MATCH_HEADING_W", 0.35)
     _SHOW_WINDOW = getattr(cfg, "TRACKING_SHOW_WINDOW", True)
     _DEBUG_LOG = getattr(cfg, "TRACKING_DEBUG_LOG", False)
     _LOOP_HZ = 50
@@ -43,24 +46,33 @@ try:
     # Bicycle model dead-reckoning between IMU updates
     _WHEELBASE_M       = getattr(cfg, "TRACKING_WHEELBASE_M", 0.260)
     # Steering gain for dead reckoning: physical_wheel_angle / commanded_angle.
-    # The servo turns ~1.2× more than commanded at high steer (>20°).  Applying
-    # this gain makes the bicycle model use the correct turning radius, preventing
-    # the DR position from drifting to the outside of tight curves.
-    # Tune experimentally; increase if DR still drifts outside.
-    _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.2)
+    # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
+    # Keep the default at 1.0 so the measured steering is trusted directly.
+    _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
+    _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
+        cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
+    )
+    _CAMERA_LATERAL_CORRECTION_MAX_M = getattr(
+        cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M", 0.08
+    )
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
     _STEP_M = 0.05
     _ADVANCE_DIST = 0.15
     _INTERSECTION_LOOKAHEAD = 0.40
     _PRECISION_LOOKAHEAD_M = 0.10
+    _MAP_MATCH_SEARCH_WP = 18
+    _MAP_MATCH_DISTANCE_W = 1.0
+    _MAP_MATCH_HEADING_W = 0.35
     _SHOW_WINDOW = True
     _DEBUG_LOG = False
     _LOOP_HZ = 50
     _LOOKAHEAD_TIME_S  = 0.6
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
-    _STEER_GAIN_DR     = 1.2
+    _STEER_GAIN_DR     = 1.0
+    _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
+    _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -104,7 +116,7 @@ class TrackingState:
     """Thread-safe shared state between threadTracking and threadLineFollowing.
 
     Attributes (readable by any thread in the same process):
-        x, y, yaw        Current pose from dead reckoning (metres, radians).
+        x, y, yaw        Current matched pose used by the map/visualizer.
         error_m          Lateral crosstrack error vs. current waypoint.
         heading_rad      Heading error vs. current waypoint tangent.
         path_psi         Path tangent angle at the current waypoint (radians).
@@ -120,15 +132,25 @@ class TrackingState:
         self.x = 0.0
         self.y = 0.0
         self.yaw = 0.0
+        self.raw_x = 0.0
+        self.raw_y = 0.0
+        self.raw_yaw = 0.0
+        self.matched_x = 0.0
+        self.matched_y = 0.0
+        self.matched_yaw = 0.0
         self.steer_rad = 0.0     # Current steering angle (rad) — used for arrow display
         self.error_m = 0.0
         self.heading_rad = 0.0
         self.path_psi = 0.0
         self.path_kappa = 0.0   # Signed path curvature at current wp (1/m)
+        self.map_match_error_m = 0.0
         self.speed_mps = 0.0
         self.wp_idx = 0
+        self.target_idx = 0
         self.waypoint_mode_active = False
         self.node_attr = 0
+        self.camera_lateral_correction_m = 0.0
+        self.lane_measurement_reliable = False
         self.initialized = False
         self.imu_received = False   # True once a real IMU message has been parsed
         # Reference to the dead reckoning instance — set by threadTracking so
@@ -146,18 +168,27 @@ class TrackingState:
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
-               steer_rad=0.0):
+               steer_rad=0.0, target_idx=None, raw_x=None, raw_y=None, raw_yaw=None,
+               matched_x=None, matched_y=None, matched_yaw=None, map_match_error_m=0.0):
         with self._lock:
             self.x = x
             self.y = y
             self.yaw = yaw
+            self.raw_x = float(x if raw_x is None else raw_x)
+            self.raw_y = float(y if raw_y is None else raw_y)
+            self.raw_yaw = float(yaw if raw_yaw is None else raw_yaw)
+            self.matched_x = float(x if matched_x is None else matched_x)
+            self.matched_y = float(y if matched_y is None else matched_y)
+            self.matched_yaw = float(yaw if matched_yaw is None else matched_yaw)
             self.steer_rad = steer_rad
             self.error_m = error_m
             self.heading_rad = heading_rad
             self.path_psi = path_psi
             self.path_kappa = path_kappa
+            self.map_match_error_m = float(map_match_error_m)
             self.speed_mps = speed_mps
             self.wp_idx = wp_idx
+            self.target_idx = int(wp_idx if target_idx is None else target_idx)
             self.waypoint_mode_active = waypoint_mode
             self.node_attr = node_attr
             self.initialized = True
@@ -203,24 +234,38 @@ class TrackingState:
 
         Args:
             lateral_error_m: Signed lane error from lane detection (m).
-                             Positive = car right of lane centre.
+                             Positive = car left of lane centre.
         """
         with self._lock:
             dr = self._dr
             psi = self.path_psi
-        if dr is not None:
-            dr.correct_lateral(lateral_error_m, psi)
+            correction_m = float(lateral_error_m)
+            self.camera_lateral_correction_m = correction_m
+            self.lane_measurement_reliable = True
+        if dr is not None and abs(correction_m) > 1e-9:
+            dr.correct_lateral(correction_m, psi)
+
+    def set_lane_measurement_state(self, reliable: bool, applied_correction_m: float = 0.0) -> None:
+        with self._lock:
+            self.lane_measurement_reliable = bool(reliable)
+            self.camera_lateral_correction_m = float(applied_correction_m if reliable else 0.0)
 
     def snapshot(self):
         with self._lock:
             return dict(
                 x=self.x, y=self.y, yaw=self.yaw,
+                raw_x=self.raw_x, raw_y=self.raw_y, raw_yaw=self.raw_yaw,
+                matched_x=self.matched_x, matched_y=self.matched_y, matched_yaw=self.matched_yaw,
                 steer_rad=self.steer_rad,
                 error_m=self.error_m, heading_rad=self.heading_rad,
                 path_psi=self.path_psi, path_kappa=self.path_kappa,
+                map_match_error_m=self.map_match_error_m,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
+                target_idx=self.target_idx,
                 waypoint_mode_active=self.waypoint_mode_active,
                 node_attr=self.node_attr,
+                camera_lateral_correction_m=self.camera_lateral_correction_m,
+                lane_measurement_reliable=self.lane_measurement_reliable,
             )
 
 
@@ -319,9 +364,9 @@ class threadTracking(ThreadWithStop):
                     _f.write(
                         "# tracking_debug.log — dead reckoning + waypoint state\n"
                         "# Each line: F<idx> | speed_raw=<raw> spd=<m/s> | "
-                        "imu_yaw=<deg> | x=<m> y=<m> yaw=<deg> | "
-                        "wp=<idx>/<total> wp_xy=(<x>,<y>) dist=<m> | "
-                        "err=<m> hdg=<deg> | zone=<attr> | dt=<ms>\n"
+                        "imu_yaw=<deg> | raw=(<x>,<y>,<yaw>) matched=(<x>,<y>,<yaw>) | "
+                        "wp=<idx>/<total> tgt=<idx> wp_xy=(<x>,<y>) dist=<m> | "
+                        "err=<m> hdg=<deg> mm=<m> latcorr=<m> lane=<0/1> | zone=<attr> | dt=<ms>\n"
                     )
             except Exception:
                 pass
@@ -463,7 +508,7 @@ class threadTracking(ThreadWithStop):
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
         self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
                         steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
-        x, y, yaw = self._dr.get_state()
+        raw_x, raw_y, raw_yaw = self._dr.get_state()
 
         # ---- Advance waypoint index when car is close enough
         n_wp = len(self._graph.waypoints)
@@ -479,10 +524,26 @@ class threadTracking(ThreadWithStop):
         # of premature turning.  Along-track projection is immune to lateral
         # offset: only forward progress along the path tangent triggers advance.
         _psi_wp = float(wp[2])
-        _along_track = ((x - float(wp[0])) * math.cos(_psi_wp)
-                        + (y - float(wp[1])) * math.sin(_psi_wp))
+        _along_track = ((raw_x - float(wp[0])) * math.cos(_psi_wp)
+                        + (raw_y - float(wp[1])) * math.sin(_psi_wp))
         if _along_track > 0:
             self._wp_idx = (self._wp_idx + 1) % n_wp
+
+        map_match = self._graph.project_pose_to_path(
+            raw_x,
+            raw_y,
+            raw_yaw,
+            search_center=self._wp_idx,
+            search_window=_MAP_MATCH_SEARCH_WP,
+            distance_weight=_MAP_MATCH_DISTANCE_W,
+            heading_weight=_MAP_MATCH_HEADING_W,
+        )
+        matched_idx = int(map_match.get("matched_idx", self._wp_idx))
+        matched_x = float(map_match.get("matched_x", raw_x))
+        matched_y = float(map_match.get("matched_y", raw_y))
+        matched_yaw = float(map_match.get("path_psi", raw_yaw))
+        map_match_error_m = float(map_match.get("map_match_error_m", 0.0))
+        self._wp_idx = matched_idx
 
         # ---- Speed-adaptive lookahead: scale with velocity to compensate for
         #      servo + control-loop lag (~270ms). Clamped to [_ADVANCE_DIST, _MAX_LOOKAHEAD_M].
@@ -493,7 +554,7 @@ class threadTracking(ThreadWithStop):
 
         # ---- Find the lookahead waypoint (used for control)
         target_idx = self._graph.find_waypoint_ahead(
-            x, y, self._wp_idx, lookahead_m=lookahead_m
+            matched_x, matched_y, self._wp_idx, lookahead_m=lookahead_m
         )
 
         # ---- Detect precision zone (intersection / stop-line ahead)
@@ -511,11 +572,13 @@ class threadTracking(ThreadWithStop):
                 min(float(lookahead_m), float(_PRECISION_LOOKAHEAD_M)),
             )
             target_idx = self._graph.find_waypoint_ahead(
-                x, y, self._wp_idx, lookahead_m=precision_lookahead_m
+                matched_x, matched_y, self._wp_idx, lookahead_m=precision_lookahead_m
             )
 
         # ---- Compute tracking errors against the active control target
-        error_m, heading_rad = self._graph.compute_tracking_error(x, y, yaw, target_idx)
+        error_m, heading_rad = self._graph.compute_tracking_error(
+            matched_x, matched_y, matched_yaw, target_idx
+        )
 
         # ---- Path tangent and curvature at the active target waypoint
         path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
@@ -524,15 +587,19 @@ class threadTracking(ThreadWithStop):
 
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)
         self.tracking_state.update(
-            x=x, y=y, yaw=yaw,
+            x=matched_x, y=matched_y, yaw=matched_yaw,
             steer_rad=self._last_steer_rad,
             error_m=error_m, heading_rad=heading_rad,
             path_psi=path_psi, path_kappa=path_kappa,
             speed_mps=self._last_speed,
-            wp_idx=target_idx,
+            wp_idx=matched_idx,
             waypoint_mode=in_precision_zone,
             node_attr=node_attr,
             imu_received=self._imu_received,
+            target_idx=target_idx,
+            raw_x=raw_x, raw_y=raw_y, raw_yaw=raw_yaw,
+            matched_x=matched_x, matched_y=matched_y, matched_yaw=matched_yaw,
+            map_match_error_m=map_match_error_m,
         )
 
         # ---- Push state to visualizer if attached
@@ -547,7 +614,7 @@ class threadTracking(ThreadWithStop):
         # (0..13.76) → (0..100%) height, so we send raw metres and let the
         # dashboard scale.  Y is inverted because SVG y=0 is at the top.
         try:
-            self._loc_sender.send({"x": round(x, 4), "y": round(y, 4)})
+            self._loc_sender.send({"x": round(matched_x, 4), "y": round(matched_y, 4)})
         except Exception:
             pass
 
@@ -556,17 +623,21 @@ class threadTracking(ThreadWithStop):
         if self._debug_log_enabled and self._debug_log_path and \
                 (self._frame_idx % self._log_every == 0):
             self._write_tracking_log(
-                x, y, yaw, error_m, heading_rad,
-                target_idx, n_wp, in_precision_zone, node_attr, dt,
+                raw_x, raw_y, raw_yaw,
+                matched_x, matched_y, matched_yaw,
+                error_m, heading_rad,
+                matched_idx, target_idx, n_wp, in_precision_zone, node_attr, dt,
             )
 
-    def _write_tracking_log(self, x, y, yaw, error_m, heading_rad,
-                             wp_idx, n_wp, in_precision_zone, node_attr, dt):
+    def _write_tracking_log(self, raw_x, raw_y, raw_yaw,
+                             matched_x, matched_y, matched_yaw,
+                             error_m, heading_rad,
+                             wp_idx, target_idx, n_wp, in_precision_zone, node_attr, dt):
         """Write one line to temp/tracking_debug.txt."""
         try:
             now = time.monotonic()
-            wp = self._graph.waypoints[wp_idx % n_wp]
-            dist_to_wp = math.hypot(x - wp[0], y - wp[1])
+            wp = self._graph.waypoints[target_idx % n_wp]
+            dist_to_wp = math.hypot(matched_x - wp[0], matched_y - wp[1])
 
             # Speed field
             raw_spd = self._last_raw_speed
@@ -609,16 +680,19 @@ class threadTracking(ThreadWithStop):
             drift_warn = ""
             prev_xy = getattr(self, "_log_prev_xy", None)
             if prev_xy is not None and abs(self._last_speed) < 1e-4:
-                moved = math.hypot(x - prev_xy[0], y - prev_xy[1])
+                moved = math.hypot(matched_x - prev_xy[0], matched_y - prev_xy[1])
                 if moved > 0.005:  # more than 5mm movement at zero speed = real drift
                     drift_warn = f" ⚠ DRIFT_WITH_ZERO_SPEED (moved {moved*100:.1f}cm)"
-            self._log_prev_xy = (x, y)
+            self._log_prev_xy = (matched_x, matched_y)
 
-            path_kappa = self._graph.get_curvature(wp_idx)
+            path_kappa = self._graph.get_curvature(target_idx)
             ff_deg = math.degrees(math.atan(path_kappa * 0.258)) if abs(path_kappa) > 0.01 else 0.0
             _corr_deg = getattr(self.tracking_state, 'last_yaw_correction_deg', 0.0)
             _cam_hint = getattr(self.tracking_state, '_cam_yaw_hint_rad', None)
             _cam_conf = getattr(self.tracking_state, '_cam_yaw_hint_conf', 0.0)
+            _lane_rel = int(bool(getattr(self.tracking_state, 'lane_measurement_reliable', False)))
+            _lat_corr = float(getattr(self.tracking_state, 'camera_lateral_correction_m', 0.0))
+            _mm_err = float(getattr(self.tracking_state, 'map_match_error_m', 0.0))
             _cam_str = (
                 f"cam_yaw_hint={math.degrees(_cam_hint):.1f}° conf={_cam_conf:.2f} corr={_corr_deg:+.3f}°"
                 if _cam_hint is not None else "cam_yaw_hint=none"
@@ -627,9 +701,11 @@ class threadTracking(ThreadWithStop):
                 f"F{self._frame_idx:06d} | "
                 f"{spd_str} | "
                 f"{imu_str} | "
-                f"x={x:.4f}m y={y:.4f}m yaw={math.degrees(yaw):.1f}° | "
-                f"wp={wp_idx}/{n_wp} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
+                f"raw=({raw_x:.4f},{raw_y:.4f},{math.degrees(raw_yaw):.1f}°) "
+                f"matched=({matched_x:.4f},{matched_y:.4f},{math.degrees(matched_yaw):.1f}°) | "
+                f"wp={wp_idx}/{n_wp} tgt={target_idx} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
                 f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° "
+                f"mm={_mm_err:.4f}m latcorr={_lat_corr:+.4f}m lane={_lane_rel} "
                 f"kappa={path_kappa:+.3f}/m ff={ff_deg:+.1f}° | "
                 f"zone={zone_str} | {_cam_str} | dt={dt*1000:.1f}ms"
                 f"{drift_warn}\n"

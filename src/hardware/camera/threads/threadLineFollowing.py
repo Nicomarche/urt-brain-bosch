@@ -5653,12 +5653,19 @@ Args:
 
         ts = self._tracking_state
         _track_heading_enabled = bool(getattr(_config, "TRACKING_USE_PATH_HEADING", True))
+        _lane_measurement_reliable = bool(
+            getattr(ts, "lane_measurement_reliable", False)
+        ) if ts is not None else False
 
         # ── Waypoint-mode override (GPS-free tracking at precision zones) ─────
         # When threadTracking detects a STOPLINE / INTERSECTION node ahead it
-        # sets waypoint_mode_active=True.  We bypass visual lane detection and
-        # feed the dead-reckoning errors directly into the MPC / Stanley.
-        if ts is not None and getattr(ts, "waypoint_mode_active", False):
+        # sets waypoint_mode_active=True.  Use graph-only control only as a
+        # fallback when the camera does not have a reliable lane measurement.
+        if (
+            ts is not None and
+            getattr(ts, "waypoint_mode_active", False) and
+            not _lane_measurement_reliable
+        ):
             wp_error_m = float(getattr(ts, "error_m", 0.0))
             wp_heading_rad = float(getattr(ts, "heading_rad", 0.0))
             wp_speed_mps = float(getattr(ts, "speed_mps", 0.0))
@@ -8570,10 +8577,20 @@ Returns:
                         "x_m": round(float(getattr(self._tracking_state, 'x', 0.0)), 4),
                         "y_m": round(float(getattr(self._tracking_state, 'y', 0.0)), 4),
                         "yaw_deg": round(math.degrees(float(getattr(self._tracking_state, 'yaw', 0.0))), 2),
+                        "raw_x_m": round(float(getattr(self._tracking_state, 'raw_x', 0.0)), 4),
+                        "raw_y_m": round(float(getattr(self._tracking_state, 'raw_y', 0.0)), 4),
+                        "raw_yaw_deg": round(math.degrees(float(getattr(self._tracking_state, 'raw_yaw', 0.0))), 2),
+                        "matched_x_m": round(float(getattr(self._tracking_state, 'matched_x', 0.0)), 4),
+                        "matched_y_m": round(float(getattr(self._tracking_state, 'matched_y', 0.0)), 4),
+                        "matched_yaw_deg": round(math.degrees(float(getattr(self._tracking_state, 'matched_yaw', 0.0))), 2),
                         "heading_rad": round(float(getattr(self._tracking_state, 'heading_rad', 0.0)), 5),
                         "heading_deg": round(math.degrees(float(getattr(self._tracking_state, 'heading_rad', 0.0))), 3),
                         "error_m": round(float(getattr(self._tracking_state, 'error_m', 0.0)), 5),
                         "waypoint_mode": bool(getattr(self._tracking_state, 'waypoint_mode_active', False)),
+                        "lane_measurement_reliable": bool(getattr(self._tracking_state, 'lane_measurement_reliable', False)),
+                        "camera_lateral_correction_m": round(float(getattr(self._tracking_state, 'camera_lateral_correction_m', 0.0)), 5),
+                        "map_match_error_m": round(float(getattr(self._tracking_state, 'map_match_error_m', 0.0)), 5),
+                        "path_psi_deg": round(math.degrees(float(getattr(self._tracking_state, 'path_psi', 0.0))), 3),
                         "path_kappa": round(float(getattr(self._tracking_state, 'path_kappa', 0.0)), 5),
                         "target_idx": getattr(
                             self._tracking_state,
@@ -9098,6 +9115,9 @@ Returns:
             self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
 
         prev_seen_side = self.last_seen_side
+        _ts_for_tracking = getattr(self, '_tracking_state', None)
+        if _ts_for_tracking is not None:
+            _ts_for_tracking.set_lane_measurement_state(False, 0.0)
         if not isinstance(local_mask_guidance, dict):
             if avg_left is not None and avg_right is not None:
                 observed_sides = ('left', 'right')
@@ -9250,20 +9270,33 @@ Returns:
                     debug_info['two_line_direct_error_m'] = round(direct_error_m, 4)
                     debug_info['two_line_offtrack_cm']    = round(_offtrack_cm, 2)
 
-                # In 2-line mode with a physical direct_error_m the heading from the
-                # mask geometry is dominated by the car's YAW angle, not road curvature.
-                # As the Stanley crosstrack correction turns the car body, the heading
-                # grows positively (nose points more left → heading says "steer right"),
-                # creating a positive-feedback loop that cancels the very correction being
-                # applied.  With direct_error_m providing a physically reliable crosstrack
-                # signal, the heading term is not only unnecessary but actively harmful.
-                # Pass heading=0 so crosstrack is the sole driver in 2-line mode.
-                _two_line_heading = 0.0 if direct_error_m is not None else heading
-                steering_angle = self._compute_lateral_control(
-                    error, _two_line_heading, speed_val, curve_reference=curve_reference,
-                    lane_width_px=lane_width_px, img_w=img_w,
-                    direct_error_m=direct_error_m,
-                )
+                    # In 2-line mode with a physical direct_error_m the heading from the
+                    # mask geometry is dominated by the car's YAW angle, not road curvature.
+                    # As the Stanley crosstrack correction turns the car body, the heading
+                    # grows positively (nose points more left -> heading says "steer right"),
+                    # creating a positive-feedback loop that cancels the very correction being
+                    # applied. With direct_error_m providing a physically reliable crosstrack
+                    # signal, the heading term is not only unnecessary but actively harmful.
+                    # Pass heading=0 so crosstrack is the sole driver in 2-line mode.
+                    if _ts_for_tracking is not None and direct_error_m is not None:
+                        _lat_gain = float(getattr(
+                            _config, 'TRACKING_CAMERA_LATERAL_CORRECTION_GAIN', 0.35
+                        ) or 0.35)
+                        _lat_max = float(getattr(
+                            _config, 'TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M', 0.08
+                        ) or 0.08)
+                        _lat_corr = float(direct_error_m) * _lat_gain
+                        if _lat_max > 0.0:
+                            _lat_corr = max(-_lat_max, min(_lat_max, _lat_corr))
+                        _ts_for_tracking.correct_lateral(_lat_corr)
+                        debug_info['tracking_camera_lateral_correction_m'] = round(_lat_corr, 4)
+                        debug_info['tracking_lane_measurement_reliable'] = True
+                    _two_line_heading = 0.0 if direct_error_m is not None else heading
+                    steering_angle = self._compute_lateral_control(
+                        error, _two_line_heading, speed_val, curve_reference=curve_reference,
+                        lane_width_px=lane_width_px, img_w=img_w,
+                        direct_error_m=direct_error_m,
+                    )
 
                 self.steer_history.append(steering_angle)
                 steering_angle = sum(self.steer_history) / len(self.steer_history)
