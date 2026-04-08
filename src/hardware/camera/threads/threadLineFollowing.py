@@ -1092,6 +1092,7 @@ Args:
         self._last_good_error = 0.0          # Last accepted error value
         self._last_good_steering = 0.0       # Last accepted steering angle
         self._last_good_num_lines = 0        # Last accepted line count
+        self._prev_direct_error_side = None  # Visible side used by single-line direct_error_m
 
         # Curve recovery (reverse when curve is impossible)
         self.use_curve_recovery = False      # Disabled: reverse recovery caused incorrect interventions
@@ -5670,6 +5671,7 @@ Args:
         lane_width_px=None,
         img_w=None,
         direct_error_m=None,
+        direct_error_context=None,
     ):
         """Compute steering with the active controller policy for the current mode.
 
@@ -5755,16 +5757,41 @@ Args:
 
         if self._should_use_stanley_controller():
             self._apply_stanley_road_type_schedule()
+            direct_error_source = ""
+            direct_error_side = None
+            if isinstance(direct_error_context, dict):
+                direct_error_source = str(direct_error_context.get("source", "") or "")
+                _side_value = direct_error_context.get("side")
+                if _side_value is not None:
+                    direct_error_side = str(_side_value)
             if direct_error_m is not None:
                 # Physical error supplied directly: no pixel conversion or cache needed.
                 error_m = float(direct_error_m)
                 # Rate-limit: cap frame-to-frame jump at 10 cm to suppress single-line
                 # extrapolation spikes (e.g. at curve entry when one line disappears).
                 _prev_em = getattr(self, '_prev_direct_error_m', None)
-                if _prev_em is not None:
+                _prev_em_side = getattr(self, '_prev_direct_error_side', None)
+                _skip_rate_limit = False
+                if direct_error_source == "single_line":
+                    # A real 1-line side switch (left -> right or right -> left) can
+                    # legitimately invert the physical direct_error_m sign in one frame.
+                    # Smoothing across that transition drags the old sign forward and
+                    # makes the MPC unwind or countersteer mid-curve.
+                    if (
+                        direct_error_side is not None and
+                        _prev_em_side is not None and
+                        direct_error_side != _prev_em_side
+                    ):
+                        _skip_rate_limit = True
+                    elif _prev_em is not None and (error_m * float(_prev_em) < 0.0):
+                        _skip_rate_limit = True
+                if _prev_em is not None and not _skip_rate_limit:
                     _max_step = 0.10  # 10 cm/frame max change
                     error_m = max(_prev_em - _max_step, min(_prev_em + _max_step, error_m))
                 self._prev_direct_error_m = error_m
+                self._prev_direct_error_side = (
+                    direct_error_side if direct_error_source == "single_line" else None
+                )
                 # px_per_cm is still needed for the legacy deadband path; compute from
                 # current-frame lane width if available, otherwise fall back to cache.
                 if lane_width_px is not None and float(lane_width_px) > 1.0:
@@ -5852,7 +5879,7 @@ Args:
                 # non-zero psi even when the car is aligned.  This avoids the degenerate
                 # case where de/dt = v·sin(0) = 0 renders the MPC horizon useless.
                 heading_mpc = heading
-                if direct_error_m is not None:
+                if direct_error_m is not None and direct_error_source != "single_line":
                     k_eff = float(self.stanley_k) * float(self.mpc_crosstrack_k_mult)
                     heading_mpc = heading + math.atan2(
                         k_eff * float(error_m),
@@ -9348,6 +9375,7 @@ Returns:
                         error, _two_line_heading, speed_val, curve_reference=curve_reference,
                         lane_width_px=lane_width_px, img_w=img_w,
                         direct_error_m=direct_error_m,
+                        direct_error_context={"source": "two_line"},
                     )
 
                 self.steer_history.append(steering_angle)
@@ -9439,6 +9467,7 @@ Returns:
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
+                        direct_error_context={"source": "single_line", "side": "left"},
                     )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -9532,6 +9561,7 @@ Returns:
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
+                        direct_error_context={"source": "single_line", "side": "right"},
                     )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
