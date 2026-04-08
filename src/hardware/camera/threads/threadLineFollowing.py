@@ -3408,6 +3408,34 @@ Args:
 
         return max(-self.max_steering, min(self.max_steering, float(candidate)))
 
+    def _resolve_ai_local_blind_control(self, img_w, speed_cap=None):
+        """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
+
+        In precision zones the graph/tracking state is trusted as the fallback
+        controller. Outside precision zones, do not keep driving blind with the
+        last steering command: stop the car instead.
+        """
+        ts = getattr(self, "_tracking_state", None)
+        waypoint_mode_active = bool(
+            ts is not None and getattr(ts, "waypoint_mode_active", False)
+        )
+        _, eff_min_spd = self._get_effective_speeds()
+
+        if waypoint_mode_active:
+            fallback_speed = float(eff_min_spd)
+            if speed_cap is not None:
+                fallback_speed = min(fallback_speed, float(speed_cap))
+            speed_value = self._current_speed if self._current_speed > 0 else fallback_speed
+            steering_angle = self._compute_lateral_control(
+                0.0, 0.0, speed_value,
+                speed_cap=fallback_speed, img_w=img_w,
+            )
+            if steering_angle is not None:
+                steering_angle = max(-self.max_steering, min(self.max_steering, float(steering_angle)))
+                return steering_angle, fallback_speed, "tracking_fallback"
+
+        return 0.0, 0.0, "safety_stop"
+
     def _resolve_nominal_lane_width_px(self, img_w):
         """Estimate nominal lane width in pixels from cache or frame fallback."""
         cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
@@ -9071,38 +9099,42 @@ Returns:
             )
         _pre_noisy, _pre_reason = self._is_frame_noisy(debug_info, None, None, num_lines)
         if _pre_noisy:
-            # Frame is noisy (e.g. too many Hough lines from reflections)
-            # Use previous good steering and skip all processing
-            self._noise_reject_count += 1
-            if self.show_debug:
-                print(f"\033[1;97m[ Noise Filter ] :\033[0m \033[1;91mREJECT\033[0m "
-                      f"({self._noise_reject_count}/{self.noise_max_reject_frames}) "
-                      f"reason={_pre_reason}")
-            steering_angle = self._last_good_steering
-            speed = self.min_speed  # Slow down during noise
-            # Create debug frame showing rejection (only when debug active)
-            if self._needs_debug:
-                debug_frame = self._bfmc_draw_debug(
-                    frame, avg_left, avg_right, None, None, None, None, steering_angle, debug_info
-                )
-                cv2.rectangle(debug_frame, (0, debug_frame.shape[0] - 25),
-                             (debug_frame.shape[1], debug_frame.shape[0]), (0, 0, 150), -1)
-                cv2.putText(debug_frame, f"NOISE REJECT: {_pre_reason}",
-                           (8, debug_frame.shape[0] - 8),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
-                self._store_debug_image('final', debug_frame)
+            if self._is_ai_local_active() and _pre_reason == "sudden_loss(2→0)":
+                debug_info['blind_transition_loss'] = True
+                debug_info['blind_transition_loss_reason'] = _pre_reason
             else:
-                debug_frame = None
-            self._set_frame_trace({
-                "status": "noise_reject",
-                "detection_mode": self.detection_mode,
-                "reason": _pre_reason,
-                "steering_deg": steering_angle,
-                "speed": speed,
-                "noise_reject_count": self._noise_reject_count,
-                "debug": debug_info,
-            })
-            return steering_angle, speed, debug_frame
+                # Frame is noisy (e.g. too many Hough lines from reflections)
+                # Use previous good steering and skip all processing
+                self._noise_reject_count += 1
+                if self.show_debug:
+                    print(f"\033[1;97m[ Noise Filter ] :\033[0m \033[1;91mREJECT\033[0m "
+                          f"({self._noise_reject_count}/{self.noise_max_reject_frames}) "
+                          f"reason={_pre_reason}")
+                steering_angle = self._last_good_steering
+                speed = self.min_speed  # Slow down during noise
+                # Create debug frame showing rejection (only when debug active)
+                if self._needs_debug:
+                    debug_frame = self._bfmc_draw_debug(
+                        frame, avg_left, avg_right, None, None, None, None, steering_angle, debug_info
+                    )
+                    cv2.rectangle(debug_frame, (0, debug_frame.shape[0] - 25),
+                                 (debug_frame.shape[1], debug_frame.shape[0]), (0, 0, 150), -1)
+                    cv2.putText(debug_frame, f"NOISE REJECT: {_pre_reason}",
+                               (8, debug_frame.shape[0] - 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 100, 255), 1)
+                    self._store_debug_image('final', debug_frame)
+                else:
+                    debug_frame = None
+                self._set_frame_trace({
+                    "status": "noise_reject",
+                    "detection_mode": self.detection_mode,
+                    "reason": _pre_reason,
+                    "steering_deg": steering_angle,
+                    "speed": speed,
+                    "noise_reject_count": self._noise_reject_count,
+                    "debug": debug_info,
+                })
+                return steering_angle, speed, debug_frame
 
         # === UPDATE CURVE STATE MACHINE ===
         # Always run, even when use_swept_path=False: curve_state drives single-line
@@ -9734,62 +9766,74 @@ Returns:
             # ---- NO LINES ----
             self._swept_path_info = None  # Reset swept path
             self.frames_without_line += 1
-            blind_hold_steering = self._get_no_lane_hold_steering()
+            if self._is_ai_local_active():
+                steering_angle, speed, blind_mode = self._resolve_ai_local_blind_control(
+                    img_w, speed_cap=speed_cap
+                )
+                speed_cap = float(speed)
+                debug_info['blind_control_mode'] = blind_mode
+                if blind_mode == 'tracking_fallback':
+                    debug_info['control_override'] = 'tracking_blind_fallback'
+                else:
+                    self._current_speed = 0.0
+                    debug_info['control_override'] = 'no_lane_safety_stop'
+            else:
+                blind_hold_steering = self._get_no_lane_hold_steering()
 
-            if self.show_debug:
-                pass
-                #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
+                if self.show_debug:
+                    pass
+                    #print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mNO LANES\033[0m - frame {self.frames_without_line}")
 
-            can_use_kalman_pred = (
-                self.use_kalman_filter and
-                self._kalman_initialized and
-                kalman_pred_error is not None and
-                self._kalman_age_frames <= self.kalman_max_prediction_frames
-            )
-            if can_use_kalman_pred:
-                error = kalman_pred_error
-                kalman_prediction_used = True
-                debug_info['kalman_error'] = error
-                debug_info['kalman_age'] = self._kalman_age_frames
-                debug_info['kalman_predicted'] = True
-                if blind_hold_steering is not None:
+                can_use_kalman_pred = (
+                    self.use_kalman_filter and
+                    self._kalman_initialized and
+                    kalman_pred_error is not None and
+                    self._kalman_age_frames <= self.kalman_max_prediction_frames
+                )
+                if can_use_kalman_pred:
+                    error = kalman_pred_error
+                    kalman_prediction_used = True
+                    debug_info['kalman_error'] = error
+                    debug_info['kalman_age'] = self._kalman_age_frames
+                    debug_info['kalman_predicted'] = True
+                    if blind_hold_steering is not None:
+                        steering_angle = blind_hold_steering
+                        debug_info['blind_steer_hold'] = True
+                        debug_info['blind_steer_source'] = (
+                            'last_good' if getattr(self, '_last_good_steering', None) is not None else 'last'
+                        )
+                        if self.show_debug:
+                            print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mHOLD\033[0m - "
+                                  f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
+                                  f"steer={steering_angle:.1f}°")
+                    else:
+                        speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
+                        heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
+                        heading_pred = self._fuse_heading_with_local_hint(heading_pred, debug_info, mode='stale')
+                        curve_reference = self._get_stanley_curve_reference()
+                        steering_angle = self._compute_lateral_control(
+                            error, heading_pred, speed_val, curve_reference=curve_reference,
+                            speed_cap=self.min_speed, img_w=img_w
+                        )
+                        steering_angle *= 0.9  # conservative while running on prediction only
+                        steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
+                        if self.show_debug:
+                            print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mPREDICT\033[0m - "
+                                  f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
+                                  f"steer={steering_angle:.1f}°")
+                elif blind_hold_steering is not None:
                     steering_angle = blind_hold_steering
                     debug_info['blind_steer_hold'] = True
                     debug_info['blind_steer_source'] = (
                         'last_good' if getattr(self, '_last_good_steering', None) is not None else 'last'
                     )
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mHOLD\033[0m - "
-                              f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
-                              f"steer={steering_angle:.1f}°")
+                elif hasattr(self, 'last_steering') and self.frames_without_line < 5:
+                    steering_angle = self.last_steering * 0.95
                 else:
-                    speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
-                    heading_pred = self._heading_error * 0.5  # stale heading is less reliable while blind
-                    heading_pred = self._fuse_heading_with_local_hint(heading_pred, debug_info, mode='stale')
-                    curve_reference = self._get_stanley_curve_reference()
-                    steering_angle = self._compute_lateral_control(
-                        error, heading_pred, speed_val, curve_reference=curve_reference,
-                        speed_cap=self.min_speed, img_w=img_w
-                    )
-                    steering_angle *= 0.9  # conservative while running on prediction only
-                    steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Kalman ] :\033[0m \033[1;93mPREDICT\033[0m - "
-                              f"e={error:.1f}px age={self._kalman_age_frames}/{self.kalman_max_prediction_frames} "
-                              f"steer={steering_angle:.1f}°")
-            elif blind_hold_steering is not None:
-                steering_angle = blind_hold_steering
-                debug_info['blind_steer_hold'] = True
-                debug_info['blind_steer_source'] = (
-                    'last_good' if getattr(self, '_last_good_steering', None) is not None else 'last'
-                )
-            elif hasattr(self, 'last_steering') and self.frames_without_line < 5:
-                steering_angle = self.last_steering * 0.95
-            else:
-                steering_angle = None
-            _, eff_min_spd = self._get_effective_speeds()
-            speed = eff_min_spd
-            speed_cap = speed
+                    steering_angle = None
+                _, eff_min_spd = self._get_effective_speeds()
+                speed = eff_min_spd
+                speed_cap = speed
 
         if self._is_ai_local_active():
             speed, speed_cap = self._apply_lead_distance_speed_cap(
@@ -9807,11 +9851,14 @@ Returns:
 
         # === POST-CHECK: Reject steering if it looks like a noise spike ===
         if steering_angle is not None and self.use_noise_filter:
+            blind_control_mode = debug_info.get('blind_control_mode')
             # Skip noise filter for stabilization frames (just_seen_two_lines transition).
             # These frames use last_steering (not a real measurement) and would falsely
             # reset the reject counter, causing a latch-up where the correct steering
             # value is perpetually rejected.
-            if self._is_stabilization_frame or kalman_prediction_used:
+            if blind_control_mode is not None:
+                pass  # Blind AI-local fallback/stop is already the safe override.
+            elif self._is_stabilization_frame or kalman_prediction_used:
                 pass  # Don't check, don't accept, don't reject — just pass through
             else:
                 _post_noisy, _post_reason = self._is_frame_noisy(
