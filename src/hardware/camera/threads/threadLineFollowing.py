@@ -2210,9 +2210,13 @@ Args:
         _dr_yaw_hint_deg = 0.0
         _dr_yaw_hint_conf = 0.0
         _ts_for_yaw = getattr(self, '_tracking_state', None)
+        _tracking_cam_min_speed_mps = float(
+            getattr(_config, 'TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS', 0.02) or 0.02
+        )
         if (_ts_for_yaw is not None
+                and self.is_line_following_active
                 and abs(heading_rad) < math.radians(20.0)
-                and abs(float(getattr(_ts_for_yaw, 'speed_mps', 0.0) or 0.0)) > 0.02):
+                and abs(float(getattr(_ts_for_yaw, 'speed_mps', 0.0) or 0.0)) > _tracking_cam_min_speed_mps):
             _path_psi = float(getattr(_ts_for_yaw, 'path_psi', 0.0) or 0.0)
             _cam_world_yaw = _path_psi + heading_rad
             # Confidence: 1.0 when perfectly aligned, 0.0 at ±20°.
@@ -9116,6 +9120,18 @@ Returns:
 
         prev_seen_side = self.last_seen_side
         _ts_for_tracking = getattr(self, '_tracking_state', None)
+        _tracking_cam_min_speed_mps = float(
+            getattr(_config, 'TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS', 0.02) or 0.02
+        )
+        _tracking_speed_mps = (
+            abs(float(getattr(_ts_for_tracking, 'speed_mps', 0.0) or 0.0))
+            if _ts_for_tracking is not None else 0.0
+        )
+        _tracking_camera_corrections_allowed = bool(
+            self.is_line_following_active and
+            _ts_for_tracking is not None and
+            _tracking_speed_mps > _tracking_cam_min_speed_mps
+        )
         if _ts_for_tracking is not None:
             _ts_for_tracking.set_lane_measurement_state(False, 0.0)
         if not isinstance(local_mask_guidance, dict):
@@ -9278,7 +9294,7 @@ Returns:
                     # applied. With direct_error_m providing a physically reliable crosstrack
                     # signal, the heading term is not only unnecessary but actively harmful.
                     # Pass heading=0 so crosstrack is the sole driver in 2-line mode.
-                    if _ts_for_tracking is not None and direct_error_m is not None:
+                    if _tracking_camera_corrections_allowed and direct_error_m is not None:
                         _lat_gain = float(getattr(
                             _config, 'TRACKING_CAMERA_LATERAL_CORRECTION_GAIN', 0.35
                         ) or 0.35)
@@ -9291,6 +9307,10 @@ Returns:
                         _ts_for_tracking.correct_lateral(_lat_corr)
                         debug_info['tracking_camera_lateral_correction_m'] = round(_lat_corr, 4)
                         debug_info['tracking_lane_measurement_reliable'] = True
+                    elif direct_error_m is not None:
+                        debug_info['tracking_camera_correction_blocked'] = (
+                            'inactive' if not self.is_line_following_active else 'low_speed'
+                        )
                     _two_line_heading = 0.0 if direct_error_m is not None else heading
                     steering_angle = self._compute_lateral_control(
                         error, _two_line_heading, speed_val, curve_reference=curve_reference,

@@ -289,6 +289,7 @@ TRACKING_STEER_GAIN_DR = 1.0
 # are visible and the physical lane error is reliable.
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
 TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 
 # Local map-matching weights/search around the current dense waypoint index.
 TRACKING_MAP_MATCH_SEARCH_WP = 18
