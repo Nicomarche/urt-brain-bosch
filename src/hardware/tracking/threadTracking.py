@@ -31,6 +31,7 @@ try:
     _STEP_M = getattr(cfg, "TRACKING_WAYPOINT_STEP_M", 0.05)
     _ADVANCE_DIST = getattr(cfg, "TRACKING_ADVANCE_DIST_M", 0.15)
     _INTERSECTION_LOOKAHEAD = getattr(cfg, "TRACKING_INTERSECTION_LOOKAHEAD_M", 0.40)
+    _PRECISION_LOOKAHEAD_M = getattr(cfg, "TRACKING_PRECISION_LOOKAHEAD_M", 0.10)
     _SHOW_WINDOW = getattr(cfg, "TRACKING_SHOW_WINDOW", True)
     _DEBUG_LOG = getattr(cfg, "TRACKING_DEBUG_LOG", False)
     _LOOP_HZ = 50
@@ -52,6 +53,7 @@ except Exception:
     _STEP_M = 0.05
     _ADVANCE_DIST = 0.15
     _INTERSECTION_LOOKAHEAD = 0.40
+    _PRECISION_LOOKAHEAD_M = 0.10
     _SHOW_WINDOW = True
     _DEBUG_LOG = False
     _LOOP_HZ = 50
@@ -494,17 +496,30 @@ class threadTracking(ThreadWithStop):
             x, y, self._wp_idx, lookahead_m=lookahead_m
         )
 
-        # ---- Compute tracking errors
-        error_m, heading_rad = self._graph.compute_tracking_error(x, y, yaw, target_idx)
-
-        # ---- Path tangent and curvature at the target waypoint
-        path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
-        path_kappa = self._graph.get_curvature(target_idx)
-
         # ---- Detect precision zone (intersection / stop-line ahead)
         in_precision_zone = self._graph.is_precision_zone(
             target_idx, lookahead_pts=_LOOKAHEAD_PTS
         )
+        if in_precision_zone:
+            # In precision zones we want the graph node itself to dominate.
+            # Using the normal speed-adaptive lookahead here jumps the target
+            # several waypoints into the next curve before the car reaches the
+            # STOPLINE / INTERSECTION node, which makes the controller start
+            # bending early.  Keep a short local target until the node is passed.
+            precision_lookahead_m = max(
+                float(self._graph.step_m),
+                min(float(lookahead_m), float(_PRECISION_LOOKAHEAD_M)),
+            )
+            target_idx = self._graph.find_waypoint_ahead(
+                x, y, self._wp_idx, lookahead_m=precision_lookahead_m
+            )
+
+        # ---- Compute tracking errors against the active control target
+        error_m, heading_rad = self._graph.compute_tracking_error(x, y, yaw, target_idx)
+
+        # ---- Path tangent and curvature at the active target waypoint
+        path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
+        path_kappa = self._graph.get_curvature(target_idx)
         node_attr = int(self._graph.wp_node_attrs[target_idx % n_wp])
 
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)

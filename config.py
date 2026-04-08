@@ -276,6 +276,11 @@ TRACKING_ADVANCE_DIST_M = 0.15
 # waypoint-mode control in threadLineFollowing.
 TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 
+# Inside STOPLINE/INTERSECTION precision zones use a much shorter control
+# lookahead so the target waypoint stays on the active node segment instead of
+# jumping into the next curve before the car actually reaches the node.
+TRACKING_PRECISION_LOOKAHEAD_M = 0.10
+
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True
 

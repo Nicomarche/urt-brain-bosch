@@ -8575,7 +8575,11 @@ Returns:
                         "error_m": round(float(getattr(self._tracking_state, 'error_m', 0.0)), 5),
                         "waypoint_mode": bool(getattr(self._tracking_state, 'waypoint_mode_active', False)),
                         "path_kappa": round(float(getattr(self._tracking_state, 'path_kappa', 0.0)), 5),
-                        "target_idx": getattr(self._tracking_state, 'target_idx', None),
+                        "target_idx": getattr(
+                            self._tracking_state,
+                            'target_idx',
+                            getattr(self._tracking_state, 'wp_idx', None),
+                        ),
                         # Camera-based yaw correction applied to DR this frame
                         "dr_yaw_correction_deg": round(float(getattr(self._tracking_state, 'last_yaw_correction_deg', 0.0)), 4),
                         "dr_yaw_cam_hint_deg": round(float(getattr(self._tracking_state, 'last_cam_yaw_hint_deg', 0.0)), 2),
