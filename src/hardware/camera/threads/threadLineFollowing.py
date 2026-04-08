@@ -2307,9 +2307,20 @@ Args:
             # Only trigger when the reference has been meaningfully learned
             # (|ref| > 5°) to avoid false positives during initialisation.
             _ref_learned = abs(math.degrees(_transversal_ref_rad)) > 5.0
+            # Only trigger transversal recovery when the graphml path confirms a real
+            # curve.  On a straight section a perpendicular line is a stop-line marker,
+            # not a curve-exit wall — applying the 20° heading bias there would wrongly
+            # steer the car into the turn.  path_kappa from DeadReckoning / TrackGraph
+            # is low (≈0.11) on straight segments and high (>0.5) inside tight turns.
+            _graph_kappa = abs(float(getattr(self._tracking_state, 'path_kappa', 0.0))) \
+                if self._tracking_state is not None else 0.0
+            _transversal_kappa_min = float(
+                getattr(self, 'single_line_transversal_kappa_threshold', 0.30)
+            )
             _is_transversal = (
                 curve_context and
                 _ref_learned and
+                _graph_kappa >= _transversal_kappa_min and
                 (
                     (visible_side == 'right' and _transversal_delta_deg > _transversal_threshold_deg) or
                     (visible_side == 'left'  and _transversal_delta_deg < -_transversal_threshold_deg)
