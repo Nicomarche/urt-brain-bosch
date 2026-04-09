@@ -115,8 +115,10 @@ class PathManager:
 
     def reset_route(self, current_pose: dict | None = None) -> bool:
         ref_ids = list(self.graph.reference_node_ids)
+        closed_loop = bool(getattr(self.graph.reference_path, "closed_loop", False))
         if len(ref_ids) > 1 and ref_ids[0] == ref_ids[-1]:
             ref_ids = ref_ids[:-1]
+            closed_loop = True
         if not ref_ids:
             self.active_route = None
             self.route_active = False
@@ -136,11 +138,18 @@ class PathManager:
                 idx = ref_ids.index(start_node_id)
                 ref_ids = ref_ids[idx:] + ref_ids[:idx]
 
-        if ref_ids[0] != ref_ids[-1]:
+        if (
+            not closed_loop
+            and len(ref_ids) > 1
+            and ref_ids[0] in self.graph.adj.get(ref_ids[-1], [])
+        ):
+            closed_loop = True
+
+        if closed_loop and ref_ids[0] != ref_ids[-1]:
             ref_ids = ref_ids + [ref_ids[0]]
         route = self.graph.build_dense_path(
             ref_ids,
-            closed_loop=True,
+            closed_loop=closed_loop,
             route_id=self._next_route_id("reference"),
             source="reference",
         )
