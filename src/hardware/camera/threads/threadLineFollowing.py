@@ -3409,32 +3409,102 @@ Args:
 
         return max(-self.max_steering, min(self.max_steering, float(candidate)))
 
+    def _should_allow_stopline_waypoint_guidance(self, direct_error_context=None):
+        """Allow graph/node authority only at STOPLINE with one line on a straight."""
+        ts = getattr(self, "_tracking_state", None)
+        if ts is None or not bool(getattr(ts, "waypoint_mode_active", False)):
+            return False
+
+        stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
+        node_attr = int(getattr(ts, "node_attr", 0) or 0)
+        if node_attr != stopline_attr:
+            return False
+
+        if str(getattr(self, "_curve_state", "STRAIGHT")) != "STRAIGHT":
+            return False
+
+        if not isinstance(direct_error_context, dict):
+            return False
+
+        return str(direct_error_context.get("source", "") or "") == "single_line"
+
+    def _enforce_single_line_curve_priority(
+        self,
+        steering_angle,
+        heading_rad,
+        direct_error_m=None,
+        side=None,
+        debug_info=None,
+    ):
+        """Keep steering committed to the visible line while still inside the curve."""
+        if steering_angle is None or side not in ("left", "right"):
+            return steering_angle
+
+        curve_state = str(getattr(self, "_curve_state", "STRAIGHT"))
+        if curve_state not in ("ENTERING", "IN_CURVE"):
+            return steering_angle
+
+        if isinstance(debug_info, dict):
+            if bool(debug_info.get("single_line_transversal_detected", False)):
+                return steering_angle
+            if str(debug_info.get("single_line_mode", "") or "") == "transversal_recovery":
+                return steering_angle
+
+        desired_sign = 0
+        curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
+        if curve_direction != 0:
+            desired_sign = -curve_direction
+
+        if desired_sign == 0 and direct_error_m is not None and abs(float(direct_error_m)) > 1e-4:
+            desired_sign = -1 if float(direct_error_m) > 0.0 else 1
+
+        previous_steering = getattr(self, "_last_good_steering", None)
+        if previous_steering is None:
+            previous_steering = getattr(self, "last_steering", None)
+        if desired_sign == 0 and previous_steering is not None and abs(float(previous_steering)) > 0.2:
+            desired_sign = 1 if float(previous_steering) > 0.0 else -1
+
+        heading_deg = abs(math.degrees(float(heading_rad or 0.0)))
+        if desired_sign == 0 and heading_deg > 0.2:
+            desired_sign = 1 if float(heading_rad) > 0.0 else -1
+
+        if desired_sign == 0:
+            return steering_angle
+
+        min_steer_deg = max(
+            float(getattr(_config, "SINGLE_LINE_CURVE_MIN_STEER_DEG", 2.0) or 2.0),
+            heading_deg * float(
+                getattr(_config, "SINGLE_LINE_CURVE_HEADING_STEER_GAIN", 1.0) or 1.0
+            ),
+        )
+
+        if previous_steering is not None and float(previous_steering) * desired_sign > 0.0:
+            hold_ratio = max(
+                0.0,
+                min(1.0, float(getattr(_config, "SINGLE_LINE_CURVE_STEER_HOLD_RATIO", 0.45) or 0.45)),
+            )
+            min_steer_deg = max(min_steer_deg, abs(float(previous_steering)) * hold_ratio)
+
+        min_steer_deg = min(float(self.max_steering), float(min_steer_deg))
+        guarded_steer = float(steering_angle)
+        if guarded_steer * desired_sign < min_steer_deg:
+            guarded_steer = desired_sign * min_steer_deg
+            if isinstance(debug_info, dict):
+                debug_info["single_line_curve_priority"] = True
+                debug_info["single_line_curve_priority_sign"] = int(desired_sign)
+                debug_info["single_line_curve_priority_min_deg"] = round(float(min_steer_deg), 3)
+                debug_info["single_line_curve_priority_input_deg"] = round(float(steering_angle), 3)
+                debug_info["single_line_curve_priority_output_deg"] = round(float(guarded_steer), 3)
+
+        return guarded_steer
+
     def _resolve_ai_local_blind_control(self, img_w, speed_cap=None):
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
-        In precision zones the graph/tracking state is trusted as the fallback
-        controller. Outside precision zones, do not keep driving blind with the
-        last steering command: stop the car instead.
+        The visible lane always has priority. Blind graph fallback is intentionally
+        disabled here; once no lane is visible, stop instead of letting waypoint
+        guidance take over unexpectedly.
         """
-        ts = getattr(self, "_tracking_state", None)
-        waypoint_mode_active = bool(
-            ts is not None and getattr(ts, "waypoint_mode_active", False)
-        )
-        _, eff_min_spd = self._get_effective_speeds()
-
-        if waypoint_mode_active:
-            fallback_speed = float(eff_min_spd)
-            if speed_cap is not None:
-                fallback_speed = min(fallback_speed, float(speed_cap))
-            speed_value = self._current_speed if self._current_speed > 0 else fallback_speed
-            steering_angle = self._compute_lateral_control(
-                0.0, 0.0, speed_value,
-                speed_cap=fallback_speed, img_w=img_w,
-            )
-            if steering_angle is not None:
-                steering_angle = max(-self.max_steering, min(self.max_steering, float(steering_angle)))
-                return steering_angle, fallback_speed, "tracking_fallback"
-
         return 0.0, 0.0, "safety_stop"
 
     def _resolve_nominal_lane_width_px(self, img_w):
@@ -5690,14 +5760,26 @@ Args:
         _lane_measurement_reliable = bool(
             getattr(ts, "lane_measurement_reliable", False)
         ) if ts is not None else False
+        direct_error_source = ""
+        direct_error_side = None
+        if isinstance(direct_error_context, dict):
+            direct_error_source = str(direct_error_context.get("source", "") or "")
+            _side_value = direct_error_context.get("side")
+            if _side_value is not None:
+                direct_error_side = str(_side_value)
+        _allow_stopline_waypoint = self._should_allow_stopline_waypoint_guidance(
+            direct_error_context=direct_error_context
+        )
 
         # ── Waypoint-mode override (GPS-free tracking at precision zones) ─────
         # When threadTracking detects a STOPLINE / INTERSECTION node ahead it
-        # sets waypoint_mode_active=True.  Use graph-only control only as a
-        # fallback when the camera does not have a reliable lane measurement.
+        # sets waypoint_mode_active=True.  The visible line still has priority:
+        # only allow graph-only authority at a STOPLINE, with a single visible
+        # line, while not being inside a curve.
         if (
             ts is not None and
             getattr(ts, "waypoint_mode_active", False) and
+            _allow_stopline_waypoint and
             not _lane_measurement_reliable
         ):
             wp_error_m = float(getattr(ts, "error_m", 0.0))
@@ -5749,7 +5831,8 @@ Args:
         _imu_ready = getattr(ts, "imu_received", False) if ts is not None else False
         if ts is not None and getattr(ts, "initialized", False) \
                 and _track_heading_enabled and _imu_ready \
-                and direct_error_m is None:
+                and direct_error_m is None \
+                and _allow_stopline_waypoint:
             heading = float(ts.heading_rad)
             self._heading_error = heading
             direct_error_m = float(getattr(ts, "error_m", 0.0))
@@ -5757,13 +5840,6 @@ Args:
 
         if self._should_use_stanley_controller():
             self._apply_stanley_road_type_schedule()
-            direct_error_source = ""
-            direct_error_side = None
-            if isinstance(direct_error_context, dict):
-                direct_error_source = str(direct_error_context.get("source", "") or "")
-                _side_value = direct_error_context.get("side")
-                if _side_value is not None:
-                    direct_error_side = str(_side_value)
             if direct_error_m is not None:
                 # Physical error supplied directly: no pixel conversion or cache needed.
                 error_m = float(direct_error_m)
@@ -5860,7 +5936,12 @@ Args:
                 # initial psi0 seen by the MPC so it commands extra steer to maintain
                 # the curve — without this the MPC under-steers in corners.
                 effective_psi_ss = psi_ss
-                if ts is not None and getattr(ts, 'initialized', False) and _imu_ready:
+                if (
+                    ts is not None and
+                    getattr(ts, 'initialized', False) and
+                    _imu_ready and
+                    _allow_stopline_waypoint
+                ):
                     path_kappa = float(getattr(ts, 'path_kappa', 0.0))
                     # Clamp to a conservative curvature limit.  At ±1.0 rad/m
                     # the feedforward reaches ±14.5° which, added to the
@@ -6126,6 +6207,13 @@ Args:
         # Heading from single line (dampened — less reliable than two-line)
         # Remove static perspective bias from single-line heading.
         heading_gain = 0.2 if prefer_center else 0.3
+        if physical_projection and curve_state in ("ENTERING", "IN_CURVE"):
+            heading_gain = min(
+                0.65,
+                heading_gain * float(
+                    getattr(_config, "SINGLE_LINE_CURVE_HEADING_GAIN_MULT", 1.75) or 1.75
+                ),
+            )
         heading = (heading_delta * heading_gain) + curve_heading_bias
 
         self._last_single_line_projection_debug = {
@@ -6142,6 +6230,7 @@ Args:
             'single_line_curve_like': bool(curve_strength > 0.0),
             'single_line_curve_strength': float(curve_strength),
             'single_line_curve_heading_bias_deg': float(math.degrees(curve_heading_bias)),
+            'single_line_heading_gain': float(heading_gain),
             'single_line_outer_curve_line': bool(is_outer_curve_line),
             'single_line_outer_confirmed': bool(outer_confirmation.get('confirmed', False)),
             'single_line_outer_confirm_sources': ",".join(outer_confirmation.get('sources', [])),
@@ -9469,6 +9558,13 @@ Returns:
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
                         direct_error_context={"source": "single_line", "side": "left"},
                     )
+                    steering_angle = self._enforce_single_line_curve_priority(
+                        steering_angle,
+                        heading,
+                        direct_error_m=_sl_direct,
+                        side="left",
+                        debug_info=debug_info,
+                    )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
                     steering_angle, transition_blend = self._blend_single_line_transition_steering(
@@ -9562,6 +9658,13 @@ Returns:
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
                         direct_error_context={"source": "single_line", "side": "right"},
+                    )
+                    steering_angle = self._enforce_single_line_curve_priority(
+                        steering_angle,
+                        heading,
+                        direct_error_m=_sl_direct,
+                        side="right",
+                        debug_info=debug_info,
                     )
 
                     steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
@@ -9713,6 +9816,12 @@ Returns:
                 sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
                 img_w=img_w
             )
+            steering_angle = self._enforce_single_line_curve_priority(
+                steering_angle,
+                sl_heading,
+                side="left",
+                debug_info=debug_info,
+            )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
             steering_angle, transition_blend = self._blend_single_line_transition_steering(
@@ -9773,6 +9882,12 @@ Returns:
             steering_angle = self._compute_lateral_control(
                 sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
                 img_w=img_w
+            )
+            steering_angle = self._enforce_single_line_curve_priority(
+                steering_angle,
+                sl_heading,
+                side="right",
+                debug_info=debug_info,
             )
 
             steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))

@@ -290,6 +290,9 @@ TRACKING_STEER_GAIN_DR = 1.0
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
 TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
 TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
+# Graph node attr that represents a physical stopline. Graph guidance is only
+# allowed to take authority in this exact node type.
+TRACKING_STOPLINE_NODE_ATTR = 7
 
 # Local map-matching weights/search around the current dense waypoint index.
 TRACKING_MAP_MATCH_SEARCH_WP = 18
@@ -309,6 +312,14 @@ TRACKING_DEBUG_LOG = True
 # de líneas. Más estable en modo una-sola-línea: evita el spike a ±25° cuando
 # se pierde una línea.  False = comportamiento anterior (heading de visión).
 TRACKING_USE_PATH_HEADING = True
+
+# Single-line curve priority: if only one lane line is visible inside a curve,
+# the steering cannot unwind below this heading-based floor until the car exits
+# the curve. This keeps the visible line above graph/MPC hints.
+SINGLE_LINE_CURVE_HEADING_GAIN_MULT = 1.75
+SINGLE_LINE_CURVE_MIN_STEER_DEG = 2.0
+SINGLE_LINE_CURVE_HEADING_STEER_GAIN = 1.0
+SINGLE_LINE_CURVE_STEER_HOLD_RATIO = 0.45
 
 # ── Lane mask classification debug log ──────────────────────────────────────
 # Set True to write temp/lane_mask_debug.log continuously while the car runs.
