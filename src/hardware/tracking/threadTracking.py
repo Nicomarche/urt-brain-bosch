@@ -22,10 +22,12 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.allMessages import (
     CurrentSpeed,
+    CurrentSteer,
     ImuData,
     Location,
     NavigationCommand,
     NavigationStatus,
+    SpeedMotor,
     SignDetected,
     SteerMotor,
 )
@@ -90,6 +92,15 @@ try:
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S = getattr(
         cfg, "TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S", 0.75
     )
+    _SPEED_FEEDBACK_TIMEOUT_S = getattr(
+        cfg, "TRACKING_SPEED_FEEDBACK_TIMEOUT_S", 0.35
+    )
+    _COMMAND_SPEED_FALLBACK_TIMEOUT_S = getattr(
+        cfg, "TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S", 0.50
+    )
+    _STEER_FEEDBACK_TIMEOUT_S = getattr(
+        cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
+    )
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
     _SEMANTICS_PATH = "track_semantics.json"
@@ -118,6 +129,9 @@ except Exception:
     _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
     _SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = 0.25
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.75
+    _SPEED_FEEDBACK_TIMEOUT_S = 0.35
+    _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
+    _STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -442,8 +456,14 @@ class threadTracking(ThreadWithStop):
         self._speed_sub = messageHandlerSubscriber(
             queuesList, CurrentSpeed, "lastOnly", subscribe=True
         )
+        self._speed_cmd_sub = messageHandlerSubscriber(
+            queuesList, SpeedMotor, "lastOnly", subscribe=True
+        )
         self._imu_sub = messageHandlerSubscriber(
             queuesList, ImuData, "lastOnly", subscribe=True
+        )
+        self._steer_feedback_sub = messageHandlerSubscriber(
+            queuesList, CurrentSteer, "lastOnly", subscribe=True
         )
         self._steer_sub = messageHandlerSubscriber(
             queuesList, SteerMotor, "lastOnly", subscribe=True
@@ -499,6 +519,9 @@ class threadTracking(ThreadWithStop):
         self._wp_idx = 0
         self._last_t = time.monotonic()
         self._last_speed = 0.0
+        self._last_speed_source = "none"
+        self._last_cmd_speed_raw = 0.0
+        self._last_cmd_speed_t = None
         # Seed yaw from track start pose so heading error is ~0 before IMU arrives.
         # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
         self._last_yaw_rad = self._start_yaw_rad
@@ -518,6 +541,8 @@ class threadTracking(ThreadWithStop):
         self._last_semantic_relocalization_t = 0.0
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
+        self._last_steer_feedback_rad = 0.0
+        self._last_steer_feedback_t = None
 
         # ── Tracking debug log ──────────────────────────────────────────────
         self._debug_log_enabled = _DEBUG_LOG
@@ -677,32 +702,82 @@ class threadTracking(ThreadWithStop):
         self._last_semantic_relocalization_t = float(now)
         return True, semantic_match
 
+    @staticmethod
+    def _parse_speed_mps(raw_value) -> float | None:
+        try:
+            return float(raw_value) * 0.001
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_steer_rad(raw_value) -> float | None:
+        try:
+            return math.radians(float(raw_value) / 10.0)
+        except (TypeError, ValueError):
+            return None
+
+    def _resolve_speed_mps(self, now: float) -> float:
+        speed_raw = self._speed_sub.receive()
+        if speed_raw is not None:
+            self._last_raw_speed = speed_raw
+            self._last_speed_t = now
+            parsed_speed = self._parse_speed_mps(speed_raw)
+            if parsed_speed is not None:
+                self._last_speed = float(parsed_speed)
+                self._last_speed_source = "encoder"
+
+        speed_cmd_raw = self._speed_cmd_sub.receive()
+        if speed_cmd_raw is not None:
+            try:
+                self._last_cmd_speed_raw = float(speed_cmd_raw)
+                self._last_cmd_speed_t = now
+            except (TypeError, ValueError):
+                pass
+
+        if self._last_speed_t is not None:
+            if (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S):
+                return float(self._last_speed)
+
+        if self._last_cmd_speed_t is not None:
+            if (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S):
+                cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
+                if cmd_speed is not None:
+                    self._last_speed = float(cmd_speed)
+                    self._last_speed_source = "command"
+                    return float(self._last_speed)
+
+        self._last_speed = 0.0
+        self._last_speed_source = "none"
+        return 0.0
+
+    def _resolve_steer_rad(self, now: float) -> float:
+        steer_feedback_raw = self._steer_feedback_sub.receive()
+        if steer_feedback_raw is not None:
+            parsed_feedback = self._parse_steer_rad(steer_feedback_raw)
+            if parsed_feedback is not None:
+                self._last_steer_feedback_rad = float(parsed_feedback)
+                self._last_steer_feedback_t = now
+
+        steer_raw = self._steer_sub.receive()
+        if steer_raw is not None:
+            parsed_cmd = self._parse_steer_rad(steer_raw)
+            if parsed_cmd is not None:
+                self._last_steer_rad = float(parsed_cmd)
+
+        if self._last_steer_feedback_t is not None:
+            if (now - self._last_steer_feedback_t) <= float(_STEER_FEEDBACK_TIMEOUT_S):
+                return float(self._last_steer_feedback_rad)
+        return float(self._last_steer_rad)
+
     # ------------------------------------------------------------------
     def thread_work(self):
         now = time.monotonic()
         dt = now - self._last_t
         self._last_t = now
 
-        # ---- Read latest speed (float, raw units = 10 cm/s)
-        speed_raw = self._speed_sub.receive()
-        if speed_raw is not None:
-            self._last_raw_speed = speed_raw
-            self._last_speed_t = now
-            try:
-                self._last_speed = float(speed_raw) * 0.001  # → m/s
-            except (TypeError, ValueError):
-                pass
-
-        # ---- Read latest steering angle (degrees, same sign as servo command)
-        steer_raw = self._steer_sub.receive()
-        if steer_raw is not None:
-            try:
-                # CurrentSteer is in tenths of degrees (angle × 10) — divide before converting.
-                # Protocol: send_motor_commands sends int(angle_deg * 10), firmware echoes same units.
-                # CurrentSteer > 0 → right turn (CW in world) → yaw decreases in math convention.
-                self._last_steer_rad = math.radians(float(steer_raw) / 10.0)
-            except (TypeError, ValueError):
-                pass
+        # ---- Read latest speed/steering feedback and fall back to commands when needed.
+        self._resolve_speed_mps(now)
+        self._last_steer_rad = self._resolve_steer_rad(now)
 
         # ---- Read latest IMU data and apply absolute heading correction.
         # The BNO055 magnetometer is affected by electromagnetic interference
@@ -777,7 +852,7 @@ class threadTracking(ThreadWithStop):
         # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases.
         # dt is capped at _MAX_INTEGRATION_DT to limit error from frame drops.
         _eff_steer_rad = self._last_steer_rad * _STEER_GAIN_DR
-        if abs(self._last_speed) > 0.005 and self._yaw_offset_calibrated:
+        if abs(self._last_speed) > 0.005:
             yaw_dt = min(dt, _MAX_INTEGRATION_DT)
             yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(_eff_steer_rad)
             self._last_yaw_rad -= yaw_rate * yaw_dt

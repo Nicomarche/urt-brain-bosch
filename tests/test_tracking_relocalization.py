@@ -27,7 +27,45 @@ class _FakeDR:
         return self.x, self.y, self.yaw
 
 
+class _FakeSub:
+    def __init__(self, values):
+        self._values = list(values)
+
+    def receive(self):
+        if not self._values:
+            return None
+        return self._values.pop(0)
+
+
 class TrackingRelocalizationTests(unittest.TestCase):
+    def test_speed_command_fallback_is_used_when_encoder_feedback_is_missing(self):
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub([None])
+        tracker._speed_cmd_sub = _FakeSub(["108"])
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 0.0
+        tracker._last_cmd_speed_t = None
+
+        speed_mps = tracker._resolve_speed_mps(now=10.0)
+
+        self.assertAlmostEqual(speed_mps, 0.108, places=4)
+        self.assertEqual(tracker._last_speed_source, "command")
+
+    def test_current_steer_feedback_is_preferred_over_command(self):
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._steer_feedback_sub = _FakeSub(["250"])
+        tracker._steer_sub = _FakeSub(["100"])
+        tracker._last_steer_feedback_rad = 0.0
+        tracker._last_steer_feedback_t = None
+        tracker._last_steer_rad = 0.0
+
+        steer_rad = tracker._resolve_steer_rad(now=5.0)
+
+        self.assertAlmostEqual(steer_rad, math.radians(25.0), places=6)
+
     def test_lane_visual_relocalization_recenters_dead_reckoning(self):
         tracker = threadTracking.__new__(threadTracking)
         tracker._dr = _FakeDR(x=0.0, y=0.10, yaw=0.0)
