@@ -601,12 +601,31 @@ class PathManager:
                 available_destinations=self.graph.get_available_destinations(),
             )
 
+        # Advance the search centre by the raw position's forward projection along
+        # the current path direction.  When the DR position has drifted ahead of the
+        # last matched waypoint (common in single-line curve mode where camera
+        # corrections stop and speed is low), every segment within the window has a
+        # similar lateral error, so the continuity penalty keeps matched_idx frozen.
+        # Projecting the raw-to-matched displacement along the path direction gives
+        # the number of waypoints the car has actually advanced, and centering the
+        # search there lets the matcher find the correct segment instead of staying
+        # stuck at the old position.
+        _wp = route.waypoints[self._clamp_idx(route, self.matched_idx)]
+        _along_path_m = (
+            (float(x) - float(_wp[0])) * math.cos(float(_wp[2]))
+            + (float(y) - float(_wp[1])) * math.sin(float(_wp[2]))
+        )
+        _forward_pts = min(
+            max(0, int(round(_along_path_m / max(float(self.graph.step_m), 1e-6)))),
+            int(search_window) * 2,
+        )
+        _search_center = self._clamp_idx(route, self.matched_idx + _forward_pts)
         map_match = self._project_pose_to_route(
             route,
             x,
             y,
             yaw,
-            search_center=self.matched_idx,
+            search_center=_search_center,
             search_window=search_window,
             distance_weight=distance_weight,
             heading_weight=heading_weight,
