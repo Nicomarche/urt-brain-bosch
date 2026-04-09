@@ -3,21 +3,30 @@
   "map_metadata": {
     "image_width_px": 3036,
     "image_height_px": 2580,
-    "meters_per_pixel": 0.0016622537278637398,
-    "pixels_per_meter": 601.592876,
+    "meters_per_pixel": 0.0016837326307060833,
+    "pixels_per_meter": 593.918525,
     "coordinate_origin": "bottom_left",
     "y_axis_inverted": true,
-    "calibration_points_px": [],
-    "calibration_distance_m": null,
+    "calibration_points_px": [
+      {
+        "imgX": 595.799,
+        "imgY": 1152.075
+      },
+      {
+        "imgX": 598.503,
+        "imgY": 697.736
+      }
+    ],
+    "calibration_distance_m": 0.765,
     "tool_version": "track_editor_v3",
-    "width_m": 5.0466,
-    "height_m": 4.28861
+    "width_m": 5.11181,
+    "height_m": 4.34403
   },
   "destinations": [
     {
       "id": "dest_1",
-      "label": "Fin de Ruta",
-      "node_id": "96"
+      "label": "Destino 94",
+      "node_id": "94"
     }
   ],
   "intersections": [
@@ -27,13 +36,6 @@
       "anchor_node_id": "59",
       "control_id": "control_2",
       "stopline_node_id": "58"
-    },
-    {
-      "id": "intersection_2",
-      "label": "Intersection 95",
-      "anchor_node_id": "95",
-      "control_id": "control_3",
-      "stopline_node_id": "94"
     }
   ],
   "controls": [
@@ -41,12 +43,6 @@
       "id": "control_2",
       "label": "Control 58",
       "anchor_node_id": "58",
-      "type": "stop"
-    },
-    {
-      "id": "control_3",
-      "label": "Control 94",
-      "anchor_node_id": "94",
       "type": "stop"
     }
   ],

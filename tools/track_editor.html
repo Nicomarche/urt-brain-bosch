@@ -66,6 +66,28 @@
   .mode-btn:hover { background: #1a4a8a; color: #fff; }
   .mode-btn.active { background: #e94560; color: #fff; border-color: #e94560; }
   .mode-btn[data-mode="calibrate"].active { background: #f59e0b; border-color: #d97706; color: #000; }
+  .mode-btn[data-mode="measure"].active { background: #0e7490; color: #a5f3fc; border-color: #06b6d4; }
+
+  #measure-panel {
+    position: absolute;
+    bottom: 12px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(8, 145, 178, 0.18);
+    border: 1px solid #06b6d4;
+    border-radius: 8px;
+    padding: 9px 18px;
+    font-size: 13px;
+    color: #cffafe;
+    display: none;
+    pointer-events: none;
+    text-align: center;
+    backdrop-filter: blur(6px);
+    white-space: nowrap;
+    z-index: 20;
+  }
+  #measure-panel .m-dist { font-size: 18px; font-weight: 700; color: #67e8f9; display: block; margin-top: 2px; }
+  #measure-panel .m-nodes { font-size: 11px; color: #a5f3fc; opacity: 0.8; }
 
   .type-group { display: flex; align-items: center; gap: 6px; }
   .type-group label { font-size: 12px; color: #aaa; }
@@ -320,6 +342,7 @@
     <button class="mode-btn" data-mode="move">✋ Mover (V)</button>
     <button class="mode-btn" data-mode="delete">🗑 Borrar (X)</button>
     <button class="mode-btn" data-mode="calibrate">📏 Calibrar (C)</button>
+    <button class="mode-btn" data-mode="measure">📐 Medir (M)</button>
   </div>
 
   <div class="sep"></div>
@@ -370,12 +393,14 @@
       </marker>
     </defs>
     <g id="calibLayer"></g>
+    <g id="measureLayer"></g>
     <g id="edgeLayer"></g>
     <g id="nodeLayer"></g>
   </svg>
   <div id="hint">📂 Carga una imagen PNG para comenzar.</div>
   <div id="semantic-panel"></div>
   <div id="info-panel"></div>
+  <div id="measure-panel"></div>
   <div id="calibrate-panel">
     <h4>📏 Calibrar escala</h4>
     <p class="info-row">Distancia marcada: <b id="calibPxDist">-</b> px</p>
@@ -407,6 +432,8 @@ let nextNodeId = 1;
 let nextEdgeId  = 1;
 let mode = 'add_node';
 let edgeFrom     = null;
+let measureFrom  = null;   // first node selected in measure mode
+let measureTo    = null;   // second node (result shown persistently)
 let selectedNode = null;
 let selectedEdge = null;
 let selectedSemantic = null; // { type, id }
@@ -439,6 +466,8 @@ const graphSvg    = document.getElementById('graphSvg');
 const edgeLayer   = document.getElementById('edgeLayer');
 const nodeLayer   = document.getElementById('nodeLayer');
 const calibLayer  = document.getElementById('calibLayer');
+const measureLayer = document.getElementById('measureLayer');
+const measurePanel = document.getElementById('measure-panel');
 const container   = document.getElementById('canvas-container');
 const hint        = document.getElementById('hint');
 const infoPanel   = document.getElementById('info-panel');
@@ -712,6 +741,7 @@ function renderGraph() {
   renderEdges();
   renderNodes();
   renderCalibLayer();
+  renderMeasureLayer();
   renderSemanticPanel();
   renderInspector();
   updateStatus();
