@@ -6101,12 +6101,14 @@ Args:
                 speed_value, speed_cap=speed_cap
             )
             control_heading = float(heading)
+            _in_curve = str(getattr(self, "_curve_state", "STRAIGHT")) != "STRAIGHT"
             if (
                 ts is not None and
                 getattr(ts, 'initialized', False) and
                 _imu_ready and
                 _planner_priority_active and
-                direct_error_source in {"single_line", "blind_route"}
+                direct_error_source in {"single_line", "blind_route"} and
+                not _in_curve
             ):
                 path_heading = float(getattr(ts, "heading_rad", control_heading))
                 blend = 0.75 if direct_error_source == "single_line" else 1.0

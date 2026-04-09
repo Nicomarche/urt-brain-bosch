@@ -1035,9 +1035,9 @@
     },
     {
       "label": "",
-      "destinationId": "dest_1",
-      "intersectionId": "",
-      "controlId": "",
+      "destinationId": "",
+      "intersectionId": "intersection_2",
+      "controlId": "control_3",
       "parkingSpotId": "",
       "debugFlags": "",
       "id": 94,
@@ -1059,7 +1059,7 @@
     },
     {
       "label": "",
-      "destinationId": "",
+      "destinationId": "dest_1",
       "intersectionId": "",
       "controlId": "",
       "parkingSpotId": "",
@@ -2087,8 +2087,8 @@
     "destinations": [
       {
         "id": "dest_1",
-        "label": "Destino 94",
-        "node_id": "94"
+        "label": "Fin de Ruta",
+        "node_id": "96"
       }
     ],
     "intersections": [
@@ -2098,6 +2098,13 @@
         "anchor_node_id": "59",
         "control_id": "ctrl_stop_arriba_izq",
         "stopline_node_id": "58"
+      },
+      {
+        "id": "intersection_2",
+        "label": "Intersection 95",
+        "anchor_node_id": "95",
+        "control_id": "control_3",
+        "stopline_node_id": "94"
       }
     ],
     "controls": [
@@ -2105,6 +2112,12 @@
         "id": "control_2",
         "label": "Control 58",
         "anchor_node_id": "58",
+        "type": "stop"
+      },
+      {
+        "id": "control_3",
+        "label": "Control 94",
+        "anchor_node_id": "94",
         "type": "stop"
       }
     ],
