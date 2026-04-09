@@ -4929,8 +4929,18 @@ Args:
                 # mode transition (2-line heading-dominated → 1-line crosstrack-dominated),
                 # not sensor noise. Rejecting it keeps the car going the wrong way for 3
                 # frames, allowing dangerous lateral accumulation.
-                if (float(self._last_good_steering) > 2.0 and float(steering_angle) < -2.0) or \
-                   (float(self._last_good_steering) < -2.0 and float(steering_angle) > 2.0):
+                #
+                # Use inclusive thresholds here: curve-priority logic frequently clamps
+                # the previous command to exactly +/-2.0°, and strict comparisons would
+                # miss the sign change and latch the car into the stale steering command.
+                reversal_min_deg = 2.0
+                previous_steer = float(self._last_good_steering)
+                current_steer = float(steering_angle)
+                if (
+                    previous_steer >= reversal_min_deg and current_steer <= -reversal_min_deg
+                ) or (
+                    previous_steer <= -reversal_min_deg and current_steer >= reversal_min_deg
+                ):
                     return False, ""
                 return True, f"steer_jump({steer_jump:.0f}°>{self.noise_max_steer_jump_deg})"
 
