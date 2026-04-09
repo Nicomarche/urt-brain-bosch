@@ -29,6 +29,7 @@ from src.utils.messages.allMessages import (
     NavigationStatus,
     SpeedMotor,
     SignDetected,
+    StateChange,
     SteerMotor,
 )
 
@@ -204,6 +205,9 @@ class TrackingState:
         self.path_kappa = 0.0   # Signed path curvature at current wp (1/m)
         self.map_match_error_m = 0.0
         self.speed_mps = 0.0
+        self.speed_source = "none"
+        self.speed_feedback_age_s = None
+        self.speed_command_age_s = None
         self.wp_idx = 0
         self.target_idx = 0
         self.route_active = False
@@ -256,6 +260,7 @@ class TrackingState:
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
+               speed_source="none", speed_feedback_age_s=None, speed_command_age_s=None,
                steer_rad=0.0, target_idx=None, raw_x=None, raw_y=None, raw_yaw=None,
                matched_x=None, matched_y=None, matched_yaw=None, map_match_error_m=0.0,
                route_active=False, route_id=None, current_node_id=None,
@@ -287,6 +292,15 @@ class TrackingState:
             self.path_kappa = path_kappa
             self.map_match_error_m = float(map_match_error_m)
             self.speed_mps = speed_mps
+            self.speed_source = str(speed_source or "none")
+            self.speed_feedback_age_s = (
+                float(speed_feedback_age_s)
+                if speed_feedback_age_s is not None else None
+            )
+            self.speed_command_age_s = (
+                float(speed_command_age_s)
+                if speed_command_age_s is not None else None
+            )
             self.wp_idx = wp_idx
             self.target_idx = int(wp_idx if target_idx is None else target_idx)
             self.route_active = bool(route_active)
@@ -395,6 +409,9 @@ class TrackingState:
                 path_psi=self.path_psi, path_kappa=self.path_kappa,
                 map_match_error_m=self.map_match_error_m,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
+                speed_source=self.speed_source,
+                speed_feedback_age_s=self.speed_feedback_age_s,
+                speed_command_age_s=self.speed_command_age_s,
                 target_idx=self.target_idx,
                 route_active=self.route_active,
                 route_id=self.route_id,
@@ -471,6 +488,9 @@ class threadTracking(ThreadWithStop):
         self._nav_cmd_sub = messageHandlerSubscriber(
             queuesList, NavigationCommand, "lastOnly", subscribe=True
         )
+        self._state_sub = messageHandlerSubscriber(
+            queuesList, StateChange, "lastOnly", subscribe=True
+        )
         self._sign_sub = messageHandlerSubscriber(
             queuesList, SignDetected, "lastOnly", subscribe=True
         )
@@ -522,6 +542,7 @@ class threadTracking(ThreadWithStop):
         self._last_speed_source = "none"
         self._last_cmd_speed_raw = 0.0
         self._last_cmd_speed_t = None
+        self._current_state_message = "DEFAULT"
         # Seed yaw from track start pose so heading error is ~0 before IMU arrives.
         # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
         self._last_yaw_rad = self._start_yaw_rad
@@ -734,6 +755,17 @@ class threadTracking(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
+        # In MANUAL mode the Nucleo feedback stays at 0 (no odometry), so the
+        # encoder path would always return 0 and dead reckoning would never
+        # advance.  Prioritise the command speed over a zero-valued but
+        # otherwise-fresh encoder reading.
+        if self._current_state_message == "MANUAL" and self._last_cmd_speed_t is not None:
+            cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
+            if cmd_speed is not None:
+                self._last_speed = float(cmd_speed)
+                self._last_speed_source = "manual_command_hold"
+                return float(self._last_speed)
+
         if self._last_speed_t is not None:
             if (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S):
                 return float(self._last_speed)
@@ -749,6 +781,20 @@ class threadTracking(ThreadWithStop):
         self._last_speed = 0.0
         self._last_speed_source = "none"
         return 0.0
+
+    def _consume_state_change(self) -> None:
+        message = self._state_sub.receive()
+        if message is None:
+            return
+        state_name = str(message or "").strip().upper() or "DEFAULT"
+        if state_name == self._current_state_message:
+            return
+        self._current_state_message = state_name
+        # Avoid carrying a stale command-held speed between modes.
+        self._last_speed = 0.0
+        self._last_speed_source = "none"
+        self._last_cmd_speed_raw = 0.0
+        self._last_cmd_speed_t = None
 
     def _resolve_steer_rad(self, now: float) -> float:
         steer_feedback_raw = self._steer_feedback_sub.receive()
@@ -774,6 +820,7 @@ class threadTracking(ThreadWithStop):
         now = time.monotonic()
         dt = now - self._last_t
         self._last_t = now
+        self._consume_state_change()
 
         # ---- Read latest speed/steering feedback and fall back to commands when needed.
         self._resolve_speed_mps(now)
@@ -991,12 +1038,17 @@ class threadTracking(ThreadWithStop):
             relocalization_error_m = abs(float(lane_relocalization_m))
 
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)
+        speed_feedback_age_s = (now - self._last_speed_t) if self._last_speed_t is not None else None
+        speed_command_age_s = (now - self._last_cmd_speed_t) if self._last_cmd_speed_t is not None else None
         self.tracking_state.update(
             x=matched_x, y=matched_y, yaw=matched_yaw,
             steer_rad=self._last_steer_rad,
             error_m=error_m, heading_rad=heading_rad,
             path_psi=path_psi, path_kappa=path_kappa,
             speed_mps=self._last_speed,
+            speed_source=self._last_speed_source,
+            speed_feedback_age_s=speed_feedback_age_s,
+            speed_command_age_s=speed_command_age_s,
             wp_idx=matched_idx,
             waypoint_mode=path_update.waypoint_mode_active,
             node_attr=node_attr,
@@ -1101,8 +1153,10 @@ class threadTracking(ThreadWithStop):
             # Speed field
             raw_spd = self._last_raw_speed
             spd_age = f"{now - self._last_speed_t:.1f}s" if self._last_speed_t else "never"
+            cmd_age = f"{now - self._last_cmd_speed_t:.1f}s" if self._last_cmd_speed_t else "never"
             spd_str = (
-                f"speed_raw={raw_spd} spd={self._last_speed*100:.1f}cm/s (age={spd_age})"
+                f"speed_raw={raw_spd} spd={self._last_speed*100:.1f}cm/s "
+                f"src={self._last_speed_source} (enc_age={spd_age}, cmd_age={cmd_age})"
             )
 
             # IMU field
