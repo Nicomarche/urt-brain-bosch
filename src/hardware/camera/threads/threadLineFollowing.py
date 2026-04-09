@@ -8565,6 +8565,125 @@ Returns:
             log_file.write(json.dumps(self._sanitize_log_value(payload), indent=2, sort_keys=True))
             log_file.write("\n\n")
 
+    def _build_tracking_log_snapshot(self, include_route_reference=False):
+        """Return a rich tracking/navigation snapshot suitable for manual logs."""
+        ts = getattr(self, "_tracking_state", None)
+        if ts is None:
+            return None
+
+        snapshot = {}
+        if hasattr(ts, "snapshot"):
+            try:
+                raw_snapshot = ts.snapshot()
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            except Exception:
+                snapshot = {}
+
+        def _read(name, default=None):
+            if name in snapshot:
+                return snapshot.get(name, default)
+            return getattr(ts, name, default)
+
+        pose_x = float(_read("x", 0.0) or 0.0)
+        pose_y = float(_read("y", 0.0) or 0.0)
+        pose_yaw = float(_read("yaw", 0.0) or 0.0)
+        raw_x = float(_read("raw_x", pose_x) or pose_x)
+        raw_y = float(_read("raw_y", pose_y) or pose_y)
+        raw_yaw = float(_read("raw_yaw", pose_yaw) or pose_yaw)
+        matched_x = float(_read("matched_x", pose_x) or pose_x)
+        matched_y = float(_read("matched_y", pose_y) or pose_y)
+        matched_yaw = float(_read("matched_yaw", pose_yaw) or pose_yaw)
+        heading_rad = float(_read("heading_rad", 0.0) or 0.0)
+        path_psi = float(_read("path_psi", 0.0) or 0.0)
+        steer_rad = float(_read("steer_rad", 0.0) or 0.0)
+        route_queue = list(_read("route_queue", []) or [])
+        current_zone_ids = list(_read("current_zone_ids", []) or [])
+        current_zone_types = list(_read("current_zone_types", []) or [])
+
+        tracking_log = {
+            "initialized": bool(getattr(ts, "initialized", False)),
+            "imu_received": bool(getattr(ts, "imu_received", False)),
+            "pose": {
+                "x_m": round(pose_x, 4),
+                "y_m": round(pose_y, 4),
+                "yaw_deg": round(math.degrees(pose_yaw), 2),
+                "matched_x_m": round(matched_x, 4),
+                "matched_y_m": round(matched_y, 4),
+                "matched_yaw_deg": round(math.degrees(matched_yaw), 2),
+                "raw_x_m": round(raw_x, 4),
+                "raw_y_m": round(raw_y, 4),
+                "raw_yaw_deg": round(math.degrees(raw_yaw), 2),
+            },
+            "dead_reckoning": {
+                "speed_mps": round(float(_read("speed_mps", 0.0) or 0.0), 4),
+                "steer_deg": round(math.degrees(steer_rad), 3),
+                "dr_yaw_correction_deg": round(float(getattr(ts, "last_yaw_correction_deg", 0.0) or 0.0), 4),
+                "dr_yaw_cam_hint_deg": round(float(getattr(ts, "last_cam_yaw_hint_deg", 0.0) or 0.0), 2),
+                "dr_yaw_cam_conf": round(float(getattr(ts, "last_cam_yaw_hint_conf", 0.0) or 0.0), 3),
+            },
+            "path_tracking": {
+                "error_m": round(float(_read("error_m", 0.0) or 0.0), 5),
+                "raw_lateral_error_m": round(float(_read("raw_lateral_error_m", 0.0) or 0.0), 5),
+                "heading_rad": round(heading_rad, 5),
+                "heading_deg": round(math.degrees(heading_rad), 3),
+                "path_psi_deg": round(math.degrees(path_psi), 3),
+                "path_kappa": round(float(_read("path_kappa", 0.0) or 0.0), 5),
+                "map_match_error_m": round(float(_read("map_match_error_m", 0.0) or 0.0), 5),
+                "lane_measurement_reliable": bool(_read("lane_measurement_reliable", False)),
+                "camera_lateral_correction_m": round(float(_read("camera_lateral_correction_m", 0.0) or 0.0), 5),
+                "waypoint_mode": bool(_read("waypoint_mode_active", False)),
+                "wp_idx": _read("wp_idx", None),
+                "target_idx": _read("target_idx", _read("wp_idx", None)),
+                "node_attr": int(_read("node_attr", 0) or 0),
+            },
+            "navigation": {
+                "route_active": bool(_read("route_active", False)),
+                "route_id": _read("route_id", None),
+                "route_source": str(_read("route_source", "none") or "none"),
+                "route_progress": round(float(_read("route_progress", 0.0) or 0.0), 5),
+                "route_completed": bool(_read("route_completed", False)),
+                "route_replans": int(_read("route_replans", 0) or 0),
+                "destination_node_id": _read("destination_node_id", None),
+                "destination_label": _read("destination_label", None),
+                "destination_point": _read("destination_point", None),
+                "route_queue": route_queue,
+                "current_node_id": _read("current_node_id", None),
+                "current_node_attr": int(_read("current_node_attr", 0) or 0),
+                "upcoming_node_id": _read("upcoming_node_id", None),
+                "upcoming_node_attr": int(_read("upcoming_node_attr", 0) or 0),
+            },
+            "semantics": {
+                "maneuver_type": str(_read("maneuver_type", "none") or "none"),
+                "next_semantic_id": _read("next_semantic_id", None),
+                "next_semantic_type": _read("next_semantic_type", None),
+                "next_semantic_label": _read("next_semantic_label", None),
+                "next_semantic_distance_m": (
+                    round(float(_read("next_semantic_distance_m", 0.0)), 5)
+                    if _read("next_semantic_distance_m", None) is not None else None
+                ),
+                "expected_control_type": _read("expected_control_type", None),
+                "current_zone_ids": current_zone_ids,
+                "current_zone_types": current_zone_types,
+            },
+            "relocalization": {
+                "mode": str(_read("relocalization_mode", "map_match") or "map_match"),
+                "last_source": str(_read("last_relocalization_source", "map_match") or "map_match"),
+                "last_error_m": round(float(_read("last_relocalization_error_m", 0.0) or 0.0), 5),
+            },
+        }
+
+        if include_route_reference:
+            route_points = list(_read("route_points", []) or [])
+            tracking_log["route_reference"] = {
+                "route_points_preview": route_points,
+                "route_points_count": len(route_points),
+                "available_destinations": list(_read("available_destinations", []) or []),
+                "map_metadata": dict(_read("map_metadata", {}) or {}),
+            }
+
+        return tracking_log
+
     def _reset_manual_run_log(self, state_message):
         """Reset (overwrite) the manual-run log when entering MANUAL mode.
 
@@ -8579,11 +8698,15 @@ Returns:
             "log": "line_following_manual_last_run",
             "reset_timestamp": round(time.time(), 3),
             "state_message": str(state_message),
+            "detection_mode": str(getattr(self, "detection_mode", "")),
+            "tracking_reference": self._build_tracking_log_snapshot(include_route_reference=True),
             "note": (
                 "dashboard_command = speed/steer sent by PC web dashboard (raw units). "
                 "nucleo_feedback = actual values reported by Nucleo encoder/servo. "
                 "speed units: x10 cm/s (divide by 10 for cm/s). "
-                "steer units: x10 deg (divide by 10 for degrees)."
+                "steer units: x10 deg (divide by 10 for degrees). "
+                "tracking_reference.route_points_preview is a decimated preview of the active route; "
+                "per-frame current_node/upcoming_node + pose show exact progression over time."
             ),
         }
         with open(self.manual_run_log_path, "w", encoding="utf-8") as f:
@@ -8598,6 +8721,7 @@ Returns:
         - IMU yaw / roll / pitch and computed yaw rate
         - Nucleo encoder speed and servo steer feedback
         - Last speed / steer command received from the PC dashboard
+        - Dead reckoning, map-matched pose, nodes, route, semantics, relocalization
         """
         if not self._manual_run_log_enabled:
             return
@@ -8606,9 +8730,13 @@ Returns:
         steer_deg = round(float(self._measured_steer) * 0.1, 2)       # x10 deg → deg
         cmd_speed_cms = round(abs(float(self._last_cmd_speed)) * 0.1, 2)
         cmd_steer_deg = round(float(self._last_cmd_steer) * 0.1, 2)
+        latest_observation = self._lane_observation_history[-1] if self._lane_observation_history else None
         payload = {
             "frame_index": self._manual_run_log_frame_idx,
             "wall_time": round(time.time(), 3),
+            "state_change_message": self._last_state_change_message,
+            "line_following_active": bool(self.is_line_following_active),
+            "detection_mode": str(self.detection_mode),
             "imu": {
                 "yaw_deg": round(float(self._last_yaw), 3),
                 "roll_deg": round(float(self._last_imu_roll), 3),
@@ -8627,6 +8755,49 @@ Returns:
                 "steer_x10": round(float(self._last_cmd_steer), 1),
                 "steer_deg": cmd_steer_deg,
             },
+            "manual_control_context": {
+                "mission_state": getattr(self, "_mission_state_name", None),
+                "control_policy_mode": getattr(self, "_control_policy_mode", None),
+                "control_authority": getattr(self, "_control_authority", None),
+                "active_maneuver": getattr(self, "_active_maneuver_name", None),
+                "planner_priority": bool(getattr(self, "_planner_priority_active", False)),
+                "safety_stop_reason": getattr(self, "_safety_stop_reason", None) or None,
+                "maneuver_notes": getattr(self, "_last_maneuver_notes", None) or None,
+            },
+            "nucleo_request": getattr(self, "_last_requested_motor_command", None),
+            "actuator_status": getattr(self, "_last_actuator_status", None),
+            "local_perception_status": getattr(self, "_last_local_perception_status", None),
+            "local_lane_payload": self._build_local_lane_payload_log(),
+            "lane_observation": latest_observation,
+            "frame_trace": getattr(self, "_last_frame_trace", None),
+            "controller_state": {
+                "heading_error_deg": round(math.degrees(float(getattr(self, "_heading_error", 0.0) or 0.0)), 3),
+                "measured_yaw_rate": round(float(self._yaw_rate), 5),
+                "measured_speed": round(float(self._measured_speed), 3),
+                "measured_speed_mps": round(
+                    abs(float(self._measured_speed)) * float(self.stanley_measured_speed_to_mps), 4
+                ),
+                "measured_steer": round(float(self._measured_steer), 3),
+                "measured_steer_delta": round(float(getattr(self, "_measured_steer_delta", 0.0) or 0.0), 3),
+                "stanley_speed_mps": round(float(getattr(self, "_stanley_last_speed_mps", 0.0) or 0.0), 4),
+                "stanley_speed_source": getattr(self, "_stanley_last_speed_source", None),
+                "stanley_error_m": round(float(getattr(self, "_stanley_last_error_m", 0.0) or 0.0), 4),
+                "stanley_px_per_cm": round(float(getattr(self, "_stanley_last_px_per_cm", 0.0) or 0.0), 4),
+                "theta_dmae_deg": round(float(getattr(self, "_theta_dmae_deg", 0.0) or 0.0), 4),
+                "offset_dma_m": round(float(getattr(self, "_offset_dma_m", 0.0) or 0.0), 5),
+                "heading_hint_rad": round(float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0), 5),
+                "heading_hint_confidence": round(float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0), 4),
+                "heading_hint_source": getattr(self, "_local_ai_heading_hint_source", None),
+                "road_type_class": getattr(self, "_local_ai_road_type_class", None),
+                "road_type_confidence": round(float(getattr(self, "_local_ai_road_type_confidence", 0.0) or 0.0), 4),
+                "lead_distance_class": getattr(self, "_local_ai_lead_distance_class", None),
+                "lead_distance_confidence": round(float(getattr(self, "_local_ai_lead_distance_confidence", 0.0) or 0.0), 4),
+                "curve_state": getattr(self, "_curve_state", None),
+                "curve_direction": getattr(self, "_curve_direction", None),
+                "frames_without_line": int(self.frames_without_line),
+                "last_seen_side": self.last_seen_side,
+            },
+            "tracking": self._build_tracking_log_snapshot(include_route_reference=False),
         }
         log_dir = os.path.dirname(self.manual_run_log_path)
         os.makedirs(log_dir, exist_ok=True)
