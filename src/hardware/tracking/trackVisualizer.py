@@ -278,12 +278,32 @@ class TrackVisualizer(threading.Thread):
             steer_rad = state.get("steer_rad", 0.0)
             wp_idx    = state.get("wp_idx",    0)
 
-            # Current target waypoint
-            wps = self._graph.waypoints
-            if len(wps) > 0 and wp_idx < len(wps):
-                wx, wy   = wps[wp_idx % len(wps), :2]
-                wpx, wpy = self._world_to_px(float(wx), float(wy))
-                cv2.circle(canvas, (wpx, wpy), 7, _WP_COLOR, 2)
+            # Active route preview and destination marker
+            route_points = state.get("route_points") or []
+            if len(route_points) >= 2:
+                route_poly = np.array(
+                    [
+                        self._world_to_px(float(pt.get("x", 0.0)), float(pt.get("y", 0.0)))
+                        for pt in route_points
+                    ],
+                    dtype=np.int32,
+                )
+                cv2.polylines(canvas, [route_poly.reshape(-1, 1, 2)], False, (120, 255, 255), 2)
+
+            destination_point = state.get("destination_point")
+            if isinstance(destination_point, dict):
+                dpx, dpy = self._world_to_px(
+                    float(destination_point.get("x", 0.0)),
+                    float(destination_point.get("y", 0.0)),
+                )
+                cv2.circle(canvas, (dpx, dpy), 7, (0, 180, 255), 2)
+            else:
+                # Backwards-compatible target marker on the reference path.
+                wps = self._graph.waypoints
+                if len(wps) > 0 and wp_idx < len(wps):
+                    wx, wy   = wps[wp_idx % len(wps), :2]
+                    wpx, wpy = self._world_to_px(float(wx), float(wy))
+                    cv2.circle(canvas, (wpx, wpy), 7, _WP_COLOR, 2)
 
             # ── Car geometry ──────────────────────────────────────────────────
             # (x, y) is the rear-axle centre in world metres (DR reference pt).
@@ -366,7 +386,8 @@ class TrackVisualizer(threading.Thread):
                               isClosed=True, color=(180, 180, 180), thickness=1)
 
             # ── Telemetry text ────────────────────────────────────────────────
-            mode = "WP MODE" if state.get("waypoint_mode_active") else "VISUAL"
+            route_mode = state.get("route_active", False)
+            mode = "ROUTE" if route_mode else ("WP MODE" if state.get("waypoint_mode_active") else "VISUAL")
             spd  = state.get("speed_mps", 0.0)
             raw_x = state.get("raw_x", x)
             raw_y = state.get("raw_y", y)
@@ -374,6 +395,12 @@ class TrackVisualizer(threading.Thread):
             map_match_error_m = state.get("map_match_error_m", 0.0)
             lat_corr_m = state.get("camera_lateral_correction_m", 0.0)
             lane_rel = "cam" if state.get("lane_measurement_reliable") else "graph"
+            maneuver_type = state.get("maneuver_type", "none")
+            route_progress = float(state.get("route_progress", 0.0) or 0.0)
+            current_node_id = state.get("current_node_id")
+            upcoming_node_id = state.get("upcoming_node_id")
+            next_semantic = state.get("next_semantic_label") or state.get("next_semantic_type") or "none"
+            relocalization_mode = state.get("relocalization_mode", "map_match")
             cv2.putText(canvas,
                         f"match x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
                         f"  steer={math.degrees(steer_rad):+.0f}°",
@@ -387,7 +414,16 @@ class TrackVisualizer(threading.Thread):
                         f"mm={map_match_error_m:.3f}m  lat={lat_corr_m:+.3f}m  [{mode}|{lane_rel}]",
                         (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
-                        f"v={spd * 100:.1f}cm/s  wp={wp_idx}  tgt={state.get('target_idx', wp_idx)}",
+                        f"v={spd * 100:.1f}cm/s  wp={wp_idx}  tgt={state.get('target_idx', wp_idx)}"
+                        f"  man={maneuver_type}",
                         (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+            cv2.putText(canvas,
+                        f"route={state.get('route_id', 'none')}  "
+                        f"curr={current_node_id}  next={upcoming_node_id}  "
+                        f"prog={route_progress * 100:.0f}%",
+                        (10, 102), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
+            cv2.putText(canvas,
+                        f"semantic={next_semantic}  reloc={relocalization_mode}",
+                        (10, 122), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
 
         cv2.imshow(self._window_name, canvas)

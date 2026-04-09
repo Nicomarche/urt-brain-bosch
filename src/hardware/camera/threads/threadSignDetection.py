@@ -626,16 +626,8 @@ class threadSignDetection(ThreadWithStop):
                     "timestamp": now,
                 })
 
-                # Execute actions ONLY in AUTO mode AND when sign is close enough
-                if self.is_active and self.enable_actions and is_close:
-                    self.sign_actions.execute(canonical_sign)
-                elif self.enable_actions and is_close and canonical_sign in SignActions.ACTIONABLE_SIGNS:
-                    # Actionable sign detected but conditions not met — log why
-                    if not self.is_active:
-                        print(
-                            f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mSKIPPED\033[0m - "
-                            f"{canonical_sign} — is_active=False (need AUTO mode)"
-                        )
+                # Remote sign detection now publishes observations only.
+                # ManeuverManager inside threadLineFollowing owns the action policy.
 
             # Debug image (only decode frame if debug is on — expensive!)
             if self.show_debug and detections:

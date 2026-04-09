@@ -264,6 +264,7 @@ MPC_OUTPUT_DEADBAND_DEG = 0.5
 
 # Path to the GraphML track file.  Relative to the workspace root.
 TRACKING_GRAPHML = "Track GraphML File.graphml"
+TRACKING_SEMANTICS = "track_semantics.json"
 
 # Spline interpolation step (metres).  Smaller → denser waypoints, more CPU.
 TRACKING_WAYPOINT_STEP_M = 0.05
@@ -298,6 +299,7 @@ TRACKING_STOPLINE_NODE_ATTR = 7
 TRACKING_MAP_MATCH_SEARCH_WP = 18
 TRACKING_MAP_MATCH_DISTANCE_W = 1.0
 TRACKING_MAP_MATCH_HEADING_W = 0.35
+TRACKING_SEMANTIC_MATCH_WINDOW_S = 1.0
 
 # Set True to open the OpenCV "Track Navigation" debug window.
 TRACKING_SHOW_WINDOW = True

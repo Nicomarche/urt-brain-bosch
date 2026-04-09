@@ -431,19 +431,8 @@ class threadLocalPerception(ThreadWithStop):
         _parking_mode_active = self._current_mode == "parking"
         _skip_parking_action = _parking_mode_active and sign_name == "parking"
 
-        if (
-            self.enable_actions
-            and self.is_sign_actions_active
-            and is_close
-            and is_actionable
-            and not _skip_parking_action
-            and not self._walk_area_active
-        ):
-            self.sign_actions.execute(
-                sign_name,
-                curve_state=self._lf_curve_state,
-                steering_deg=self._lf_steering_deg,
-            )
+        # Sign actions are now handled centrally by ManeuverManager inside
+        # threadLineFollowing. Local perception publishes observations only.
 
     def _publish_status(self, result, now):
         if now - self.last_status_time < 1.0:
@@ -552,12 +541,6 @@ class threadLocalPerception(ThreadWithStop):
         self.state_change_handler()
         self._check_config()
         self._poll_line_following_context()
-        if self.enable_actions and self.is_sign_actions_active:
-            self.sign_actions.tick(
-                curve_state=self._lf_curve_state,
-                steering_deg=self._lf_steering_deg,
-            )
-
         if self.frame_buffer is None:
             time.sleep(0.02)
             return

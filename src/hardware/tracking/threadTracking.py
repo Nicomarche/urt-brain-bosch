@@ -20,14 +20,24 @@ import time
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.allMessages import CurrentSpeed, ImuData, Location, SteerMotor
+from src.utils.messages.allMessages import (
+    CurrentSpeed,
+    ImuData,
+    Location,
+    NavigationCommand,
+    NavigationStatus,
+    SignDetected,
+    SteerMotor,
+)
 
 from src.hardware.tracking.deadReckoning import DeadReckoning
 from src.hardware.tracking.trackGraph import TrackGraph
+from src.hardware.tracking.pathManager import PathManager
 
 try:
     import config as cfg
     _GRAPHML_PATH = getattr(cfg, "TRACKING_GRAPHML", "Track GraphML File.graphml")
+    _SEMANTICS_PATH = getattr(cfg, "TRACKING_SEMANTICS", "track_semantics.json")
     _STEP_M = getattr(cfg, "TRACKING_WAYPOINT_STEP_M", 0.05)
     _ADVANCE_DIST = getattr(cfg, "TRACKING_ADVANCE_DIST_M", 0.15)
     _INTERSECTION_LOOKAHEAD = getattr(cfg, "TRACKING_INTERSECTION_LOOKAHEAD_M", 0.40)
@@ -55,8 +65,10 @@ try:
     _CAMERA_LATERAL_CORRECTION_MAX_M = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M", 0.08
     )
+    _SEMANTIC_MATCH_WINDOW_S = getattr(cfg, "TRACKING_SEMANTIC_MATCH_WINDOW_S", 1.0)
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
+    _SEMANTICS_PATH = "track_semantics.json"
     _STEP_M = 0.05
     _ADVANCE_DIST = 0.15
     _INTERSECTION_LOOKAHEAD = 0.40
@@ -73,6 +85,7 @@ except Exception:
     _STEER_GAIN_DR     = 1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+    _SEMANTIC_MATCH_WINDOW_S = 1.0
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -147,10 +160,38 @@ class TrackingState:
         self.speed_mps = 0.0
         self.wp_idx = 0
         self.target_idx = 0
+        self.route_active = False
+        self.route_id = None
+        self.current_node_id = None
+        self.current_node_attr = 0
+        self.upcoming_node_id = None
+        self.upcoming_node_attr = 0
+        self.maneuver_type = "none"
+        self.destination_node_id = None
+        self.destination_label = None
+        self.route_queue = []
+        self.route_progress = 0.0
+        self.route_points = []
+        self.route_completed = False
+        self.route_replans = 0
+        self.route_source = "none"
+        self.destination_point = None
+        self.next_semantic_id = None
+        self.next_semantic_type = None
+        self.next_semantic_label = None
+        self.next_semantic_distance_m = None
+        self.expected_control_type = None
+        self.current_zone_ids = []
+        self.current_zone_types = []
+        self.map_metadata = {}
+        self.available_destinations = []
         self.waypoint_mode_active = False
         self.node_attr = 0
         self.camera_lateral_correction_m = 0.0
         self.lane_measurement_reliable = False
+        self.relocalization_mode = "map_match"
+        self.last_relocalization_source = "map_match"
+        self.last_relocalization_error_m = 0.0
         self.initialized = False
         self.imu_received = False   # True once a real IMU message has been parsed
         # Reference to the dead reckoning instance — set by threadTracking so
@@ -169,7 +210,19 @@ class TrackingState:
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
                steer_rad=0.0, target_idx=None, raw_x=None, raw_y=None, raw_yaw=None,
-               matched_x=None, matched_y=None, matched_yaw=None, map_match_error_m=0.0):
+               matched_x=None, matched_y=None, matched_yaw=None, map_match_error_m=0.0,
+               route_active=False, route_id=None, current_node_id=None,
+               current_node_attr=0, upcoming_node_id=None, upcoming_node_attr=0,
+               maneuver_type="none", destination_node_id=None, route_progress=0.0,
+               route_points=None, route_completed=False, route_replans=0,
+               route_source="none", destination_point=None, destination_label=None,
+               route_queue=None, next_semantic_id=None, next_semantic_type=None,
+               next_semantic_label=None, next_semantic_distance_m=None,
+               expected_control_type=None, current_zone_ids=None,
+               current_zone_types=None, map_metadata=None,
+               available_destinations=None, relocalization_mode="map_match",
+               last_relocalization_source="map_match",
+               last_relocalization_error_m=0.0):
         with self._lock:
             self.x = x
             self.y = y
@@ -189,8 +242,39 @@ class TrackingState:
             self.speed_mps = speed_mps
             self.wp_idx = wp_idx
             self.target_idx = int(wp_idx if target_idx is None else target_idx)
+            self.route_active = bool(route_active)
+            self.route_id = route_id
+            self.current_node_id = current_node_id
+            self.current_node_attr = int(current_node_attr or 0)
+            self.upcoming_node_id = upcoming_node_id
+            self.upcoming_node_attr = int(upcoming_node_attr or 0)
+            self.maneuver_type = str(maneuver_type or "none")
+            self.destination_node_id = destination_node_id
+            self.destination_label = destination_label
+            self.route_queue = list(route_queue or [])
+            self.route_progress = float(route_progress or 0.0)
+            self.route_points = list(route_points or [])
+            self.route_completed = bool(route_completed)
+            self.route_replans = int(route_replans or 0)
+            self.route_source = str(route_source or "none")
+            self.destination_point = destination_point
+            self.next_semantic_id = next_semantic_id
+            self.next_semantic_type = next_semantic_type
+            self.next_semantic_label = next_semantic_label
+            self.next_semantic_distance_m = (
+                float(next_semantic_distance_m)
+                if next_semantic_distance_m is not None else None
+            )
+            self.expected_control_type = expected_control_type
+            self.current_zone_ids = list(current_zone_ids or [])
+            self.current_zone_types = list(current_zone_types or [])
+            self.map_metadata = dict(map_metadata or {})
+            self.available_destinations = list(available_destinations or [])
             self.waypoint_mode_active = waypoint_mode
             self.node_attr = node_attr
+            self.relocalization_mode = str(relocalization_mode or "map_match")
+            self.last_relocalization_source = str(last_relocalization_source or "map_match")
+            self.last_relocalization_error_m = float(last_relocalization_error_m or 0.0)
             self.initialized = True
             if imu_received:
                 self.imu_received = True
@@ -262,10 +346,38 @@ class TrackingState:
                 map_match_error_m=self.map_match_error_m,
                 speed_mps=self.speed_mps, wp_idx=self.wp_idx,
                 target_idx=self.target_idx,
+                route_active=self.route_active,
+                route_id=self.route_id,
+                current_node_id=self.current_node_id,
+                current_node_attr=self.current_node_attr,
+                upcoming_node_id=self.upcoming_node_id,
+                upcoming_node_attr=self.upcoming_node_attr,
+                maneuver_type=self.maneuver_type,
+                destination_node_id=self.destination_node_id,
+                destination_label=self.destination_label,
+                route_queue=list(self.route_queue),
+                route_progress=self.route_progress,
+                route_points=list(self.route_points),
+                route_completed=self.route_completed,
+                route_replans=self.route_replans,
+                route_source=self.route_source,
+                destination_point=self.destination_point,
+                next_semantic_id=self.next_semantic_id,
+                next_semantic_type=self.next_semantic_type,
+                next_semantic_label=self.next_semantic_label,
+                next_semantic_distance_m=self.next_semantic_distance_m,
+                expected_control_type=self.expected_control_type,
+                current_zone_ids=list(self.current_zone_ids),
+                current_zone_types=list(self.current_zone_types),
+                map_metadata=dict(self.map_metadata),
+                available_destinations=list(self.available_destinations),
                 waypoint_mode_active=self.waypoint_mode_active,
                 node_attr=self.node_attr,
                 camera_lateral_correction_m=self.camera_lateral_correction_m,
                 lane_measurement_reliable=self.lane_measurement_reliable,
+                relocalization_mode=self.relocalization_mode,
+                last_relocalization_source=self.last_relocalization_source,
+                last_relocalization_error_m=self.last_relocalization_error_m,
             )
 
 
@@ -299,9 +411,16 @@ class threadTracking(ThreadWithStop):
         self._steer_sub = messageHandlerSubscriber(
             queuesList, SteerMotor, "lastOnly", subscribe=True
         )
+        self._nav_cmd_sub = messageHandlerSubscriber(
+            queuesList, NavigationCommand, "lastOnly", subscribe=True
+        )
+        self._sign_sub = messageHandlerSubscriber(
+            queuesList, SignDetected, "lastOnly", subscribe=True
+        )
         self._last_steer_rad = 0.0   # latest steering angle in radians (math convention)
         # Location sender → dashboard map display
         self._loc_sender = messageHandlerSender(queuesList, Location)
+        self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
 
         # Load the track graph
         graphml_path = _GRAPHML_PATH
@@ -313,9 +432,19 @@ class threadTracking(ThreadWithStop):
 
         self._graph = None
         self._dr = None
+        self._path_manager = None
         self._start_yaw_rad = 0.0   # path tangent at start — used as yaw fallback
         try:
-            self._graph = TrackGraph(graphml_path, step_m=_STEP_M)
+            semantics_path = _SEMANTICS_PATH
+            if not os.path.isabs(semantics_path):
+                _here = os.path.dirname(os.path.abspath(__file__))
+                _root = os.path.join(_here, "..", "..", "..")
+                semantics_path = os.path.normpath(os.path.join(_root, semantics_path))
+            if not os.path.exists(semantics_path):
+                semantics_path = None
+
+            self._graph = TrackGraph(graphml_path, step_m=_STEP_M, semantics_path=semantics_path)
+            self._path_manager = PathManager(self._graph)
             x0, y0, yaw0 = self._graph.get_start_pose()
             self._dr = DeadReckoning(x0, y0, yaw0)
             self._start_yaw_rad = yaw0  # remember so IMU can be seeded from this
@@ -347,6 +476,7 @@ class threadTracking(ThreadWithStop):
         self._last_raw_imu = None     # raw imu dict (for log)
         self._last_imu_t = None       # monotonic time of last IMU message
         self._last_speed_t = None     # monotonic time of last speed message
+        self._last_sign_observation = None
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
 
@@ -370,6 +500,50 @@ class threadTracking(ThreadWithStop):
                     )
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_sign_name(sign_name) -> str:
+        return str(sign_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    def _consume_sign_observation(self, now: float) -> None:
+        payload = self._sign_sub.receive()
+        if not isinstance(payload, dict):
+            return
+        sign_name = self._normalize_sign_name(payload.get("sign"))
+        if not sign_name:
+            return
+        self._last_sign_observation = {
+            "sign": sign_name,
+            "timestamp": float(payload.get("timestamp", 0.0) or 0.0),
+            "observed_at_monotonic": float(now),
+            "distance_m": (
+                float(payload.get("distance_cm")) / 100.0
+                if payload.get("distance_cm") is not None else None
+            ),
+            "confidence": float(payload.get("confidence", 0.0) or 0.0),
+        }
+
+    def _sign_matches_expected_semantic(self, path_update) -> tuple[str, float] | None:
+        observation = self._last_sign_observation
+        if not isinstance(observation, dict):
+            return None
+        obs_age = time.monotonic() - float(observation.get("observed_at_monotonic", 0.0) or 0.0)
+        if obs_age > float(_SEMANTIC_MATCH_WINDOW_S):
+            return None
+
+        sign_name = str(observation.get("sign") or "")
+        expected_control = str(path_update.expected_control_type or "")
+        next_semantic_type = str(path_update.next_semantic_type or "")
+        if expected_control == "traffic_light" and sign_name in {"red_light", "yellow_light", "green_light"}:
+            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+        if expected_control == "stop" and sign_name in {"stop", "no_entry"}:
+            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+        if next_semantic_type == "crosswalk" and sign_name == "crosswalk":
+            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+        if next_semantic_type == "parking_spot" and sign_name == "parking":
+            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+        return None
 
     # ------------------------------------------------------------------
     def thread_work(self):
@@ -498,7 +672,7 @@ class threadTracking(ThreadWithStop):
                 self._dr.correct_yaw(_yaw_correction_rad)
         self.tracking_state.last_yaw_correction_deg = math.degrees(_yaw_correction_rad)
 
-        if self._dr is None or self._graph is None:
+        if self._dr is None or self._graph is None or self._path_manager is None:
             return
 
         # ---- Dead reckoning update (RK4)
@@ -509,81 +683,58 @@ class threadTracking(ThreadWithStop):
         self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
                         steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
         raw_x, raw_y, raw_yaw = self._dr.get_state()
+        self._consume_sign_observation(now)
 
-        # ---- Advance waypoint index when car is close enough
-        n_wp = len(self._graph.waypoints)
-        if n_wp == 0:
-            return
+        nav_cmd = self._nav_cmd_sub.receive()
+        if isinstance(nav_cmd, dict):
+            self._path_manager.handle_command(
+                nav_cmd,
+                current_pose={"x": raw_x, "y": raw_y},
+            )
 
-        wp = self._graph.waypoints[self._wp_idx % n_wp]
-        # Use along-track projection instead of Euclidean distance.
-        # Euclidean distance fires when DR is within _ADVANCE_DIST of ANY of
-        # the next several waypoints simultaneously (when there is even a small
-        # lateral offset), causing _wp_idx to race 3× ahead and target_idx to
-        # land deep in the tightest part of the upcoming curve — the root cause
-        # of premature turning.  Along-track projection is immune to lateral
-        # offset: only forward progress along the path tangent triggers advance.
-        _psi_wp = float(wp[2])
-        _along_track = ((raw_x - float(wp[0])) * math.cos(_psi_wp)
-                        + (raw_y - float(wp[1])) * math.sin(_psi_wp))
-        if _along_track > 0:
-            self._wp_idx = (self._wp_idx + 1) % n_wp
-
-        map_match = self._graph.project_pose_to_path(
+        path_update = self._path_manager.update(
             raw_x,
             raw_y,
             raw_yaw,
-            search_center=self._wp_idx,
+            speed_mps=self._last_speed,
+            min_lookahead_m=_ADVANCE_DIST,
+            lookahead_time_s=_LOOKAHEAD_TIME_S,
+            max_lookahead_m=_MAX_LOOKAHEAD_M,
+            precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
+            lookahead_pts=_LOOKAHEAD_PTS,
             search_window=_MAP_MATCH_SEARCH_WP,
             distance_weight=_MAP_MATCH_DISTANCE_W,
             heading_weight=_MAP_MATCH_HEADING_W,
         )
-        matched_idx = int(map_match.get("matched_idx", self._wp_idx))
-        matched_x = float(map_match.get("matched_x", raw_x))
-        matched_y = float(map_match.get("matched_y", raw_y))
-        matched_yaw = float(map_match.get("path_psi", raw_yaw))
-        map_match_error_m = float(map_match.get("map_match_error_m", 0.0))
-        self._wp_idx = matched_idx
+        self._wp_idx = int(path_update.matched_idx)
+        matched_idx = int(path_update.matched_idx)
+        target_idx = int(path_update.target_idx)
+        matched_x = float(path_update.matched_x)
+        matched_y = float(path_update.matched_y)
+        matched_yaw = float(path_update.matched_yaw)
+        error_m = float(path_update.error_m)
+        heading_rad = float(path_update.heading_rad)
+        path_psi = float(path_update.path_psi)
+        path_kappa = float(path_update.path_kappa)
+        map_match_error_m = float(path_update.map_match_error_m)
+        node_attr = int(path_update.upcoming_node_attr or path_update.current_node_attr or 0)
 
-        # ---- Speed-adaptive lookahead: scale with velocity to compensate for
-        #      servo + control-loop lag (~270ms). Clamped to [_ADVANCE_DIST, _MAX_LOOKAHEAD_M].
-        lookahead_m = min(
-            max(_ADVANCE_DIST, abs(self._last_speed) * _LOOKAHEAD_TIME_S),
-            _MAX_LOOKAHEAD_M,
-        )
-
-        # ---- Find the lookahead waypoint (used for control)
-        target_idx = self._graph.find_waypoint_ahead(
-            matched_x, matched_y, self._wp_idx, lookahead_m=lookahead_m
-        )
-
-        # ---- Detect precision zone (intersection / stop-line ahead)
-        in_precision_zone = self._graph.is_precision_zone(
-            target_idx, lookahead_pts=_LOOKAHEAD_PTS
-        )
-        if in_precision_zone:
-            # In precision zones we want the graph node itself to dominate.
-            # Using the normal speed-adaptive lookahead here jumps the target
-            # several waypoints into the next curve before the car reaches the
-            # STOPLINE / INTERSECTION node, which makes the controller start
-            # bending early.  Keep a short local target until the node is passed.
-            precision_lookahead_m = max(
-                float(self._graph.step_m),
-                min(float(lookahead_m), float(_PRECISION_LOOKAHEAD_M)),
-            )
-            target_idx = self._graph.find_waypoint_ahead(
-                matched_x, matched_y, self._wp_idx, lookahead_m=precision_lookahead_m
-            )
-
-        # ---- Compute tracking errors against the active control target
-        error_m, heading_rad = self._graph.compute_tracking_error(
-            matched_x, matched_y, matched_yaw, target_idx
-        )
-
-        # ---- Path tangent and curvature at the active target waypoint
-        path_psi = float(self._graph.waypoints[target_idx % n_wp][2])
-        path_kappa = self._graph.get_curvature(target_idx)
-        node_attr = int(self._graph.wp_node_attrs[target_idx % n_wp])
+        relocalization_mode = "map_match"
+        relocalization_source = "map_match"
+        relocalization_error_m = map_match_error_m
+        semantic_match = self._sign_matches_expected_semantic(path_update)
+        if semantic_match is not None:
+            relocalization_mode = "semantic"
+            relocalization_source, semantic_error_m = semantic_match
+            relocalization_error_m = float(semantic_error_m)
+        elif abs(_yaw_correction_rad) > math.radians(0.25):
+            relocalization_mode = "lane_yaw_reset"
+            relocalization_source = "camera_yaw_hint"
+            relocalization_error_m = abs(math.degrees(_yaw_correction_rad)) / 180.0
+        elif bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
+            relocalization_mode = "lane_relocalization"
+            relocalization_source = "lane_center"
+            relocalization_error_m = abs(float(getattr(self.tracking_state, "camera_lateral_correction_m", 0.0) or 0.0))
 
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)
         self.tracking_state.update(
@@ -593,14 +744,56 @@ class threadTracking(ThreadWithStop):
             path_psi=path_psi, path_kappa=path_kappa,
             speed_mps=self._last_speed,
             wp_idx=matched_idx,
-            waypoint_mode=in_precision_zone,
+            waypoint_mode=path_update.waypoint_mode_active,
             node_attr=node_attr,
             imu_received=self._imu_received,
             target_idx=target_idx,
             raw_x=raw_x, raw_y=raw_y, raw_yaw=raw_yaw,
             matched_x=matched_x, matched_y=matched_y, matched_yaw=matched_yaw,
             map_match_error_m=map_match_error_m,
+            route_active=path_update.route_active,
+            route_id=path_update.route_id,
+            current_node_id=path_update.current_node_id,
+            current_node_attr=path_update.current_node_attr,
+            upcoming_node_id=path_update.upcoming_node_id,
+            upcoming_node_attr=path_update.upcoming_node_attr,
+            maneuver_type=path_update.maneuver_type,
+            destination_node_id=path_update.destination_node_id,
+            destination_label=path_update.destination_label,
+            route_queue=path_update.route_queue,
+            route_progress=path_update.route_progress,
+            route_points=path_update.route_points,
+            route_completed=path_update.route_completed,
+            route_replans=path_update.replans,
+            route_source=path_update.route_source,
+            destination_point=path_update.destination_point,
+            next_semantic_id=path_update.next_semantic_id,
+            next_semantic_type=path_update.next_semantic_type,
+            next_semantic_label=path_update.next_semantic_label,
+            next_semantic_distance_m=path_update.next_semantic_distance_m,
+            expected_control_type=path_update.expected_control_type,
+            current_zone_ids=path_update.current_zone_ids,
+            current_zone_types=path_update.current_zone_types,
+            map_metadata=path_update.map_metadata,
+            available_destinations=path_update.available_destinations,
+            relocalization_mode=relocalization_mode,
+            last_relocalization_source=relocalization_source,
+            last_relocalization_error_m=relocalization_error_m,
         )
+        try:
+            nav_status = self._path_manager.build_navigation_status(path_update)
+            nav_status.update(
+                {
+                    "relocalization_mode": relocalization_mode,
+                    "last_relocalization_source": relocalization_source,
+                    "last_relocalization_error_m": round(float(relocalization_error_m), 5),
+                }
+            )
+            self._nav_status_sender.send(
+                nav_status
+            )
+        except Exception:
+            pass
 
         # ---- Push state to visualizer if attached
         if self.visualizer is not None:
@@ -626,17 +819,28 @@ class threadTracking(ThreadWithStop):
                 raw_x, raw_y, raw_yaw,
                 matched_x, matched_y, matched_yaw,
                 error_m, heading_rad,
-                matched_idx, target_idx, n_wp, in_precision_zone, node_attr, dt,
+                matched_idx, target_idx,
+                int(self._path_manager.active_route.waypoints.shape[0]) if self._path_manager.active_route is not None else 0,
+                path_update.waypoint_mode_active, node_attr, dt,
+                route_id=path_update.route_id,
+                current_node_id=path_update.current_node_id,
+                upcoming_node_id=path_update.upcoming_node_id,
+                maneuver_type=path_update.maneuver_type,
             )
 
     def _write_tracking_log(self, raw_x, raw_y, raw_yaw,
                              matched_x, matched_y, matched_yaw,
                              error_m, heading_rad,
-                             wp_idx, target_idx, n_wp, in_precision_zone, node_attr, dt):
+                             wp_idx, target_idx, n_wp, in_precision_zone, node_attr, dt,
+                             route_id=None, current_node_id=None,
+                             upcoming_node_id=None, maneuver_type="none"):
         """Write one line to temp/tracking_debug.txt."""
         try:
+            route = self._path_manager.active_route if self._path_manager is not None else None
+            if route is None or len(route.waypoints) == 0:
+                return
             now = time.monotonic()
-            wp = self._graph.waypoints[target_idx % n_wp]
+            wp = route.waypoints[target_idx % n_wp] if route.closed_loop else route.waypoints[min(max(0, target_idx), n_wp - 1)]
             dist_to_wp = math.hypot(matched_x - wp[0], matched_y - wp[1])
 
             # Speed field
@@ -685,7 +889,7 @@ class threadTracking(ThreadWithStop):
                     drift_warn = f" ⚠ DRIFT_WITH_ZERO_SPEED (moved {moved*100:.1f}cm)"
             self._log_prev_xy = (matched_x, matched_y)
 
-            path_kappa = self._graph.get_curvature(target_idx)
+            path_kappa = self._path_manager._get_curvature(route, target_idx)
             ff_deg = math.degrees(math.atan(path_kappa * 0.258)) if abs(path_kappa) > 0.01 else 0.0
             _corr_deg = getattr(self.tracking_state, 'last_yaw_correction_deg', 0.0)
             _cam_hint = getattr(self.tracking_state, '_cam_yaw_hint_rad', None)
@@ -707,7 +911,8 @@ class threadTracking(ThreadWithStop):
                 f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° "
                 f"mm={_mm_err:.4f}m latcorr={_lat_corr:+.4f}m lane={_lane_rel} "
                 f"kappa={path_kappa:+.3f}/m ff={ff_deg:+.1f}° | "
-                f"zone={zone_str} | {_cam_str} | dt={dt*1000:.1f}ms"
+                f"zone={zone_str} route={route_id or 'none'} curr={current_node_id} "
+                f"next={upcoming_node_id} man={maneuver_type} | {_cam_str} | dt={dt*1000:.1f}ms"
                 f"{drift_warn}\n"
             )
             with open(self._debug_log_path, "a") as f:

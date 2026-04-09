@@ -28,8 +28,44 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
 
 <div class="map-container">
   <div class="map-track-container">
-    <div #imageContainer id="map-track-image-container">
+    <div class="map-hud">
+      <span class="map-hud-title">Navigator</span>
+      <span class="map-hud-status">{{ navigationSummary }}</span>
+      <span class="map-hud-detail">{{ nextSemanticSummary }}</span>
+      <span class="map-hud-detail">{{ relocalizationSummary }}</span>
+      <span class="map-hud-detail" *ngIf="routeQueueSummary">Cola: {{ routeQueueSummary }}</span>
+      <div class="map-hud-controls" *ngIf="availableDestinations.length > 0">
+        <select class="map-destination-select" [value]="selectedDestinationId" (change)="onDestinationChange($event)">
+          <option *ngFor="let destination of availableDestinations" [value]="destination.id">
+            {{ destination.label }}
+          </option>
+        </select>
+        <button class="map-destination-btn" type="button" (click)="navigateToSelectedDestination()">Ir</button>
+      </div>
+      <span class="map-hud-hint">Click en el mapa para fijar destino</span>
+    </div>
+
+    <div #imageContainer id="map-track-image-container" (click)="onMapClick($event)">
       <img src="/assets/Track.svg" id="map-track-image" #imageElement (load)="onLoadTrack(imageElement)" alt="BFMC Track" />
+      <svg
+        id="map-route-overlay"
+        class="map-route-overlay"
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+      >
+        <polyline
+          *ngIf="routePoints.length > 1"
+          class="map-route-polyline"
+          [attr.points]="routePolylinePoints"
+        />
+        <circle
+          *ngIf="destinationPoint"
+          class="map-destination-marker"
+          [attr.cx]="destinationPercentX"
+          [attr.cy]="destinationPercentY"
+          r="1.5"
+        />
+      </svg>
     </div>
 
     <div class="map-semaphores" *ngFor="let entry of semaphores | keyvalue">

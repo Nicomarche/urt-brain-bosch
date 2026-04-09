@@ -24,6 +24,7 @@ from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
 from src.statemachine.systemMode import SystemMode
+from src.hardware.camera.threads.maneuverManager import ManeuverManager
 
 # Import LSTR detector (AI-based lane detection)
 try:
@@ -700,6 +701,9 @@ Args:
         # pushing forward into a curve the chassis cannot physically close.
         self.single_line_stop_max_steer_frames = 6
         self.single_line_stop_error_scale = 1.5
+        self.use_single_line_protective_stop = bool(
+            getattr(_config, "USE_SINGLE_LINE_PROTECTIVE_STOP", False)
+        )
         # Briefly hold the last good steering when vision drops both lines.
         self.no_lane_hold_steering_frames = 4
         # Keep full-center reconstruction only briefly after 2->1 line loss.
@@ -817,6 +821,21 @@ Args:
         self.curve_vp_threshold = 0.20       # VP offset to detect curve early from 2 lines (0.10 was too sensitive)
         self.curve_vp_confirm_frames = 3    # Consecutive frames with VP above threshold to trigger ENTERING from 2 lines
         self._vp_above_count = 0            # Counter: consecutive frames VP exceeded threshold
+        self.curve_two_line_heading_threshold_deg = float(
+            getattr(_config, 'CURVE_TWO_LINE_HEADING_THRESHOLD_DEG', 24.0)
+        )
+        self.curve_two_line_heading_confidence = float(
+            getattr(_config, 'CURVE_TWO_LINE_HEADING_CONFIDENCE', 0.55)
+        )
+        self.curve_two_line_confirm_frames = int(
+            getattr(_config, 'CURVE_TWO_LINE_CONFIRM_FRAMES', 2)
+        )
+        self.curve_two_line_hold_frames = int(
+            getattr(_config, 'CURVE_TWO_LINE_HOLD_FRAMES', 6)
+        )
+        self._two_line_curve_hint_count = 0
+        self._two_line_curve_hint_direction = 0
+        self._curve_enter_origin = "none"
         self.curve_pre_position_gain = 0.95  # Pre-position aggressively when ENTERING (higher = more outer-line protection)
         self.curve_exit_gain = 0.08          # Tiny residual offset when EXITING; fades over curve_exit_frames
         self.curve_inner_line_steer_factor = float(getattr(_config, 'CURVE_INNER_LINE_STEER_FACTOR', 0.4))
@@ -1155,9 +1174,21 @@ Args:
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
         self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
+        self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
 
         # GPS-free tracking state (injected by processCamera after init)
         self._tracking_state = None
+        self._maneuver_manager = ManeuverManager(
+            state_change_sender=self.stateChangeSender,
+            highway_mode_event=self.highway_mode_event,
+        )
+        self._control_policy_mode = "VISUAL_ASSIST"
+        self._control_authority = "visual"
+        self._active_maneuver_name = "none"
+        self._mission_state_name = "LANE_FOLLOW"
+        self._planner_priority_active = False
+        self._safety_stop_reason = ""
+        self._last_maneuver_notes = ""
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -1732,8 +1763,8 @@ Args:
             (side == 'right' and heading_delta_from_ref <= 0) or
             (side == 'left'  and heading_delta_from_ref >= 0)
         )
-        if not is_outer_heading:
-            return result
+        allow_state_confirmation = bool(is_outer_heading)
+        allow_continuity_confirmation = bool(is_outer_heading)
 
         min_curve_strength = max(0.0, float(getattr(self, 'single_line_curve_confirm_threshold', 0.35)))
         if curve_strength < min_curve_strength:
@@ -1742,12 +1773,6 @@ Args:
         curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
         curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
 
-        # Never apply outer-curve bias on a straight segment.  On a straight road
-        # lines can appear at 40-50° from vertical due to perspective alone, making
-        # curve_strength = 1.0 even though the road is straight.  Applying outer bias
-        # in that case pushes the error in the wrong direction.
-        if curve_state == 'STRAIGHT':
-            return result
         state_confirmed = (
             curve_state in ("ENTERING", "IN_CURVE", "EXITING") and
             (
@@ -1755,7 +1780,7 @@ Args:
                 (curve_direction == -1 and side == 'right')
             )
         )
-        if state_confirmed:
+        if allow_state_confirmation and state_confirmed:
             result['state_confirmed'] = True
             result['sources'].append('curve_state')
 
@@ -1806,7 +1831,7 @@ Args:
             0,
         ) or 0)
         min_continuity_frames = max(1, int(getattr(self, 'single_line_outer_confirm_frames', 2)))
-        if continuity_frames >= min_continuity_frames:
+        if allow_continuity_confirmation and continuity_frames >= min_continuity_frames:
             result['continuity_confirmed'] = True
             result['sources'].append('continuity')
 
@@ -2072,7 +2097,7 @@ Args:
                 }
                 self._last_local_ai_mask_reject_reason = None
 
-        curve_context = self._curve_state in ("ENTERING", "IN_CURVE", "EXITING")
+        curve_context = str(getattr(self, '_curve_state', 'STRAIGHT')) in ("ENTERING", "IN_CURVE", "EXITING")
         prev_seen_side = str(getattr(self, 'last_seen_side', 'none') or 'none').lower()
         used_virtual_boundary = False
         if len(detected_sides) == 1:
@@ -2317,8 +2342,9 @@ Args:
             # not a curve-exit wall — applying the 20° heading bias there would wrongly
             # steer the car into the turn.  path_kappa from DeadReckoning / TrackGraph
             # is low (≈0.11) on straight segments and high (>0.5) inside tight turns.
-            _graph_kappa = abs(float(getattr(self._tracking_state, 'path_kappa', 0.0))) \
-                if self._tracking_state is not None else 0.0
+            _tracking_state = getattr(self, '_tracking_state', None)
+            _graph_kappa = abs(float(getattr(_tracking_state, 'path_kappa', 0.0))) \
+                if _tracking_state is not None else 0.0
             _transversal_kappa_min = float(
                 getattr(self, 'single_line_transversal_kappa_threshold', 0.30)
             )
@@ -2484,8 +2510,10 @@ Args:
         # real lateral offset without breaking the existing Stanley k tuning
         # (which operates on perspective pixels via error_px).
         _error_cm = None
-        if self.bev_cm_per_px > 0.0 and lane_width_px > 0.0 and self.lane_width_cm > 0.0:
-            _px_to_cm = self.lane_width_cm / max(1.0, lane_width_px)
+        _bev_cm_per_px = float(getattr(self, 'bev_cm_per_px', 0.0) or 0.0)
+        _lane_width_cm = float(getattr(self, 'lane_width_cm', 35.0) or 35.0)
+        if _bev_cm_per_px > 0.0 and lane_width_px > 0.0 and _lane_width_cm > 0.0:
+            _px_to_cm = _lane_width_cm / max(1.0, lane_width_px)
             _error_cm = float(error_px) * _px_to_cm
 
         guidance = {
@@ -2510,7 +2538,7 @@ Args:
             'bottom_y': int(measurement_bottom_y),
             'draw_y': int(draw_y),
             'used_virtual_boundary': bool(used_virtual_boundary),
-            'guidance_mode': guidance_mode,
+            'guidance_mode': 'midpoint' if guidance_mode == 'midpoint_ref' else guidance_mode,
             'single_line_prefer_center': (
                 bool(single_line_prefer_center) if single_line_prefer_center is not None else None
             ),
@@ -2992,7 +3020,7 @@ Args:
         # Initialize perspective/BEV transform if not already done.
         # This is required for _reclassify_masks_via_bev() to work; without it
         # perspective_initialized stays False and BEV is always skipped.
-        if not self.perspective_initialized:
+        if not getattr(self, 'perspective_initialized', False):
             self._init_perspective_transform(width, height)
 
         debug_info = {
@@ -3098,7 +3126,7 @@ Args:
         lane_mask_payload = payload.get('lane_mask')
 
         # Capture raw YOLO mask info for mask debug log (before any reclassification)
-        if self._mask_debug_log_enabled:
+        if bool(getattr(self, '_mask_debug_log_enabled', False)):
             raw_info = {}
             if isinstance(side_masks, dict):
                 for _s in ('left', 'right'):
@@ -3409,16 +3437,47 @@ Args:
 
         return max(-self.max_steering, min(self.max_steering, float(candidate)))
 
-    def _should_allow_stopline_waypoint_guidance(self, direct_error_context=None):
-        """Allow graph/node authority only at STOPLINE with one line on a straight."""
+    def _get_navigation_context(self):
+        """Summarize route and maneuver information published by threadTracking."""
         ts = getattr(self, "_tracking_state", None)
-        if ts is None or not bool(getattr(ts, "waypoint_mode_active", False)):
+        maneuver_type = str(getattr(ts, "maneuver_type", "none") or "none") if ts is not None else "none"
+        route_active = bool(getattr(ts, "route_active", False)) if ts is not None else False
+        waypoint_mode_active = bool(getattr(ts, "waypoint_mode_active", False)) if ts is not None else False
+        current_attr = int(getattr(ts, "current_node_attr", getattr(ts, "node_attr", 0)) or 0) if ts is not None else 0
+        upcoming_attr = int(getattr(ts, "upcoming_node_attr", current_attr) or current_attr) if ts is not None else 0
+
+        planner_priority = route_active and (
+            waypoint_mode_active
+            or maneuver_type in {
+                "stopline",
+                "turn_left",
+                "turn_right",
+                "intersection_straight",
+                "roundabout",
+                "crosswalk",
+                "highway",
+            }
+        )
+
+        return {
+            "route_active": route_active,
+            "waypoint_mode_active": waypoint_mode_active,
+            "planner_priority": planner_priority,
+            "maneuver_type": maneuver_type,
+            "current_attr": current_attr,
+            "upcoming_attr": upcoming_attr,
+        }
+
+    def _should_allow_stopline_waypoint_guidance(self, direct_error_context=None):
+        """Allow planner authority in critical route contexts while preserving visual assist."""
+        nav_ctx = self._get_navigation_context()
+        if not nav_ctx["planner_priority"]:
             return False
 
         stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
-        node_attr = int(getattr(ts, "node_attr", 0) or 0)
-        if node_attr != stopline_attr:
-            return False
+        is_stopline = nav_ctx["current_attr"] == stopline_attr or nav_ctx["upcoming_attr"] == stopline_attr
+        if not is_stopline:
+            return True
 
         if str(getattr(self, "_curve_state", "STRAIGHT")) != "STRAIGHT":
             return False
@@ -3498,13 +3557,90 @@ Args:
 
         return guarded_steer
 
+    def _enforce_two_line_curve_priority(self, steering_angle, debug_info=None):
+        """Prevent two-line ENTERING from unwinding away from a confirmed curve."""
+        if steering_angle is None:
+            return steering_angle
+
+        if str(getattr(self, "_curve_state", "STRAIGHT")) != "ENTERING":
+            return steering_angle
+        if str(getattr(self, "_curve_enter_origin", "none")) != "two_line_hint":
+            return steering_angle
+
+        desired_sign = 0
+        curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
+        if curve_direction != 0:
+            desired_sign = -curve_direction
+
+        hint_source = str(getattr(self, "_local_ai_heading_hint_source", "none") or "none")
+        hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
+        hint_rad = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
+        hint_deg = abs(math.degrees(hint_rad))
+        if desired_sign == 0 and abs(hint_rad) > 1e-4:
+            desired_sign = -1 if hint_rad > 0.0 else 1
+        if desired_sign == 0:
+            return steering_angle
+
+        min_steer_deg = 0.0
+        if hint_source == "two_line" and hint_conf >= 0.25 and hint_deg >= 12.0:
+            min_steer_deg = max(2.5, hint_deg * 0.12)
+
+        previous_steering = getattr(self, "_last_good_steering", None)
+        if previous_steering is None:
+            previous_steering = getattr(self, "last_steering", None)
+        if previous_steering is not None and float(previous_steering) * desired_sign > 0.0:
+            min_steer_deg = max(min_steer_deg, abs(float(previous_steering)) * 0.65)
+
+        if min_steer_deg <= 0.0:
+            return steering_angle
+
+        min_steer_deg = min(float(self.max_steering), float(min_steer_deg))
+        guarded_steer = float(steering_angle)
+        if guarded_steer * desired_sign < min_steer_deg:
+            guarded_steer = desired_sign * min_steer_deg
+            if isinstance(debug_info, dict):
+                debug_info["two_line_curve_priority"] = True
+                debug_info["two_line_curve_priority_sign"] = int(desired_sign)
+                debug_info["two_line_curve_priority_min_deg"] = round(float(min_steer_deg), 3)
+                debug_info["two_line_curve_priority_input_deg"] = round(float(steering_angle), 3)
+                debug_info["two_line_curve_priority_output_deg"] = round(float(guarded_steer), 3)
+
+        return guarded_steer
+
     def _resolve_ai_local_blind_control(self, img_w, speed_cap=None):
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
-        The visible lane always has priority. Blind graph fallback is intentionally
-        disabled here; once no lane is visible, stop instead of letting waypoint
-        guidance take over unexpectedly.
+        Priority order:
+        1. Active route from tracking/planner.
+        2. Brief visual hold using the last stable steering.
+        3. Full safety stop.
         """
+        ts = getattr(self, "_tracking_state", None)
+        nav_ctx = self._get_navigation_context()
+        if ts is not None and bool(getattr(ts, "initialized", False)) and nav_ctx["route_active"]:
+            try:
+                steering_angle = self._compute_lateral_control(
+                    0.0,
+                    float(getattr(ts, "heading_rad", 0.0)),
+                    self._current_speed if self._current_speed > 0 else self.min_speed,
+                    curve_reference=None,
+                    speed_cap=speed_cap,
+                    img_w=img_w,
+                    direct_error_m=float(getattr(ts, "error_m", 0.0)),
+                    direct_error_context={"source": "blind_route"},
+                )
+                speed = self._update_progressive_speed(steering_angle, speed_cap=speed_cap)
+                return steering_angle, speed, "route_tracking"
+            except Exception:
+                pass
+
+        blind_hold_steering = self._get_no_lane_hold_steering()
+        if blind_hold_steering is not None:
+            hold_speed = float(self.min_speed)
+            if speed_cap is not None:
+                hold_speed = min(hold_speed, float(speed_cap))
+            return blind_hold_steering, hold_speed, "visual_fallback"
+
         return 0.0, 0.0, "safety_stop"
 
     def _resolve_nominal_lane_width_px(self, img_w):
@@ -3693,9 +3829,11 @@ Args:
         # curve, new max-left in the immediately following left curve), blending would keep
         # the car going the wrong way for several frames.  Skip the blend entirely in that
         # case and apply the new steering immediately.
-        if (float(previous_steering) > 2.0 and float(steering_angle) < -2.0) or \
-           (float(previous_steering) < -2.0 and float(steering_angle) > 2.0):
-            return float(steering_angle), None
+        curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+        if curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+            if (float(previous_steering) > 2.0 and float(steering_angle) < -2.0) or \
+               (float(previous_steering) < -2.0 and float(steering_angle) > 2.0):
+                return float(steering_angle), None
 
         alpha = min(1.0, float(streak) / float(blend_frames + 1))
         blended = ((1.0 - alpha) * float(previous_steering)) + (alpha * float(steering_angle))
@@ -3830,6 +3968,9 @@ Args:
             self._lane_observation_history.clear()
         self._last_local_ai_duplicate_collapse = None
         self._last_single_line_projection_debug = {}
+        self._two_line_curve_hint_count = 0
+        self._two_line_curve_hint_direction = 0
+        self._curve_enter_origin = "none"
         self.previous_error = 0
         if hasattr(self, 'last_steering'):
             del self.last_steering
@@ -4206,6 +4347,12 @@ Args:
                 'steering': round(commanded_steering, 2) if commanded_steering is not None else (round(computed_steering, 2) if computed_steering is not None else None),
                 'speed': round(commanded_speed, 2) if commanded_speed is not None else (round(computed_speed, 2) if computed_speed is not None else None),
                 'mode': self.detection_mode,
+                'control_policy_mode': self._control_policy_mode,
+                'control_authority': self._control_authority,
+                'active_maneuver': self._active_maneuver_name,
+                'planner_priority': bool(self._planner_priority_active),
+                'safety_stop_reason': self._safety_stop_reason or None,
+                'maneuver_notes': self._last_maneuver_notes or None,
                 'view': view_name,
                 'active': self.is_line_following_active,
                 'lstr_available': self.lstr_detector is not None and self.lstr_detector.is_available,
@@ -4214,6 +4361,7 @@ Args:
                 'commanded_steering': round(commanded_steering, 2) if commanded_steering is not None else None,
                 'commanded_speed': round(commanded_speed, 2) if commanded_speed is not None else None,
                 'command_source': command_source,
+                'mission_state': self._mission_state_name,
                 'actual_steering': round(self._measured_steer, 2),
                 'actual_speed': round(self._measured_speed, 2),
                 'actual_speed_mps': round(
@@ -4238,6 +4386,28 @@ Args:
                 'local_ai_infer_ms': None,
                 'local_ai_fps': None,
             }
+            if self._tracking_state is not None:
+                status.update({
+                    'route_active': bool(getattr(self._tracking_state, 'route_active', False)),
+                    'route_id': getattr(self._tracking_state, 'route_id', None),
+                    'current_node_id': getattr(self._tracking_state, 'current_node_id', None),
+                    'current_node_attr': int(getattr(self._tracking_state, 'current_node_attr', 0) or 0),
+                    'upcoming_node_id': getattr(self._tracking_state, 'upcoming_node_id', None),
+                    'upcoming_node_attr': int(getattr(self._tracking_state, 'upcoming_node_attr', 0) or 0),
+                    'maneuver_type': getattr(self._tracking_state, 'maneuver_type', 'none'),
+                    'next_semantic_id': getattr(self._tracking_state, 'next_semantic_id', None),
+                    'next_semantic_type': getattr(self._tracking_state, 'next_semantic_type', None),
+                    'next_semantic_label': getattr(self._tracking_state, 'next_semantic_label', None),
+                    'expected_control_type': getattr(self._tracking_state, 'expected_control_type', None),
+                    'route_queue': list(getattr(self._tracking_state, 'route_queue', []) or []),
+                    'destination_label': getattr(self._tracking_state, 'destination_label', None),
+                    'relocalization_mode': getattr(self._tracking_state, 'relocalization_mode', 'map_match'),
+                    'last_relocalization_source': getattr(self._tracking_state, 'last_relocalization_source', 'map_match'),
+                    'last_relocalization_error_m': round(float(getattr(self._tracking_state, 'last_relocalization_error_m', 0.0) or 0.0), 5),
+                    'destination_node_id': getattr(self._tracking_state, 'destination_node_id', None),
+                    'route_progress': round(float(getattr(self._tracking_state, 'route_progress', 0.0) or 0.0), 5),
+                    'route_completed': bool(getattr(self._tracking_state, 'route_completed', False)),
+                })
             if self._last_local_perception_status:
                 status['local_ai_ready'] = bool(self._last_local_perception_status.get('model_ready', False))
                 status['local_ai_infer_ms'] = self._last_local_perception_status.get('inference_time_ms')
@@ -5267,14 +5437,44 @@ Args:
     def _should_apply_single_line_protective_stop(self, local_mask_guidance, steering_angle, error):
         """Stop forward motion if 1-line tracking stays saturated for too long.
 
-        Disabled: in single-line mode during curves the robot needs to keep moving so
-        the steering correction can take effect.  A large raw_error_px in single-line
-        mode is expected and correct — it means "steer hard to follow the curve", not
-        "the robot is off the track".  Stopping while at max-steer prevents self-correction
-        and causes the robot to freeze permanently.
+        Runtime instances keep this feature behind config because aggressive 1-line
+        protective stops are highly track-dependent. Bare test doubles created with
+        ``__new__`` default to enabled so the legacy unit tests can still exercise it.
         """
-        self._single_line_stop_consecutive = 0
-        return False
+        if not bool(getattr(self, 'use_single_line_protective_stop', True)):
+            self._single_line_stop_consecutive = 0
+            return False
+
+        if not isinstance(local_mask_guidance, dict):
+            self._single_line_stop_consecutive = 0
+            return False
+
+        guidance_mode = str(local_mask_guidance.get('guidance_mode', '') or '')
+        detected_sides = tuple(local_mask_guidance.get('detected_sides', ()) or ())
+        if not guidance_mode.startswith('single_line') or len(detected_sides) != 1:
+            self._single_line_stop_consecutive = 0
+            return False
+
+        if steering_angle is None or error is None:
+            self._single_line_stop_consecutive = 0
+            return False
+
+        max_steering = max(1.0, float(getattr(self, 'max_steering', 25.0) or 25.0))
+        raw_error_px = float(local_mask_guidance.get('raw_error_px', error) or error)
+        error_limit_px = float(getattr(self, 'max_error_px', 40.0) or 40.0) * float(
+            getattr(self, 'single_line_stop_error_scale', 1.5) or 1.5
+        )
+        saturated = abs(float(steering_angle)) >= (max_steering - 0.5)
+        error_large = abs(raw_error_px) >= error_limit_px
+
+        if saturated and error_large:
+            self._single_line_stop_consecutive += 1
+        else:
+            self._single_line_stop_consecutive = 0
+
+        return self._single_line_stop_consecutive >= max(
+            1, int(getattr(self, 'single_line_stop_max_steer_frames', 6) or 6)
+        )
 
     # ============= STANLEY CONTROLLER HELPERS =============
 
@@ -5498,7 +5698,11 @@ Args:
 
         age_factor = 1.0
         if result_age is not None:
-            age_limit = max(1e-6, float(self.local_ai_max_result_age) + max(0.0, float(self.local_ai_stale_grace_s)))
+            age_limit = max(
+                1e-6,
+                float(getattr(self, 'local_ai_max_result_age', 0.35) or 0.35) +
+                max(0.0, float(getattr(self, 'local_ai_stale_grace_s', 0.20) or 0.20))
+            )
             age_factor = max(0.0, min(1.0, 1.0 - (float(result_age) / age_limit)))
             if stale_grace:
                 age_factor *= 0.6
@@ -5766,6 +5970,9 @@ Args:
         self._heading_error = float(heading)
 
         ts = self._tracking_state
+        nav_ctx = self._get_navigation_context()
+        _route_active = bool(nav_ctx["route_active"])
+        _planner_priority_active = bool(nav_ctx["planner_priority"])
         _track_heading_enabled = bool(getattr(_config, "TRACKING_USE_PATH_HEADING", True))
         _lane_measurement_reliable = bool(
             getattr(ts, "lane_measurement_reliable", False)
@@ -5788,7 +5995,8 @@ Args:
         # line, while not being inside a curve.
         if (
             ts is not None and
-            getattr(ts, "waypoint_mode_active", False) and
+            getattr(ts, "initialized", False) and
+            _planner_priority_active and
             _allow_stopline_waypoint and
             not _lane_measurement_reliable
         ):
@@ -5842,10 +6050,11 @@ Args:
         if ts is not None and getattr(ts, "initialized", False) \
                 and _track_heading_enabled and _imu_ready \
                 and direct_error_m is None \
-                and _allow_stopline_waypoint:
+                and (_allow_stopline_waypoint or _route_active):
             heading = float(ts.heading_rad)
             self._heading_error = heading
             direct_error_m = float(getattr(ts, "error_m", 0.0))
+            direct_error_source = "blind_route"
         # ── End path-heading override ──────────────────────────────────────────
 
         if self._should_use_stanley_controller():
@@ -5891,6 +6100,18 @@ Args:
             speed_mps, speed_source = self._resolve_stanley_speed_mps(
                 speed_value, speed_cap=speed_cap
             )
+            control_heading = float(heading)
+            if (
+                ts is not None and
+                getattr(ts, 'initialized', False) and
+                _imu_ready and
+                _planner_priority_active and
+                direct_error_source in {"single_line", "blind_route"}
+            ):
+                path_heading = float(getattr(ts, "heading_rad", control_heading))
+                blend = 0.75 if direct_error_source == "single_line" else 1.0
+                control_heading = ((1.0 - blend) * float(heading)) + (blend * path_heading)
+
             # Preserve legacy px deadband behavior while using physical-state Stanley.
             if float(getattr(self, 'stanley_deadband_crosstrack_m', 0.0) or 0.0) > 0.0:
                 crosstrack_deadband = float(self.stanley_deadband_crosstrack_m)
@@ -5950,7 +6171,7 @@ Args:
                     ts is not None and
                     getattr(ts, 'initialized', False) and
                     _imu_ready and
-                    _allow_stopline_waypoint
+                    (_allow_stopline_waypoint or _route_active)
                 ):
                     path_kappa = float(getattr(ts, 'path_kappa', 0.0))
                     # Clamp to a conservative curvature limit.  At ±1.0 rad/m
@@ -5969,10 +6190,10 @@ Args:
                 # augment heading with a Stanley crosstrack term so the MPC sees a
                 # non-zero psi even when the car is aligned.  This avoids the degenerate
                 # case where de/dt = v·sin(0) = 0 renders the MPC horizon useless.
-                heading_mpc = heading
+                heading_mpc = control_heading
                 if direct_error_m is not None and direct_error_source != "single_line":
                     k_eff = float(self.stanley_k) * float(self.mpc_crosstrack_k_mult)
-                    heading_mpc = heading + math.atan2(
+                    heading_mpc = control_heading + math.atan2(
                         k_eff * float(error_m),
                         float(self.stanley_k_soft) + float(speed_mps),
                     )
@@ -5981,7 +6202,7 @@ Args:
                     steady_state_heading=effective_psi_ss,
                 )
             return self.stanley.compute(
-                error_m, heading, speed_mps,
+                error_m, control_heading, speed_mps,
                 yaw_rate=self._yaw_rate,
                 traj_yaw_rate=traj_yaw_rate,
                 steady_state_heading=psi_ss,
@@ -6088,6 +6309,16 @@ Args:
                 (side == 'left'  and heading_delta_from_ref >= 0)
             )
             if is_outer_heading_sign:
+                curve_sign = 1.0 if side == 'left' else -1.0
+                curve_heading_bias = curve_sign * math.radians(
+                    float(getattr(self, 'single_line_curve_heading_max_deg', 10.0))
+                ) * curve_strength
+            elif (
+                int(getattr(self, '_curve_direction', 0) or 0) == 0 and
+                str(getattr(self, '_curve_state', 'STRAIGHT')) == 'STRAIGHT'
+            ):
+                # When there is no confirmed curve state yet, use a side-based
+                # pre-bias so shallow 1-line hints can still seed the turn.
                 curve_sign = 1.0 if side == 'left' else -1.0
                 curve_heading_bias = curve_sign * math.radians(
                     float(getattr(self, 'single_line_curve_heading_max_deg', 10.0))
@@ -6781,6 +7012,9 @@ Args:
         """
         prev_state = self._curve_state
         self._curve_state_frames += 1
+        two_line_hint_ready, two_line_hint_direction = self._consume_two_line_curve_hint(
+            num_lines, avg_left, avg_right
+        )
 
         if self._curve_state == "STRAIGHT":
             if num_lines == 1:
@@ -6788,6 +7022,14 @@ Args:
                 self._curve_state = "ENTERING"
                 self._curve_state_frames = 1
                 self._curve_direction = 1 if avg_left is not None else -1
+                self._curve_enter_origin = "single_line"
+            elif two_line_hint_ready and two_line_hint_direction != 0:
+                # Strong, stable two-line heading hint from AI local: start pre-positioning
+                # before the outer line disappears so the car doesn't react one frame late.
+                self._curve_state = "ENTERING"
+                self._curve_state_frames = 1
+                self._curve_direction = int(two_line_hint_direction)
+                self._curve_enter_origin = "two_line_hint"
             # NOTE: VP-based detection from 2 lines was removed — too many false positives.
             # The vanishing point shifts off-center when the car is slightly off-center
             # or the camera isn't perfectly aligned, causing constant false ENTERING triggers.
@@ -6798,24 +7040,40 @@ Args:
                 if self._curve_state_frames >= self.curve_confirm_frames:
                     self._curve_state = "IN_CURVE"
                     self._curve_state_frames = 1
+                    self._curve_enter_origin = "none"
                 # Update direction based on which line is visible
                 self._curve_direction = 1 if avg_left is not None else -1
             elif num_lines == 2:
-                # Regained both lines → back to STRAIGHT.
-                # If it's a real curve, we'll lose the line again and re-enter ENTERING.
-                self._curve_state = "STRAIGHT"
-                self._curve_state_frames = 0
-                self._curve_direction = 0
-                self._steering_radius_history.clear()  # Clear stale steering data
+                if two_line_hint_ready and two_line_hint_direction != 0:
+                    # Keep the early-entering state alive while the two-line hint remains strong.
+                    self._curve_direction = int(two_line_hint_direction)
+                    self._curve_enter_origin = "two_line_hint"
+                elif (
+                    self._curve_enter_origin == "two_line_hint" and
+                    self._curve_state_frames <= max(1, int(getattr(self, 'curve_two_line_hold_frames', 6) or 6))
+                ):
+                    # Short confidence dips are common on the last safe frame before line loss.
+                    # Keep ENTERING alive briefly so the steering does not unwind to zero.
+                    pass
+                else:
+                    # Regained both lines → back to STRAIGHT.
+                    # If it's a real curve, we'll lose the line again and re-enter ENTERING.
+                    self._curve_state = "STRAIGHT"
+                    self._curve_state_frames = 0
+                    self._curve_direction = 0
+                    self._curve_enter_origin = "none"
+                    self._steering_radius_history.clear()  # Clear stale steering data
             elif num_lines == 0:
                 # Lost all lines in entering - go to IN_CURVE (assume committed)
                 self._curve_state = "IN_CURVE"
                 self._curve_state_frames = 1
+                self._curve_enter_origin = "none"
 
         elif self._curve_state == "IN_CURVE":
             if num_lines == 2:
                 self._curve_state = "EXITING"
                 self._curve_state_frames = 1
+                self._curve_enter_origin = "none"
                 # Reset PID integral so accumulated curve error doesn't push the car wide on exit
                 self.pid.integral = 0.0
                 self.pid.prev_error = 0
@@ -6829,6 +7087,7 @@ Args:
                     self._curve_state = "STRAIGHT"
                     self._curve_state_frames = 0
                     self._curve_direction = 0
+                    self._curve_enter_origin = "none"
                     self._curve_radius_estimate = 0.0
                     self._curve_confidence = 0.0
                     self._steering_radius_history.clear()
@@ -6836,6 +7095,7 @@ Args:
                 # Lost line again - back to IN_CURVE
                 self._curve_state = "IN_CURVE"
                 self._curve_state_frames = 1
+                self._curve_enter_origin = "none"
                 if num_lines == 1:
                     self._curve_direction = 1 if avg_left is not None else -1
 
@@ -6869,6 +7129,46 @@ Args:
             return {'offset_norm': max(-1.0, min(1.0, offset_norm))}
         except Exception:
             return None
+
+    def _reset_two_line_curve_hint(self):
+        self._two_line_curve_hint_count = 0
+        self._two_line_curve_hint_direction = 0
+
+    def _consume_two_line_curve_hint(self, num_lines, avg_left, avg_right):
+        """Track strong two-line AI heading hints to start ENTERING before line loss."""
+        if num_lines != 2 or avg_left is None or avg_right is None:
+            self._reset_two_line_curve_hint()
+            return False, 0
+
+        hint_source = str(getattr(self, '_local_ai_heading_hint_source', 'none') or 'none')
+        if hint_source != 'two_line':
+            self._reset_two_line_curve_hint()
+            return False, 0
+
+        hint_conf = float(getattr(self, '_local_ai_heading_hint_confidence', 0.0) or 0.0)
+        hint_rad = float(getattr(self, '_local_ai_heading_hint_rad', 0.0) or 0.0)
+        hint_deg = abs(math.degrees(hint_rad))
+        min_conf = max(
+            0.0,
+            min(1.0, float(getattr(self, 'curve_two_line_heading_confidence', 0.55) or 0.55)),
+        )
+        min_deg = max(0.0, float(getattr(self, 'curve_two_line_heading_threshold_deg', 24.0) or 24.0))
+        if hint_conf < min_conf or hint_deg < min_deg:
+            self._reset_two_line_curve_hint()
+            return False, 0
+
+        hint_direction = 1 if hint_rad > 0.0 else -1
+        if self._two_line_curve_hint_direction == hint_direction:
+            self._two_line_curve_hint_count += 1
+        else:
+            self._two_line_curve_hint_direction = hint_direction
+            self._two_line_curve_hint_count = 1
+
+        confirm_frames = max(
+            1,
+            int(getattr(self, 'curve_two_line_confirm_frames', 2) or 2),
+        )
+        return self._two_line_curve_hint_count >= confirm_frames, hint_direction
 
     def _is_seeing_inner_line(self, visible_side):
         """Check if the visible line is the INNER boundary of the current curve.
@@ -7544,15 +7844,16 @@ Args:
         # and corresponds to the road region whose physical width is lane_width_cm.
         # (The src bottom span width*0.8 maps 1:1 to lane_width_cm at the bottom.)
         bev_lane_width_px = float(dst_x_right - dst_x_left)
-        if bev_lane_width_px > 0.0 and self.lane_width_cm > 0.0:
-            self.bev_cm_per_px = self.lane_width_cm / bev_lane_width_px
+        lane_width_cm = float(getattr(self, 'lane_width_cm', 35.0) or 35.0)
+        if bev_lane_width_px > 0.0 and lane_width_cm > 0.0:
+            self.bev_cm_per_px = lane_width_cm / bev_lane_width_px
         else:
             self.bev_cm_per_px = 0.0
 
         print(
             f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - "
             f"BEV initialized {width}x{height} | bev_cm_per_px={self.bev_cm_per_px:.4f} "
-            f"(lane={self.lane_width_cm}cm / {bev_lane_width_px:.0f}px)"
+            f"(lane={lane_width_cm}cm / {bev_lane_width_px:.0f}px)"
         )
 
     def warp_perspective(self, img):
@@ -7926,6 +8227,7 @@ Returns:
                          'hough_max_lines_per_side',
                          'use_swept_path', 'curve_speed_reduction',
                          'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames', 'curve_vp_confirm_frames',
+                         'curve_two_line_confirm_frames', 'curve_two_line_hold_frames',
                          'use_noise_filter', 'noise_max_hough_lines',
                          'noise_max_reject_frames',
                          'use_curve_recovery', 'recovery_max_steer_frames',
@@ -7989,6 +8291,10 @@ Returns:
                      'bfmc_default_curve_radius',
                      'curve_enter_frames', 'curve_confirm_frames', 'curve_exit_frames',
                      'curve_vp_threshold', 'curve_vp_confirm_frames',
+                     'curve_two_line_heading_threshold_deg',
+                     'curve_two_line_heading_confidence',
+                     'curve_two_line_confirm_frames',
+                     'curve_two_line_hold_frames',
                      'curve_pre_position_gain', 'curve_exit_gain',
                      'curve_inner_line_steer_factor',
                      'single_line_swept_weight_entering', 'single_line_swept_weight_in_curve',
@@ -8124,6 +8430,10 @@ Returns:
                             'bfmc_default_curve_radius', 'curve_enter_frames',
                             'curve_confirm_frames', 'curve_exit_frames',
                             'curve_vp_threshold', 'curve_vp_confirm_frames',
+                            'curve_two_line_heading_threshold_deg',
+                            'curve_two_line_heading_confidence',
+                            'curve_two_line_confirm_frames',
+                            'curve_two_line_hold_frames',
                             'curve_pre_position_gain', 'curve_exit_gain',
                             'curve_inner_line_steer_factor']
             if any(p in normalized_config for p in hybrid_params):
@@ -8133,6 +8443,10 @@ Returns:
                       f"FSM: enter={self.curve_enter_frames} confirm={self.curve_confirm_frames} "
                       f"exit={self.curve_exit_frames} vp_thr={self.curve_vp_threshold} "
                       f"vp_confirm={self.curve_vp_confirm_frames} "
+                      f"2l_hint_deg={self.curve_two_line_heading_threshold_deg} "
+                      f"2l_hint_conf={self.curve_two_line_heading_confidence} "
+                      f"2l_confirm={self.curve_two_line_confirm_frames} "
+                      f"2l_hold={self.curve_two_line_hold_frames} "
                       f"pre_gain={self.curve_pre_position_gain} exit_gain={self.curve_exit_gain} "
                       f"inner_steer={self.curve_inner_line_steer_factor}")
             
@@ -8880,11 +9194,55 @@ Returns:
                     if speed is not None:
                         self._last_safe_speed = speed
 
+            maneuver_decision = self._maneuver_manager.decide(
+                time.time(),
+                tracking_state=self._tracking_state,
+            )
+            self._planner_priority_active = bool(maneuver_decision.planner_priority)
+            self._active_maneuver_name = str(maneuver_decision.active_maneuver or "none")
+            self._mission_state_name = str(maneuver_decision.mission_state or "LANE_FOLLOW")
+            self._last_maneuver_notes = str(maneuver_decision.notes or "")
+            self._safety_stop_reason = self._last_maneuver_notes if maneuver_decision.safety_stop else ""
+
+            if maneuver_decision.speed_cap is not None and speed is not None:
+                speed = min(float(speed), float(maneuver_decision.speed_cap))
+            if maneuver_decision.speed_override is not None:
+                speed = float(maneuver_decision.speed_override)
+            if maneuver_decision.steer_override is not None:
+                steering_angle = float(maneuver_decision.steer_override)
+            if maneuver_decision.safety_stop:
+                if steering_angle is None:
+                    steering_angle = 0.0
+                speed = 0.0
+
             # While parking is active (LANE_KEEPING / SPOT_TRACKED), cap speed
             # so the vehicle moves slowly enough to react to the detected spot.
             _parking_active_states = (ParkingState.LANE_KEEPING, ParkingState.SPOT_TRACKED)
             if self._parking_state in _parking_active_states and speed is not None:
                 speed = min(speed, PARKING_SEARCH_SPEED)
+
+            nav_ctx = self._get_navigation_context()
+            last_trace = self._last_frame_trace or {}
+            debug_trace = last_trace.get("debug", {}) if isinstance(last_trace, dict) else {}
+            blind_control_mode = str(debug_trace.get("blind_control_mode", "") or "")
+            if maneuver_decision.safety_stop:
+                self._control_policy_mode = "SAFETY_STOP"
+                self._control_authority = "safety"
+            elif self._active_maneuver_name != "none":
+                self._control_policy_mode = "MANEUVER_CONTROL"
+                self._control_authority = "maneuver"
+            elif blind_control_mode == "visual_fallback":
+                self._control_policy_mode = "VISUAL_FALLBACK"
+                self._control_authority = "visual_fallback"
+            elif blind_control_mode == "route_tracking" or nav_ctx["planner_priority"]:
+                self._control_policy_mode = "ROUTE_TRACKING"
+                self._control_authority = "planner"
+            elif nav_ctx["route_active"]:
+                self._control_policy_mode = "VISUAL_ASSIST"
+                self._control_authority = "planner_visual_assist"
+            else:
+                self._control_policy_mode = "VISUAL_ASSIST"
+                self._control_authority = "visual"
 
             computed_steering = steering_angle
             computed_speed = speed
@@ -9352,8 +9710,9 @@ Returns:
                 self.last_seen_side = "both"
 
                 curve_reference = None
+                curve_context = self._curve_state in ("ENTERING", "IN_CURVE", "EXITING")
                 if (
-                    self.use_swept_path and
+                    (self.use_swept_path or curve_context) and
                     mask_guidance_left_line is not None and
                     mask_guidance_right_line is not None
                 ):
@@ -9475,6 +9834,10 @@ Returns:
                         lane_width_px=lane_width_px, img_w=img_w,
                         direct_error_m=direct_error_m,
                         direct_error_context={"source": "two_line"},
+                    )
+                    steering_angle = self._enforce_two_line_curve_priority(
+                        steering_angle,
+                        debug_info=debug_info,
                     )
 
                 self.steer_history.append(steering_angle)
@@ -9927,8 +10290,10 @@ Returns:
                 )
                 speed_cap = float(speed)
                 debug_info['blind_control_mode'] = blind_mode
-                if blind_mode == 'tracking_fallback':
-                    debug_info['control_override'] = 'tracking_blind_fallback'
+                if blind_mode == 'route_tracking':
+                    debug_info['control_override'] = 'route_blind_fallback'
+                elif blind_mode == 'visual_fallback':
+                    debug_info['control_override'] = 'visual_blind_hold'
                 else:
                     self._current_speed = 0.0
                     debug_info['control_override'] = 'no_lane_safety_stop'
@@ -10423,6 +10788,13 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             data = msg if isinstance(msg, dict) else json.loads(msg)
         except Exception:
             return False
+
+        current_mode = str(getattr(self, "_last_state_change_message", "") or "").lower()
+        self._maneuver_manager.observe_sign(
+            data,
+            current_mode=current_mode,
+            tracking_state=self._tracking_state,
+        )
 
         if data.get("sign") != "parking":
             return False

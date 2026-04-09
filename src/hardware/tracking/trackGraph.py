@@ -1,33 +1,35 @@
 """
-Track graph loader and waypoint generator.
+Track graph loader, global route builder, and dense waypoint generator.
 
-Loads a GraphML file, builds an ordered traversal of nodes starting from
-``is_start=true``, and interpolates a dense waypoint array using a cubic
-spline — equivalent to SplineUtils.cpp in the reference repo.
+This module keeps two responsibilities separate:
+1. A topological directed graph loaded from GraphML for route planning.
+2. Dense waypoint interpolation for whatever node sequence is currently active.
 
-Node attribute encoding (new_attribute field):
-    0 = NORMAL
-    1 = CROSSWALK
-    2 = INTERSECTION
-    3 = ONEWAY
-    4 = HIGHWAY_LEFT
-    5 = HIGHWAY_RIGHT
-    6 = ROUNDABOUT
-    7 = STOPLINE
-    8 = DOTTED
-    9 = DOTTED_CROSSWALK
+The legacy reference loop is still built for backwards compatibility with the
+existing visualizer and as a safe default route when no destination was chosen.
+Explicit navigation uses shortest-path planning over the graph instead.
 """
 
+from __future__ import annotations
+
+import heapq
 import math
+import os
 import xml.etree.ElementTree as ET
-import numpy as np
 from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Iterable
+
+import numpy as np
 
 try:
     from scipy.interpolate import CubicSpline
+
     _SCIPY_OK = True
 except ImportError:
     _SCIPY_OK = False
+
+from src.hardware.tracking.trackSemantics import TrackSemantics
 
 ATTR_NORMAL = 0
 ATTR_CROSSWALK = 1
@@ -37,45 +39,99 @@ ATTR_HIGHWAY_LEFT = 4
 ATTR_HIGHWAY_RIGHT = 5
 ATTR_ROUNDABOUT = 6
 ATTR_STOPLINE = 7
+ATTR_DOTTED = 8
+ATTR_DOTTED_CROSSWALK = 9
 
-# Attributes treated as "precision zones" where waypoint guidance replaces vision
 WAYPOINT_MODE_ATTRS = {ATTR_INTERSECTION, ATTR_STOPLINE}
 
+_ATTR_ROUTE_WEIGHTS = {
+    ATTR_NORMAL: 1.00,
+    ATTR_CROSSWALK: 1.08,
+    ATTR_INTERSECTION: 1.02,
+    ATTR_ONEWAY: 0.98,
+    ATTR_HIGHWAY_LEFT: 0.95,
+    ATTR_HIGHWAY_RIGHT: 0.95,
+    ATTR_ROUNDABOUT: 1.04,
+    ATTR_STOPLINE: 1.10,
+    ATTR_DOTTED: 1.00,
+    ATTR_DOTTED_CROSSWALK: 1.08,
+}
 
+
+@dataclass(frozen=True)
 class TrackNode:
-    __slots__ = ("node_id", "x", "y", "attribute", "is_start")
+    node_id: str
+    x: float
+    y: float
+    attribute: int = ATTR_NORMAL
+    is_start: bool = False
 
-    def __init__(self, node_id, x, y, attribute=ATTR_NORMAL, is_start=False):
-        self.node_id = node_id
-        self.x = float(x)
-        self.y = float(y)
-        self.attribute = int(attribute)
-        self.is_start = bool(is_start)
+
+@dataclass
+class RoutePath:
+    node_ids: list[str]
+    waypoints: np.ndarray
+    wp_node_attrs: np.ndarray
+    wp_node_ids: list[str]
+    closed_loop: bool = False
+    route_id: str | None = None
+    source: str = "graph"
+    wp_edge_ids: list[str] = field(default_factory=list)
+    wp_semantic_ids: list[str | None] = field(default_factory=list)
+    wp_semantic_types: list[str] = field(default_factory=list)
+    wp_zone_ids: list[list[str]] = field(default_factory=list)
+    wp_zone_types: list[list[str]] = field(default_factory=list)
+    route_events: list[dict] = field(default_factory=list)
+    map_metadata: dict = field(default_factory=dict)
+    available_destinations: list[dict] = field(default_factory=list)
+
+    def preview_points(self, max_points: int = 140) -> list[dict[str, float]]:
+        if self.waypoints.size == 0:
+            return []
+        total = int(self.waypoints.shape[0])
+        step = max(1, total // max(1, int(max_points)))
+        preview = self.waypoints[::step, :2]
+        if total > 0 and (len(preview) == 0 or not np.allclose(preview[-1], self.waypoints[-1, :2])):
+            preview = np.vstack([preview, self.waypoints[-1, :2]])
+        return [
+            {"x": round(float(x), 4), "y": round(float(y), 4)}
+            for x, y in preview
+        ]
+
+    def destination_point(self) -> dict[str, float] | None:
+        if self.waypoints.size == 0:
+            return None
+        x, y, _ = self.waypoints[-1]
+        return {"x": round(float(x), 4), "y": round(float(y), 4)}
 
 
 class TrackGraph:
-    """Loads a GraphML track file and provides navigation utilities."""
+    """Loads a GraphML track file and provides route/navigation utilities."""
 
     GRAPHML_NS = "http://graphml.graphdrawing.org/graphml"
 
-    def __init__(self, graphml_path: str, step_m: float = 0.05):
-        """
-        Args:
-            graphml_path: Path to the GraphML file.
-            step_m:       Spline interpolation step in metres (default 5 cm).
-        """
+    def __init__(self, graphml_path: str, step_m: float = 0.05, semantics_path: str | None = None):
         self.step_m = float(step_m)
         self.nodes: dict[str, TrackNode] = {}
         self.adj: dict[str, list[str]] = defaultdict(list)
+        self.edge_lengths: dict[tuple[str, str], float] = {}
+        self.edge_ids: dict[tuple[str, str], str] = {}
 
-        # Filled after build():
-        self.ordered_nodes: list[TrackNode] = []   # DFS-ordered graph nodes
-        self.waypoints: np.ndarray = np.empty((0, 3))  # (N, 3) → x, y, psi
-        self.wp_node_attrs: np.ndarray = np.empty(0, dtype=int)  # attribute per wp
+        self.reference_node_ids: list[str] = []
+        self.reference_path: RoutePath = RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+
+        # Backwards-compatible fields used by the visualizer and older code.
+        self.ordered_nodes: list[TrackNode] = []
+        self.waypoints: np.ndarray = np.empty((0, 3))
+        self.wp_node_attrs: np.ndarray = np.empty(0, dtype=int)
 
         self._load(graphml_path)
-        self._build_path()
-        self._interpolate()
+        if semantics_path is None:
+            candidate = os.path.join(os.path.dirname(os.path.abspath(graphml_path)), "track_semantics.json")
+            semantics_path = candidate if os.path.exists(candidate) else None
+        self.semantics = TrackSemantics(semantics_path)
+        self.map_metadata = self._build_map_metadata()
+        self._build_reference_path()
 
     # ------------------------------------------------------------------
     # Loading
@@ -85,7 +141,6 @@ class TrackGraph:
         root = tree.getroot()
         ns = self.GRAPHML_NS
 
-        # Discover key IDs for x, y, new_attribute, is_start
         key_map = {}
         for key in root.findall(f"{{{ns}}}key"):
             name = key.get("attr.name", "")
@@ -103,149 +158,543 @@ class TrackGraph:
 
         for node_el in graph.findall(f"{{{ns}}}node"):
             nid = node_el.get("id")
+            if nid is None:
+                continue
             data = {d.get("key"): d.text for d in node_el.findall(f"{{{ns}}}data")}
             x = float(data.get(x_key, 0.0))
             y = float(data.get(y_key, 0.0))
-            attr = int(data.get(attr_key, 0) or 0)
+            attr = int(data.get(attr_key, ATTR_NORMAL) or ATTR_NORMAL)
             is_start = str(data.get(start_key, "false")).lower() == "true"
             self.nodes[nid] = TrackNode(nid, x, y, attr, is_start)
 
         for edge_el in graph.findall(f"{{{ns}}}edge"):
             src = edge_el.get("source")
             tgt = edge_el.get("target")
-            if src and tgt:
-                self.adj[src].append(tgt)
+            if not src or not tgt or src not in self.nodes or tgt not in self.nodes:
+                continue
+            self.adj[src].append(tgt)
+            self.edge_ids[(src, tgt)] = edge_el.get("id") or f"{src}->{tgt}"
+            self.edge_lengths[(src, tgt)] = math.hypot(
+                self.nodes[tgt].x - self.nodes[src].x,
+                self.nodes[tgt].y - self.nodes[src].y,
+            )
 
-    # ------------------------------------------------------------------
-    # Path building (DFS from start node)
-    # ------------------------------------------------------------------
-    def _build_path(self) -> None:
-        # Find start node
-        start_id = None
+    def get_start_node_id(self) -> str:
         for nid, node in self.nodes.items():
             if node.is_start:
-                start_id = nid
-                break
-        if start_id is None:
-            # Fall back to the node with the smallest numeric id
-            start_id = min(self.nodes.keys(), key=lambda k: int(k))
+                return nid
+        return min(self.nodes.keys(), key=lambda key: int(key))
 
-        # Walk following edges; stop when we'd revisit or dead-end
+    def _build_map_metadata(self) -> dict:
+        xs = [node.x for node in self.nodes.values()]
+        ys = [node.y for node in self.nodes.values()]
+        x_min = min(xs) if xs else 0.0
+        x_max = max(xs) if xs else 0.0
+        y_min = min(ys) if ys else 0.0
+        y_max = max(ys) if ys else 0.0
+        default = {
+            "coordinate_origin": "bottom_left",
+            "y_axis_inverted": True,
+            "width_m": round(float(x_max - x_min), 5),
+            "height_m": round(float(y_max - y_min), 5),
+            "world_bounds": {
+                "x_min": round(float(x_min), 5),
+                "x_max": round(float(x_max), 5),
+                "y_min": round(float(y_min), 5),
+                "y_max": round(float(y_max), 5),
+            },
+        }
+        payload = dict(default)
+        payload.update(dict(self.semantics.map_metadata or {}))
+        mpp = payload.get("meters_per_pixel")
+        ppm = payload.get("pixels_per_meter")
+        try:
+            if mpp and not ppm:
+                payload["pixels_per_meter"] = round(1.0 / float(mpp), 6)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        try:
+            if ppm and not mpp:
+                payload["meters_per_pixel"] = round(1.0 / float(ppm), 9)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+        return payload
+
+    def get_map_metadata(self) -> dict:
+        return dict(self.map_metadata)
+
+    def get_available_destinations(self) -> list[dict]:
+        destinations = self.semantics.get_available_destinations()
+        if destinations:
+            return destinations
+        start_id = self.get_start_node_id() if self.nodes else None
+        return [
+            {"id": "reference_start", "label": "Reference Start", "node_id": start_id}
+        ] if start_id else []
+
+    def describe_destination(self, node_id: str | None) -> dict | None:
+        if node_id is None:
+            return None
+        node_key = str(node_id)
+        for item in self.get_available_destinations():
+            if str(item.get("node_id")) == node_key or str(item.get("id")) == node_key:
+                return dict(item)
+        if node_key in self.nodes:
+            return {"id": node_key, "label": f"Node {node_key}", "node_id": node_key}
+        return None
+
+    # ------------------------------------------------------------------
+    # Reference loop (compatibility / default route)
+    # ------------------------------------------------------------------
+    def _build_reference_sequence(self, start_id: str) -> list[str]:
         visited = set()
-        path = []
+        path: list[str] = []
         current = start_id
         while current is not None and current not in visited:
             visited.add(current)
-            node = self.nodes.get(current)
-            if node is None:
+            if current not in self.nodes:
                 break
-            path.append(node)
+            path.append(current)
             successors = self.adj.get(current, [])
-            # Pick first unvisited successor; if all visited, pick first anyway
-            # (allows the loop to "re-enter" for the final segment)
             next_node = None
-            for s in successors:
-                if s not in visited:
-                    next_node = s
+            for succ in successors:
+                if succ not in visited:
+                    next_node = succ
                     break
+            if next_node is None and successors and start_id in successors and len(path) > 1:
+                path.append(start_id)
+                break
             current = next_node
+        return path
 
-        self.ordered_nodes = path
+    def _build_reference_path(self) -> None:
+        start_id = self.get_start_node_id()
+        reference_ids = self._build_reference_sequence(start_id)
+        if len(reference_ids) < 2 and self.nodes:
+            reference_ids = list(self.nodes.keys())
+
+        closed_loop = len(reference_ids) > 1 and reference_ids[0] == reference_ids[-1]
+        if not closed_loop and len(reference_ids) > 1:
+            last_id = reference_ids[-1]
+            first_id = reference_ids[0]
+            if first_id in self.adj.get(last_id, []):
+                reference_ids = reference_ids + [first_id]
+                closed_loop = True
+
+        self.reference_node_ids = list(reference_ids)
+        self.reference_path = self.build_dense_path(
+            reference_ids,
+            closed_loop=closed_loop,
+            route_id="reference_loop",
+            source="reference",
+        )
+        self.ordered_nodes = [self.nodes[nid] for nid in reference_ids if nid in self.nodes]
+        self.waypoints = self.reference_path.waypoints
+        self.wp_node_attrs = self.reference_path.wp_node_attrs
 
     # ------------------------------------------------------------------
-    # Spline interpolation (like SplineUtils.cpp)
+    # Topological planning
     # ------------------------------------------------------------------
-    def _interpolate(self) -> None:
-        if len(self.ordered_nodes) < 2:
-            # Single or no nodes: one waypoint at the start position
-            if self.ordered_nodes:
-                n = self.ordered_nodes[0]
-                self.waypoints = np.array([[n.x, n.y, 0.0]])
-                self.wp_node_attrs = np.array([n.attribute], dtype=int)
-            return
+    def _edge_cost(self, src: str, tgt: str) -> float:
+        base = self.edge_lengths.get((src, tgt))
+        if base is None:
+            src_node = self.nodes[src]
+            tgt_node = self.nodes[tgt]
+            base = math.hypot(tgt_node.x - src_node.x, tgt_node.y - src_node.y)
+        weight = _ATTR_ROUTE_WEIGHTS.get(self.nodes[tgt].attribute, 1.0)
+        return float(base) * float(weight)
 
-        xs = np.array([n.x for n in self.ordered_nodes])
-        ys = np.array([n.y for n in self.ordered_nodes])
-        attrs = np.array([n.attribute for n in self.ordered_nodes], dtype=int)
+    def shortest_path(self, start_id: str, dest_id: str) -> list[str]:
+        start_id = str(start_id)
+        dest_id = str(dest_id)
+        if start_id not in self.nodes or dest_id not in self.nodes:
+            return []
+        if start_id == dest_id:
+            return [start_id]
 
-        # Arc-length parameterisation
+        dist = {start_id: 0.0}
+        prev: dict[str, str] = {}
+        heap: list[tuple[float, str]] = [(0.0, start_id)]
+        visited = set()
+
+        while heap:
+            cost, node_id = heapq.heappop(heap)
+            if node_id in visited:
+                continue
+            visited.add(node_id)
+            if node_id == dest_id:
+                break
+            for succ in self.adj.get(node_id, []):
+                edge_cost = cost + self._edge_cost(node_id, succ)
+                if edge_cost < dist.get(succ, float("inf")):
+                    dist[succ] = edge_cost
+                    prev[succ] = node_id
+                    heapq.heappush(heap, (edge_cost, succ))
+
+        if dest_id not in dist:
+            return []
+
+        path = [dest_id]
+        cur = dest_id
+        while cur != start_id:
+            cur = prev[cur]
+            path.append(cur)
+        path.reverse()
+        return path
+
+    def reference_path_between(self, start_id: str, dest_id: str) -> list[str]:
+        if not self.reference_node_ids:
+            return []
+        ref_ids = list(self.reference_node_ids)
+        if len(ref_ids) > 1 and ref_ids[0] == ref_ids[-1]:
+            ref_ids = ref_ids[:-1]
+        if start_id not in ref_ids or dest_id not in ref_ids:
+            return []
+        start_idx = ref_ids.index(start_id)
+        dest_idx = ref_ids.index(dest_id)
+        if start_idx <= dest_idx:
+            return ref_ids[start_idx:dest_idx + 1]
+        return ref_ids[start_idx:] + ref_ids[:dest_idx + 1]
+
+    def find_nearest_node(self, x: float, y: float, candidate_ids: Iterable[str] | None = None) -> str | None:
+        ids = list(candidate_ids) if candidate_ids is not None else list(self.nodes.keys())
+        if not ids:
+            return None
+        best_id = None
+        best_dist = None
+        for node_id in ids:
+            node = self.nodes.get(str(node_id))
+            if node is None:
+                continue
+            dist = math.hypot(float(x) - node.x, float(y) - node.y)
+            if best_dist is None or dist < best_dist:
+                best_dist = dist
+                best_id = node.node_id
+        return best_id
+
+    def resolve_node_id(self, spec) -> str | None:
+        if spec is None:
+            return None
+        destination = self.semantics.resolve_destination(spec)
+        if destination is not None:
+            return str(destination.get("node_id"))
+        if isinstance(spec, dict):
+            if "node_id" in spec:
+                candidate = str(spec["node_id"])
+                return candidate if candidate in self.nodes else None
+            if "id" in spec:
+                candidate = str(spec["id"])
+                return candidate if candidate in self.nodes else None
+            if "x" in spec and "y" in spec:
+                try:
+                    return self.find_nearest_node(float(spec["x"]), float(spec["y"]))
+                except (TypeError, ValueError):
+                    return None
+            return None
+        candidate = str(spec)
+        if candidate in self.nodes:
+            return candidate
+        destination = self.semantics.resolve_destination(candidate)
+        if destination is not None:
+            return str(destination.get("node_id"))
+        try:
+            numeric = str(int(float(spec)))
+            return numeric if numeric in self.nodes else None
+        except (TypeError, ValueError):
+            return None
+
+    def go_to(self, start_spec, dest_spec) -> RoutePath:
+        start_id = self.resolve_node_id(start_spec)
+        dest_id = self.resolve_node_id(dest_spec)
+        if start_id is None or dest_id is None:
+            return RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+
+        node_ids = self.shortest_path(start_id, dest_id)
+        if not node_ids:
+            node_ids = self.reference_path_between(start_id, dest_id)
+        if not node_ids:
+            return RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+        return self.build_dense_path(node_ids, closed_loop=False, source="go_to")
+
+    def go_to_multiple(self, start_spec, destinations) -> RoutePath:
+        start_id = self.resolve_node_id(start_spec)
+        if start_id is None:
+            return RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+
+        dest_ids = []
+        for spec in destinations or []:
+            node_id = self.resolve_node_id(spec)
+            if node_id is not None:
+                dest_ids.append(node_id)
+        if not dest_ids:
+            return RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+
+        full_sequence: list[str] = []
+        current = start_id
+        for dest_id in dest_ids:
+            segment = self.shortest_path(current, dest_id)
+            if not segment:
+                segment = self.reference_path_between(current, dest_id)
+            if not segment:
+                continue
+            if full_sequence and segment:
+                segment = segment[1:]
+            full_sequence.extend(segment if full_sequence else segment)
+            current = dest_id
+
+        if not full_sequence:
+            return RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [])
+        return self.build_dense_path(full_sequence, closed_loop=False, source="go_to_multiple")
+
+    # ------------------------------------------------------------------
+    # Dense waypoint generation
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _semantic_priority(event: dict | None) -> int:
+        semantic_type = str((event or {}).get("type") or "")
+        order = {
+            "control": 0,
+            "intersection": 1,
+            "crosswalk": 2,
+            "parking_spot": 3,
+            "destination": 4,
+            "zone": 5,
+        }
+        return order.get(semantic_type, 99)
+
+    def _default_attr_semantic(self, node_id: str, attr: int) -> dict | None:
+        attr = int(attr)
+        if attr == ATTR_STOPLINE:
+            return {
+                "id": f"attr-stopline-{node_id}",
+                "type": "stopline",
+                "label": "Stopline",
+                "anchor_node_id": node_id,
+                "control_type": "stop",
+            }
+        if attr == ATTR_INTERSECTION:
+            return {
+                "id": f"attr-intersection-{node_id}",
+                "type": "intersection",
+                "label": "Intersection",
+                "anchor_node_id": node_id,
+            }
+        if attr == ATTR_CROSSWALK:
+            return {
+                "id": f"attr-crosswalk-{node_id}",
+                "type": "crosswalk",
+                "label": "Crosswalk",
+                "anchor_node_id": node_id,
+            }
+        if attr == ATTR_ROUNDABOUT:
+            return {
+                "id": f"attr-roundabout-{node_id}",
+                "type": "roundabout",
+                "label": "Roundabout",
+                "anchor_node_id": node_id,
+            }
+        if attr in (ATTR_HIGHWAY_LEFT, ATTR_HIGHWAY_RIGHT):
+            return {
+                "id": f"attr-highway-{node_id}",
+                "type": "zone",
+                "label": "Highway",
+                "anchor_node_id": node_id,
+                "zone_type": "highway",
+            }
+        if attr == ATTR_ONEWAY:
+            return {
+                "id": f"attr-oneway-{node_id}",
+                "type": "zone",
+                "label": "One Way",
+                "anchor_node_id": node_id,
+                "zone_type": "oneway",
+            }
+        return None
+
+    def _annotate_route(self, route: RoutePath) -> RoutePath:
+        route.map_metadata = self.get_map_metadata()
+        route.available_destinations = self.get_available_destinations()
+        if not route.node_ids or not route.wp_node_ids:
+            return route
+
+        annotations = self.semantics.build_route_annotations(
+            route.node_ids,
+            closed_loop=route.closed_loop,
+        )
+        node_events_by_index = annotations.get("node_events_by_index", [])
+        zone_ids_by_index = annotations.get("zone_ids_by_index", [])
+        zone_types_by_index = annotations.get("zone_types_by_index", [])
+        route.route_events = list(annotations.get("route_events", []))
+
+        node_index_by_id = {
+            str(node_id): idx
+            for idx, node_id in enumerate(route.node_ids)
+        }
+        route.wp_semantic_ids = []
+        route.wp_semantic_types = []
+        route.wp_zone_ids = []
+        route.wp_zone_types = []
+
+        seen_route_events = {
+            (str(item.get("type")), str(item.get("id")))
+            for item in route.route_events
+        }
+
+        for wp_idx, node_id in enumerate(route.wp_node_ids):
+            route_idx = node_index_by_id.get(str(node_id), 0)
+            node_events = list(node_events_by_index[route_idx]) if route_idx < len(node_events_by_index) else []
+            zone_ids = list(zone_ids_by_index[route_idx]) if route_idx < len(zone_ids_by_index) else []
+            zone_types = list(zone_types_by_index[route_idx]) if route_idx < len(zone_types_by_index) else []
+
+            default_event = self._default_attr_semantic(
+                str(node_id),
+                int(route.wp_node_attrs[wp_idx]) if wp_idx < len(route.wp_node_attrs) else ATTR_NORMAL,
+            )
+            if default_event is not None:
+                node_events.append(default_event)
+                key = (str(default_event.get("type")), str(default_event.get("id")))
+                if key not in seen_route_events:
+                    seen_route_events.add(key)
+                    route.route_events.append(
+                        {**default_event, "route_node_index": route_idx, "node_id": str(node_id)}
+                    )
+
+            node_events.sort(key=self._semantic_priority)
+            primary = node_events[0] if node_events else None
+            route.wp_semantic_ids.append(primary.get("id") if primary else None)
+            route.wp_semantic_types.append(str(primary.get("type") or "lane_follow") if primary else "lane_follow")
+            route.wp_zone_ids.append(zone_ids)
+            route.wp_zone_types.append(zone_types)
+
+        first_wp_idx_by_node_id = {}
+        for wp_idx, node_id in enumerate(route.wp_node_ids):
+            first_wp_idx_by_node_id.setdefault(str(node_id), wp_idx)
+        for event in route.route_events:
+            node_id = str(event.get("node_id") or "")
+            event["waypoint_idx"] = int(first_wp_idx_by_node_id.get(node_id, 0))
+        route.route_events.sort(key=lambda item: (int(item.get("route_node_index", 0)), str(item.get("id", ""))))
+        return route
+
+    def _finalize_route(self, route: RoutePath) -> RoutePath:
+        route.map_metadata = self.get_map_metadata()
+        route.available_destinations = self.get_available_destinations()
+        if not route.wp_edge_ids:
+            route.wp_edge_ids = ["" for _ in route.wp_node_ids]
+        return self._annotate_route(route)
+
+    def build_dense_path(
+        self,
+        node_ids: Iterable[str],
+        closed_loop: bool | None = None,
+        step_m: float | None = None,
+        route_id: str | None = None,
+        source: str = "graph",
+    ) -> RoutePath:
+        clean_ids = [str(node_id) for node_id in node_ids if str(node_id) in self.nodes]
+        if not clean_ids:
+            return self._finalize_route(
+                RoutePath([], np.empty((0, 3)), np.empty(0, dtype=int), [], False, route_id, source)
+            )
+
+        deduped = [clean_ids[0]]
+        for node_id in clean_ids[1:]:
+            if node_id != deduped[-1]:
+                deduped.append(node_id)
+
+        if closed_loop is None:
+            closed_loop = len(deduped) > 1 and deduped[0] == deduped[-1]
+        loop_ids = list(deduped)
+        if closed_loop and len(loop_ids) > 1 and loop_ids[0] != loop_ids[-1]:
+            loop_ids.append(loop_ids[0])
+
+        if len(loop_ids) == 1:
+            node = self.nodes[loop_ids[0]]
+            waypoints = np.array([[node.x, node.y, 0.0]], dtype=float)
+            attrs = np.array([node.attribute], dtype=int)
+            return self._finalize_route(RoutePath(
+                node_ids=list(deduped),
+                waypoints=waypoints,
+                wp_node_attrs=attrs,
+                wp_node_ids=[node.node_id],
+                closed_loop=bool(closed_loop),
+                route_id=route_id,
+                source=source,
+                wp_edge_ids=[""],
+            ))
+
+        xs = np.array([self.nodes[node_id].x for node_id in loop_ids], dtype=float)
+        ys = np.array([self.nodes[node_id].y for node_id in loop_ids], dtype=float)
+        attrs = np.array([self.nodes[node_id].attribute for node_id in loop_ids], dtype=int)
+
         dists = np.hypot(np.diff(xs), np.diff(ys))
         dists = np.maximum(dists, 1e-6)
         t = np.concatenate([[0.0], np.cumsum(dists)])
-        total_len = t[-1]
+        total_len = float(t[-1])
+        step = float(step_m or self.step_m)
 
-        if _SCIPY_OK:
-            cs_x = CubicSpline(t, xs)
-            cs_y = CubicSpline(t, ys)
-            n_pts = max(2, int(total_len / self.step_m) + 1)
+        if total_len <= 1e-6:
+            waypoints = np.column_stack([xs[:1], ys[:1], np.zeros(1, dtype=float)])
+            return self._finalize_route(RoutePath(
+                node_ids=list(deduped),
+                waypoints=waypoints,
+                wp_node_attrs=np.array([attrs[0]], dtype=int),
+                wp_node_ids=[loop_ids[0]],
+                closed_loop=bool(closed_loop),
+                route_id=route_id,
+                source=source,
+                wp_edge_ids=[""],
+            ))
+
+        if closed_loop:
+            n_pts = max(3, int(total_len / max(step, 1e-6)))
+            t_dense = np.linspace(0.0, total_len, n_pts, endpoint=False)
+        else:
+            n_pts = max(2, int(total_len / max(step, 1e-6)) + 1)
             t_dense = np.linspace(0.0, total_len, n_pts)
+
+        if _SCIPY_OK and len(loop_ids) >= 3:
+            cs_x = CubicSpline(t, xs, bc_type="not-a-knot")
+            cs_y = CubicSpline(t, ys, bc_type="not-a-knot")
             wx = cs_x(t_dense)
             wy = cs_y(t_dense)
             dx = cs_x(t_dense, 1)
             dy = cs_y(t_dense, 1)
         else:
-            # Linear fallback
-            n_pts = max(2, int(total_len / self.step_m) + 1)
-            t_dense = np.linspace(0.0, total_len, n_pts)
             wx = np.interp(t_dense, t, xs)
             wy = np.interp(t_dense, t, ys)
             dx = np.gradient(wx, t_dense)
             dy = np.gradient(wy, t_dense)
 
         psi = np.arctan2(dy, dx)
-        self.waypoints = np.column_stack([wx, wy, psi])
+        waypoints = np.column_stack([wx, wy, psi])
 
-        # Map each dense waypoint to the attribute of its nearest graph node
         wp_attrs = np.zeros(len(t_dense), dtype=int)
-        for i, td in enumerate(t_dense):
+        wp_node_ids: list[str] = []
+        wp_edge_ids: list[str] = []
+        attr_limit = max(0, len(attrs) - 2) if len(attrs) > 1 else 0
+        for td in t_dense:
             idx = int(np.searchsorted(t, td, side="right")) - 1
-            idx = max(0, min(idx, len(attrs) - 1))
-            wp_attrs[i] = attrs[idx]
-        self.wp_node_attrs = wp_attrs
+            idx = max(0, min(idx, attr_limit if len(attrs) > 1 else 0))
+            wp_attrs[len(wp_node_ids)] = attrs[idx]
+            wp_node_ids.append(loop_ids[idx])
+            next_idx = min(idx + 1, len(loop_ids) - 1)
+            edge_key = (loop_ids[idx], loop_ids[next_idx]) if next_idx != idx else None
+            wp_edge_ids.append(self.edge_ids.get(edge_key, "") if edge_key else "")
+
+        return self._finalize_route(RoutePath(
+            node_ids=list(deduped),
+            waypoints=waypoints,
+            wp_node_attrs=wp_attrs,
+            wp_node_ids=wp_node_ids,
+            closed_loop=bool(closed_loop),
+            route_id=route_id,
+            source=source,
+            wp_edge_ids=wp_edge_ids,
+        ))
 
     # ------------------------------------------------------------------
-    # Navigation utilities
+    # Backwards-compatible path utilities (reference path only)
     # ------------------------------------------------------------------
-    def find_closest_waypoint(self, x: float, y: float, search_start: int = 0,
-                               search_window: int = 60) -> int:
-        """Return the index of the waypoint closest to (x, y).
-
-        Searches within ±search_window around search_start to handle
-        path wrap-around efficiently.
-        """
-        n = len(self.waypoints)
-        if n == 0:
-            return 0
-        start = int(search_start) % n
-        window = max(1, int(search_window))
-        if n <= window + 5:
-            idxs = np.arange(n, dtype=int)
-        else:
-            idxs = np.array(
-                [(start + off) % n for off in range(-5, window)],
-                dtype=int,
-            )
-        sub = self.waypoints[idxs, :2]
-        dists = np.hypot(sub[:, 0] - x, sub[:, 1] - y)
-        return int(idxs[int(np.argmin(dists))])
-
-    def find_waypoint_ahead(self, x: float, y: float, current_idx: int,
-                             lookahead_m: float = 0.30) -> int:
-        """Return the waypoint index lookahead_m ahead of current_idx along
-        the path arc.
-
-        Uses path arc-length (step_m × N steps) rather than Euclidean
-        distance from the car, so that a large lateral offset (e.g. 19 cm)
-        does not incorrectly prevent the lookahead from advancing — with
-        Euclidean distance every waypoint appears > lookahead_m away and
-        the function would return current_idx (zero effective lookahead).
-        """
-        n = len(self.waypoints)
-        if n == 0:
-            return 0
-        steps = max(1, round(lookahead_m / self.step_m))
-        return (current_idx + steps) % n
-
     @staticmethod
     def _wrap_angle(angle_rad: float) -> float:
         while angle_rad > math.pi:
@@ -253,6 +702,31 @@ class TrackGraph:
         while angle_rad < -math.pi:
             angle_rad += 2.0 * math.pi
         return float(angle_rad)
+
+    def find_closest_waypoint(self, x: float, y: float, search_start: int = 0, search_window: int = 60) -> int:
+        n = len(self.waypoints)
+        if n == 0:
+            return 0
+        start = int(search_start) % n if self.reference_path.closed_loop else max(0, min(n - 1, int(search_start)))
+        window = max(1, int(search_window))
+        if n <= window + 5 or not self.reference_path.closed_loop:
+            lo = max(0, start - 5)
+            hi = min(n, start + window)
+            idxs = np.arange(lo, hi, dtype=int)
+        else:
+            idxs = np.array([(start + off) % n for off in range(-5, window)], dtype=int)
+        sub = self.waypoints[idxs, :2]
+        dists = np.hypot(sub[:, 0] - x, sub[:, 1] - y)
+        return int(idxs[int(np.argmin(dists))])
+
+    def find_waypoint_ahead(self, x: float, y: float, current_idx: int, lookahead_m: float = 0.30) -> int:
+        n = len(self.waypoints)
+        if n == 0:
+            return 0
+        steps = max(1, round(lookahead_m / self.step_m))
+        if self.reference_path.closed_loop:
+            return (current_idx + steps) % n
+        return min(n - 1, current_idx + steps)
 
     def project_pose_to_path(
         self,
@@ -264,11 +738,6 @@ class TrackGraph:
         distance_weight: float = 1.0,
         heading_weight: float = 0.35,
     ) -> dict:
-        """Project a raw pose onto the local path and score candidate segments.
-
-        Returns a dict with the matched waypoint index, projected x/y on the
-        path, tangent angle at the match, and the local matching score/error.
-        """
         n = len(self.waypoints)
         if n == 0:
             return {
@@ -294,16 +763,25 @@ class TrackGraph:
                 "score": math.hypot(float(x) - float(wx), float(y) - float(wy)),
             }
 
-        center = int(search_center) % n
-        window = max(1, int(search_window))
+        center = int(search_center)
+        if self.reference_path.closed_loop:
+            center %= n
+            seg_idxs = [(center + off) % n for off in range(-search_window, search_window + 1)]
+        else:
+            lo = max(0, center - search_window)
+            hi = min(n - 1, center + search_window)
+            seg_idxs = list(range(lo, hi))
+            if not seg_idxs:
+                seg_idxs = [max(0, min(n - 2, center))]
+
         continuity_weight = max(0.05, 0.25 * float(distance_weight))
         best = None
-
-        seg_offsets = range(-window, window + 1) if n > 2 else range(0, n)
-        for seg_offset in seg_offsets:
-            seg_idx = (center + seg_offset) % n
+        for seg_idx in seg_idxs:
+            next_idx = (seg_idx + 1) % n if self.reference_path.closed_loop else min(seg_idx + 1, n - 1)
+            if next_idx == seg_idx:
+                continue
             x0, y0, _ = self.waypoints[seg_idx]
-            x1, y1, _ = self.waypoints[(seg_idx + 1) % n]
+            x1, y1, _ = self.waypoints[next_idx]
             seg_dx = float(x1) - float(x0)
             seg_dy = float(y1) - float(y0)
             seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
@@ -320,13 +798,13 @@ class TrackGraph:
             dy = float(y) - proj_y
             lateral_error_m = -dx * math.sin(seg_psi) + dy * math.cos(seg_psi)
             heading_error_rad = self._wrap_angle(float(yaw) - seg_psi)
-            continuity_m = abs(seg_offset) * float(self.step_m)
+            continuity_m = abs(seg_idx - center) * float(self.step_m)
             score = (
-                float(distance_weight) * abs(lateral_error_m) +
-                float(heading_weight) * abs(heading_error_rad) +
-                continuity_weight * continuity_m
+                float(distance_weight) * abs(lateral_error_m)
+                + float(heading_weight) * abs(heading_error_rad)
+                + continuity_weight * continuity_m
             )
-            matched_idx = (seg_idx + 1) % n if proj_t >= 0.5 else seg_idx
+            matched_idx = next_idx if proj_t >= 0.5 else seg_idx
             candidate = {
                 "matched_idx": int(matched_idx),
                 "matched_x": float(proj_x),
@@ -340,69 +818,57 @@ class TrackGraph:
             if best is None or candidate["score"] < best["score"]:
                 best = candidate
 
-        if best is None:
-            idx = self.find_closest_waypoint(float(x), float(y), search_start=center, search_window=window)
-            wx, wy, psi = self.waypoints[idx]
-            return {
-                "matched_idx": int(idx),
-                "matched_x": float(wx),
-                "matched_y": float(wy),
-                "path_psi": float(psi),
-                "lateral_error_m": 0.0,
-                "heading_error_rad": self._wrap_angle(float(yaw) - float(psi)),
-                "map_match_error_m": math.hypot(float(x) - float(wx), float(y) - float(wy)),
-                "score": math.hypot(float(x) - float(wx), float(y) - float(wy)),
-            }
-        return best
+        if best is not None:
+            return best
 
-    def compute_tracking_error(self, x: float, y: float, yaw: float,
-                                wp_idx: int) -> tuple[float, float]:
-        """Compute lateral (crosstrack) and heading errors vs. waypoint wp_idx.
+        idx = self.find_closest_waypoint(float(x), float(y), search_start=center, search_window=search_window)
+        wx, wy, psi = self.waypoints[idx]
+        return {
+            "matched_idx": int(idx),
+            "matched_x": float(wx),
+            "matched_y": float(wy),
+            "path_psi": float(psi),
+            "lateral_error_m": 0.0,
+            "heading_error_rad": self._wrap_angle(float(yaw) - float(psi)),
+            "map_match_error_m": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+            "score": math.hypot(float(x) - float(wx), float(y) - float(wy)),
+        }
 
-        Returns:
-            (error_m, heading_rad) — same convention as LateralMPC.compute()
-                error_m  > 0 → car is to the left of the path centre
-                heading_rad > 0 → car is heading left relative to path tangent
-        """
+    def compute_tracking_error(self, x: float, y: float, yaw: float, wp_idx: int) -> tuple[float, float]:
         if len(self.waypoints) == 0:
             return 0.0, 0.0
-        idx = wp_idx % len(self.waypoints)
+        idx = int(max(0, min(len(self.waypoints) - 1, wp_idx)))
         xr, yr, psi_r = self.waypoints[idx]
         dx = x - xr
         dy = y - yr
-        # Crosstrack: signed lateral distance from path tangent
         error_m = -dx * math.sin(psi_r) + dy * math.cos(psi_r)
-        # Heading error: wrap to [-pi, pi]
         heading_rad = self._wrap_angle(yaw - psi_r)
         return float(error_m), float(heading_rad)
 
     def is_precision_zone(self, wp_idx: int, lookahead_pts: int = 8) -> bool:
-        """Return True if any of the next lookahead_pts waypoints is in a
-        STOPLINE or INTERSECTION zone — triggers waypoint-mode control."""
         n = len(self.waypoints)
         if n == 0:
             return False
-        for i in range(lookahead_pts):
-            attr = self.wp_node_attrs[(wp_idx + i) % n]
-            if attr in WAYPOINT_MODE_ATTRS:
+        for i in range(max(1, int(lookahead_pts))):
+            idx = (wp_idx + i) % n if self.reference_path.closed_loop else min(n - 1, wp_idx + i)
+            if int(self.wp_node_attrs[idx]) in WAYPOINT_MODE_ATTRS:
                 return True
         return False
 
     def get_curvature(self, wp_idx: int) -> float:
-        """Return signed path curvature kappa at waypoint wp_idx (1/m).
-
-        Positive = left curve (counterclockwise), Negative = right curve.
-        Estimated via central finite differences of the tangent angle psi
-        over the two adjacent waypoints, divided by 2 * step_m.
-        """
         n = len(self.waypoints)
         if n < 3:
             return 0.0
-        idx = wp_idx % n
-        i_next = (idx + 1) % n
-        i_prev = (idx - 1) % n
+        idx = int(max(0, min(n - 1, wp_idx)))
+        if self.reference_path.closed_loop:
+            i_prev = (idx - 1) % n
+            i_next = (idx + 1) % n
+        else:
+            i_prev = max(0, idx - 1)
+            i_next = min(n - 1, idx + 1)
+            if i_prev == idx or i_next == idx:
+                return 0.0
         dpsi = float(self.waypoints[i_next][2]) - float(self.waypoints[i_prev][2])
-        # Wrap difference to [-pi, pi]
         while dpsi > math.pi:
             dpsi -= 2.0 * math.pi
         while dpsi < -math.pi:
@@ -410,22 +876,18 @@ class TrackGraph:
         return dpsi / max(2.0 * self.step_m, 1e-6)
 
     def get_start_pose(self) -> tuple[float, float, float]:
-        """Return (x, y, yaw) of the start waypoint.
-
-        The heading is the chord direction from the start node to the next node,
-        matching the physical direction the car faces at startup.  Using the
-        spline tangent at waypoint-0 is wrong when the not-a-knot boundary
-        conditions pull the derivative away from the chord — that offset
-        mis-calibrates the IMU reference frame on the first message.
-        """
-        if not self.ordered_nodes:
-            return 0.0, 0.0, 0.0
-        n0 = self.ordered_nodes[0]
-        if len(self.ordered_nodes) >= 2:
-            n1 = self.ordered_nodes[1]
-            yaw = math.atan2(n1.y - n0.y, n1.x - n0.x)
+        start_id = self.get_start_node_id()
+        node = self.nodes[start_id]
+        next_id = None
+        for candidate in self.reference_node_ids:
+            if candidate != start_id:
+                next_id = candidate
+                break
+        if next_id is not None and next_id in self.nodes:
+            next_node = self.nodes[next_id]
+            yaw = math.atan2(next_node.y - node.y, next_node.x - node.x)
         elif len(self.waypoints) > 0:
             yaw = float(self.waypoints[0][2])
         else:
             yaw = 0.0
-        return n0.x, n0.y, yaw
+        return node.x, node.y, yaw

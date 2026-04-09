@@ -68,7 +68,8 @@ export class WebSocketService {
     'ImuAck',
     'console_log',
     'LineFollowingDebug',
-    'LineFollowingStatus'
+    'LineFollowingStatus',
+    'NavigationStatus'
   ]);
 
   constructor() {
@@ -257,6 +258,10 @@ export class WebSocketService {
   // Method to receive line following status (steering, speed, mode, etc.)
   receiveLineFollowingStatus(): Observable<any> {
     return this.webSocket.fromEvent('LineFollowingStatus');
+  }
+
+  receiveNavigationStatus(): Observable<any> {
+    return this.webSocket.fromEvent('NavigationStatus');
   }
 
   // Method to receive the initial connection confirmation

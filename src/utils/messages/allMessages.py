@@ -205,6 +205,12 @@ class LaneCalibMode(Enum):
     msgID = 22
     msgType = "str"  # "true" / "false"
 
+class NavigationCommand(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 23
+    msgType = "dict"  # {"mode": str, "destinations": list}
+
 ################################# From Line Following ##################################
 class LineFollowingDebug(Enum):
     Queue = "General"
@@ -377,3 +383,9 @@ class TrackingDebug(Enum):
     #                "speed_mps": float, "wp_idx": int,
     #                "waypoint_mode_active": bool, "node_attr": int}
     msgType = "dict"
+
+class NavigationStatus(Enum):
+    Queue = "General"
+    Owner = "threadTracking"
+    msgID = 2
+    msgType = "dict"  # route state, current/upcoming node, maneuver, route preview

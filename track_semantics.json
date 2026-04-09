@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "map_metadata": {
+    "image_width_px": 3036,
+    "image_height_px": 2580,
+    "meters_per_pixel": 0.0016622537278637398,
+    "pixels_per_meter": 601.593519,
+    "coordinate_origin": "bottom_left",
+    "y_axis_inverted": true,
+    "calibration_points_px": [],
+    "calibration_distance_m": null,
+    "tool_version": "track_editor_v3",
+    "width_m": 5.0462,
+    "height_m": 4.28861
+  },
+  "destinations": [
+    {
+      "id": "start",
+      "label": "Start",
+      "node_id": "46"
+    }
+  ],
+  "intersections": [],
+  "controls": [],
+  "crosswalks": [],
+  "parking_spots": [],
+  "zones": [],
+  "route_annotations_defaults": {}
+}

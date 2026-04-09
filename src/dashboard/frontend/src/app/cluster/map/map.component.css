@@ -26,7 +26,7 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
 
-.map-container { 
+.map-container {
     display: flex;
     position: relative;
     justify-content: center;
@@ -35,7 +35,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     height: 100%;
 }
 
-.map-track-container { 
+.map-track-container {
     display: flex;
     position: relative;
     justify-content: center;
@@ -53,16 +53,114 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     -webkit-mask-position: center;
 }
 
+.map-hud {
+    position: absolute;
+    top: 5%;
+    left: 50%;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 14rem;
+    padding: 0.75rem 0.95rem;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 1rem;
+    background: rgba(8, 16, 32, 0.76);
+    box-shadow: 0 0.75rem 2.2rem rgba(0, 0, 0, 0.28);
+    color: #f5f7fb;
+    text-align: center;
+    transform: translateX(-50%);
+    backdrop-filter: blur(12px);
+}
+
+.map-hud-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: #9cc3ff;
+}
+
+.map-hud-status {
+    font-size: 0.92rem;
+    font-weight: 600;
+}
+
+.map-hud-detail {
+    font-size: 0.72rem;
+    color: rgba(245, 247, 251, 0.82);
+}
+
+.map-hud-controls {
+    display: flex;
+    gap: 0.45rem;
+    margin-top: 0.25rem;
+}
+
+.map-destination-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0.38rem 0.55rem;
+    border: 1px solid rgba(156, 195, 255, 0.35);
+    border-radius: 0.65rem;
+    background: rgba(10, 20, 34, 0.92);
+    color: #f5f7fb;
+    font-size: 0.74rem;
+}
+
+.map-destination-btn {
+    padding: 0.38rem 0.75rem;
+    border: 1px solid rgba(105, 240, 174, 0.45);
+    border-radius: 0.65rem;
+    background: rgba(24, 66, 50, 0.92);
+    color: #dff8ea;
+    font-size: 0.74rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.map-destination-btn:hover {
+    background: rgba(36, 88, 66, 0.96);
+}
+
+.map-hud-hint {
+    font-size: 0.72rem;
+    color: rgba(245, 247, 251, 0.72);
+}
+
 #map-track-image-container {
     display: flex;
     position: relative;
+    cursor: crosshair;
 }
 
 #map-track-image {
     position: absolute;
 }
 
-#map-cursor { 
+.map-route-overlay {
+    position: absolute;
+    pointer-events: none;
+    overflow: visible;
+}
+
+.map-route-polyline {
+    fill: none;
+    stroke: #69f0ae;
+    stroke-width: 0.85;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    filter: drop-shadow(0 0 0.5rem rgba(105, 240, 174, 0.55));
+}
+
+.map-destination-marker {
+    fill: #ffb86b;
+    stroke: #fff4db;
+    stroke-width: 0.35;
+    filter: drop-shadow(0 0 0.5rem rgba(255, 184, 107, 0.65));
+}
+
+#map-cursor {
     position: absolute;
     filter: drop-shadow(0 0 0.5vw rgba(0, 0, 0, 0.5));
 }

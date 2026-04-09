@@ -177,13 +177,80 @@
     border: 1px solid #0f3460;
     border-radius: 8px;
     padding: 12px;
-    min-width: 170px;
+    min-width: 280px;
+    max-width: 320px;
     font-size: 12px;
     display: none;
   }
   #info-panel h4 { color: #7dd3fc; margin-bottom: 8px; font-size: 12px; }
   #info-panel p { color: #94a3b8; margin: 2px 0; }
   #info-panel p span { color: #e2e8f0; }
+  .inspector-grid { display: grid; gap: 8px; }
+  .inspector-row { display: grid; gap: 4px; }
+  .inspector-row label { color: #93c5fd; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .inspector-row input,
+  .inspector-row select,
+  .inspector-row textarea {
+    background: #0f3460;
+    border: 1px solid #1a4a8a;
+    color: #fff;
+    padding: 6px 8px;
+    border-radius: 5px;
+    font-size: 12px;
+    width: 100%;
+  }
+  .inspector-row textarea { min-height: 54px; resize: vertical; }
+  .inspector-inline { display: flex; align-items: center; gap: 8px; }
+  .inspector-inline input[type="checkbox"] { width: auto; }
+  .inspector-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .mini-btn {
+    background: #0f3460;
+    border: 1px solid #1a4a8a;
+    color: #e2e8f0;
+    border-radius: 5px;
+    padding: 5px 9px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .mini-btn:hover { background: #1a4a8a; }
+  .mini-btn.warn { border-color: #d97706; color: #fcd34d; }
+  .mini-btn.danger { border-color: #dc2626; color: #fca5a5; }
+  .inspector-badges { display: flex; flex-wrap: wrap; gap: 6px; }
+  .inspector-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: rgba(15, 52, 96, 0.9);
+    border: 1px solid #1a4a8a;
+    color: #e2e8f0;
+    font-size: 10px;
+  }
+  #semantic-panel {
+    position: absolute;
+    left: 12px;
+    top: 12px;
+    background: rgba(22, 33, 62, 0.92);
+    border: 1px solid #0f3460;
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 240px;
+    max-width: 280px;
+    font-size: 12px;
+    display: none;
+  }
+  #semantic-panel h4 { color: #7dd3fc; margin-bottom: 8px; font-size: 12px; }
+  .semantic-list { display: grid; gap: 6px; max-height: 42vh; overflow: auto; }
+  .semantic-item {
+    border: 1px solid #1a4a8a;
+    border-radius: 6px;
+    padding: 7px 8px;
+    background: rgba(15, 52, 96, 0.8);
+    cursor: pointer;
+  }
+  .semantic-item.active { border-color: #f59e0b; box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.3) inset; }
+  .semantic-item-title { color: #fff; font-size: 12px; font-weight: 600; }
+  .semantic-item-meta { color: #94a3b8; font-size: 10px; margin-top: 2px; }
 
   /* Calibration panel */
   #calibrate-panel {
@@ -277,9 +344,19 @@
   <button class="action-btn danger" id="clearBtn">🗑 Limpiar todo</button>
   <button class="action-btn" id="undoBtn">↩ Deshacer (Z)</button>
   <button class="action-btn success" id="exportBtn">⬇ Exportar GraphML</button>
+  <button class="action-btn success" id="exportRuntimeBtn">🚀 Exportar Runtime</button>
   <button class="action-btn" id="exportJsonBtn">💾 Guardar JSON</button>
   <label class="file-btn" for="loadJsonInput">📂 Cargar JSON</label>
   <input type="file" id="loadJsonInput" accept=".json">
+
+  <div class="sep"></div>
+  <span class="section-label">Semántica</span>
+  <button class="action-btn" id="addDestinationBtn">🎯 Destino</button>
+  <button class="action-btn" id="addIntersectionBtn">✚ Intersección</button>
+  <button class="action-btn" id="addControlBtn">🚦 Control</button>
+  <button class="action-btn" id="addCrosswalkBtn">🚸 Crosswalk</button>
+  <button class="action-btn" id="addParkingBtn">🅿 Parking</button>
+  <button class="action-btn" id="addZoneBtn">🧭 Zona</button>
 
   <div id="status">Nodos: <span id="nodeCount">0</span> | Aristas: <span id="edgeCount">0</span></div>
 </div>
@@ -297,13 +374,8 @@
     <g id="nodeLayer"></g>
   </svg>
   <div id="hint">📂 Carga una imagen PNG para comenzar.</div>
-  <div id="info-panel">
-    <h4>Nodo seleccionado</h4>
-    <p>ID: <span id="info-id">-</span></p>
-    <p>X: <span id="info-x">-</span></p>
-    <p>Y: <span id="info-y">-</span></p>
-    <p>Tipo: <span id="info-type">-</span></p>
-  </div>
+  <div id="semantic-panel"></div>
+  <div id="info-panel"></div>
   <div id="calibrate-panel">
     <h4>📏 Calibrar escala</h4>
     <p class="info-row">Distancia marcada: <b id="calibPxDist">-</b> px</p>
@@ -330,14 +402,22 @@ const START_TYPE = 10;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let nodes = [];   // { id, imgX, imgY, type }
-let edges = [];   // { id, source, target }
+let edges = [];   // { id, source, target, speedHint, oneway, zoneId, laneHint, costMultiplier }
 let nextNodeId = 1;
 let nextEdgeId  = 1;
 let mode = 'add_node';
 let edgeFrom     = null;
 let selectedNode = null;
+let selectedEdge = null;
+let selectedSemantic = null; // { type, id }
 let draggingNode = null;
 let undoStack    = [];
+let semantics = createEmptySemantics();
+let lastCalibrationPointsPx = [];
+let lastCalibrationDistanceM = null;
+let displayPreferences = {
+  showSemanticPanel: true
+};
 
 // Image coordinate space
 let imgW = 800, imgH = 600;
@@ -362,6 +442,7 @@ const calibLayer  = document.getElementById('calibLayer');
 const container   = document.getElementById('canvas-container');
 const hint        = document.getElementById('hint');
 const infoPanel   = document.getElementById('info-panel');
+const semanticPanel = document.getElementById('semantic-panel');
 const calibPanel  = document.getElementById('calibrate-panel');
 const scaleStatus = document.getElementById('scaleStatus');
 
@@ -389,6 +470,93 @@ function imgToReal(ix, iy) {
 }
 
 function getNodeById(id) { return nodes.find(n => n.id === id); }
+function getEdgeById(id) { return edges.find(e => e.id === id); }
+
+function createEmptySemantics() {
+  return {
+    version: 1,
+    destinations: [],
+    intersections: [],
+    controls: [],
+    crosswalks: [],
+    parking_spots: [],
+    zones: [],
+    route_annotations_defaults: {}
+  };
+}
+
+function normalizeNode(node) {
+  return {
+    label: '',
+    destinationId: '',
+    intersectionId: '',
+    controlId: '',
+    parkingSpotId: '',
+    debugFlags: '',
+    ...node,
+  };
+}
+
+function normalizeEdge(edge) {
+  return {
+    speedHint: '',
+    oneway: true,
+    zoneId: '',
+    laneHint: '',
+    costMultiplier: 1.0,
+    ...edge,
+  };
+}
+
+function normalizeSemantics(raw) {
+  const base = createEmptySemantics();
+  const data = raw && typeof raw === 'object' ? raw : {};
+  const semanticsOut = { ...base };
+  Object.keys(base).forEach(key => {
+    if (Array.isArray(base[key])) {
+      semanticsOut[key] = Array.isArray(data[key]) ? data[key].map(item => ({ ...item })) : [];
+    } else if (typeof base[key] === 'object') {
+      semanticsOut[key] = data[key] && typeof data[key] === 'object' ? { ...data[key] } : {};
+    }
+  });
+  return semanticsOut;
+}
+
+function semanticCollections() {
+  return [
+    ['destinations', 'destination'],
+    ['intersections', 'intersection'],
+    ['controls', 'control'],
+    ['crosswalks', 'crosswalk'],
+    ['parking_spots', 'parking_spot'],
+    ['zones', 'zone'],
+  ];
+}
+
+function getSemanticArray(type) {
+  const map = {
+    destination: semantics.destinations,
+    intersection: semantics.intersections,
+    control: semantics.controls,
+    crosswalk: semantics.crosswalks,
+    parking_spot: semantics.parking_spots,
+    zone: semantics.zones,
+  };
+  return map[type] || null;
+}
+
+function getSemanticEntity(type, id) {
+  const arr = getSemanticArray(type);
+  if (!arr) return null;
+  return arr.find(item => String(item.id) === String(id)) || null;
+}
+
+function makeSemanticId(prefix, items) {
+  let nextIdx = 1;
+  const seen = new Set((items || []).map(item => String(item.id || '')));
+  while (seen.has(`${prefix}_${nextIdx}`)) nextIdx += 1;
+  return `${prefix}_${nextIdx}`;
+}
 
 function updateStatus() {
   document.getElementById('nodeCount').textContent = nodes.length;
@@ -398,7 +566,18 @@ function updateStatus() {
 function setHint(text) { hint.textContent = text; }
 
 function saveUndo() {
-  undoStack.push(JSON.parse(JSON.stringify({ nodes, edges, nextNodeId, nextEdgeId })));
+  undoStack.push(JSON.parse(JSON.stringify({
+    nodes,
+    edges,
+    nextNodeId,
+    nextEdgeId,
+    semantics,
+    selectedNode,
+    selectedEdge,
+    selectedSemantic,
+    lastCalibrationPointsPx,
+    lastCalibrationDistanceM,
+  })));
   if (undoStack.length > 50) undoStack.shift();
 }
 
@@ -533,6 +712,8 @@ function renderGraph() {
   renderEdges();
   renderNodes();
   renderCalibLayer();
+  renderSemanticPanel();
+  renderInspector();
   updateStatus();
 }
 
@@ -558,10 +739,21 @@ function renderEdges() {
     line.setAttribute('x1', x1); line.setAttribute('y1', y1);
     line.setAttribute('x2', x2); line.setAttribute('y2', y2);
     line.setAttribute('class', 'edge-line');
+    if (edge.id === selectedEdge) {
+      line.setAttribute('stroke', '#fbbf24');
+      line.setAttribute('stroke-width', '3');
+    }
     line.setAttribute('marker-end', 'url(#arrow)');
     line.addEventListener('click', ev => {
       ev.stopPropagation();
-      if (mode === 'delete') deleteEdge(edge.id);
+      if (mode === 'delete') {
+        deleteEdge(edge.id);
+      } else {
+        selectedEdge = edge.id;
+        selectedNode = null;
+        selectedSemantic = null;
+        renderGraph();
+      }
     });
     edgeLayer.appendChild(line);
   });
@@ -670,6 +862,401 @@ function starPoints(cx, cy, outerR, innerR, numPoints) {
   return pts.join(' ');
 }
 
+function renderSemanticPanel() {
+  const entries = [];
+  semanticCollections().forEach(([collection, type]) => {
+    (semantics[collection] || []).forEach(item => {
+      const label = String(item.label || item.id || type);
+      const meta = [];
+      if (item.anchor_node_id) meta.push(`nodo ${item.anchor_node_id}`);
+      if (item.node_id) meta.push(`dest ${item.node_id}`);
+      if (item.type && type !== 'control' && type !== 'zone') meta.push(item.type);
+      if (type === 'zone' && item.start_node_id && item.end_node_id) meta.push(`${item.start_node_id} → ${item.end_node_id}`);
+      entries.push({ type, id: String(item.id), label, meta: meta.join(' · ') });
+    });
+  });
+
+  semanticPanel.style.display = displayPreferences.showSemanticPanel ? 'block' : 'none';
+  semanticPanel.innerHTML = `
+    <h4>Semántica Runtime</h4>
+    <div class="inspector-badges">
+      <span class="inspector-badge">dest ${semantics.destinations.length}</span>
+      <span class="inspector-badge">ctrl ${semantics.controls.length}</span>
+      <span class="inspector-badge">int ${semantics.intersections.length}</span>
+      <span class="inspector-badge">park ${semantics.parking_spots.length}</span>
+      <span class="inspector-badge">zone ${semantics.zones.length}</span>
+    </div>
+    <div class="semantic-list">
+      ${entries.length ? entries.map(entry => `
+        <div class="semantic-item ${selectedSemantic && selectedSemantic.type === entry.type && String(selectedSemantic.id) === entry.id ? 'active' : ''}"
+             onclick="selectSemantic('${entry.type}', '${entry.id}')">
+          <div class="semantic-item-title">${entry.label}</div>
+          <div class="semantic-item-meta">${entry.type}${entry.meta ? ` · ${entry.meta}` : ''}</div>
+        </div>
+      `).join('') : '<div class="semantic-item"><div class="semantic-item-title">Sin entidades</div><div class="semantic-item-meta">Crea destinos, controles o zonas desde la selección actual.</div></div>'}
+    </div>
+  `;
+}
+
+function renderInspector() {
+  const node = selectedNode != null ? getNodeById(selectedNode) : null;
+  const edge = selectedEdge != null ? getEdgeById(selectedEdge) : null;
+  const semantic = selectedSemantic ? getSemanticEntity(selectedSemantic.type, selectedSemantic.id) : null;
+
+  if (!node && !edge && !semantic) {
+    infoPanel.style.display = 'none';
+    infoPanel.innerHTML = '';
+    return;
+  }
+
+  infoPanel.style.display = 'block';
+  if (node) {
+    const real = imgToReal(node.imgX, node.imgY);
+    const linked = [
+      node.destinationId ? `dest:${node.destinationId}` : '',
+      node.intersectionId ? `int:${node.intersectionId}` : '',
+      node.controlId ? `ctrl:${node.controlId}` : '',
+      node.parkingSpotId ? `park:${node.parkingSpotId}` : '',
+    ].filter(Boolean);
+    infoPanel.innerHTML = `
+      <h4>Nodo ${node.id}</h4>
+      <div class="inspector-grid">
+        <div class="inspector-badges">
+          <span class="inspector-badge">${TYPES[node.type]}</span>
+          <span class="inspector-badge">${metersPerPixel ? `${real.x}m, ${real.y}m` : `${Math.round(node.imgX)}px, ${Math.round(node.imgY)}px`}</span>
+          ${linked.map(item => `<span class="inspector-badge">${item}</span>`).join('')}
+        </div>
+        <div class="inspector-row">
+          <label>Label</label>
+          <input value="${escapeHtml(node.label || '')}" oninput="updateNodeField(${node.id}, 'label', this.value)">
+        </div>
+        <div class="inspector-row">
+          <label>Tipo vial</label>
+          <select onchange="updateNodeType(${node.id}, this.value)">
+            ${TYPES.map((typeName, idx) => `<option value="${idx}" ${idx === node.type ? 'selected' : ''}>${typeName}</option>`).join('')}
+          </select>
+        </div>
+        <div class="inspector-row">
+          <label>Flags debug</label>
+          <input value="${escapeHtml(node.debugFlags || '')}" oninput="updateNodeField(${node.id}, 'debugFlags', this.value)">
+        </div>
+        <div class="inspector-actions">
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('destination')">+ Destino</button>
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('intersection')">+ Intersección</button>
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('control')">+ Control</button>
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('crosswalk')">+ Crosswalk</button>
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('parking_spot')">+ Parking</button>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (edge) {
+    infoPanel.innerHTML = `
+      <h4>Arista ${edge.id}</h4>
+      <div class="inspector-grid">
+        <div class="inspector-badges">
+          <span class="inspector-badge">${edge.source} → ${edge.target}</span>
+          ${edge.zoneId ? `<span class="inspector-badge">zone:${escapeHtml(edge.zoneId)}</span>` : ''}
+        </div>
+        <div class="inspector-row">
+          <label>Speed hint</label>
+          <input type="number" step="0.1" value="${edge.speedHint !== '' ? edge.speedHint : ''}" oninput="updateEdgeField(${edge.id}, 'speedHint', this.value)">
+        </div>
+        <div class="inspector-row">
+          <label>Lane hint</label>
+          <input value="${escapeHtml(edge.laneHint || '')}" oninput="updateEdgeField(${edge.id}, 'laneHint', this.value)">
+        </div>
+        <div class="inspector-row">
+          <label>Cost multiplier</label>
+          <input type="number" step="0.05" value="${edge.costMultiplier ?? 1}" oninput="updateEdgeField(${edge.id}, 'costMultiplier', this.value)">
+        </div>
+        <div class="inspector-inline">
+          <input type="checkbox" ${edge.oneway ? 'checked' : ''} onchange="updateEdgeCheckbox(${edge.id}, 'oneway', this.checked)">
+          <label>Oneway</label>
+        </div>
+        <div class="inspector-actions">
+          <button class="mini-btn" type="button" onclick="createSemanticFromSelection('zone')">+ Zona</button>
+          <button class="mini-btn danger" type="button" onclick="deleteEdge(${edge.id})">Borrar arista</button>
+        </div>
+      </div>
+    `;
+    return;
+  }
+
+  if (semantic) {
+    const type = selectedSemantic.type;
+    infoPanel.innerHTML = `
+      <h4>${type} · ${escapeHtml(String(semantic.id || ''))}</h4>
+      <div class="inspector-grid">
+        <div class="inspector-row">
+          <label>Label</label>
+          <input value="${escapeHtml(semantic.label || '')}" oninput="updateSemanticField('${type}', '${semantic.id}', 'label', this.value)">
+        </div>
+        ${renderSemanticFields(type, semantic)}
+        <div class="inspector-actions">
+          <button class="mini-btn danger" type="button" onclick="deleteSemantic('${type}', '${semantic.id}')">Borrar</button>
+        </div>
+      </div>
+    `;
+  }
+}
+
+function renderSemanticFields(type, semantic) {
+  if (type === 'destination') {
+    return `
+      <div class="inspector-row">
+        <label>Nodo destino</label>
+        <input value="${escapeHtml(String(semantic.node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'node_id', this.value)">
+      </div>
+    `;
+  }
+  if (type === 'intersection') {
+    return `
+      <div class="inspector-row">
+        <label>Nodo anchor</label>
+        <input value="${escapeHtml(String(semantic.anchor_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'anchor_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Control ID</label>
+        <input value="${escapeHtml(String(semantic.control_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'control_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Stopline node</label>
+        <input value="${escapeHtml(String(semantic.stopline_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'stopline_node_id', this.value)">
+      </div>
+    `;
+  }
+  if (type === 'control') {
+    return `
+      <div class="inspector-row">
+        <label>Nodo anchor</label>
+        <input value="${escapeHtml(String(semantic.anchor_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'anchor_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Tipo</label>
+        <select onchange="updateSemanticField('${type}', '${semantic.id}', 'type', this.value)">
+          ${['stop', 'traffic_light', 'priority', 'roundabout', 'generic'].map(item => `<option value="${item}" ${String(semantic.type || '') === item ? 'selected' : ''}>${item}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }
+  if (type === 'crosswalk') {
+    return `
+      <div class="inspector-row">
+        <label>Nodo anchor</label>
+        <input value="${escapeHtml(String(semantic.anchor_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'anchor_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Stopline node</label>
+        <input value="${escapeHtml(String(semantic.stopline_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'stopline_node_id', this.value)">
+      </div>
+    `;
+  }
+  if (type === 'parking_spot') {
+    return `
+      <div class="inspector-row">
+        <label>Nodo anchor</label>
+        <input value="${escapeHtml(String(semantic.anchor_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'anchor_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Entry node</label>
+        <input value="${escapeHtml(String(semantic.entry_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'entry_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>Exit node</label>
+        <input value="${escapeHtml(String(semantic.exit_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'exit_node_id', this.value)">
+      </div>
+    `;
+  }
+  if (type === 'zone') {
+    return `
+      <div class="inspector-row">
+        <label>Tipo</label>
+        <select onchange="updateSemanticField('${type}', '${semantic.id}', 'type', this.value)">
+          ${['parking', 'highway', 'slow', 'debug'].map(item => `<option value="${item}" ${String(semantic.type || '') === item ? 'selected' : ''}>${item}</option>`).join('')}
+        </select>
+      </div>
+      <div class="inspector-row">
+        <label>Start node</label>
+        <input value="${escapeHtml(String(semantic.start_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'start_node_id', this.value)">
+      </div>
+      <div class="inspector-row">
+        <label>End node</label>
+        <input value="${escapeHtml(String(semantic.end_node_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'end_node_id', this.value)">
+      </div>
+    `;
+  }
+  return '';
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function selectSemantic(type, id) {
+  selectedNode = null;
+  selectedEdge = null;
+  selectedSemantic = { type, id };
+  renderGraph();
+}
+
+function updateNodeField(nodeId, field, value) {
+  const node = getNodeById(nodeId);
+  if (!node) return;
+  node[field] = value;
+  renderInspector();
+  renderSemanticPanel();
+}
+
+function updateNodeType(nodeId, value) {
+  const node = getNodeById(nodeId);
+  if (!node) return;
+  const type = parseInt(value, 10);
+  if (type === START_TYPE) {
+    nodes.forEach(candidate => {
+      if (candidate.id !== node.id && candidate.type === START_TYPE) candidate.type = 0;
+    });
+  }
+  node.type = type;
+  renderGraph();
+}
+
+function updateEdgeField(edgeId, field, value) {
+  const edge = getEdgeById(edgeId);
+  if (!edge) return;
+  if (field === 'speedHint' || field === 'costMultiplier') {
+    edge[field] = value === '' ? '' : Number(value);
+  } else {
+    edge[field] = value;
+  }
+  renderInspector();
+}
+
+function updateEdgeCheckbox(edgeId, field, checked) {
+  const edge = getEdgeById(edgeId);
+  if (!edge) return;
+  edge[field] = !!checked;
+  renderInspector();
+}
+
+function updateSemanticField(type, id, field, value) {
+  const entity = getSemanticEntity(type, id);
+  if (!entity) return;
+  entity[field] = value;
+  syncSemanticLinks();
+  renderGraph();
+}
+
+function deleteSemantic(type, id) {
+  const arr = getSemanticArray(type);
+  if (!arr) return;
+  const idx = arr.findIndex(item => String(item.id) === String(id));
+  if (idx < 0) return;
+  arr.splice(idx, 1);
+  syncSemanticLinks();
+  selectedSemantic = null;
+  renderGraph();
+}
+
+function syncSemanticLinks() {
+  nodes.forEach(node => {
+    node.destinationId = '';
+    node.intersectionId = '';
+    node.controlId = '';
+    node.parkingSpotId = '';
+  });
+  edges.forEach(edge => {
+    edge.zoneId = '';
+  });
+
+  semantics.destinations.forEach(item => {
+    const node = getNodeById(Number(item.node_id));
+    if (node) node.destinationId = String(item.id || '');
+  });
+  semantics.intersections.forEach(item => {
+    const node = getNodeById(Number(item.anchor_node_id));
+    if (node) node.intersectionId = String(item.id || '');
+  });
+  semantics.controls.forEach(item => {
+    const node = getNodeById(Number(item.anchor_node_id));
+    if (node) node.controlId = String(item.id || '');
+  });
+  semantics.parking_spots.forEach(item => {
+    const node = getNodeById(Number(item.anchor_node_id || item.entry_node_id));
+    if (node) node.parkingSpotId = String(item.id || '');
+  });
+  semantics.zones.forEach(item => {
+    const edge = edges.find(candidate =>
+      String(candidate.source) === String(item.start_node_id || '') &&
+      String(candidate.target) === String(item.end_node_id || '')
+    );
+    if (edge) edge.zoneId = String(item.id || '');
+  });
+}
+
+function createSemanticFromSelection(type) {
+  if (type === 'zone') {
+    if (selectedEdge == null) {
+      alert('Selecciona una arista para crear una zona.');
+      return;
+    }
+    const edge = getEdgeById(selectedEdge);
+    if (!edge) return;
+    saveUndo();
+    const zoneId = makeSemanticId('zone', semantics.zones);
+    semantics.zones.push({
+      id: zoneId,
+      label: zoneId,
+      type: 'parking',
+      start_node_id: String(edge.source),
+      end_node_id: String(edge.target),
+    });
+    syncSemanticLinks();
+    selectedSemantic = { type: 'zone', id: zoneId };
+    selectedEdge = null;
+    renderGraph();
+    return;
+  }
+
+  if (selectedNode == null) {
+    alert('Selecciona un nodo para crear esta entidad.');
+    return;
+  }
+  const node = getNodeById(selectedNode);
+  if (!node) return;
+  saveUndo();
+
+  if (type === 'destination') {
+    const id = makeSemanticId('dest', semantics.destinations);
+    semantics.destinations.push({ id, label: node.label || `Destino ${node.id}`, node_id: String(node.id) });
+    selectedSemantic = { type, id };
+  } else if (type === 'intersection') {
+    const id = makeSemanticId('intersection', semantics.intersections);
+    semantics.intersections.push({ id, label: node.label || `Intersection ${node.id}`, anchor_node_id: String(node.id), control_id: '', stopline_node_id: '' });
+    selectedSemantic = { type, id };
+  } else if (type === 'control') {
+    const id = makeSemanticId('control', semantics.controls);
+    semantics.controls.push({ id, label: node.label || `Control ${node.id}`, anchor_node_id: String(node.id), type: 'stop' });
+    selectedSemantic = { type, id };
+  } else if (type === 'crosswalk') {
+    const id = makeSemanticId('crosswalk', semantics.crosswalks);
+    semantics.crosswalks.push({ id, label: node.label || `Crosswalk ${node.id}`, anchor_node_id: String(node.id), stopline_node_id: '' });
+    selectedSemantic = { type, id };
+  } else if (type === 'parking_spot') {
+    const id = makeSemanticId('parking', semantics.parking_spots);
+    semantics.parking_spots.push({ id, label: node.label || `Parking ${node.id}`, anchor_node_id: String(node.id), entry_node_id: String(node.id), exit_node_id: '' });
+    selectedSemantic = { type, id };
+  }
+  syncSemanticLinks();
+  renderGraph();
+}
+
 // ─── Interactions ─────────────────────────────────────────────────────────────
 function handleNodeClick(nodeId) {
   if (mode === 'add_edge') {
@@ -678,8 +1265,11 @@ function handleNodeClick(nodeId) {
       setHint('Click en el nodo destino para crear la arista. Esc para cancelar.');
     } else if (edgeFrom !== nodeId) {
       saveUndo();
-      edges.push({ id: nextEdgeId++, source: edgeFrom, target: nodeId });
+      edges.push(normalizeEdge({ id: nextEdgeId++, source: edgeFrom, target: nodeId }));
       edgeFrom = null;
+      selectedEdge = edges[edges.length - 1].id;
+      selectedNode = null;
+      selectedSemantic = null;
       setHint('Arista creada.');
     } else {
       edgeFrom = null;
@@ -696,28 +1286,41 @@ function handleNodeClick(nodeId) {
 
 function selectNode(id) {
   selectedNode = id;
-  const node = getNodeById(id);
-  if (node) {
-    const real = imgToReal(node.imgX, node.imgY);
-    document.getElementById('info-id').textContent   = node.id;
-    document.getElementById('info-x').textContent    = metersPerPixel ? `${real.x} m` : `${Math.round(node.imgX)} px`;
-    document.getElementById('info-y').textContent    = metersPerPixel ? `${real.y} m` : `${Math.round(node.imgY)} px`;
-    document.getElementById('info-type').textContent = TYPES[node.type];
-    infoPanel.style.display = 'block';
-  }
+  selectedEdge = null;
+  selectedSemantic = null;
   renderGraph();
 }
 
 function deleteNode(id) {
   nodes = nodes.filter(n => n.id !== id);
   edges = edges.filter(e => e.source !== id && e.target !== id);
-  if (selectedNode === id) { selectedNode = null; infoPanel.style.display = 'none'; }
+  semanticCollections().forEach(([collection]) => {
+    semantics[collection] = (semantics[collection] || []).filter(item => {
+      const anchorNodeId = String(item.anchor_node_id || item.node_id || item.start_node_id || item.entry_node_id || '');
+      return anchorNodeId !== String(id);
+    });
+  });
+  semantics.zones = (semantics.zones || []).filter(item =>
+    String(item.start_node_id || '') !== String(id) && String(item.end_node_id || '') !== String(id)
+  );
+  nodes.forEach(node => {
+    if (String(node.destinationId || '') === String(id)) node.destinationId = '';
+  });
+  if (selectedNode === id) { selectedNode = null; }
   renderGraph();
 }
 
 function deleteEdge(id) {
   saveUndo();
+  const edge = getEdgeById(id);
+  if (edge) {
+    semantics.zones = (semantics.zones || []).filter(item =>
+      !(String(item.start_node_id || '') === String(edge.source) && String(item.end_node_id || '') === String(edge.target))
+    );
+  }
   edges = edges.filter(e => e.id !== id);
+  if (selectedEdge === id) selectedEdge = null;
+  syncSemanticLinks();
   renderGraph();
 }
 
@@ -747,7 +1350,13 @@ graphSvg.addEventListener('click', ev => {
     return;
   }
 
-  if (mode !== 'add_node') return;
+  if (mode !== 'add_node') {
+    selectedNode = null;
+    selectedEdge = null;
+    selectedSemantic = null;
+    renderGraph();
+    return;
+  }
 
   const imgC = canvasToImg(cx, cy);
   const type = parseInt(document.getElementById('nodeTypeSelect').value);
@@ -758,7 +1367,10 @@ graphSvg.addEventListener('click', ev => {
   }
 
   saveUndo();
-  nodes.push({ id: nextNodeId++, imgX: imgC.x, imgY: imgC.y, type });
+  nodes.push(normalizeNode({ id: nextNodeId++, imgX: imgC.x, imgY: imgC.y, type }));
+  selectedNode = nodes[nodes.length - 1].id;
+  selectedEdge = null;
+  selectedSemantic = null;
   renderGraph();
   setHint(`Nodo ${nextNodeId - 1} colocado (${TYPES[type]})`);
 });
@@ -788,6 +1400,8 @@ function confirmCalib() {
   const dy     = calibPoints[1].imgY - calibPoints[0].imgY;
   const pxDist = Math.sqrt(dx*dx + dy*dy);
   if (pxDist < 1) { alert('Los dos puntos son demasiado cercanos.'); return; }
+  lastCalibrationPointsPx = calibPoints.map(point => ({ imgX: point.imgX, imgY: point.imgY }));
+  lastCalibrationDistanceM = realDist;
   metersPerPixel = realDist / pxDist;
   cancelCalib();
   updateScaleStatus();
@@ -806,6 +1420,8 @@ document.getElementById('calibCancelBtn').addEventListener('click', cancelCalib)
 
 document.getElementById('clearCalibBtn').addEventListener('click', () => {
   metersPerPixel = null;
+  lastCalibrationPointsPx = [];
+  lastCalibrationDistanceM = null;
   updateScaleStatus();
   setHint('Escala eliminada. Calibra de nuevo con 📏 (C).');
 });
@@ -838,9 +1454,8 @@ document.addEventListener('keydown', ev => {
   if (map[ev.key.toLowerCase()]) { setMode(map[ev.key.toLowerCase()]); return; }
   if ((ev.key.toLowerCase() === 'z') && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); undo(); return; }
   if (ev.key === 'Escape') {
-    edgeFrom = null; selectedNode = null;
+    edgeFrom = null; selectedNode = null; selectedEdge = null; selectedSemantic = null;
     cancelCalib();
-    infoPanel.style.display = 'none';
     renderGraph();
   }
 });
@@ -850,6 +1465,15 @@ function undo() {
   const prev = undoStack.pop();
   nodes = prev.nodes; edges = prev.edges;
   nextNodeId = prev.nextNodeId; nextEdgeId = prev.nextEdgeId;
+  semantics = normalizeSemantics(prev.semantics);
+  selectedNode = prev.selectedNode ?? null;
+  selectedEdge = prev.selectedEdge ?? null;
+  selectedSemantic = prev.selectedSemantic ?? null;
+  lastCalibrationPointsPx = Array.isArray(prev.lastCalibrationPointsPx) ? prev.lastCalibrationPointsPx : [];
+  lastCalibrationDistanceM = prev.lastCalibrationDistanceM ?? null;
+  nodes = nodes.map(normalizeNode);
+  edges = edges.map(normalizeEdge);
+  syncSemanticLinks();
   renderGraph();
 }
 
@@ -859,19 +1483,13 @@ document.getElementById('clearBtn').addEventListener('click', () => {
   if (!confirm('¿Eliminar todos los nodos y aristas?')) return;
   saveUndo();
   nodes = []; edges = []; nextNodeId = 1; nextEdgeId = 1;
-  selectedNode = null; edgeFrom = null;
-  infoPanel.style.display = 'none';
+  semantics = createEmptySemantics();
+  selectedNode = null; selectedEdge = null; selectedSemantic = null; edgeFrom = null;
   renderGraph();
 });
 
 // ─── Export GraphML ───────────────────────────────────────────────────────────
-document.getElementById('exportBtn').addEventListener('click', () => {
-  if (nodes.length === 0) { alert('No hay nodos para exportar.'); return; }
-
-  const startNode = nodes.find(n => n.type === START_TYPE);
-  if (!startNode && !confirm('No hay nodo START definido. ¿Exportar de todos modos?')) return;
-  if (!metersPerPixel && !confirm('La escala no está calibrada. Las coordenadas exportadas serán en píxeles. ¿Continuar?')) return;
-
+function buildGraphMl() {
   let xml = `<?xml version="1.0" encoding="UTF-8"?>
 <graphml xmlns="http://graphml.graphdrawing.org/graphml"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -897,24 +1515,175 @@ document.getElementById('exportBtn').addEventListener('click', () => {
   });
 
   edges.forEach((edge, i) => {
-    xml += `    <edge id="e${i}" source="${edge.source}" target="${edge.target}"/>\n`;
+    xml += `    <edge id="${escapeXml(edge.id ?? `e${i}`)}" source="${edge.source}" target="${edge.target}"/>\n`;
   });
 
   xml += `  </graph>\n</graphml>`;
-  download('track.graphml', xml, 'application/xml');
+  return xml;
+}
+
+function escapeXml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+}
+
+function buildMapMetadata() {
+  const widthM = metersPerPixel ? +(imgW * metersPerPixel).toFixed(5) : null;
+  const heightM = metersPerPixel ? +(imgH * metersPerPixel).toFixed(5) : null;
+  return {
+    image_width_px: imgW,
+    image_height_px: imgH,
+    meters_per_pixel: metersPerPixel,
+    pixels_per_meter: metersPerPixel ? +(1 / metersPerPixel).toFixed(6) : null,
+    coordinate_origin: 'bottom_left',
+    y_axis_inverted: true,
+    calibration_points_px: lastCalibrationPointsPx.map(point => ({
+      imgX: +point.imgX.toFixed(3),
+      imgY: +point.imgY.toFixed(3),
+    })),
+    calibration_distance_m: lastCalibrationDistanceM,
+    tool_version: 'track_editor_v3',
+    width_m: widthM,
+    height_m: heightM,
+  };
+}
+
+function buildRuntimeSemantics() {
+  return {
+    version: 1,
+    map_metadata: buildMapMetadata(),
+    destinations: semantics.destinations.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      node_id: String(item.node_id || ''),
+    })),
+    intersections: semantics.intersections.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      anchor_node_id: String(item.anchor_node_id || ''),
+      control_id: String(item.control_id || ''),
+      stopline_node_id: String(item.stopline_node_id || ''),
+    })),
+    controls: semantics.controls.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      anchor_node_id: String(item.anchor_node_id || ''),
+      type: String(item.type || 'generic'),
+    })),
+    crosswalks: semantics.crosswalks.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      anchor_node_id: String(item.anchor_node_id || ''),
+      stopline_node_id: String(item.stopline_node_id || ''),
+    })),
+    parking_spots: semantics.parking_spots.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      anchor_node_id: String(item.anchor_node_id || ''),
+      entry_node_id: String(item.entry_node_id || ''),
+      exit_node_id: String(item.exit_node_id || ''),
+    })),
+    zones: semantics.zones.map(item => ({
+      id: String(item.id || ''),
+      label: String(item.label || item.id || ''),
+      type: String(item.type || 'debug'),
+      start_node_id: String(item.start_node_id || ''),
+      end_node_id: String(item.end_node_id || ''),
+    })),
+    route_annotations_defaults: { ...(semantics.route_annotations_defaults || {}) },
+  };
+}
+
+function buildProjectJson() {
+  return {
+    version: 3,
+    nodes,
+    edges,
+    nextNodeId,
+    nextEdgeId,
+    imgW,
+    imgH,
+    metersPerPixel,
+    calibration: {
+      pointsPx: lastCalibrationPointsPx,
+      distanceM: lastCalibrationDistanceM,
+    },
+    semantics: buildRuntimeSemantics(),
+    displayPreferences,
+    backgroundImage: bgCanvas._imgDataUrl || null,
+  };
+}
+
+function validateRuntimeExport() {
+  const problems = [];
+  if (nodes.length === 0) problems.push('No hay nodos para exportar.');
+  const startNodes = nodes.filter(n => n.type === START_TYPE);
+  if (startNodes.length !== 1) problems.push('Debe existir exactamente un nodo START.');
+  if (!metersPerPixel) problems.push('La escala debe estar calibrada para export runtime.');
+
+  const nodeIds = new Set(nodes.map(node => String(node.id)));
+  const controlIds = new Set(semantics.controls.map(item => String(item.id || '')));
+
+  const requireNode = (label, nodeId) => {
+    if (!nodeId || !nodeIds.has(String(nodeId))) problems.push(`${label} referencia un nodo inexistente (${nodeId || 'vacío'}).`);
+  };
+
+  semantics.destinations.forEach(item => requireNode(`Destino ${item.id}`, item.node_id));
+  semantics.intersections.forEach(item => {
+    requireNode(`Intersección ${item.id}`, item.anchor_node_id);
+    if (item.stopline_node_id) requireNode(`Intersección ${item.id} stopline`, item.stopline_node_id);
+    if (item.control_id && !controlIds.has(String(item.control_id))) problems.push(`Intersección ${item.id} usa control inexistente (${item.control_id}).`);
+  });
+  semantics.controls.forEach(item => requireNode(`Control ${item.id}`, item.anchor_node_id));
+  semantics.crosswalks.forEach(item => {
+    requireNode(`Crosswalk ${item.id}`, item.anchor_node_id);
+    if (item.stopline_node_id) requireNode(`Crosswalk ${item.id} stopline`, item.stopline_node_id);
+  });
+  semantics.parking_spots.forEach(item => {
+    requireNode(`Parking ${item.id} anchor`, item.anchor_node_id);
+    requireNode(`Parking ${item.id} entry`, item.entry_node_id);
+    if (item.exit_node_id) requireNode(`Parking ${item.id} exit`, item.exit_node_id);
+  });
+  semantics.zones.forEach(item => {
+    requireNode(`Zona ${item.id} start`, item.start_node_id);
+    requireNode(`Zona ${item.id} end`, item.end_node_id);
+  });
+
+  return problems;
+}
+
+document.getElementById('exportBtn').addEventListener('click', () => {
+  if (nodes.length === 0) { alert('No hay nodos para exportar.'); return; }
+  if (!metersPerPixel && !confirm('La escala no está calibrada. Las coordenadas exportadas serán en píxeles. ¿Continuar?')) return;
+  download('track.graphml', buildGraphMl(), 'application/xml');
+});
+
+document.getElementById('exportRuntimeBtn').addEventListener('click', () => {
+  const problems = validateRuntimeExport();
+  if (problems.length) {
+    alert(`No se puede exportar runtime:\n- ${problems.join('\n- ')}`);
+    return;
+  }
+  download('track.graphml', buildGraphMl(), 'application/xml');
+  download('track_semantics.json', JSON.stringify(buildRuntimeSemantics(), null, 2), 'application/json');
+  setHint('✅ Exportados track.graphml + track_semantics.json');
 });
 
 // ─── Save / Load JSON ─────────────────────────────────────────────────────────
 document.getElementById('exportJsonBtn').addEventListener('click', () => {
-  const data = JSON.stringify({
-    version: 2,
-    nodes, edges, nextNodeId, nextEdgeId,
-    imgW, imgH,
-    metersPerPixel,
-    backgroundImage: bgCanvas._imgDataUrl || null
-  }, null, 2);
+  const data = JSON.stringify(buildProjectJson(), null, 2);
   download('track_editor_save.json', data, 'application/json');
 });
+
+document.getElementById('addDestinationBtn').addEventListener('click', () => createSemanticFromSelection('destination'));
+document.getElementById('addIntersectionBtn').addEventListener('click', () => createSemanticFromSelection('intersection'));
+document.getElementById('addControlBtn').addEventListener('click', () => createSemanticFromSelection('control'));
+document.getElementById('addCrosswalkBtn').addEventListener('click', () => createSemanticFromSelection('crosswalk'));
+document.getElementById('addParkingBtn').addEventListener('click', () => createSemanticFromSelection('parking_spot'));
+document.getElementById('addZoneBtn').addEventListener('click', () => createSemanticFromSelection('zone'));
 
 document.getElementById('loadJsonInput').addEventListener('change', e => {
   const file = e.target.files[0];
@@ -923,16 +1692,32 @@ document.getElementById('loadJsonInput').addEventListener('change', e => {
   reader.onload = ev => {
     try {
       const data = JSON.parse(ev.target.result);
-      nodes      = data.nodes;
-      edges      = data.edges;
-      nextNodeId = data.nextNodeId;
-      nextEdgeId = data.nextEdgeId;
+      nodes      = Array.isArray(data.nodes) ? data.nodes.map(normalizeNode) : [];
+      edges      = Array.isArray(data.edges) ? data.edges.map(normalizeEdge) : [];
+      nextNodeId = data.nextNodeId || 1;
+      nextEdgeId = data.nextEdgeId || 1;
+      semantics  = normalizeSemantics(data.semantics);
+      displayPreferences = {
+        ...displayPreferences,
+        ...(data.displayPreferences && typeof data.displayPreferences === 'object' ? data.displayPreferences : {}),
+      };
+      selectedNode = null;
+      selectedEdge = null;
+      selectedSemantic = null;
 
-      if (data.version === 2) {
-        // Current format
-        if (data.imgW)          imgW           = data.imgW;
-        if (data.imgH)          imgH           = data.imgH;
-        if (data.metersPerPixel) metersPerPixel = data.metersPerPixel;
+      if (data.version === 3) {
+        if (data.imgW) imgW = data.imgW;
+        if (data.imgH) imgH = data.imgH;
+        metersPerPixel = data.metersPerPixel || null;
+        const calibration = data.calibration && typeof data.calibration === 'object' ? data.calibration : {};
+        lastCalibrationPointsPx = Array.isArray(calibration.pointsPx) ? calibration.pointsPx : [];
+        lastCalibrationDistanceM = calibration.distanceM ?? null;
+      } else if (data.version === 2) {
+        if (data.imgW) imgW = data.imgW;
+        if (data.imgH) imgH = data.imgH;
+        metersPerPixel = data.metersPerPixel || null;
+        lastCalibrationPointsPx = [];
+        lastCalibrationDistanceM = null;
       } else if (data.svgViewBox) {
         // Legacy v1 format: svgX/svgY relative to viewBox
         const vb = data.svgViewBox;
@@ -944,8 +1729,12 @@ document.getElementById('loadJsonInput').addEventListener('change', e => {
             delete n.svgX; delete n.svgY;
           }
         });
+        metersPerPixel = null;
+        lastCalibrationPointsPx = [];
+        lastCalibrationDistanceM = null;
       }
 
+      syncSemanticLinks();
       updateScaleStatus();
 
       if (data.backgroundImage) {
@@ -961,6 +1750,9 @@ document.getElementById('loadJsonInput').addEventListener('change', e => {
         };
         img.src = data.backgroundImage;
       } else {
+        bgCanvas._img = null;
+        bgCanvas._imgDataUrl = null;
+        imageLoaded = false;
         renderGraph();
         setHint('Sesión cargada. Carga también la imagen PNG de fondo.');
       }
@@ -981,7 +1773,9 @@ function download(filename, content, mimeType) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 updateScaleStatus();
-setHint('📂 Carga una imagen PNG → calibra la escala (C) → coloca nodos → conecta → exporta GraphML');
+syncSemanticLinks();
+renderGraph();
+setHint('📂 Carga imagen → calibra (C) → arma topología y semántica → exporta runtime');
 </script>
 </body>
 </html>
