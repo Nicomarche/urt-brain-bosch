@@ -65,7 +65,31 @@ try:
     _CAMERA_LATERAL_CORRECTION_MAX_M = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M", 0.08
     )
+    _VISUAL_LANE_RELOCALIZATION_GAIN = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.60
+    )
+    _VISUAL_LANE_RELOCALIZATION_MAX_M = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M", 0.10
+    )
+    _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M", 0.01
+    )
+    _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M", 0.25
+    )
     _SEMANTIC_MATCH_WINDOW_S = getattr(cfg, "TRACKING_SEMANTIC_MATCH_WINDOW_S", 1.0)
+    _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = getattr(
+        cfg, "TRACKING_SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M", 0.45
+    )
+    _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = getattr(
+        cfg, "TRACKING_SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M", 0.30
+    )
+    _SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = getattr(
+        cfg, "TRACKING_SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M", 0.25
+    )
+    _SEMANTIC_RELOCALIZATION_COOLDOWN_S = getattr(
+        cfg, "TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S", 0.75
+    )
 except Exception:
     _GRAPHML_PATH = "Track GraphML File.graphml"
     _SEMANTICS_PATH = "track_semantics.json"
@@ -85,7 +109,15 @@ except Exception:
     _STEER_GAIN_DR     = 1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+    _VISUAL_LANE_RELOCALIZATION_GAIN = 0.60
+    _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.10
+    _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
+    _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
     _SEMANTIC_MATCH_WINDOW_S = 1.0
+    _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = 0.45
+    _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
+    _SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = 0.25
+    _SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.75
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -189,6 +221,7 @@ class TrackingState:
         self.node_attr = 0
         self.camera_lateral_correction_m = 0.0
         self.lane_measurement_reliable = False
+        self.raw_lateral_error_m = 0.0
         self.relocalization_mode = "map_match"
         self.last_relocalization_source = "map_match"
         self.last_relocalization_error_m = 0.0
@@ -222,7 +255,7 @@ class TrackingState:
                current_zone_types=None, map_metadata=None,
                available_destinations=None, relocalization_mode="map_match",
                last_relocalization_source="map_match",
-               last_relocalization_error_m=0.0):
+               last_relocalization_error_m=0.0, raw_lateral_error_m=0.0):
         with self._lock:
             self.x = x
             self.y = y
@@ -272,6 +305,7 @@ class TrackingState:
             self.available_destinations = list(available_destinations or [])
             self.waypoint_mode_active = waypoint_mode
             self.node_attr = node_attr
+            self.raw_lateral_error_m = float(raw_lateral_error_m or 0.0)
             self.relocalization_mode = str(relocalization_mode or "map_match")
             self.last_relocalization_source = str(last_relocalization_source or "map_match")
             self.last_relocalization_error_m = float(last_relocalization_error_m or 0.0)
@@ -333,6 +367,8 @@ class TrackingState:
         with self._lock:
             self.lane_measurement_reliable = bool(reliable)
             self.camera_lateral_correction_m = float(applied_correction_m if reliable else 0.0)
+            if not reliable:
+                self.raw_lateral_error_m = 0.0
 
     def snapshot(self):
         with self._lock:
@@ -375,6 +411,7 @@ class TrackingState:
                 node_attr=self.node_attr,
                 camera_lateral_correction_m=self.camera_lateral_correction_m,
                 lane_measurement_reliable=self.lane_measurement_reliable,
+                raw_lateral_error_m=self.raw_lateral_error_m,
                 relocalization_mode=self.relocalization_mode,
                 last_relocalization_source=self.last_relocalization_source,
                 last_relocalization_error_m=self.last_relocalization_error_m,
@@ -441,7 +478,8 @@ class threadTracking(ThreadWithStop):
                 _root = os.path.join(_here, "..", "..", "..")
                 semantics_path = os.path.normpath(os.path.join(_root, semantics_path))
             if not os.path.exists(semantics_path):
-                semantics_path = None
+                alt_name = os.path.join(os.path.dirname(semantics_path), "Track Semantics.json")
+                semantics_path = alt_name if os.path.exists(alt_name) else None
 
             self._graph = TrackGraph(graphml_path, step_m=_STEP_M, semantics_path=semantics_path)
             self._path_manager = PathManager(self._graph)
@@ -477,6 +515,7 @@ class threadTracking(ThreadWithStop):
         self._last_imu_t = None       # monotonic time of last IMU message
         self._last_speed_t = None     # monotonic time of last speed message
         self._last_sign_observation = None
+        self._last_semantic_relocalization_t = 0.0
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
 
@@ -535,15 +574,108 @@ class threadTracking(ThreadWithStop):
         sign_name = str(observation.get("sign") or "")
         expected_control = str(path_update.expected_control_type or "")
         next_semantic_type = str(path_update.next_semantic_type or "")
+        obs_distance_m = observation.get("distance_m")
+        path_distance_m = path_update.next_semantic_distance_m
+
+        def _match_payload() -> tuple[str, float]:
+            if obs_distance_m is not None and path_distance_m is not None:
+                return (f"sign:{sign_name}", abs(float(obs_distance_m) - float(path_distance_m)))
+            if path_distance_m is not None:
+                return (f"sign:{sign_name}", float(path_distance_m))
+            if obs_distance_m is not None:
+                return (f"sign:{sign_name}", float(obs_distance_m))
+            return (f"sign:{sign_name}", 0.0)
+
         if expected_control == "traffic_light" and sign_name in {"red_light", "yellow_light", "green_light"}:
-            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+            return _match_payload()
         if expected_control == "stop" and sign_name in {"stop", "no_entry"}:
-            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+            return _match_payload()
         if next_semantic_type == "crosswalk" and sign_name == "crosswalk":
-            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+            return _match_payload()
         if next_semantic_type == "parking_spot" and sign_name == "parking":
-            return (f"sign:{sign_name}", path_update.next_semantic_distance_m or 0.0)
+            return _match_payload()
         return None
+
+    @staticmethod
+    def _signed_lateral_error_to_path(
+        x: float,
+        y: float,
+        ref_x: float,
+        ref_y: float,
+        path_psi: float,
+    ) -> float:
+        dx = float(x) - float(ref_x)
+        dy = float(y) - float(ref_y)
+        return float(-dx * math.sin(float(path_psi)) + dy * math.cos(float(path_psi)))
+
+    def _apply_lane_visual_relocalization(self, raw_x, raw_y, raw_yaw, path_update):
+        if self._dr is None or path_update is None:
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0
+        if not bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0
+
+        raw_lateral_error_m = self._signed_lateral_error_to_path(
+            raw_x,
+            raw_y,
+            path_update.matched_x,
+            path_update.matched_y,
+            path_update.matched_yaw,
+        )
+        abs_raw_error_m = abs(raw_lateral_error_m)
+        if abs_raw_error_m < float(_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M):
+            self.tracking_state.set_lane_measurement_state(True, 0.0)
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+        if abs_raw_error_m > float(_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M):
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+
+        correction_m = float(raw_lateral_error_m) * float(_VISUAL_LANE_RELOCALIZATION_GAIN)
+        max_corr_m = float(_VISUAL_LANE_RELOCALIZATION_MAX_M)
+        if max_corr_m > 0.0:
+            correction_m = max(-max_corr_m, min(max_corr_m, correction_m))
+        if abs(correction_m) < 1e-9:
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+
+        self._dr.correct_lateral(correction_m, float(path_update.matched_yaw))
+        new_raw_x, new_raw_y, new_raw_yaw = self._dr.get_state()
+        self.tracking_state.set_lane_measurement_state(True, correction_m)
+        self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+        return new_raw_x, new_raw_y, new_raw_yaw, float(correction_m), float(raw_lateral_error_m)
+
+    def _apply_semantic_relocalization(self, path_update, now: float):
+        if self._dr is None or path_update is None:
+            return False, None
+        semantic_match = self._sign_matches_expected_semantic(path_update)
+        if semantic_match is None:
+            return False, None
+
+        if (float(now) - float(self._last_semantic_relocalization_t)) < float(_SEMANTIC_RELOCALIZATION_COOLDOWN_S):
+            return False, semantic_match
+
+        expected_distance_m = path_update.next_semantic_distance_m
+        observation = self._last_sign_observation if isinstance(self._last_sign_observation, dict) else {}
+        observed_distance_m = observation.get("distance_m")
+        if expected_distance_m is not None and float(expected_distance_m) > float(_SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M):
+            return False, semantic_match
+        if float(path_update.map_match_error_m or 0.0) > float(_SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M):
+            return False, semantic_match
+        if (
+            observed_distance_m is not None
+            and expected_distance_m is not None
+            and abs(float(observed_distance_m) - float(expected_distance_m))
+            > float(_SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M)
+        ):
+            return False, semantic_match
+
+        self._dr.reset(
+            float(path_update.matched_x),
+            float(path_update.matched_y),
+            float(path_update.matched_yaw),
+        )
+        self._last_semantic_relocalization_t = float(now)
+        return True, semantic_match
 
     # ------------------------------------------------------------------
     def thread_work(self):
@@ -706,6 +838,54 @@ class threadTracking(ThreadWithStop):
             distance_weight=_MAP_MATCH_DISTANCE_W,
             heading_weight=_MAP_MATCH_HEADING_W,
         )
+        raw_x, raw_y, raw_yaw, lane_relocalization_m, raw_lateral_error_m = self._apply_lane_visual_relocalization(
+            raw_x,
+            raw_y,
+            raw_yaw,
+            path_update,
+        )
+        if abs(lane_relocalization_m) > 1e-9:
+            path_update = self._path_manager.update(
+                raw_x,
+                raw_y,
+                raw_yaw,
+                speed_mps=self._last_speed,
+                min_lookahead_m=_ADVANCE_DIST,
+                lookahead_time_s=_LOOKAHEAD_TIME_S,
+                max_lookahead_m=_MAX_LOOKAHEAD_M,
+                precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
+                lookahead_pts=_LOOKAHEAD_PTS,
+                search_window=_MAP_MATCH_SEARCH_WP,
+                distance_weight=_MAP_MATCH_DISTANCE_W,
+                heading_weight=_MAP_MATCH_HEADING_W,
+            )
+
+        semantic_relocalized, semantic_match = self._apply_semantic_relocalization(path_update, now)
+        if semantic_relocalized:
+            raw_x, raw_y, raw_yaw = self._dr.get_state()
+            path_update = self._path_manager.update(
+                raw_x,
+                raw_y,
+                raw_yaw,
+                speed_mps=self._last_speed,
+                min_lookahead_m=_ADVANCE_DIST,
+                lookahead_time_s=_LOOKAHEAD_TIME_S,
+                max_lookahead_m=_MAX_LOOKAHEAD_M,
+                precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
+                lookahead_pts=_LOOKAHEAD_PTS,
+                search_window=_MAP_MATCH_SEARCH_WP,
+                distance_weight=_MAP_MATCH_DISTANCE_W,
+                heading_weight=_MAP_MATCH_HEADING_W,
+            )
+            raw_lateral_error_m = self._signed_lateral_error_to_path(
+                raw_x,
+                raw_y,
+                path_update.matched_x,
+                path_update.matched_y,
+                path_update.matched_yaw,
+            )
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+
         self._wp_idx = int(path_update.matched_idx)
         matched_idx = int(path_update.matched_idx)
         target_idx = int(path_update.target_idx)
@@ -722,8 +902,7 @@ class threadTracking(ThreadWithStop):
         relocalization_mode = "map_match"
         relocalization_source = "map_match"
         relocalization_error_m = map_match_error_m
-        semantic_match = self._sign_matches_expected_semantic(path_update)
-        if semantic_match is not None:
+        if semantic_relocalized and semantic_match is not None:
             relocalization_mode = "semantic"
             relocalization_source, semantic_error_m = semantic_match
             relocalization_error_m = float(semantic_error_m)
@@ -731,10 +910,10 @@ class threadTracking(ThreadWithStop):
             relocalization_mode = "lane_yaw_reset"
             relocalization_source = "camera_yaw_hint"
             relocalization_error_m = abs(math.degrees(_yaw_correction_rad)) / 180.0
-        elif bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
+        elif abs(lane_relocalization_m) > 1e-9:
             relocalization_mode = "lane_relocalization"
             relocalization_source = "lane_center"
-            relocalization_error_m = abs(float(getattr(self.tracking_state, "camera_lateral_correction_m", 0.0) or 0.0))
+            relocalization_error_m = abs(float(lane_relocalization_m))
 
         # ---- Write shared state (consumed by threadLineFollowing & visualizer)
         self.tracking_state.update(
@@ -779,6 +958,7 @@ class threadTracking(ThreadWithStop):
             relocalization_mode=relocalization_mode,
             last_relocalization_source=relocalization_source,
             last_relocalization_error_m=relocalization_error_m,
+            raw_lateral_error_m=raw_lateral_error_m,
         )
         try:
             nav_status = self._path_manager.build_navigation_status(path_update)
@@ -896,6 +1076,7 @@ class threadTracking(ThreadWithStop):
             _cam_conf = getattr(self.tracking_state, '_cam_yaw_hint_conf', 0.0)
             _lane_rel = int(bool(getattr(self.tracking_state, 'lane_measurement_reliable', False)))
             _lat_corr = float(getattr(self.tracking_state, 'camera_lateral_correction_m', 0.0))
+            _raw_lat = float(getattr(self.tracking_state, 'raw_lateral_error_m', 0.0))
             _mm_err = float(getattr(self.tracking_state, 'map_match_error_m', 0.0))
             _cam_str = (
                 f"cam_yaw_hint={math.degrees(_cam_hint):.1f}° conf={_cam_conf:.2f} corr={_corr_deg:+.3f}°"
@@ -909,7 +1090,7 @@ class threadTracking(ThreadWithStop):
                 f"matched=({matched_x:.4f},{matched_y:.4f},{math.degrees(matched_yaw):.1f}°) | "
                 f"wp={wp_idx}/{n_wp} tgt={target_idx} wp_xy=({wp[0]:.3f},{wp[1]:.3f}) dist={dist_to_wp:.3f}m | "
                 f"err={error_m:+.4f}m hdg={math.degrees(heading_rad):+.2f}° "
-                f"mm={_mm_err:.4f}m latcorr={_lat_corr:+.4f}m lane={_lane_rel} "
+                f"mm={_mm_err:.4f}m latcorr={_lat_corr:+.4f}m raw_lat={_raw_lat:+.4f}m lane={_lane_rel} "
                 f"kappa={path_kappa:+.3f}/m ff={ff_deg:+.1f}° | "
                 f"zone={zone_str} route={route_id or 'none'} curr={current_node_id} "
                 f"next={upcoming_node_id} man={maneuver_type} | {_cam_str} | dt={dt*1000:.1f}ms"

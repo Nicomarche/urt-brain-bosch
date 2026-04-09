@@ -127,8 +127,12 @@ class TrackGraph:
 
         self._load(graphml_path)
         if semantics_path is None:
-            candidate = os.path.join(os.path.dirname(os.path.abspath(graphml_path)), "track_semantics.json")
-            semantics_path = candidate if os.path.exists(candidate) else None
+            base_dir = os.path.dirname(os.path.abspath(graphml_path))
+            for candidate_name in ("track_semantics.json", "Track Semantics.json"):
+                candidate = os.path.join(base_dir, candidate_name)
+                if os.path.exists(candidate):
+                    semantics_path = candidate
+                    break
         self.semantics = TrackSemantics(semantics_path)
         self.map_metadata = self._build_map_metadata()
         self._build_reference_path()

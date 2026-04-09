@@ -44,7 +44,11 @@ class TrackGraphPlannerTests(unittest.TestCase):
         self.assertGreater(route.waypoints.shape[0], len(route.node_ids))
 
     def test_named_destination_and_map_metadata_are_available(self):
-        route = self.graph.go_to(self.reference_ids[0], {"destination_id": "start"})
+        available_destinations = self.graph.get_available_destinations()
+        self.assertGreater(len(available_destinations), 0)
+
+        destination_id = available_destinations[0]["id"]
+        route = self.graph.go_to(self.reference_ids[0], {"destination_id": destination_id})
 
         self.assertGreater(route.waypoints.shape[0], 0)
         self.assertIn("meters_per_pixel", route.map_metadata)

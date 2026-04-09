@@ -394,6 +394,7 @@ class TrackVisualizer(threading.Thread):
             raw_yaw = state.get("raw_yaw", yaw)
             map_match_error_m = state.get("map_match_error_m", 0.0)
             lat_corr_m = state.get("camera_lateral_correction_m", 0.0)
+            raw_lat_err_m = state.get("raw_lateral_error_m", 0.0)
             lane_rel = "cam" if state.get("lane_measurement_reliable") else "graph"
             maneuver_type = state.get("maneuver_type", "none")
             route_progress = float(state.get("route_progress", 0.0) or 0.0)
@@ -411,7 +412,8 @@ class TrackVisualizer(threading.Thread):
             cv2.putText(canvas,
                         f"e={state.get('error_m', 0):.3f}m  "
                         f"h={math.degrees(state.get('heading_rad', 0)):.1f}°  "
-                        f"mm={map_match_error_m:.3f}m  lat={lat_corr_m:+.3f}m  [{mode}|{lane_rel}]",
+                        f"mm={map_match_error_m:.3f}m  lat={lat_corr_m:+.3f}m  "
+                        f"raw_lat={raw_lat_err_m:+.3f}m  [{mode}|{lane_rel}]",
                         (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
                         f"v={spd * 100:.1f}cm/s  wp={wp_idx}  tgt={state.get('target_idx', wp_idx)}"

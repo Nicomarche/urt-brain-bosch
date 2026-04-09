@@ -991,6 +991,10 @@ function renderInspector() {
       <h4>${type} · ${escapeHtml(String(semantic.id || ''))}</h4>
       <div class="inspector-grid">
         <div class="inspector-row">
+          <label>ID</label>
+          <input value="${escapeHtml(String(semantic.id || ''))}" oninput="renameSemanticId('${type}', '${semantic.id}', this.value)">
+        </div>
+        <div class="inspector-row">
           <label>Label</label>
           <input value="${escapeHtml(semantic.label || '')}" oninput="updateSemanticField('${type}', '${semantic.id}', 'label', this.value)">
         </div>
@@ -1013,6 +1017,7 @@ function renderSemanticFields(type, semantic) {
     `;
   }
   if (type === 'intersection') {
+    const controlOptions = semantics.controls || [];
     return `
       <div class="inspector-row">
         <label>Nodo anchor</label>
@@ -1020,7 +1025,15 @@ function renderSemanticFields(type, semantic) {
       </div>
       <div class="inspector-row">
         <label>Control ID</label>
-        <input value="${escapeHtml(String(semantic.control_id || ''))}" oninput="updateSemanticField('${type}', '${semantic.id}', 'control_id', this.value)">
+        <select onchange="updateSemanticField('${type}', '${semantic.id}', 'control_id', this.value)">
+          <option value="">(sin control)</option>
+          ${controlOptions.map(item => `<option value="${escapeHtml(String(item.id || ''))}" ${String(semantic.control_id || '') === String(item.id || '') ? 'selected' : ''}>${escapeHtml(String(item.id || ''))} · ${escapeHtml(String(item.label || item.id || ''))}</option>`).join('')}
+        </select>
+        <div class="inspector-badges">
+          ${controlOptions.length
+            ? controlOptions.map(item => `<span class="inspector-badge">${escapeHtml(String(item.id || ''))}</span>`).join('')
+            : '<span class="inspector-badge">creá un control primero</span>'}
+        </div>
       </div>
       <div class="inspector-row">
         <label>Stopline node</label>
@@ -1149,6 +1162,31 @@ function updateSemanticField(type, id, field, value) {
   const entity = getSemanticEntity(type, id);
   if (!entity) return;
   entity[field] = value;
+  syncSemanticLinks();
+  renderGraph();
+}
+
+function renameSemanticId(type, oldId, newId) {
+  const trimmed = String(newId || '').trim();
+  if (!trimmed) return;
+  const arr = getSemanticArray(type);
+  if (!arr) return;
+  if (arr.some(item => String(item.id) === trimmed && String(item.id) !== String(oldId))) {
+    return;
+  }
+  const entity = getSemanticEntity(type, oldId);
+  if (!entity) return;
+  entity.id = trimmed;
+
+  if (type === 'control') {
+    (semantics.intersections || []).forEach(item => {
+      if (String(item.control_id || '') === String(oldId)) item.control_id = trimmed;
+    });
+  }
+
+  if (selectedSemantic && selectedSemantic.type === type && String(selectedSemantic.id) === String(oldId)) {
+    selectedSemantic = { type, id: trimmed };
+  }
   syncSemanticLinks();
   renderGraph();
 }
@@ -1626,10 +1664,40 @@ function validateRuntimeExport() {
 
   const nodeIds = new Set(nodes.map(node => String(node.id)));
   const controlIds = new Set(semantics.controls.map(item => String(item.id || '')));
+  const semanticIdSets = {
+    destinations: new Set(),
+    intersections: new Set(),
+    controls: new Set(),
+    crosswalks: new Set(),
+    parking_spots: new Set(),
+    zones: new Set(),
+  };
 
   const requireNode = (label, nodeId) => {
     if (!nodeId || !nodeIds.has(String(nodeId))) problems.push(`${label} referencia un nodo inexistente (${nodeId || 'vacío'}).`);
   };
+
+  const requireUniqueIds = (collectionName, label) => {
+    (semantics[collectionName] || []).forEach(item => {
+      const itemId = String(item.id || '').trim();
+      if (!itemId) {
+        problems.push(`${label} tiene un id vacío.`);
+        return;
+      }
+      if (semanticIdSets[collectionName].has(itemId)) {
+        problems.push(`${label} repite el id ${itemId}.`);
+        return;
+      }
+      semanticIdSets[collectionName].add(itemId);
+    });
+  };
+
+  requireUniqueIds('destinations', 'Destino');
+  requireUniqueIds('intersections', 'Intersección');
+  requireUniqueIds('controls', 'Control');
+  requireUniqueIds('crosswalks', 'Crosswalk');
+  requireUniqueIds('parking_spots', 'Parking');
+  requireUniqueIds('zones', 'Zona');
 
   semantics.destinations.forEach(item => requireNode(`Destino ${item.id}`, item.node_id));
   semantics.intersections.forEach(item => {

@@ -291,6 +291,22 @@ TRACKING_STEER_GAIN_DR = 1.0
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
 TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
 TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
+
+# Cuando la cámara confirma que seguimos dentro del carril, el tracking puede
+# recentrar el dead reckoning lateralmente hacia la ruta para que el auto
+# virtual no se “vaya” de la pista mientras el auto real sigue centrado.
+TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN = 0.60
+TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M = 0.10
+TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
+TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
+
+# Reanclaje semántico: cuando una señal esperada coincide cerca del próximo
+# evento de ruta, el DR puede resetearse a la pose matcheada del mapa.
+TRACKING_SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = 0.45
+TRACKING_SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
+TRACKING_SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = 0.25
+TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.75
+
 # Graph node attr that represents a physical stopline. Graph guidance is only
 # allowed to take authority in this exact node type.
 TRACKING_STOPLINE_NODE_ATTR = 7
