@@ -69,16 +69,22 @@ try:
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M", 0.08
     )
     _VISUAL_LANE_RELOCALIZATION_GAIN = getattr(
-        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.60
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.10
     )
     _VISUAL_LANE_RELOCALIZATION_MAX_M = getattr(
-        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M", 0.10
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M", 0.03
     )
     _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M", 0.01
     )
     _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M", 0.25
+    )
+    _VISUAL_LANE_RELOCALIZATION_COOLDOWN_S = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_COOLDOWN_S", 0.10
+    )
+    _VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS = getattr(
+        cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS", 0.05
     )
     _SEMANTIC_MATCH_WINDOW_S = getattr(cfg, "TRACKING_SEMANTIC_MATCH_WINDOW_S", 1.0)
     _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = getattr(
@@ -121,10 +127,12 @@ except Exception:
     _STEER_GAIN_DR     = 1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
-    _VISUAL_LANE_RELOCALIZATION_GAIN = 0.60
-    _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.10
+    _VISUAL_LANE_RELOCALIZATION_GAIN = 0.10
+    _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
     _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
     _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
+    _VISUAL_LANE_RELOCALIZATION_COOLDOWN_S = 0.10
+    _VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS = 0.05
     _SEMANTIC_MATCH_WINDOW_S = 1.0
     _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = 0.45
     _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
@@ -560,6 +568,7 @@ class threadTracking(ThreadWithStop):
         self._last_speed_t = None     # monotonic time of last speed message
         self._last_sign_observation = None
         self._last_semantic_relocalization_t = 0.0
+        self._last_lane_visual_reloc_t = 0.0
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
         self._last_steer_feedback_rad = 0.0
@@ -654,10 +663,17 @@ class threadTracking(ThreadWithStop):
         dy = float(y) - float(ref_y)
         return float(-dx * math.sin(float(path_psi)) + dy * math.cos(float(path_psi)))
 
-    def _apply_lane_visual_relocalization(self, raw_x, raw_y, raw_yaw, path_update):
+    def _apply_lane_visual_relocalization(self, raw_x, raw_y, raw_yaw, path_update, now: float):
         if self._dr is None or path_update is None:
             return raw_x, raw_y, raw_yaw, 0.0, 0.0
         if not bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0
+        # Skip in precision zones (intersections, stoplines): the car intentionally
+        # deviates from the route centreline here, so snapping it back is wrong.
+        if bool(getattr(path_update, "waypoint_mode_active", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0
+        # Skip when the car is nearly stopped — prevents fighting parking manoeuvres.
+        if abs(self._last_speed) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
             return raw_x, raw_y, raw_yaw, 0.0, 0.0
 
         raw_lateral_error_m = self._signed_lateral_error_to_path(
@@ -676,6 +692,13 @@ class threadTracking(ThreadWithStop):
             self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
             return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
 
+        # Rate-limit: apply at most every _VISUAL_LANE_RELOCALIZATION_COOLDOWN_S so
+        # we don't snap the virtual position 50×/s (which would keep it glued to the
+        # map route and mask any genuine physical departure from the lane).
+        if (now - self._last_lane_visual_reloc_t) < float(_VISUAL_LANE_RELOCALIZATION_COOLDOWN_S):
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+
         correction_m = float(raw_lateral_error_m) * float(_VISUAL_LANE_RELOCALIZATION_GAIN)
         max_corr_m = float(_VISUAL_LANE_RELOCALIZATION_MAX_M)
         if max_corr_m > 0.0:
@@ -685,6 +708,7 @@ class threadTracking(ThreadWithStop):
             return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
 
         self._dr.correct_lateral(correction_m, float(path_update.matched_yaw))
+        self._last_lane_visual_reloc_t = now
         new_raw_x, new_raw_y, new_raw_yaw = self._dr.get_state()
         self.tracking_state.set_lane_measurement_state(True, correction_m)
         self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
@@ -965,6 +989,7 @@ class threadTracking(ThreadWithStop):
             raw_y,
             raw_yaw,
             path_update,
+            now,
         )
         if abs(lane_relocalization_m) > 1e-9:
             path_update = self._path_manager.update(

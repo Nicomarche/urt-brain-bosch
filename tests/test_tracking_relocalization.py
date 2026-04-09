@@ -66,26 +66,32 @@ class TrackingRelocalizationTests(unittest.TestCase):
 
         self.assertAlmostEqual(steer_rad, math.radians(25.0), places=6)
 
-    def test_lane_visual_relocalization_recenters_dead_reckoning(self):
+    def _make_lane_reloc_tracker(self, dr_y=0.10, speed=0.20):
         tracker = threadTracking.__new__(threadTracking)
-        tracker._dr = _FakeDR(x=0.0, y=0.10, yaw=0.0)
+        tracker._dr = _FakeDR(x=0.0, y=dr_y, yaw=0.0)
+        tracker._last_speed = speed
+        tracker._last_lane_visual_reloc_t = 0.0
         tracker.tracking_state = types.SimpleNamespace(
             lane_measurement_reliable=True,
             raw_lateral_error_m=0.0,
             set_lane_measurement_state=lambda reliable, applied_correction_m=0.0: None,
         )
+        return tracker
 
-        path_update = types.SimpleNamespace(
+    def _make_lane_reloc_path_update(self, waypoint_mode_active=False):
+        return types.SimpleNamespace(
             matched_x=0.0,
             matched_y=0.0,
             matched_yaw=0.0,
+            waypoint_mode_active=waypoint_mode_active,
         )
 
+    def test_lane_visual_relocalization_recenters_dead_reckoning(self):
+        tracker = self._make_lane_reloc_tracker(dr_y=0.10)
+        path_update = self._make_lane_reloc_path_update()
+
         raw_x, raw_y, raw_yaw, correction_m, raw_lat_err = tracker._apply_lane_visual_relocalization(
-            0.0,
-            0.10,
-            0.0,
-            path_update,
+            0.0, 0.10, 0.0, path_update, now=1000.0,
         )
 
         self.assertGreater(correction_m, 0.0)
@@ -95,25 +101,11 @@ class TrackingRelocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(raw_yaw, 0.0, places=4)
 
     def test_lane_visual_relocalization_skips_large_raw_error(self):
-        tracker = threadTracking.__new__(threadTracking)
-        tracker._dr = _FakeDR(x=0.0, y=0.40, yaw=0.0)
-        tracker.tracking_state = types.SimpleNamespace(
-            lane_measurement_reliable=True,
-            raw_lateral_error_m=0.0,
-            set_lane_measurement_state=lambda reliable, applied_correction_m=0.0: None,
-        )
-
-        path_update = types.SimpleNamespace(
-            matched_x=0.0,
-            matched_y=0.0,
-            matched_yaw=0.0,
-        )
+        tracker = self._make_lane_reloc_tracker(dr_y=0.40)
+        path_update = self._make_lane_reloc_path_update()
 
         raw_x, raw_y, raw_yaw, correction_m, raw_lat_err = tracker._apply_lane_visual_relocalization(
-            0.0,
-            0.40,
-            0.0,
-            path_update,
+            0.0, 0.40, 0.0, path_update, now=1000.0,
         )
 
         self.assertEqual(correction_m, 0.0)
@@ -121,6 +113,37 @@ class TrackingRelocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(raw_x, 0.0, places=4)
         self.assertAlmostEqual(raw_y, 0.40, places=4)
         self.assertAlmostEqual(raw_yaw, 0.0, places=4)
+
+    def test_lane_visual_relocalization_skips_in_precision_zone(self):
+        tracker = self._make_lane_reloc_tracker(dr_y=0.10)
+        path_update = self._make_lane_reloc_path_update(waypoint_mode_active=True)
+
+        _, _, _, correction_m, _ = tracker._apply_lane_visual_relocalization(
+            0.0, 0.10, 0.0, path_update, now=1000.0,
+        )
+
+        self.assertEqual(correction_m, 0.0)
+
+    def test_lane_visual_relocalization_skips_when_stopped(self):
+        tracker = self._make_lane_reloc_tracker(dr_y=0.10, speed=0.01)
+        path_update = self._make_lane_reloc_path_update()
+
+        _, _, _, correction_m, _ = tracker._apply_lane_visual_relocalization(
+            0.0, 0.10, 0.0, path_update, now=1000.0,
+        )
+
+        self.assertEqual(correction_m, 0.0)
+
+    def test_lane_visual_relocalization_respects_cooldown(self):
+        tracker = self._make_lane_reloc_tracker(dr_y=0.10)
+        tracker._last_lane_visual_reloc_t = 999.95  # 50 ms ago
+        path_update = self._make_lane_reloc_path_update()
+
+        _, _, _, correction_m, _ = tracker._apply_lane_visual_relocalization(
+            0.0, 0.10, 0.0, path_update, now=1000.0,
+        )
+
+        self.assertEqual(correction_m, 0.0)
 
     def test_semantic_relocalization_resets_pose_when_event_matches(self):
         tracker = threadTracking.__new__(threadTracking)
