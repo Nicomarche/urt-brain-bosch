@@ -3582,7 +3582,7 @@ Args:
 
         min_steer_deg = 0.0
         if hint_source == "two_line" and hint_conf >= 0.25 and hint_deg >= 12.0:
-            min_steer_deg = max(2.5, hint_deg * 0.12)
+            min_steer_deg = max(2.5, hint_deg * 0.55)
 
         previous_steering = getattr(self, "_last_good_steering", None)
         if previous_steering is None:
@@ -7046,17 +7046,29 @@ Args:
                 # Update direction based on which line is visible
                 self._curve_direction = 1 if avg_left is not None else -1
             elif num_lines == 2:
+                two_line_hold = max(1, int(getattr(self, 'curve_two_line_hold_frames', 6) or 6))
                 if two_line_hint_ready and two_line_hint_direction != 0:
                     # Keep the early-entering state alive while the two-line hint remains strong.
                     self._curve_direction = int(two_line_hint_direction)
                     self._curve_enter_origin = "two_line_hint"
                 elif (
                     self._curve_enter_origin == "two_line_hint" and
-                    self._curve_state_frames <= max(1, int(getattr(self, 'curve_two_line_hold_frames', 6) or 6))
+                    self._curve_state_frames <= two_line_hold
                 ):
                     # Short confidence dips are common on the last safe frame before line loss.
                     # Keep ENTERING alive briefly so the steering does not unwind to zero.
                     pass
+                elif (
+                    self._curve_enter_origin == "two_line_hint" and
+                    self._curve_state_frames > two_line_hold and
+                    self._curve_state_frames <= two_line_hold * 4
+                ):
+                    # Still seeing 2 lines after hold expired but hint was strong enough to
+                    # enter. Promote to IN_CURVE rather than resetting — the car may still be
+                    # mid-curve and just hasn't lost the outer line yet.
+                    self._curve_state = "IN_CURVE"
+                    self._curve_state_frames = 1
+                    self._curve_enter_origin = "none"
                 else:
                     # Regained both lines → back to STRAIGHT.
                     # If it's a real curve, we'll lose the line again and re-enter ENTERING.
