@@ -747,6 +747,60 @@ function renderGraph() {
   updateStatus();
 }
 
+// ─── Measure overlay (drawn on SVG layer) ─────────────────────────────────────
+function renderMeasureLayer() {
+  measureLayer.innerHTML = '';
+  measurePanel.style.display = 'none';
+  if (!measureFrom) return;
+
+  const n1 = getNodeById(measureFrom);
+  if (!n1) return;
+  const p1 = imgToCanvas(n1.imgX, n1.imgY);
+
+  // First node highlight ring
+  const ring1 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  ring1.setAttribute('cx', p1.x); ring1.setAttribute('cy', p1.y); ring1.setAttribute('r', 12);
+  ring1.setAttribute('fill', 'none'); ring1.setAttribute('stroke', '#06b6d4');
+  ring1.setAttribute('stroke-width', '2'); ring1.setAttribute('stroke-dasharray', '4 2');
+  measureLayer.appendChild(ring1);
+
+  if (!measureTo) return;
+
+  const n2 = getNodeById(measureTo);
+  if (!n2) return;
+  const p2 = imgToCanvas(n2.imgX, n2.imgY);
+
+  // Line between nodes
+  const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+  line.setAttribute('x1', p1.x); line.setAttribute('y1', p1.y);
+  line.setAttribute('x2', p2.x); line.setAttribute('y2', p2.y);
+  line.setAttribute('stroke', '#06b6d4'); line.setAttribute('stroke-width', '1.5');
+  line.setAttribute('stroke-dasharray', '6 3'); line.setAttribute('fill', 'none');
+  measureLayer.appendChild(line);
+
+  // Second node highlight ring
+  const ring2 = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  ring2.setAttribute('cx', p2.x); ring2.setAttribute('cy', p2.y); ring2.setAttribute('r', 12);
+  ring2.setAttribute('fill', 'none'); ring2.setAttribute('stroke', '#06b6d4');
+  ring2.setAttribute('stroke-width', '2'); ring2.setAttribute('stroke-dasharray', '4 2');
+  measureLayer.appendChild(ring2);
+
+  // Compute distance
+  const dx = n2.imgX - n1.imgX, dy = n2.imgY - n1.imgY;
+  const pxDist = Math.sqrt(dx * dx + dy * dy);
+  const s = metersPerPixel;
+  let distText;
+  if (s) {
+    const meters = pxDist * s;
+    distText = `${meters.toFixed(3)} m`;
+  } else {
+    distText = `${Math.round(pxDist)} px (sin calibrar)`;
+  }
+
+  measurePanel.style.display = 'block';
+  measurePanel.innerHTML = `<span class="m-dist">${distText}</span><span class="m-nodes">Nodo ${n1.id} → Nodo ${n2.id}</span>`;
+}
+
 function renderEdges() {
   edgeLayer.innerHTML = '';
   edges.forEach(edge => {
@@ -1344,6 +1398,20 @@ function handleNodeClick(nodeId) {
       setHint('Selección cancelada.');
     }
     renderGraph();
+  } else if (mode === 'measure') {
+    if (measureFrom === null) {
+      measureFrom = nodeId;
+      measureTo = null;
+      setHint('Click en el segundo nodo para medir la distancia.');
+    } else if (measureFrom !== nodeId) {
+      measureTo = nodeId;
+      setHint('Click en otro nodo para medir de nuevo. Esc para cancelar.');
+    } else {
+      measureFrom = null;
+      measureTo = null;
+      setHint('Click en el primer nodo para medir.');
+    }
+    renderGraph();
   } else if (mode === 'delete') {
     saveUndo();
     deleteNode(nodeId);
@@ -1499,6 +1567,7 @@ function setMode(m) {
   mode = m;
   edgeFrom = null;
   if (m !== 'calibrate') cancelCalib();
+  if (m !== 'measure') { measureFrom = null; measureTo = null; }
   document.querySelectorAll('.mode-btn').forEach(b => {
     b.classList.toggle('active', b.dataset.mode === m);
   });
@@ -1507,9 +1576,11 @@ function setMode(m) {
     add_edge:  'Click en nodo origen, luego en nodo destino para crear arista.',
     move:      'Arrastra nodos para repositionarlos.',
     delete:    'Click en un nodo o arista para eliminarlo.',
-    calibrate: 'Click en el primer extremo de una línea de referencia conocida.'
+    calibrate: 'Click en el primer extremo de una línea de referencia conocida.',
+    measure:   'Click en el primer nodo para medir la distancia a otro nodo.'
   };
-  setHint(hints[m]);
+  setHint(hints[m] || '');
+  renderGraph();
 }
 
 document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -1518,11 +1589,12 @@ document.querySelectorAll('.mode-btn').forEach(btn => {
 
 document.addEventListener('keydown', ev => {
   if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA') return;
-  const map = { 'n': 'add_node', 'e': 'add_edge', 'v': 'move', 'x': 'delete', 'c': 'calibrate' };
+  const map = { 'n': 'add_node', 'e': 'add_edge', 'v': 'move', 'x': 'delete', 'c': 'calibrate', 'm': 'measure' };
   if (map[ev.key.toLowerCase()]) { setMode(map[ev.key.toLowerCase()]); return; }
   if ((ev.key.toLowerCase() === 'z') && (ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); undo(); return; }
   if (ev.key === 'Escape') {
     edgeFrom = null; selectedNode = null; selectedEdge = null; selectedSemantic = null;
+    measureFrom = null; measureTo = null;
     cancelCalib();
     renderGraph();
   }

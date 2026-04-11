@@ -628,42 +628,6 @@
     {
       "label": "",
       "destinationId": "",
-      "intersectionId": "intersection_1",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 59,
-      "imgX": 1562.2213516160627,
-      "imgY": 371.4593535749266,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 60,
-      "imgX": 1741.633692458374,
-      "imgY": 411.8903036238981,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 61,
-      "imgX": 1958.9500489715965,
-      "imgY": 447.26738491674826,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
       "intersectionId": "",
       "controlId": "",
       "parkingSpotId": "",
@@ -1115,6 +1079,174 @@
       "id": 100,
       "imgX": 1375.228207639569,
       "imgY": 2337.4142997061704,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 105,
+      "imgX": 1572.0880503144654,
+      "imgY": 356.9811320754717,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 106,
+      "imgX": 1693.7861635220124,
+      "imgY": 362.38993710691824,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 107,
+      "imgX": 1774.918238993711,
+      "imgY": 359.68553459119494,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 108,
+      "imgX": 1839.8238993710693,
+      "imgY": 356.9811320754717,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 109,
+      "imgX": 1904.7295597484276,
+      "imgY": 354.27672955974845,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 110,
+      "imgX": 1972.3396226415095,
+      "imgY": 351.57232704402514,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 111,
+      "imgX": 2048.062893081761,
+      "imgY": 351.57232704402514,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 112,
+      "imgX": 2107.5597484276727,
+      "imgY": 356.9811320754717,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 113,
+      "imgX": 2172.4654088050315,
+      "imgY": 365.0943396226415,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 114,
+      "imgX": 2231.9622641509436,
+      "imgY": 370.5031446540881,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 115,
+      "imgX": 2283.3459119496856,
+      "imgY": 384.02515723270443,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 116,
+      "imgX": 2326.616352201258,
+      "imgY": 400.2515723270441,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 117,
+      "imgX": 1488.251572327044,
+      "imgY": 351.57232704402514,
+      "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 118,
+      "imgX": 1636.9937106918237,
+      "imgY": 359.68553459119494,
       "type": 0
     }
   ],
@@ -1635,46 +1767,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 52,
-      "source": 58,
-      "target": 59
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 53,
-      "source": 59,
-      "target": 60
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 54,
-      "source": 60,
-      "target": 61
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 55,
-      "source": 61,
-      "target": 62
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 56,
       "source": 62,
       "target": 63
@@ -2058,10 +2150,160 @@
       "id": 94,
       "source": 100,
       "target": 35
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 95,
+      "source": 58,
+      "target": 117
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 96,
+      "source": 117,
+      "target": 105
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 97,
+      "source": 105,
+      "target": 118
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 98,
+      "source": 118,
+      "target": 106
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 99,
+      "source": 106,
+      "target": 107
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 100,
+      "source": 107,
+      "target": 108
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 101,
+      "source": 108,
+      "target": 109
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 102,
+      "source": 109,
+      "target": 110
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 103,
+      "source": 110,
+      "target": 111
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 104,
+      "source": 111,
+      "target": 112
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 105,
+      "source": 112,
+      "target": 113
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 106,
+      "source": 113,
+      "target": 114
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 107,
+      "source": 114,
+      "target": 115
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 108,
+      "source": 115,
+      "target": 116
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 109,
+      "source": 116,
+      "target": 64
     }
   ],
-  "nextNodeId": 105,
-  "nextEdgeId": 95,
+  "nextNodeId": 119,
+  "nextEdgeId": 110,
   "imgW": 3036,
   "imgH": 2580,
   "metersPerPixel": 0.0016837326307060833,
@@ -2109,15 +2351,7 @@
         "node_id": "94"
       }
     ],
-    "intersections": [
-      {
-        "id": "intersection_1",
-        "label": "Intersection 59",
-        "anchor_node_id": "59",
-        "control_id": "control_2",
-        "stopline_node_id": "58"
-      }
-    ],
+    "intersections": [],
     "controls": [
       {
         "id": "control_2",
