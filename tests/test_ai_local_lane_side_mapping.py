@@ -1,3 +1,4 @@
+import math
 import os
 import tempfile
 import time
@@ -751,6 +752,43 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
 
         detector.frames_without_line = 5
         self.assertIsNone(detector._get_no_lane_hold_steering())
+
+    def test_two_line_curve_priority_holds_previous_steer_through_deadband(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._curve_state = "STRAIGHT"
+        detector._curve_enter_origin = "none"
+        detector._curve_direction = 0
+        detector._local_ai_heading_hint_source = "two_line"
+        detector._local_ai_heading_hint_confidence = 0.68
+        detector._local_ai_heading_hint_rad = math.radians(19.0)
+        detector._last_good_steering = -1.0
+        detector.last_steering = -1.0
+        detector.mpc_output_deadband_deg = 0.5
+        detector.max_steering = 25.0
+
+        debug_info = {}
+        guarded = detector._enforce_two_line_curve_priority(0.0, debug_info=debug_info)
+
+        self.assertLess(guarded, -0.7)
+        self.assertTrue(debug_info["two_line_curve_priority"])
+        self.assertEqual(debug_info["two_line_curve_priority_mode"], "continuity_hold")
+
+    def test_two_line_curve_priority_allows_real_reversal_command(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector._curve_state = "STRAIGHT"
+        detector._curve_enter_origin = "none"
+        detector._curve_direction = 0
+        detector._local_ai_heading_hint_source = "two_line"
+        detector._local_ai_heading_hint_confidence = 0.68
+        detector._local_ai_heading_hint_rad = math.radians(19.0)
+        detector._last_good_steering = -1.0
+        detector.last_steering = -1.0
+        detector.mpc_output_deadband_deg = 0.5
+        detector.max_steering = 25.0
+
+        guarded = detector._enforce_two_line_curve_priority(3.0, debug_info={})
+
+        self.assertEqual(guarded, 3.0)
 
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):

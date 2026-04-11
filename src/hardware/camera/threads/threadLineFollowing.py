@@ -3567,35 +3567,56 @@ Args:
         if steering_angle is None:
             return steering_angle
 
-        if str(getattr(self, "_curve_state", "STRAIGHT")) != "ENTERING":
-            return steering_angle
-        if str(getattr(self, "_curve_enter_origin", "none")) != "two_line_hint":
-            return steering_angle
-
-        desired_sign = 0
-        curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
-        if curve_direction != 0:
-            # _curve_direction = 1 = right curve → steer right (+1)
-            desired_sign = curve_direction
-
+        curve_state = str(getattr(self, "_curve_state", "STRAIGHT"))
+        curve_origin = str(getattr(self, "_curve_enter_origin", "none"))
         hint_source = str(getattr(self, "_local_ai_heading_hint_source", "none") or "none")
         hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
         hint_rad = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
         hint_deg = abs(math.degrees(hint_rad))
+        previous_steering = getattr(self, "_last_good_steering", None)
+        if previous_steering is None:
+            previous_steering = getattr(self, "last_steering", None)
+        deadband_deg = max(0.0, float(getattr(self, "mpc_output_deadband_deg", 0.0) or 0.0))
+
+        entering_hold_active = (
+            curve_state == "ENTERING" and
+            curve_origin == "two_line_hint"
+        )
+        continuity_hold_active = (
+            not entering_hold_active and
+            hint_source == "two_line" and
+            hint_conf >= 0.45 and
+            hint_deg >= 16.0 and
+            previous_steering is not None and
+            abs(float(previous_steering)) >= max(deadband_deg + 0.25, 0.8) and
+            abs(float(steering_angle)) <= max(deadband_deg + 0.05, abs(float(previous_steering)) * 0.55)
+        )
+        if not entering_hold_active and not continuity_hold_active:
+            return steering_angle
+
+        desired_sign = 0
+        if continuity_hold_active and previous_steering is not None and abs(float(previous_steering)) > 1e-4:
+            desired_sign = 1 if float(previous_steering) > 0.0 else -1
+        else:
+            curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
+            if curve_direction != 0:
+                # _curve_direction = 1 = right curve → steer right (+1)
+                desired_sign = curve_direction
         if desired_sign == 0 and abs(hint_rad) > 1e-4:
             desired_sign = -1 if hint_rad > 0.0 else 1
         if desired_sign == 0:
             return steering_angle
 
         min_steer_deg = 0.0
-        if hint_source == "two_line" and hint_conf >= 0.25 and hint_deg >= 12.0:
+        if entering_hold_active and hint_source == "two_line" and hint_conf >= 0.25 and hint_deg >= 12.0:
             min_steer_deg = max(2.5, hint_deg * 0.55)
-
-        previous_steering = getattr(self, "_last_good_steering", None)
-        if previous_steering is None:
-            previous_steering = getattr(self, "last_steering", None)
+        if continuity_hold_active:
+            min_steer_deg = max(min_steer_deg, deadband_deg + 0.25)
+            if hint_deg >= 12.0:
+                min_steer_deg = max(min_steer_deg, hint_deg * 0.12)
         if previous_steering is not None and float(previous_steering) * desired_sign > 0.0:
-            min_steer_deg = max(min_steer_deg, abs(float(previous_steering)) * 0.65)
+            hold_ratio = 0.80 if continuity_hold_active else 0.65
+            min_steer_deg = max(min_steer_deg, abs(float(previous_steering)) * hold_ratio)
 
         if min_steer_deg <= 0.0:
             return steering_angle
@@ -3606,6 +3627,9 @@ Args:
             guarded_steer = desired_sign * min_steer_deg
             if isinstance(debug_info, dict):
                 debug_info["two_line_curve_priority"] = True
+                debug_info["two_line_curve_priority_mode"] = (
+                    "continuity_hold" if continuity_hold_active else "entering_guard"
+                )
                 debug_info["two_line_curve_priority_sign"] = int(desired_sign)
                 debug_info["two_line_curve_priority_min_deg"] = round(float(min_steer_deg), 3)
                 debug_info["two_line_curve_priority_input_deg"] = round(float(steering_angle), 3)
