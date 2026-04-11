@@ -3549,6 +3549,39 @@ Args:
             )
             min_steer_deg = max(min_steer_deg, abs(float(previous_steering)) * hold_ratio)
 
+        continuity_sign = 0
+        continuity_min_deg = 0.0
+        continuity_hold_active = False
+        if (
+            curve_state == "IN_CURVE" and
+            previous_steering is not None and
+            float(previous_steering) * desired_sign < 0.0
+        ):
+            single_line_streak = 0
+            if isinstance(debug_info, dict):
+                try:
+                    single_line_streak = int(debug_info.get("single_line_streak", 0) or 0)
+                except (TypeError, ValueError):
+                    single_line_streak = 0
+            continuity_window = max(
+                3,
+                int(getattr(self, "single_line_prefer_center_frames", 2) or 2) + 2,
+            )
+            prev_steer_abs = abs(float(previous_steering))
+            hint_supports_curve = (
+                hint_deg >= 20.0 or
+                (hint_conf >= 0.20 and hint_deg >= 10.0) or
+                heading_deg >= 4.0
+            )
+            if (
+                0 < single_line_streak <= continuity_window and
+                prev_steer_abs >= 4.0 and
+                hint_supports_curve
+            ):
+                continuity_sign = 1 if float(previous_steering) > 0.0 else -1
+                continuity_min_deg = max(min_steer_deg, prev_steer_abs * 0.70)
+                continuity_hold_active = True
+
         min_steer_deg = min(float(self.max_steering), float(min_steer_deg))
         guarded_steer = float(steering_angle)
         if guarded_steer * desired_sign < min_steer_deg:
@@ -3559,6 +3592,17 @@ Args:
                 debug_info["single_line_curve_priority_min_deg"] = round(float(min_steer_deg), 3)
                 debug_info["single_line_curve_priority_input_deg"] = round(float(steering_angle), 3)
                 debug_info["single_line_curve_priority_output_deg"] = round(float(guarded_steer), 3)
+
+        if continuity_hold_active:
+            continuity_min_deg = min(float(self.max_steering), float(continuity_min_deg))
+            if continuity_sign != 0 and guarded_steer * continuity_sign < continuity_min_deg:
+                guarded_steer = continuity_sign * continuity_min_deg
+                if isinstance(debug_info, dict):
+                    debug_info["single_line_curve_continuity_hold"] = True
+                    debug_info["single_line_curve_continuity_sign"] = int(continuity_sign)
+                    debug_info["single_line_curve_continuity_min_deg"] = round(float(continuity_min_deg), 3)
+                    debug_info["single_line_curve_continuity_prev_deg"] = round(float(previous_steering), 3)
+                    debug_info["single_line_curve_continuity_output_deg"] = round(float(guarded_steer), 3)
 
         return guarded_steer
 
