@@ -5372,6 +5372,8 @@ Args:
         if not self.use_noise_filter:
             return False, ""
 
+        curve_transition_active = self._curve_state in ("ENTERING", "EXITING")
+
         # Check 1: Too many Hough lines = reflections/glare
         all_lines = debug_info.get('all_lines')
         if all_lines is not None and len(all_lines) > self.noise_max_hough_lines:
@@ -5387,6 +5389,10 @@ Args:
         if error is not None and self._last_good_error is not None:
             error_jump = abs(error - self._last_good_error)
             if error_jump > self.noise_max_error_jump_px and self._noise_reject_count < self.noise_max_reject_frames:
+                # During curve entry/exit the target lane center can legitimately jump
+                # as the controller switches between straight and curve geometry.
+                if curve_transition_active:
+                    return False, ""
                 return True, f"error_jump({error_jump:.0f}px>{self.noise_max_error_jump_px})"
 
         # Check 3: Sudden steering jump
@@ -5394,7 +5400,7 @@ Args:
             steer_jump = abs(steering_angle - self._last_good_steering)
             if steer_jump > self.noise_max_steer_jump_deg and self._noise_reject_count < self.noise_max_reject_frames:
                 # Exception: don't reject if we're transitioning states (curve entry/exit)
-                if self._curve_state in ("ENTERING", "EXITING"):
+                if curve_transition_active:
                     return False, ""
                 # Exception: don't reject when steering DIRECTION reverses.
                 # A reversal (e.g., last_good=+22° → new=-3°) indicates a legitimate

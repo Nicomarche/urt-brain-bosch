@@ -209,6 +209,42 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertTrue(info["applied"])
         self.assertAlmostEqual(blended, 6.6667, places=3)
 
+    def test_noise_filter_allows_large_error_jump_during_curve_entering(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.use_noise_filter = True
+        detector.noise_max_hough_lines = 40
+        detector.noise_max_error_jump_px = 80
+        detector.noise_max_steer_jump_deg = 15
+        detector.noise_max_reject_frames = 3
+        detector._noise_reject_count = 0
+        detector._last_good_error = -59.0
+        detector._last_good_steering = -2.76
+        detector._last_good_num_lines = 2
+        detector._curve_state = "ENTERING"
+
+        is_noisy, reason = detector._is_frame_noisy({}, 30.0, -17.5, 2)
+
+        self.assertFalse(is_noisy)
+        self.assertEqual(reason, "")
+
+    def test_noise_filter_still_rejects_large_error_jump_on_straight(self):
+        detector = threadLineFollowing.__new__(threadLineFollowing)
+        detector.use_noise_filter = True
+        detector.noise_max_hough_lines = 40
+        detector.noise_max_error_jump_px = 80
+        detector.noise_max_steer_jump_deg = 15
+        detector.noise_max_reject_frames = 3
+        detector._noise_reject_count = 0
+        detector._last_good_error = -59.0
+        detector._last_good_steering = -2.76
+        detector._last_good_num_lines = 2
+        detector._curve_state = "STRAIGHT"
+
+        is_noisy, reason = detector._is_frame_noisy({}, 30.0, -17.5, 2)
+
+        self.assertTrue(is_noisy)
+        self.assertTrue(reason.startswith("error_jump("))
+
     def test_build_local_mask_guidance_single_line_uses_conservative_center_after_streak(self):
         self.detector.consecutive_single_right = 4
         self.detector.single_line_prefer_center_frames = 2
