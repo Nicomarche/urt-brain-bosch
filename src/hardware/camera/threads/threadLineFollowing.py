@@ -9682,6 +9682,7 @@ Returns:
                         "map_match_error_m": round(float(getattr(self._tracking_state, 'map_match_error_m', 0.0)), 5),
                         "path_psi_deg": round(math.degrees(float(getattr(self._tracking_state, 'path_psi', 0.0))), 3),
                         "path_kappa": round(float(getattr(self._tracking_state, 'path_kappa', 0.0)), 5),
+                        "path_heading_change_rad": round(float(getattr(self._tracking_state, 'path_heading_change_rad', 0.0)), 4),
                         "target_idx": getattr(
                             self._tracking_state,
                             'target_idx',

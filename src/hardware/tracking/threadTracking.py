@@ -211,6 +211,7 @@ class TrackingState:
         self.heading_rad = 0.0
         self.path_psi = 0.0
         self.path_kappa = 0.0   # Signed path curvature at current wp (1/m)
+        self.path_heading_change_rad = 0.0  # Total heading change over next 1.5m of path
         self.map_match_error_m = 0.0
         self.speed_mps = 0.0
         self.speed_source = "none"
@@ -268,6 +269,7 @@ class TrackingState:
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
+               path_heading_change_rad=0.0,
                speed_source="none", speed_feedback_age_s=None, speed_command_age_s=None,
                steer_rad=0.0, target_idx=None, raw_x=None, raw_y=None, raw_yaw=None,
                matched_x=None, matched_y=None, matched_yaw=None, map_match_error_m=0.0,
@@ -298,6 +300,7 @@ class TrackingState:
             self.heading_rad = heading_rad
             self.path_psi = path_psi
             self.path_kappa = path_kappa
+            self.path_heading_change_rad = float(path_heading_change_rad)
             self.map_match_error_m = float(map_match_error_m)
             self.speed_mps = speed_mps
             self.speed_source = str(speed_source or "none")
@@ -1072,6 +1075,7 @@ class threadTracking(ThreadWithStop):
             steer_rad=self._last_steer_rad,
             error_m=error_m, heading_rad=heading_rad,
             path_psi=path_psi, path_kappa=path_kappa,
+            path_heading_change_rad=float(path_update.path_heading_change_rad),
             speed_mps=self._last_speed,
             speed_source=self._last_speed_source,
             speed_feedback_age_s=speed_feedback_age_s,
