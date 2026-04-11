@@ -43,6 +43,7 @@ class PathUpdate:
     matched_yaw: float
     path_psi: float
     path_kappa: float
+    path_heading_change_rad: float
     error_m: float
     heading_rad: float
     map_match_error_m: float
@@ -377,6 +378,28 @@ class PathManager:
             dpsi += 2.0 * math.pi
         return dpsi / max(2.0 * self.graph.step_m, 1e-6)
 
+    def _get_heading_change_ahead(self, route: RoutePath, wp_idx: int, lookahead_m: float) -> float:
+        """Total heading change (radians) from wp_idx over the next lookahead_m of path.
+
+        Positive = right curve, negative = left curve. Derived directly from the
+        dense path which is built from graph nodes and edges, so this reflects true
+        track geometry rather than camera observations.
+        """
+        n = len(route.waypoints)
+        if n < 2:
+            return 0.0
+        steps = max(1, int(round(float(lookahead_m) / max(float(self.graph.step_m), 1e-6))))
+        idx_start = self._clamp_idx(route, wp_idx)
+        idx_end = self._clamp_idx(route, wp_idx + steps)
+        if idx_start == idx_end:
+            return 0.0
+        dpsi = float(route.waypoints[idx_end][2]) - float(route.waypoints[idx_start][2])
+        while dpsi > math.pi:
+            dpsi -= 2.0 * math.pi
+        while dpsi < -math.pi:
+            dpsi += 2.0 * math.pi
+        return dpsi
+
     def _remaining_distance(self, route: RoutePath, matched_idx: int) -> float:
         n = len(route.waypoints)
         if n == 0 or route.closed_loop:
@@ -589,6 +612,7 @@ class PathManager:
                 matched_yaw=float(yaw),
                 path_psi=float(yaw),
                 path_kappa=0.0,
+                path_heading_change_rad=0.0,
                 error_m=0.0,
                 heading_rad=0.0,
                 map_match_error_m=0.0,
@@ -657,6 +681,7 @@ class PathManager:
         error_m, heading_rad = self._compute_tracking_error(route, matched_x, matched_y, matched_yaw, self.target_idx)
         path_psi = float(route.waypoints[self.target_idx][2])
         path_kappa = self._get_curvature(route, self.target_idx)
+        path_heading_change_rad = self._get_heading_change_ahead(route, self.matched_idx, lookahead_m=1.5)
         current_node_id = route.wp_node_ids[self.matched_idx] if route.wp_node_ids else None
         upcoming_node_id = route.wp_node_ids[self.target_idx] if route.wp_node_ids else None
         current_attr = int(route.wp_node_attrs[self.matched_idx]) if len(route.wp_node_attrs) else ATTR_NORMAL
@@ -700,6 +725,7 @@ class PathManager:
             matched_yaw=matched_yaw,
             path_psi=path_psi,
             path_kappa=path_kappa,
+            path_heading_change_rad=path_heading_change_rad,
             error_m=error_m,
             heading_rad=heading_rad,
             map_match_error_m=map_match_error_m,

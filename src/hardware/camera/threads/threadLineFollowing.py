@@ -7492,6 +7492,42 @@ Args:
             print(f"\033[1;97m[ Curve Assist ] :\033[0m \033[1;96mdir={dir_s}\033[0m "
                   f"R={self._curve_radius_estimate:.0f}cm frames={self._curve_state_frames}")
 
+    def _apply_graph_curve_state(self, tracking_state) -> None:
+        """Override visual curve state using graph-based lookahead heading change.
+
+        The dense path is built directly from graph nodes and edges, so
+        path_heading_change_rad reflects true track geometry — not camera noise.
+        Two corrections are applied when GPS tracking is initialized:
+
+        1. If GPS says STRAIGHT (|delta_psi| small): clear any curve the visual
+           detector wrongly engaged (e.g. post-curve oscillation, false positive
+           from losing one lane line on a straight).
+        2. If GPS says CURVE: correct _curve_direction if the visual got the
+           sign wrong (e.g. right-lane-only visible → inferred left curve).
+        """
+        if tracking_state is None or not getattr(tracking_state, 'initialized', False):
+            return
+        delta_psi = float(getattr(tracking_state, 'path_heading_change_rad', 0.0))
+        CURVE_ENTER_RAD = math.radians(15.0)   # >15° heading change over 1.5m → curve
+        if delta_psi > CURVE_ENTER_RAD:
+            gps_dir = 1
+        elif delta_psi < -CURVE_ENTER_RAD:
+            gps_dir = -1
+        else:
+            gps_dir = 0
+
+        if gps_dir == 0:
+            # GPS sees no significant curve ahead — clear wrongly active curve state
+            if self._curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+                self._curve_state = "STRAIGHT"
+                self._curve_state_frames = 0
+                self._curve_direction = 0
+                self._curve_enter_origin = "none"
+        else:
+            # GPS sees a real curve — fix direction if visual got it wrong
+            if self._curve_direction != 0 and self._curve_direction != gps_dir:
+                self._curve_direction = gps_dir
+
     def _quick_vp_check(self, avg_left, avg_right, img_h, img_w):
         """Quick vanishing point check for early curve detection.
         
@@ -10207,6 +10243,7 @@ Returns:
             )
         else:
             self._update_curve_state(num_lines, avg_left, avg_right, img_h, img_w)
+        self._apply_graph_curve_state(getattr(self, '_tracking_state', None))
 
         prev_seen_side = self.last_seen_side
         _ts_for_tracking = getattr(self, '_tracking_state', None)
