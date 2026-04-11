@@ -3447,15 +3447,11 @@ Args:
         upcoming_attr = int(getattr(ts, "upcoming_node_attr", current_attr) or current_attr) if ts is not None else 0
 
         planner_priority = route_active and (
-            waypoint_mode_active
-            or maneuver_type in {
-                "stopline",
+            maneuver_type in {
                 "turn_left",
                 "turn_right",
                 "intersection_straight",
                 "roundabout",
-                "crosswalk",
-                "highway",
             }
         )
 
@@ -3611,36 +3607,36 @@ Args:
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
         Priority order:
-        1. Active route from tracking/planner, but ONLY at intersection/maneuver points
-           (planner_priority). On normal segments, lane visual hold takes precedence.
-        2. Brief visual hold using the last stable steering.
-        3. Full safety stop.
-        """
-        ts = getattr(self, "_tracking_state", None)
-        nav_ctx = self._get_navigation_context()
-        if ts is not None and bool(getattr(ts, "initialized", False)) and nav_ctx["planner_priority"]:
-            try:
-                steering_angle = self._compute_lateral_control(
-                    0.0,
-                    float(getattr(ts, "heading_rad", 0.0)),
-                    self._current_speed if self._current_speed > 0 else self.min_speed,
-                    curve_reference=None,
-                    speed_cap=speed_cap,
-                    img_w=img_w,
-                    direct_error_m=float(getattr(ts, "error_m", 0.0)),
-                    direct_error_context={"source": "blind_route"},
-                )
-                speed = self._update_progressive_speed(steering_angle, speed_cap=speed_cap)
-                return steering_angle, speed, "route_tracking"
-            except Exception:
-                pass
+        1. Brief visual hold using the last stable steering.
+        2. Full safety stop.
 
+        Route tracking was removed: the dead-reckoning map position drifts from
+        the actual physical position, so using map heading as steering reference
+        when lines are lost causes the car to turn in the wrong direction.
+        Always hold last good steering instead (same behaviour as master branch).
+        """
         blind_hold_steering = self._get_no_lane_hold_steering()
         if blind_hold_steering is not None:
             hold_speed = float(self.min_speed)
             if speed_cap is not None:
                 hold_speed = min(hold_speed, float(speed_cap))
             return blind_hold_steering, hold_speed, "visual_fallback"
+
+        # Secondary fallback: decay last steering for a few more frames before stopping
+        # (matches master branch behaviour: last_steering * 0.95 for frames_without_line < 5
+        # after the hard hold expires).
+        frames_without = int(getattr(self, 'frames_without_line', 0) or 0)
+        decay_limit = int(getattr(self, 'no_lane_hold_steering_frames', 4) or 4) + 5
+        last_steer = getattr(self, '_last_good_steering', None)
+        if last_steer is None:
+            last_steer = getattr(self, 'last_steering', None)
+        if last_steer is not None and frames_without <= decay_limit:
+            decayed = float(last_steer) * 0.90
+            decayed = max(-self.max_steering, min(self.max_steering, decayed))
+            hold_speed = float(self.min_speed)
+            if speed_cap is not None:
+                hold_speed = min(hold_speed, float(speed_cap))
+            return decayed, hold_speed, "visual_fallback"
 
         return 0.0, 0.0, "safety_stop"
 
