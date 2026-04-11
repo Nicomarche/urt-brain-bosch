@@ -6296,9 +6296,14 @@ Args:
         # Without this guard, yaw stays at 0° (or track-start yaw) and
         # heading_rad = 0 - path_psi can be very large → MPC saturates.
         _imu_ready = getattr(ts, "imu_received", False) if ts is not None else False
+        # IMPORTANT: some visible-lane modes (e.g. midpoint_ref_fallback in single-line AI_LOCAL)
+        # intentionally disable physical direct_error_m. That does NOT mean we are blind.
+        # Only fall back to route/tracking guidance when the caller did not provide any
+        # visual lane context at all.
         if ts is not None and getattr(ts, "initialized", False) \
                 and _track_heading_enabled and _imu_ready \
                 and direct_error_m is None \
+                and direct_error_source == "" \
                 and (_allow_stopline_waypoint or _route_active):
             heading = float(ts.heading_rad)
             self._heading_error = heading
@@ -10685,6 +10690,7 @@ Returns:
                     error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                     lane_width_px=abs(float(bottom_right_x) - float(bottom_left_x)),
                     img_w=img_w,
+                    direct_error_context={"source": "two_line"},
                 )
 
                 # Moving average of last N steering values (smooths erratic readings from lighting)
@@ -10747,7 +10753,8 @@ Returns:
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
                 sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
-                img_w=img_w
+                img_w=img_w,
+                direct_error_context={"source": "single_line", "side": "left"},
             )
             steering_angle = self._enforce_single_line_curve_priority(
                 steering_angle,
@@ -10814,7 +10821,8 @@ Returns:
             speed_val = self._current_speed if self._current_speed > 0 else self.base_speed
             steering_angle = self._compute_lateral_control(
                 sl_error, sl_heading, speed_val, curve_reference=None, speed_cap=speed_cap,
-                img_w=img_w
+                img_w=img_w,
+                direct_error_context={"source": "single_line", "side": "right"},
             )
             steering_angle = self._enforce_single_line_curve_priority(
                 steering_angle,

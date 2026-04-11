@@ -272,9 +272,33 @@ class TrackVisualizer(threading.Thread):
             state = dict(self._state) if self._state is not None else None
 
         if state is not None:
-            x         = state.get("x",         0.0)
-            y         = state.get("y",         0.0)
-            yaw       = state.get("yaw",       0.0)
+            matched_x = state.get("x", 0.0)
+            matched_y = state.get("y", 0.0)
+            matched_yaw = state.get("yaw", 0.0)
+            raw_x = state.get("raw_x", matched_x)
+            raw_y = state.get("raw_y", matched_y)
+            raw_yaw = state.get("raw_yaw", matched_yaw)
+            # Use the map-matched position for the car rectangle.
+            # The raw DR position accumulates longitudinal drift over time (the
+            # dead-reckoning always lags slightly behind the physical car because
+            # encoder feedback has inherent measurement delay).  The map-matched
+            # position is continuously corrected to the nearest point on the known
+            # path, which is consistently closer to the physical car's actual
+            # location.  Raw DR is preserved for the lateral-error overlay dot.
+            speed_mps = state.get("speed_mps", 0.0)
+            state_ts  = state.get("state_ts")
+            # Forward-predict matched position by the state snapshot age to
+            # compensate for display lag (typically 50–100 ms at 10 FPS).
+            vis_x   = matched_x
+            vis_y   = matched_y
+            vis_yaw = matched_yaw
+            if state_ts is not None and abs(speed_mps) > 0.01:
+                pred_s = min(time.monotonic() - state_ts, 0.15)
+                vis_x = vis_x + speed_mps * math.cos(vis_yaw) * pred_s
+                vis_y = vis_y + speed_mps * math.sin(vis_yaw) * pred_s
+            x = vis_x
+            y = vis_y
+            yaw = vis_yaw
             steer_rad = state.get("steer_rad", 0.0)
             wp_idx    = state.get("wp_idx",    0)
 
@@ -389,9 +413,7 @@ class TrackVisualizer(threading.Thread):
             route_mode = state.get("route_active", False)
             mode = "ROUTE" if route_mode else ("WP MODE" if state.get("waypoint_mode_active") else "VISUAL")
             spd  = state.get("speed_mps", 0.0)
-            raw_x = state.get("raw_x", x)
-            raw_y = state.get("raw_y", y)
-            raw_yaw = state.get("raw_yaw", yaw)
+            spd_src = state.get("speed_source", "?")
             map_match_error_m = state.get("map_match_error_m", 0.0)
             lat_corr_m = state.get("camera_lateral_correction_m", 0.0)
             raw_lat_err_m = state.get("raw_lateral_error_m", 0.0)
@@ -402,8 +424,15 @@ class TrackVisualizer(threading.Thread):
             upcoming_node_id = state.get("upcoming_node_id")
             next_semantic = state.get("next_semantic_label") or state.get("next_semantic_type") or "none"
             relocalization_mode = state.get("relocalization_mode", "map_match")
+
+            matched_px = self._world_to_px(matched_x, matched_y)
+            cv2.circle(canvas, matched_px, 5, (0, 215, 255), 1)
+            if math.hypot(float(raw_x) - float(matched_x), float(raw_y) - float(matched_y)) > 0.03:
+                raw_px = self._world_to_px(raw_x, raw_y)
+                cv2.line(canvas, raw_px, matched_px, (0, 215, 255), 1)
+
             cv2.putText(canvas,
-                        f"match x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
+                        f"vis x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
                         f"  steer={math.degrees(steer_rad):+.0f}°",
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
@@ -416,7 +445,7 @@ class TrackVisualizer(threading.Thread):
                         f"raw_lat={raw_lat_err_m:+.3f}m  [{mode}|{lane_rel}]",
                         (10, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
-                        f"v={spd * 100:.1f}cm/s  wp={wp_idx}  tgt={state.get('target_idx', wp_idx)}"
+                        f"v={spd * 100:.1f}cm/s[{spd_src}]  wp={wp_idx}  tgt={state.get('target_idx', wp_idx)}"
                         f"  man={maneuver_type}",
                         (10, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,

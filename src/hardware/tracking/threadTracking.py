@@ -409,6 +409,7 @@ class TrackingState:
     def snapshot(self):
         with self._lock:
             return dict(
+                state_ts=time.monotonic(),
                 x=self.x, y=self.y, yaw=self.yaw,
                 raw_x=self.raw_x, raw_y=self.raw_y, raw_yaw=self.raw_yaw,
                 matched_x=self.matched_x, matched_y=self.matched_y, matched_yaw=self.matched_yaw,
