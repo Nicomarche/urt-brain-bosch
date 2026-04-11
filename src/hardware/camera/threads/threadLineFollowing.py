@@ -3499,11 +3499,39 @@ Args:
         if curve_state not in ("ENTERING", "IN_CURVE"):
             return steering_angle
 
+        previous_steering = getattr(self, "_last_good_steering", None)
+        if previous_steering is None:
+            previous_steering = getattr(self, "last_steering", None)
+
+        transversal_recovery_active = False
         if isinstance(debug_info, dict):
-            if bool(debug_info.get("single_line_transversal_detected", False)):
-                return steering_angle
-            if str(debug_info.get("single_line_mode", "") or "") == "transversal_recovery":
-                return steering_angle
+            transversal_recovery_active = (
+                bool(debug_info.get("single_line_transversal_detected", False)) or
+                str(debug_info.get("single_line_mode", "") or "") == "transversal_recovery"
+            )
+        if transversal_recovery_active:
+            curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
+            if (
+                curve_state == "IN_CURVE" and
+                curve_direction != 0 and
+                previous_steering is not None and
+                float(previous_steering) * curve_direction > 0.0 and
+                float(steering_angle) * curve_direction < 0.0
+            ):
+                hold_ratio = max(
+                    0.0,
+                    min(1.0, float(getattr(_config, "SINGLE_LINE_CURVE_STEER_HOLD_RATIO", 0.45) or 0.45)),
+                )
+                min_steer_deg = max(2.0, abs(float(previous_steering)) * hold_ratio)
+                guarded_steer = curve_direction * min(float(self.max_steering), float(min_steer_deg))
+                if isinstance(debug_info, dict):
+                    debug_info["single_line_transversal_curve_hold"] = True
+                    debug_info["single_line_transversal_curve_hold_sign"] = int(curve_direction)
+                    debug_info["single_line_transversal_curve_hold_input_deg"] = round(float(steering_angle), 3)
+                    debug_info["single_line_transversal_curve_hold_prev_deg"] = round(float(previous_steering), 3)
+                    debug_info["single_line_transversal_curve_hold_output_deg"] = round(float(guarded_steer), 3)
+                return guarded_steer
+            return steering_angle
 
         desired_sign = 0
         curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
@@ -3515,9 +3543,6 @@ Args:
         if desired_sign == 0 and direct_error_m is not None and abs(float(direct_error_m)) > 1e-4:
             desired_sign = -1 if float(direct_error_m) > 0.0 else 1
 
-        previous_steering = getattr(self, "_last_good_steering", None)
-        if previous_steering is None:
-            previous_steering = getattr(self, "last_steering", None)
         if desired_sign == 0 and previous_steering is not None and abs(float(previous_steering)) > 0.2:
             desired_sign = 1 if float(previous_steering) > 0.0 else -1
 
@@ -7299,6 +7324,24 @@ Args:
             return True
         return False
 
+    def _is_transversal_recovery_active(self, local_mask_guidance, debug_info=None):
+        """Return True when single-line guidance is following a transversal marker."""
+        if isinstance(local_mask_guidance, dict):
+            if str(local_mask_guidance.get('guidance_mode', '') or '') == 'transversal_recovery':
+                return True
+            projection_debug = local_mask_guidance.get('single_line_projection_debug')
+            if isinstance(projection_debug, dict):
+                if bool(projection_debug.get('single_line_transversal_detected', False)):
+                    return True
+                if str(projection_debug.get('single_line_mode', '') or '') == 'transversal_recovery':
+                    return True
+        if isinstance(debug_info, dict):
+            if bool(debug_info.get('single_line_transversal_detected', False)):
+                return True
+            if str(debug_info.get('single_line_mode', '') or '') == 'transversal_recovery':
+                return True
+        return False
+
     def _update_steering_radius_estimate(self):
         """Update curve radius estimate from current steering angle.
         
@@ -10122,14 +10165,20 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
                 speed_cap = speed
+                transversal_recovery_active = self._is_transversal_recovery_active(
+                    local_mask_guidance,
+                    debug_info=debug_info,
+                )
 
-                if self._is_seeing_inner_line('left'):
+                if self._is_seeing_inner_line('left') and not transversal_recovery_active:
                     steering_angle = self.max_steering * self.curve_inner_line_steer_factor
                     speed = self.min_speed
                     speed_cap = speed
                     self._swept_path_info = None
                     debug_info['inner_line_escape'] = True
                 else:
+                    if self._is_seeing_inner_line('left') and transversal_recovery_active:
+                        debug_info['inner_line_escape_suppressed'] = 'transversal_recovery'
                     swept = None
                     if self.use_swept_path and mask_guidance_left_line is not None:
                         swept = self._predict_swept_path_single_line(
@@ -10180,23 +10229,27 @@ Returns:
                     # left_x at a different reference_y (clamped by the mask extent), which is
                     # farther from the lookahead and gives a completely different apparent
                     # position even though the car hasn't moved.
-                    _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
-                    _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
-                    if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_left_line is not None:
-                        _sl_ref_x = self._interp_line_x_at_y(mask_guidance_left_line, _std_ref_y)
-                        # A nearly-horizontal line (e.g. at curve entry) extrapolates far
-                        # outside the image when projected to a different reference_y.
-                        # Fall back to the native single-line position to avoid a huge
-                        # spurious direct_error_m spike.
-                        if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                    _sl_direct = None
+                    if transversal_recovery_active:
+                        debug_info['single_line_direct_error_disabled'] = 'transversal_recovery'
+                    else:
+                        _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
+                        _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
+                        if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_left_line is not None:
+                            _sl_ref_x = self._interp_line_x_at_y(mask_guidance_left_line, _std_ref_y)
+                            # A nearly-horizontal line (e.g. at curve entry) extrapolates far
+                            # outside the image when projected to a different reference_y.
+                            # Fall back to the native single-line position to avoid a huge
+                            # spurious direct_error_m spike.
+                            if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                                _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                                _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
+                        else:
                             _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
                             _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
-                    else:
-                        _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-                        _sl_ref_x = float(local_mask_guidance.get('left_x', 0.0) or 0.0)
-                    _sl_direct = self._compute_sl_physical_error(
-                        'left', _sl_ref_x, img_w, _sl_ppc, debug_info
-                    )
+                        _sl_direct = self._compute_sl_physical_error(
+                            'left', _sl_ref_x, img_w, _sl_ppc, debug_info
+                        )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
@@ -10228,14 +10281,20 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
                 speed_cap = speed
+                transversal_recovery_active = self._is_transversal_recovery_active(
+                    local_mask_guidance,
+                    debug_info=debug_info,
+                )
 
-                if self._is_seeing_inner_line('right'):
+                if self._is_seeing_inner_line('right') and not transversal_recovery_active:
                     steering_angle = -self.max_steering * self.curve_inner_line_steer_factor
                     speed = self.min_speed
                     speed_cap = speed
                     self._swept_path_info = None
                     debug_info['inner_line_escape'] = True
                 else:
+                    if self._is_seeing_inner_line('right') and transversal_recovery_active:
+                        debug_info['inner_line_escape_suppressed'] = 'transversal_recovery'
                     swept = None
                     if self.use_swept_path and mask_guidance_right_line is not None:
                         swept = self._predict_swept_path_single_line(
@@ -10281,23 +10340,27 @@ Returns:
                     ) if isinstance(self._swept_path_info, dict) else None
 
                     # Physical direct_error_m using the real right mask position + safety margin.
-                    _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
-                    _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
-                    if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_right_line is not None:
-                        _sl_ref_x = self._interp_line_x_at_y(mask_guidance_right_line, _std_ref_y)
-                        # A nearly-horizontal line (e.g. at curve entry) extrapolates far
-                        # outside the image when projected to a different reference_y.
-                        # Fall back to the native single-line position to avoid a huge
-                        # spurious direct_error_m spike.
-                        if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                    _sl_direct = None
+                    if transversal_recovery_active:
+                        debug_info['single_line_direct_error_disabled'] = 'transversal_recovery'
+                    else:
+                        _std_ref_y  = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
+                        _sl_ppc     = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
+                        if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_right_line is not None:
+                            _sl_ref_x = self._interp_line_x_at_y(mask_guidance_right_line, _std_ref_y)
+                            # A nearly-horizontal line (e.g. at curve entry) extrapolates far
+                            # outside the image when projected to a different reference_y.
+                            # Fall back to the native single-line position to avoid a huge
+                            # spurious direct_error_m spike.
+                            if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+                                _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
+                                _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
+                        else:
                             _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
                             _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
-                    else:
-                        _sl_ppc   = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-                        _sl_ref_x = float(local_mask_guidance.get('right_x', 0.0) or 0.0)
-                    _sl_direct = self._compute_sl_physical_error(
-                        'right', _sl_ref_x, img_w, _sl_ppc, debug_info
-                    )
+                        _sl_direct = self._compute_sl_physical_error(
+                            'right', _sl_ref_x, img_w, _sl_ppc, debug_info
+                        )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
