@@ -53,13 +53,17 @@ _NODE_COLORS = {
 }
 _DEFAULT_COLOR = (180, 180, 180)
 
-_CANVAS_SIZE  = 700
-_MARGIN_PX    = 40
-_EDGE_COLOR   = (80, 80, 80)
-_WP_COLOR     = (255, 220, 50)
-_CAR_COLOR    = (255, 255, 255)
-_FPS          = 10
-_IMG_DIM      = 0.55   # background image brightness (0–1)
+_CANVAS_SIZE       = 700
+_MARGIN_PX         = 40
+_EDGE_COLOR        = (80, 80, 80)
+_WP_COLOR          = (255, 220, 50)
+_CAR_COLOR         = (255, 255, 255)
+_FPS               = 25
+_IMG_DIM           = 0.55   # background image brightness (0–1)
+# Additional offset added to the forward prediction to compensate for encoder
+# measurement pipeline delay (encoder → MCU → serial → Python), which is not
+# captured by state_ts (set after DR integration).
+_PIPELINE_DELAY_S  = 0.05
 
 
 class TrackVisualizer(threading.Thread):
@@ -293,7 +297,7 @@ class TrackVisualizer(threading.Thread):
             vis_y   = matched_y
             vis_yaw = matched_yaw
             if state_ts is not None and abs(speed_mps) > 0.01:
-                pred_s = min(time.monotonic() - state_ts, 0.15)
+                pred_s = min(time.monotonic() - state_ts + _PIPELINE_DELAY_S, 0.25)
                 vis_x = vis_x + speed_mps * math.cos(vis_yaw) * pred_s
                 vis_y = vis_y + speed_mps * math.sin(vis_yaw) * pred_s
             x = vis_x
