@@ -1532,7 +1532,11 @@ Args:
             getattr(self, '_last_two_line_left', None) is not None and
             getattr(self, '_last_two_line_right', None) is not None
         )
-        if has_recent_two_line_reference:
+        _in_waypoint_mode = (
+            getattr(self, '_tracking_state', None) is not None and
+            bool(getattr(self._tracking_state, 'waypoint_mode_active', False))
+        )
+        if has_recent_two_line_reference and not _in_waypoint_mode:
             inferred_lost_side = 'right' if visible_side == 'left' else 'left'
             inferred_curve_direction = 1 if visible_side == 'left' else -1
             context_sources.append(f"lost_{inferred_lost_side}")
@@ -3801,14 +3805,23 @@ Args:
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
         Priority order:
-        1. Brief visual hold using the last stable steering.
-        2. Full safety stop.
-
-        Route tracking was removed: the dead-reckoning map position drifts from
-        the actual physical position, so using map heading as steering reference
-        when lines are lost causes the car to turn in the wrong direction.
-        Always hold last good steering instead (same behaviour as master branch).
+        1. GPS waypoint control when in intersection/stopline zone (waypoint_mode_active).
+        2. Brief visual hold using the last stable steering.
+        3. Full safety stop.
         """
+        nav_ctx = self._get_navigation_context()
+        if nav_ctx["waypoint_mode_active"]:
+            ts = self._tracking_state
+            if ts is not None and getattr(ts, "initialized", False):
+                steering = self._compute_lateral_control(
+                    0, 0, 0,
+                    speed_cap=speed_cap,
+                )
+                hold_speed = float(self.min_speed)
+                if speed_cap is not None:
+                    hold_speed = min(hold_speed, float(speed_cap))
+                return steering, hold_speed, "route_tracking"
+
         blind_hold_steering = self._get_no_lane_hold_steering()
         if blind_hold_steering is not None:
             hold_speed = float(self.min_speed)
@@ -6268,15 +6281,14 @@ Args:
 
         # ── Waypoint-mode override (GPS-free tracking at precision zones) ─────
         # When threadTracking detects a STOPLINE / INTERSECTION node ahead it
-        # sets waypoint_mode_active=True.  The visible line still has priority:
-        # only allow graph-only authority at a STOPLINE, with a single visible
-        # line, while not being inside a curve.
+        # sets waypoint_mode_active=True.  After the stop node, lane lines at
+        # intersections are unreliable and must be ignored entirely; GPS
+        # waypoints have full authority regardless of line visibility.
+        _waypoint_mode_active = bool(nav_ctx["waypoint_mode_active"])
         if (
             ts is not None and
             getattr(ts, "initialized", False) and
-            _planner_priority_active and
-            _allow_stopline_waypoint and
-            not _lane_measurement_reliable
+            _waypoint_mode_active
         ):
             wp_error_m = float(getattr(ts, "error_m", 0.0))
             wp_heading_rad = float(getattr(ts, "heading_rad", 0.0))
