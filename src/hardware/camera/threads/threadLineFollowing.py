@@ -3526,17 +3526,21 @@ Args:
         if curve_state not in ("ENTERING", "IN_CURVE"):
             return steering_angle
 
-        # When GPS waypoint mode is active, only bypass enforcement if the GPS-computed
-        # path curvature disagrees with the visually inferred curve direction. This lets
-        # legitimate curves (GPS and visual agree) still get enforced, while preventing
-        # wrong-direction enforcement at intersections where losing one lane line causes
-        # incorrect curve direction inference (e.g. right-lane-only → inferred left curve).
+        # If GPS tracking is available and its path curvature sign disagrees with the
+        # visually inferred curve direction, bypass max-steer enforcement. This prevents
+        # two failure modes:
+        #   1. Intersection approach: right-lane-only visible → inferred left curve (-1)
+        #      but GPS says straight/right → bypass stops wrong -25° steer.
+        #   2. Post-curve straight: curve state oscillates back into IN_CURVE after the
+        #      real curve ends, but GPS path_kappa has flipped sign → bypass stops wrong
+        #      +25° steer on the straight.
+        # Legitimate curves (GPS and visual agree on direction) still get enforced.
         _ts = getattr(self, '_tracking_state', None)
-        if _ts is not None and bool(getattr(_ts, 'waypoint_mode_active', False)):
+        if _ts is not None and getattr(_ts, 'initialized', False):
             gps_kappa = float(getattr(_ts, 'path_kappa', 0.0))
             gps_sign = 1 if gps_kappa > 0.1 else (-1 if gps_kappa < -0.1 else 0)
-            curve_direction = int(getattr(self, '_curve_direction', 0))
-            if gps_sign != curve_direction:
+            _curve_dir = int(getattr(self, '_curve_direction', 0))
+            if gps_sign != _curve_dir:
                 return steering_angle
 
         previous_steering = getattr(self, "_last_good_steering", None)
