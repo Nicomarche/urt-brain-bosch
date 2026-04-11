@@ -10294,13 +10294,15 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
                 speed_cap = speed
+                single_line_mode = str(debug_info.get('single_line_mode', '') or '')
+                physical_single_line_mode = single_line_mode == 'physical'
                 transversal_recovery_active = self._is_transversal_recovery_active(
                     local_mask_guidance,
                     debug_info=debug_info,
                 )
 
                 _sl_direct = None
-                if not transversal_recovery_active:
+                if not transversal_recovery_active and physical_single_line_mode:
                     _sl_direct = self._get_single_line_physical_direct_error(
                         'left',
                         mask_guidance_left_line,
@@ -10311,6 +10313,7 @@ Returns:
 
                 if (
                     not transversal_recovery_active and
+                    physical_single_line_mode and
                     self._should_apply_inner_line_escape(
                         'left',
                         direct_error_m=_sl_direct,
@@ -10325,6 +10328,10 @@ Returns:
                 else:
                     if self._is_seeing_inner_line('left') and transversal_recovery_active:
                         debug_info['inner_line_escape_suppressed'] = 'transversal_recovery'
+                    elif self._is_seeing_inner_line('left') and not physical_single_line_mode:
+                        debug_info['inner_line_escape_suppressed'] = (
+                            f'non_physical_mode:{single_line_mode or "unknown"}'
+                        )
                     swept = None
                     if self.use_swept_path and mask_guidance_left_line is not None:
                         swept = self._predict_swept_path_single_line(
@@ -10377,6 +10384,10 @@ Returns:
                     # position even though the car hasn't moved.
                     if transversal_recovery_active:
                         debug_info['single_line_direct_error_disabled'] = 'transversal_recovery'
+                    elif not physical_single_line_mode:
+                        debug_info['single_line_direct_error_disabled'] = (
+                            f'non_physical_mode:{single_line_mode or "unknown"}'
+                        )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
@@ -10408,13 +10419,15 @@ Returns:
                 debug_info['single_line_side_source'] = 'mask'
                 speed = self.min_speed + 2
                 speed_cap = speed
+                single_line_mode = str(debug_info.get('single_line_mode', '') or '')
+                physical_single_line_mode = single_line_mode == 'physical'
                 transversal_recovery_active = self._is_transversal_recovery_active(
                     local_mask_guidance,
                     debug_info=debug_info,
                 )
 
                 _sl_direct = None
-                if not transversal_recovery_active:
+                if not transversal_recovery_active and physical_single_line_mode:
                     _sl_direct = self._get_single_line_physical_direct_error(
                         'right',
                         mask_guidance_right_line,
@@ -10425,6 +10438,7 @@ Returns:
 
                 if (
                     not transversal_recovery_active and
+                    physical_single_line_mode and
                     self._should_apply_inner_line_escape(
                         'right',
                         direct_error_m=_sl_direct,
@@ -10439,6 +10453,10 @@ Returns:
                 else:
                     if self._is_seeing_inner_line('right') and transversal_recovery_active:
                         debug_info['inner_line_escape_suppressed'] = 'transversal_recovery'
+                    elif self._is_seeing_inner_line('right') and not physical_single_line_mode:
+                        debug_info['inner_line_escape_suppressed'] = (
+                            f'non_physical_mode:{single_line_mode or "unknown"}'
+                        )
                     swept = None
                     if self.use_swept_path and mask_guidance_right_line is not None:
                         swept = self._predict_swept_path_single_line(
@@ -10486,6 +10504,10 @@ Returns:
                     # Physical direct_error_m using the real right mask position + safety margin.
                     if transversal_recovery_active:
                         debug_info['single_line_direct_error_disabled'] = 'transversal_recovery'
+                    elif not physical_single_line_mode:
+                        debug_info['single_line_direct_error_disabled'] = (
+                            f'non_physical_mode:{single_line_mode or "unknown"}'
+                        )
                     steering_angle = self._compute_lateral_control(
                         error, heading, speed_val, curve_reference=curve_reference, speed_cap=speed_cap,
                         lane_width_px=lane_width_px, img_w=img_w, direct_error_m=_sl_direct,
