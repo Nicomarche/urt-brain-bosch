@@ -546,7 +546,8 @@ Args:
         self.min_speed         = float(getattr(_config, "LF_MIN_SPEED",          8))
         self.highway_max_speed = float(getattr(_config, "LF_HIGHWAY_MAX_SPEED", 25))
         self.highway_min_speed = float(getattr(_config, "LF_HIGHWAY_MIN_SPEED", 15))
-        self.speed_ramp_step   = float(getattr(_config, "LF_SPEED_RAMP_STEP",  0.5))
+        self.speed_ramp_step      = float(getattr(_config, "LF_SPEED_RAMP_STEP",      0.5))
+        self.speed_ramp_down_step = float(getattr(_config, "LF_SPEED_DOWN_RAMP_STEP", 1.5))
         self._current_speed = self.base_speed  # Tracks actual speed for ramping
         self.speed_steer_factor = 0.4  # Steering attenuation at max speed (0=none, 1=full mute)
         self.max_frame_age_ms = 300.0
@@ -3432,7 +3433,14 @@ Args:
             target_speed = min(target_speed, float(speed_cap))
 
         if target_speed <= self._current_speed:
-            self._current_speed = target_speed
+            # Ramp down gradually so the car doesn't appear to freeze at curve nodes.
+            # Exception: if the gap is large (>3 units, e.g. emergency stop) drop instantly.
+            gap = self._current_speed - target_speed
+            down_step = float(getattr(self, 'speed_ramp_down_step', 1.5))
+            if gap > 3.0:
+                self._current_speed = target_speed  # instant for large drops (safety)
+            else:
+                self._current_speed = max(target_speed, self._current_speed - down_step)
         else:
             self._current_speed = min(target_speed, self._current_speed + ramp_step)
         return self._current_speed
