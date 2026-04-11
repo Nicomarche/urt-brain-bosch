@@ -623,7 +623,7 @@
       "id": 58,
       "imgX": 1418.1860920666013,
       "imgY": 348.71694417238,
-      "type": 7
+      "type": 0
     },
     {
       "label": "",
@@ -1228,7 +1228,7 @@
     {
       "label": "",
       "destinationId": "",
-      "intersectionId": "",
+      "intersectionId": "intersection_1",
       "controlId": "",
       "parkingSpotId": "",
       "debugFlags": "",
@@ -2571,7 +2571,15 @@
         "node_id": "94"
       }
     ],
-    "intersections": [],
+    "intersections": [
+      {
+        "id": "intersection_1",
+        "label": "Intersection 117",
+        "anchor_node_id": "117",
+        "control_id": "",
+        "stopline_node_id": ""
+      }
+    ],
     "controls": [
       {
         "id": "control_2",

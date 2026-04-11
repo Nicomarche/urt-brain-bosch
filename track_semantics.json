@@ -29,7 +29,15 @@
       "node_id": "94"
     }
   ],
-  "intersections": [],
+  "intersections": [
+    {
+      "id": "intersection_1",
+      "label": "Intersection 117",
+      "anchor_node_id": "117",
+      "control_id": "",
+      "stopline_node_id": ""
+    }
+  ],
   "controls": [
     {
       "id": "control_2",

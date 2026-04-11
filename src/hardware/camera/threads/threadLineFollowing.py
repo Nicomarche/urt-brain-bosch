@@ -3526,13 +3526,18 @@ Args:
         if curve_state not in ("ENTERING", "IN_CURVE"):
             return steering_angle
 
-        # When GPS waypoint mode is active (near stoplines/intersections), the GPS
-        # already computed the correct steering via _compute_lateral_control. Don't
-        # override it with visual curve inference, which is unreliable at intersections
-        # (e.g. losing one lane line gets misidentified as a curve in the wrong direction).
+        # When GPS waypoint mode is active, only bypass enforcement if the GPS-computed
+        # path curvature disagrees with the visually inferred curve direction. This lets
+        # legitimate curves (GPS and visual agree) still get enforced, while preventing
+        # wrong-direction enforcement at intersections where losing one lane line causes
+        # incorrect curve direction inference (e.g. right-lane-only → inferred left curve).
         _ts = getattr(self, '_tracking_state', None)
         if _ts is not None and bool(getattr(_ts, 'waypoint_mode_active', False)):
-            return steering_angle
+            gps_kappa = float(getattr(_ts, 'path_kappa', 0.0))
+            gps_sign = 1 if gps_kappa > 0.1 else (-1 if gps_kappa < -0.1 else 0)
+            curve_direction = int(getattr(self, '_curve_direction', 0))
+            if gps_sign != curve_direction:
+                return steering_angle
 
         previous_steering = getattr(self, "_last_good_steering", None)
         if previous_steering is None:
@@ -6298,13 +6303,6 @@ Args:
             getattr(ts, "initialized", False) and
             _waypoint_mode_active
         ):
-            # Clear any stale visual curve state so it doesn't re-engage after
-            # waypoint mode exits with a wrong direction inferred from intersection geometry.
-            if str(getattr(self, '_curve_state', 'STRAIGHT')) in ('ENTERING', 'IN_CURVE', 'EXITING'):
-                self._curve_state = 'STRAIGHT'
-                self._curve_state_frames = 0
-                self._curve_direction = 0
-                self._curve_enter_origin = 'none'
             wp_error_m = float(getattr(ts, "error_m", 0.0))
             wp_heading_rad = float(getattr(ts, "heading_rad", 0.0))
             wp_speed_mps = float(getattr(ts, "speed_mps", 0.0))
