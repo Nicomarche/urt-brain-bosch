@@ -7493,22 +7493,28 @@ Args:
                   f"R={self._curve_radius_estimate:.0f}cm frames={self._curve_state_frames}")
 
     def _apply_graph_curve_state(self, tracking_state) -> None:
-        """Override visual curve state using graph-based lookahead heading change.
+        """Correct visual curve state using graph-based lookahead heading change.
 
         The dense path is built directly from graph nodes and edges, so
         path_heading_change_rad reflects true track geometry — not camera noise.
         Two corrections are applied when GPS tracking is initialized:
 
-        1. If GPS says STRAIGHT (|delta_psi| small): clear any curve the visual
-           detector wrongly engaged (e.g. post-curve oscillation, false positive
-           from losing one lane line on a straight).
-        2. If GPS says CURVE: correct _curve_direction if the visual got the
-           sign wrong (e.g. right-lane-only visible → inferred left curve).
+        1. ENTERING with GPS saying straight → false entry (e.g. right lane lost at
+           intersection), clear it immediately.
+        2. EXITING with GPS saying straight → confirm the curve is done, prevent
+           oscillation back to IN_CURVE from lost lines on a straight.
+        3. IN_CURVE with wrong GPS direction → fix _curve_direction sign.
+
+        IN_CURVE is intentionally NOT cleared here: the curve arc on this track is
+        ~2 m long, and 1.5 m of lookahead from matched_idx exits the arc before the
+        car does — premature clearing would kill curve assistance mid-turn.
+        The enforcement bypass in _enforce_single_line_curve_priority already prevents
+        wrong-direction enforcement while IN_CURVE when GPS path_kappa disagrees.
         """
         if tracking_state is None or not getattr(tracking_state, 'initialized', False):
             return
         delta_psi = float(getattr(tracking_state, 'path_heading_change_rad', 0.0))
-        CURVE_ENTER_RAD = math.radians(15.0)   # >15° heading change over 1.5m → curve
+        CURVE_ENTER_RAD = math.radians(15.0)   # >15° total heading change over 1.5m → curve
         if delta_psi > CURVE_ENTER_RAD:
             gps_dir = 1
         elif delta_psi < -CURVE_ENTER_RAD:
@@ -7517,14 +7523,16 @@ Args:
             gps_dir = 0
 
         if gps_dir == 0:
-            # GPS sees no significant curve ahead — clear wrongly active curve state
-            if self._curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+            # GPS sees no significant curve in the next 1.5 m.
+            # Clear ENTERING (false visual trigger) or EXITING (confirm done).
+            # Do NOT clear IN_CURVE — enforcement bypass handles that case.
+            if self._curve_state in ("ENTERING", "EXITING"):
                 self._curve_state = "STRAIGHT"
                 self._curve_state_frames = 0
                 self._curve_direction = 0
                 self._curve_enter_origin = "none"
         else:
-            # GPS sees a real curve — fix direction if visual got it wrong
+            # GPS sees a real curve — fix direction if visual got the sign wrong
             if self._curve_direction != 0 and self._curve_direction != gps_dir:
                 self._curve_direction = gps_dir
 
