@@ -7124,8 +7124,11 @@ Args:
                     self._curve_state = "IN_CURVE"
                     self._curve_state_frames = 1
                     self._curve_enter_origin = "none"
-                # Update direction based on which line is visible
-                self._curve_direction = 1 if avg_left is not None else -1
+                # Once a curve direction is established, keep it while the visible side
+                # changes. In real turns the detector can switch from outer to inner line
+                # mid-curve; that does not mean the curve reversed.
+                if self._curve_direction == 0:
+                    self._curve_direction = 1 if avg_left is not None else -1
             elif num_lines == 2:
                 two_line_hold = max(1, int(getattr(self, 'curve_two_line_hold_frames', 6) or 6))
                 if two_line_hint_ready and two_line_hint_direction != 0:
@@ -7173,8 +7176,10 @@ Args:
                 self.pid.integral = 0.0
                 self.pid.prev_error = 0
             elif num_lines == 1:
-                # Update direction (might have switched which line we see)
-                self._curve_direction = 1 if avg_left is not None else -1
+                # Keep the established curve direction while single-line visibility
+                # alternates between inner and outer boundaries.
+                if self._curve_direction == 0:
+                    self._curve_direction = 1 if avg_left is not None else -1
 
         elif self._curve_state == "EXITING":
             if num_lines == 2:
@@ -7191,7 +7196,7 @@ Args:
                 self._curve_state = "IN_CURVE"
                 self._curve_state_frames = 1
                 self._curve_enter_origin = "none"
-                if num_lines == 1:
+                if num_lines == 1 and self._curve_direction == 0:
                     self._curve_direction = 1 if avg_left is not None else -1
 
         # Update radius estimate using steering feedback
