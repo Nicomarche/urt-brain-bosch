@@ -386,6 +386,11 @@ NOISE_MAX_REJECT_FRAMES    = 3
 #   → 0.4: gira al 40% del máximo (suave, evita escaparse por el otro lado)
 #   → 0.7: gira más fuerte (corrección más rápida pero riesgo de sobrepasar)
 CURVE_INNER_LINE_STEER_FACTOR = 0.6
+# CURVE_INNER_LINE_HARD_ESCAPE_MIN_ERROR_M:
+#   error físico mínimo (en metros) para permitir el "escape duro" al lado opuesto
+#   mientras la curva sigue confirmada. Por debajo de este valor se deja actuar al
+#   controlador normal para evitar desarmar la curva por ver sólo la línea interior.
+CURVE_INNER_LINE_HARD_ESCAPE_MIN_ERROR_M = 0.09
 
 # ── 8. SUAVIZADO EN TRANSICIONES DE MODO ─────────────────────────────────────
 # Al pasar de modo 2-líneas a 1-línea (o cambio de lado), el steering se mezcla
