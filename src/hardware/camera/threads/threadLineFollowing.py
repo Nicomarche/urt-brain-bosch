@@ -3568,6 +3568,17 @@ Args:
         if desired_sign == 0:
             return steering_angle
 
+        # When IN_CURVE with only one line visible, the car must steer at maximum to
+        # complete the curve or recover from having gone outside the outer boundary.
+        # This also prevents the steering from tapering off mid-curve (turns too wide).
+        if curve_state == "IN_CURVE" and curve_direction != 0:
+            guarded_steer = float(desired_sign) * float(self.max_steering)
+            if isinstance(debug_info, dict):
+                debug_info["single_line_max_curve_steer"] = True
+                debug_info["single_line_max_curve_steer_deg"] = round(guarded_steer, 3)
+                debug_info["single_line_max_curve_steer_input_deg"] = round(float(steering_angle), 3)
+            return guarded_steer
+
         min_steer_deg = max(
             float(getattr(_config, "SINGLE_LINE_CURVE_MIN_STEER_DEG", 2.0) or 2.0),
             heading_deg * float(
@@ -4015,6 +4026,16 @@ Args:
 
         curve_state = str(getattr(self, "_curve_state", "STRAIGHT"))
         if curve_state not in ("IN_CURVE", "EXITING"):
+            return False
+
+        # In a confirmed curve, seeing only the inner line means the outer line was lost —
+        # the car went outside the curve boundary, not inside. Applying inner_line_escape
+        # would steer the car further in the wrong direction. Suppress it so
+        # _enforce_single_line_curve_priority can apply max recovery steering instead.
+        curve_dir = int(getattr(self, '_curve_direction', 0) or 0)
+        if curve_dir != 0:
+            if isinstance(debug_info, dict):
+                debug_info["inner_line_escape_suppressed"] = "inner_only_means_outer_lost"
             return False
 
         if isinstance(debug_info, dict):
