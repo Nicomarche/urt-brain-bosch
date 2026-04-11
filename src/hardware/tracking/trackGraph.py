@@ -800,11 +800,12 @@ class TrackGraph:
             seg_psi = math.atan2(seg_dy, seg_dx)
             dx = float(x) - proj_x
             dy = float(y) - proj_y
+            projection_error_m = math.hypot(dx, dy)
             lateral_error_m = -dx * math.sin(seg_psi) + dy * math.cos(seg_psi)
             heading_error_rad = self._wrap_angle(float(yaw) - seg_psi)
             continuity_m = abs(seg_idx - center) * float(self.step_m)
             score = (
-                float(distance_weight) * abs(lateral_error_m)
+                float(distance_weight) * projection_error_m
                 + float(heading_weight) * abs(heading_error_rad)
                 + continuity_weight * continuity_m
             )
@@ -816,7 +817,7 @@ class TrackGraph:
                 "path_psi": float(seg_psi),
                 "lateral_error_m": float(lateral_error_m),
                 "heading_error_rad": float(heading_error_rad),
-                "map_match_error_m": float(abs(lateral_error_m)),
+                "map_match_error_m": float(projection_error_m),
                 "score": float(score),
             }
             if best is None or candidate["score"] < best["score"]:

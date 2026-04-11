@@ -297,11 +297,17 @@ class PathManager:
             seg_psi = math.atan2(seg_dy, seg_dx)
             dx = float(x) - proj_x
             dy = float(y) - proj_y
+            projection_error_m = math.hypot(dx, dy)
             lateral_error_m = -dx * math.sin(seg_psi) + dy * math.cos(seg_psi)
             heading_error_rad = self._wrap_angle(float(yaw) - seg_psi)
             continuity_m = abs(seg_idx - center) * float(self.graph.step_m)
             score = (
-                float(distance_weight) * abs(lateral_error_m)
+                # Use the real distance to the projected point on the segment, not only the
+                # signed lateral component. In tight curves / stopline turns the raw pose can
+                # be well ahead along the route while keeping a small lateral error, which
+                # makes many old segments look equally good and the continuity term freezes the
+                # match on a stale waypoint.
+                float(distance_weight) * projection_error_m
                 + float(heading_weight) * abs(heading_error_rad)
                 + continuity_weight * continuity_m
             )
@@ -311,7 +317,7 @@ class PathManager:
                 "matched_x": float(proj_x),
                 "matched_y": float(proj_y),
                 "path_psi": float(seg_psi),
-                "map_match_error_m": float(abs(lateral_error_m)),
+                "map_match_error_m": float(projection_error_m),
                 "score": float(score),
             }
             if best is None or candidate["score"] < best["score"]:
