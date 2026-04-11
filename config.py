@@ -337,7 +337,7 @@ TRACKING_USE_PATH_HEADING = True
 # Single-line curve priority: if only one lane line is visible inside a curve,
 # the steering cannot unwind below this heading-based floor until the car exits
 # the curve. This keeps the visible line above graph/MPC hints.
-SINGLE_LINE_CURVE_HEADING_GAIN_MULT = 1.75
+SINGLE_LINE_CURVE_HEADING_GAIN_MULT = 2.5
 SINGLE_LINE_CURVE_MIN_STEER_DEG = 2.0
 SINGLE_LINE_CURVE_HEADING_STEER_GAIN = 1.0
 SINGLE_LINE_CURVE_STEER_HOLD_RATIO = 0.45

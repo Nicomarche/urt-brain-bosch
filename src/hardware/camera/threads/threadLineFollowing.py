@@ -3611,13 +3611,14 @@ Args:
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
         Priority order:
-        1. Active route from tracking/planner.
+        1. Active route from tracking/planner, but ONLY at intersection/maneuver points
+           (planner_priority). On normal segments, lane visual hold takes precedence.
         2. Brief visual hold using the last stable steering.
         3. Full safety stop.
         """
         ts = getattr(self, "_tracking_state", None)
         nav_ctx = self._get_navigation_context()
-        if ts is not None and bool(getattr(ts, "initialized", False)) and nav_ctx["route_active"]:
+        if ts is not None and bool(getattr(ts, "initialized", False)) and nav_ctx["planner_priority"]:
             try:
                 steering_angle = self._compute_lateral_control(
                     0.0,
@@ -6452,9 +6453,9 @@ Args:
         heading_gain = 0.2 if prefer_center else 0.3
         if physical_projection and curve_state in ("ENTERING", "IN_CURVE"):
             heading_gain = min(
-                0.65,
+                0.85,
                 heading_gain * float(
-                    getattr(_config, "SINGLE_LINE_CURVE_HEADING_GAIN_MULT", 1.75) or 1.75
+                    getattr(_config, "SINGLE_LINE_CURVE_HEADING_GAIN_MULT", 2.5) or 2.5
                 ),
             )
         heading = (heading_delta * heading_gain) + curve_heading_bias
