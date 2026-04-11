@@ -381,9 +381,10 @@ class PathManager:
     def _get_heading_change_ahead(self, route: RoutePath, wp_idx: int, lookahead_m: float) -> float:
         """Total heading change (radians) from wp_idx over the next lookahead_m of path.
 
-        Positive = right curve, negative = left curve. Derived directly from the
-        dense path which is built from graph nodes and edges, so this reflects true
-        track geometry rather than camera observations.
+        Sign follows the graph yaw convention:
+        positive = counter-clockwise / left curve, negative = clockwise / right curve.
+        Derived directly from the dense path built from graph nodes and edges, so
+        this reflects true track geometry rather than camera observations.
         """
         n = len(route.waypoints)
         if n < 2:

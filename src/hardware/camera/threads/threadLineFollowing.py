@@ -7521,9 +7521,15 @@ Args:
             return
         delta_psi = float(getattr(tracking_state, 'path_heading_change_rad', 0.0))
         CURVE_ENTER_RAD = math.radians(15.0)   # >15° total heading change over 1.5m → curve
-        if delta_psi > CURVE_ENTER_RAD:
+        # path_heading_change_rad follows the path yaw convention from the graph:
+        # positive dpsi = counter-clockwise / left turn, negative dpsi = clockwise / right turn.
+        # The line-following controller uses the opposite sign convention for steering commands:
+        #   curve_direction = +1 -> right curve / steer right
+        #   curve_direction = -1 -> left curve / steer left
+        # Map the graph yaw sign explicitly here so GPS correction cannot invert real curves.
+        if delta_psi < -CURVE_ENTER_RAD:
             gps_dir = 1
-        elif delta_psi < -CURVE_ENTER_RAD:
+        elif delta_psi > CURVE_ENTER_RAD:
             gps_dir = -1
         else:
             gps_dir = 0
