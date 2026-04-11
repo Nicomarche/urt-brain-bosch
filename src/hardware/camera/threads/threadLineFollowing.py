@@ -3534,6 +3534,13 @@ Args:
                 getattr(_config, "SINGLE_LINE_CURVE_HEADING_STEER_GAIN", 1.0) or 1.0
             ),
         )
+        # If geometric heading is weak (e.g. inner line is near-horizontal) but the AI hint
+        # is confident about a significant curve, use the hint to raise the minimum steering.
+        hint_rad = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
+        hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
+        hint_deg = abs(math.degrees(hint_rad))
+        if hint_conf > 0.35 and hint_deg > 5.0:
+            min_steer_deg = max(min_steer_deg, hint_deg * 0.4)
 
         if previous_steering is not None and float(previous_steering) * desired_sign > 0.0:
             hold_ratio = max(
@@ -5773,6 +5780,12 @@ Args:
         if mode_name == "single_line" and isinstance(debug_info, dict):
             local_reliability = float(debug_info.get("single_line_heading_reliability", 1.0) or 0.0)
             fusion_weight *= local_reliability
+            # When the line is nearly horizontal (reliability≈0) but we are in a curve and the
+            # AI hint is confident, apply a minimum fusion weight so the hint is not fully ignored.
+            if local_reliability < 0.1 and fusion_weight < 0.05:
+                in_curve = str(getattr(self, '_curve_state', 'STRAIGHT')) in ('ENTERING', 'IN_CURVE')
+                if in_curve and hint_conf > 0.3:
+                    fusion_weight = hint_conf * 0.25
             if isinstance(debug_info, dict):
                 debug_info["heading_fusion_local_reliability"] = round(local_reliability, 3)
 
@@ -7917,7 +7930,7 @@ Args:
             ref_mask = left_mask if has_left else right_mask
             h, w = ref_mask.shape[:2]
             warp_size = (w, h)
-            min_area = max(4, int(w * h * 0.0005))
+            min_area = max(2, int(w * h * 0.0002))
             bev_center = w / 2.0
 
             def _bev_cx(mask):
