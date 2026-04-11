@@ -798,7 +798,8 @@ class threadTracking(ThreadWithStop):
             if (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S):
                 cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
                 if cmd_speed is not None:
-                    self._last_speed = float(cmd_speed)
+                    scale = float(getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_SCALE", 1.0) or 1.0)
+                    self._last_speed = float(cmd_speed) * scale
                     self._last_speed_source = "command"
                     return float(self._last_speed)
 
