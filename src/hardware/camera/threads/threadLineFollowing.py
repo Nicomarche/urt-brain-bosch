@@ -836,6 +836,10 @@ Args:
         self._two_line_curve_hint_count = 0
         self._two_line_curve_hint_direction = 0
         self._curve_enter_origin = "none"
+        self._recent_curve_direction = 0
+        self._recent_curve_direction_frames = 0
+        self.curve_reentry_hold_frames = max(10, self.curve_exit_frames + 2)
+        self.curve_reentry_min_steer_deg = 3.0
         self.curve_pre_position_gain = 0.95  # Pre-position aggressively when ENTERING (higher = more outer-line protection)
         self.curve_exit_gain = 0.08          # Tiny residual offset when EXITING; fades over curve_exit_frames
         self.curve_inner_line_steer_factor = float(getattr(_config, 'CURVE_INNER_LINE_STEER_FACTOR', 0.4))
@@ -1531,6 +1535,17 @@ Args:
             inferred_lost_side = 'right' if visible_side == 'left' else 'left'
             inferred_curve_direction = 1 if visible_side == 'left' else -1
             context_sources.append(f"lost_{inferred_lost_side}")
+            curve_state = str(getattr(self, '_curve_state', 'STRAIGHT'))
+            curve_direction = int(getattr(self, '_curve_direction', 0) or 0)
+            if curve_direction != 0 and curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+                inferred_curve_direction = curve_direction
+                context_sources.append("curve_state")
+            else:
+                recent_curve_direction = int(getattr(self, '_recent_curve_direction', 0) or 0)
+                recent_curve_frames = int(getattr(self, '_recent_curve_direction_frames', 0) or 0)
+                if recent_curve_direction != 0 and recent_curve_frames > 0:
+                    inferred_curve_direction = recent_curve_direction
+                    context_sources.append("recent_curve")
 
         previous = self._lane_observation_history[-1] if self._lane_observation_history else None
         if previous is not None:
@@ -7190,18 +7205,55 @@ Args:
             img_h, img_w: Image dimensions
         """
         prev_state = self._curve_state
+        prev_direction = int(getattr(self, '_curve_direction', 0) or 0)
         self._curve_state_frames += 1
+        if self._recent_curve_direction_frames > 0:
+            self._recent_curve_direction_frames -= 1
+            if self._recent_curve_direction_frames <= 0:
+                self._recent_curve_direction_frames = 0
+                self._recent_curve_direction = 0
         two_line_hint_ready, two_line_hint_direction = self._consume_two_line_curve_hint(
             num_lines, avg_left, avg_right
         )
 
+        previous_steering = getattr(self, '_last_good_steering', None)
+        if previous_steering is None:
+            previous_steering = getattr(self, 'last_steering', None)
+
+        def _resolve_recent_curve_reentry_direction(fallback_direction):
+            fallback_direction = int(fallback_direction or 0)
+            recent_direction = int(getattr(self, '_recent_curve_direction', 0) or 0)
+            recent_frames = int(getattr(self, '_recent_curve_direction_frames', 0) or 0)
+            if (
+                fallback_direction == 0 or
+                recent_direction == 0 or
+                recent_frames <= 0 or
+                recent_direction == fallback_direction
+            ):
+                return fallback_direction, False
+            if previous_steering is None:
+                return fallback_direction, False
+            min_reentry_steer = max(
+                0.0,
+                float(getattr(self, 'curve_reentry_min_steer_deg', 3.0) or 3.0),
+            )
+            if abs(float(previous_steering)) < min_reentry_steer:
+                return fallback_direction, False
+            if float(previous_steering) * recent_direction <= 0.0:
+                return fallback_direction, False
+            return recent_direction, True
+
         if self._curve_state == "STRAIGHT":
             if num_lines == 1:
                 # Lost a line → entering curve (only reliable trigger)
+                inferred_direction = 1 if avg_left is not None else -1
+                inferred_direction, reused_recent_curve = _resolve_recent_curve_reentry_direction(
+                    inferred_direction
+                )
                 self._curve_state = "ENTERING"
                 self._curve_state_frames = 1
-                self._curve_direction = 1 if avg_left is not None else -1
-                self._curve_enter_origin = "single_line"
+                self._curve_direction = int(inferred_direction)
+                self._curve_enter_origin = "recent_curve_hold" if reused_recent_curve else "single_line"
             elif two_line_hint_ready and two_line_hint_direction != 0:
                 # Strong, stable two-line heading hint from AI local: start pre-positioning
                 # before the outer line disappears so the car doesn't react one frame late.
@@ -7232,14 +7284,14 @@ Args:
                     self._curve_direction = int(two_line_hint_direction)
                     self._curve_enter_origin = "two_line_hint"
                 elif (
-                    self._curve_enter_origin == "two_line_hint" and
+                    self._curve_enter_origin in ("two_line_hint", "recent_curve_hold") and
                     self._curve_state_frames <= two_line_hold
                 ):
                     # Short confidence dips are common on the last safe frame before line loss.
                     # Keep ENTERING alive briefly so the steering does not unwind to zero.
                     pass
                 elif (
-                    self._curve_enter_origin == "two_line_hint" and
+                    self._curve_enter_origin in ("two_line_hint", "recent_curve_hold") and
                     self._curve_state_frames > two_line_hold and
                     self._curve_state_frames <= two_line_hold * 4
                 ):
@@ -7280,6 +7332,12 @@ Args:
         elif self._curve_state == "EXITING":
             if num_lines == 2:
                 if self._curve_state_frames >= self.curve_exit_frames:
+                    if prev_direction != 0:
+                        self._recent_curve_direction = int(prev_direction)
+                        self._recent_curve_direction_frames = max(
+                            0,
+                            int(getattr(self, 'curve_reentry_hold_frames', 10) or 10),
+                        )
                     self._curve_state = "STRAIGHT"
                     self._curve_state_frames = 0
                     self._curve_direction = 0
