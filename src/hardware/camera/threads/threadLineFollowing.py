@@ -3508,7 +3508,9 @@ Args:
         desired_sign = 0
         curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
         if curve_direction != 0:
-            desired_sign = -curve_direction
+            # _curve_direction = 1 = right curve → steer right (+1)
+            # _curve_direction = -1 = left curve → steer left (-1)
+            desired_sign = curve_direction
 
         if desired_sign == 0 and direct_error_m is not None and abs(float(direct_error_m)) > 1e-4:
             desired_sign = -1 if float(direct_error_m) > 0.0 else 1
@@ -3566,7 +3568,8 @@ Args:
         desired_sign = 0
         curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
         if curve_direction != 0:
-            desired_sign = -curve_direction
+            # _curve_direction = 1 = right curve → steer right (+1)
+            desired_sign = curve_direction
 
         hint_source = str(getattr(self, "_local_ai_heading_hint_source", "none") or "none")
         hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
