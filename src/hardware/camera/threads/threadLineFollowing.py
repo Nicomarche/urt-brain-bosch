@@ -3668,6 +3668,7 @@ Args:
         )
         continuity_hold_active = (
             not entering_hold_active and
+            curve_state == "IN_CURVE" and
             hint_source == "two_line" and
             hint_conf >= 0.45 and
             hint_deg >= 16.0 and
@@ -3720,6 +3721,62 @@ Args:
                 debug_info["two_line_curve_priority_output_deg"] = round(float(guarded_steer), 3)
 
         return guarded_steer
+
+    def _get_curve_exit_unwind_factor(
+        self,
+        reinforced_sign=None,
+        debug_info=None,
+        debug_prefix="curve_exit_unwind",
+    ):
+        """Return a damping factor when visual exit cues contradict the current curve."""
+        curve_state = str(getattr(self, "_curve_state", "STRAIGHT"))
+        active_curve_direction = int(getattr(self, "_curve_direction", 0) or 0)
+        recent_curve_frames = int(getattr(self, "_recent_curve_direction_frames", 0) or 0)
+        if curve_state == "STRAIGHT" and active_curve_direction == 0 and recent_curve_frames > 0:
+            active_curve_direction = int(getattr(self, "_recent_curve_direction", 0) or 0)
+
+        if active_curve_direction == 0 or curve_state not in ("EXITING", "STRAIGHT"):
+            return 1.0
+
+        reinforced_sign_value = 0
+        if reinforced_sign is not None:
+            try:
+                reinforced_sign_value = 1 if float(reinforced_sign) > 0.0 else -1
+            except (TypeError, ValueError):
+                reinforced_sign_value = 0
+            if reinforced_sign_value * active_curve_direction <= 0:
+                return 1.0
+
+        hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
+        hint_rad = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
+        hint_deg = abs(math.degrees(hint_rad))
+        if hint_conf < 0.35 or hint_deg < 3.0:
+            return 1.0
+
+        hint_sign = 0
+        if hint_rad > 1e-4:
+            hint_sign = 1
+        elif hint_rad < -1e-4:
+            hint_sign = -1
+        if hint_sign == 0 or hint_sign == active_curve_direction:
+            return 1.0
+
+        strong_exit_hint = hint_conf >= 0.60 or hint_deg >= 6.0
+        if curve_state == "EXITING":
+            unwind_factor = 0.20 if strong_exit_hint else 0.35
+        else:
+            unwind_factor = 0.35 if strong_exit_hint else 0.55
+
+        if isinstance(debug_info, dict):
+            debug_info[debug_prefix] = True
+            debug_info[f"{debug_prefix}_factor"] = round(float(unwind_factor), 3)
+            debug_info[f"{debug_prefix}_curve_state"] = curve_state
+            debug_info[f"{debug_prefix}_curve_direction"] = int(active_curve_direction)
+            debug_info[f"{debug_prefix}_hint_deg"] = round(float(math.degrees(hint_rad)), 3)
+            debug_info[f"{debug_prefix}_hint_conf"] = round(float(hint_conf), 4)
+            debug_info[f"{debug_prefix}_reinforced_sign"] = int(reinforced_sign_value)
+
+        return unwind_factor
 
     def _resolve_ai_local_blind_control(self, img_w, speed_cap=None):
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
@@ -6361,6 +6418,15 @@ Args:
                 # initial psi0 seen by the MPC so it commands extra steer to maintain
                 # the curve — without this the MPC under-steers in corners.
                 effective_psi_ss = psi_ss
+                curve_exit_unwind_factor = 1.0
+                if direct_error_source == "two_line":
+                    curve_hold_direction = int(getattr(self, "_curve_direction", 0) or 0)
+                    if curve_hold_direction == 0:
+                        curve_hold_direction = int(getattr(self, "_recent_curve_direction", 0) or 0)
+                    if curve_hold_direction != 0:
+                        curve_exit_unwind_factor = self._get_curve_exit_unwind_factor(
+                            reinforced_sign=curve_hold_direction,
+                        )
                 if (
                     ts is not None and
                     getattr(ts, 'initialized', False) and
@@ -6380,6 +6446,8 @@ Args:
                         effective_psi_ss = math.atan(
                             path_kappa * float(self.lateral_mpc.L)
                         )
+                        if curve_exit_unwind_factor < 0.999:
+                            effective_psi_ss *= float(curve_exit_unwind_factor)
                 # When both lane lines provide a direct physical error (psi≈0 is common),
                 # augment heading with a Stanley crosstrack term so the MPC sees a
                 # non-zero psi even when the car is aligned.  This avoids the degenerate
@@ -10240,6 +10308,17 @@ Returns:
                             _rv = max(0.0, (_car_half_cm + _safety_cm) - D_right_cm)
                         direct_error_m += _lv / 100.0   # push right if too close to left
                         direct_error_m -= _rv / 100.0   # push left  if too close to right
+                    if direct_error_m is not None and abs(float(direct_error_m)) > 1e-4:
+                        exit_unwind_factor = self._get_curve_exit_unwind_factor(
+                            reinforced_sign=direct_error_m,
+                            debug_info=debug_info,
+                            debug_prefix="two_line_exit_unwind",
+                        )
+                        if exit_unwind_factor < 0.999:
+                            raw_direct_error_m = float(direct_error_m)
+                            direct_error_m = raw_direct_error_m * float(exit_unwind_factor)
+                            debug_info['two_line_exit_unwind_input_error_m'] = round(raw_direct_error_m, 4)
+                            debug_info['two_line_exit_unwind_output_error_m'] = round(float(direct_error_m), 4)
                     debug_info['two_line_D_left_cm']  = round(D_left_cm, 2)
                     debug_info['two_line_D_right_cm'] = round(D_right_cm, 2)
                     debug_info['two_line_ref_lw_px']  = round(_ref_lw_px, 1)
