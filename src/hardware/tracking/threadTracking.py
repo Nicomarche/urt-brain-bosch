@@ -62,9 +62,9 @@ try:
     # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
     # Keep the default at 1.0 so the measured steering is trusted directly.
     _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
-    # Project convention: positive steering command/feedback means RIGHT turn.
-    # The DR bicycle model expects mathematical sign: positive = LEFT turn.
-    _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", -1.0) or -1.0)
+    # Tracking now keeps the steering sign aligned with the actuator feedback so
+    # the same convention flows through controller, telemetry, and DR.
+    _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
     _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
     )
@@ -81,7 +81,7 @@ try:
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.10
     )
     _VISUAL_LANE_RELOCALIZATION_ENABLED = bool(
-        getattr(cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_ENABLED", False)
+        getattr(cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_ENABLED", True)
     )
     _VISUAL_LANE_RELOCALIZATION_MAX_M = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M", 0.03
@@ -134,7 +134,7 @@ try:
         cfg, "TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S", 0.50
     )
     _COMMAND_SPEED_FALLBACK_ENABLED = bool(
-        getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", False)
+        getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", True)
     )
     _STEER_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
@@ -156,13 +156,13 @@ except Exception:
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
-    _STEER_SIGN_DR     = -1.0
+    _STEER_SIGN_DR     = 1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.18
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.02
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
     _VISUAL_LANE_RELOCALIZATION_GAIN = 0.10
-    _VISUAL_LANE_RELOCALIZATION_ENABLED = False
+    _VISUAL_LANE_RELOCALIZATION_ENABLED = True
     _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
     _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
     _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
@@ -181,7 +181,7 @@ except Exception:
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
     _SPEED_FEEDBACK_TIMEOUT_S = 0.35
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
-    _COMMAND_SPEED_FALLBACK_ENABLED = False
+    _COMMAND_SPEED_FALLBACK_ENABLED = True
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
@@ -294,6 +294,7 @@ class TrackingState:
         self.relocalization_mode = "map_match"
         self.last_relocalization_source = "map_match"
         self.last_relocalization_error_m = 0.0
+        self.localization_confidence = 0.0
         self.initialized = False
         self.imu_received = False   # True once a real IMU message has been parsed
         # Reference to the dead reckoning instance — set by threadTracking so
@@ -323,6 +324,11 @@ class TrackingState:
         self._stopline_last_seen_monotonic = 0.0
         self._stopline_last_pass_monotonic = 0.0
         self._stopline_pass_event = None
+        self.control_steering_deg = None
+        self.control_speed_cmd = None
+        self.control_authority = "none"
+        self.control_safety_override = False
+        self.control_reason = "none"
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
@@ -405,9 +411,90 @@ class TrackingState:
             self.relocalization_mode = str(relocalization_mode or "map_match")
             self.last_relocalization_source = str(last_relocalization_source or "map_match")
             self.last_relocalization_error_m = float(last_relocalization_error_m or 0.0)
+            self.localization_confidence = float(getattr(self, "localization_confidence", 0.0) or 0.0)
             self.initialized = True
             if imu_received:
                 self.imu_received = True
+
+    def update_from_pose_estimate(self, pose_estimate) -> None:
+        with self._lock:
+            self.x = float(getattr(pose_estimate.fused_pose, "x", 0.0))
+            self.y = float(getattr(pose_estimate.fused_pose, "y", 0.0))
+            self.yaw = float(getattr(pose_estimate.fused_pose, "yaw", 0.0))
+            self.raw_x = float(getattr(pose_estimate.raw_pose, "x", self.x))
+            self.raw_y = float(getattr(pose_estimate.raw_pose, "y", self.y))
+            self.raw_yaw = float(getattr(pose_estimate.raw_pose, "yaw", self.yaw))
+            self.speed_mps = float(getattr(pose_estimate, "speed_mps", self.speed_mps))
+            self.speed_source = str(getattr(pose_estimate, "speed_source", self.speed_source) or "none")
+            self.speed_feedback_age_s = getattr(pose_estimate, "speed_feedback_age_s", self.speed_feedback_age_s)
+            self.speed_command_age_s = getattr(pose_estimate, "speed_command_age_s", self.speed_command_age_s)
+            self.steer_rad = float(getattr(pose_estimate, "steer_rad", self.steer_rad))
+            self.raw_lateral_error_m = float(getattr(pose_estimate, "raw_lateral_error_m", 0.0) or 0.0)
+            self.lane_measurement_reliable = bool(getattr(pose_estimate, "lane_measurement_reliable", False))
+            self.camera_lateral_correction_m = float(
+                getattr(pose_estimate, "camera_lateral_correction_m", 0.0) or 0.0
+            )
+            self.relocalization_mode = str(getattr(pose_estimate, "relocalization_mode", self.relocalization_mode) or "dead_reckoning")
+            self.last_relocalization_source = str(
+                getattr(pose_estimate, "last_relocalization_source", self.last_relocalization_source) or "none"
+            )
+            self.last_relocalization_error_m = float(
+                getattr(pose_estimate, "last_relocalization_error_m", self.last_relocalization_error_m) or 0.0
+            )
+            self.localization_confidence = float(getattr(pose_estimate, "localization_confidence", 0.0) or 0.0)
+            if bool(getattr(pose_estimate, "imu_received", False)):
+                self.imu_received = True
+            self.initialized = True
+
+    def update_from_route_context(self, route_context) -> None:
+        with self._lock:
+            self.matched_x = float(getattr(route_context.matched_pose, "x", self.matched_x))
+            self.matched_y = float(getattr(route_context.matched_pose, "y", self.matched_y))
+            self.matched_yaw = float(getattr(route_context.matched_pose, "yaw", self.matched_yaw))
+            self.map_match_error_m = float(getattr(route_context, "map_match_error_m", 0.0) or 0.0)
+            self.wp_idx = int(getattr(route_context, "matched_idx", self.wp_idx) or 0)
+            self.target_idx = int(getattr(route_context, "target_idx", self.target_idx) or 0)
+            self.error_m = float(getattr(route_context, "error_m", 0.0) or 0.0)
+            self.heading_rad = float(getattr(route_context, "heading_rad", 0.0) or 0.0)
+            self.path_psi = float(getattr(route_context, "path_psi", 0.0) or 0.0)
+            self.path_kappa = float(getattr(route_context, "path_kappa", 0.0) or 0.0)
+            self.path_heading_change_rad = float(getattr(route_context, "path_heading_change_rad", 0.0) or 0.0)
+            self.route_active = bool(getattr(route_context, "route_active", False))
+            self.route_id = getattr(route_context, "route_id", self.route_id)
+            self.current_node_id = getattr(route_context, "current_node_id", self.current_node_id)
+            self.current_node_attr = int(getattr(route_context, "current_node_attr", 0) or 0)
+            self.upcoming_node_id = getattr(route_context, "upcoming_node_id", self.upcoming_node_id)
+            self.upcoming_node_attr = int(getattr(route_context, "upcoming_node_attr", 0) or 0)
+            self.maneuver_type = str(getattr(route_context, "maneuver_type", self.maneuver_type) or "none")
+            self.destination_node_id = getattr(route_context, "destination_node_id", self.destination_node_id)
+            self.destination_label = getattr(route_context, "destination_label", self.destination_label)
+            self.route_queue = list(getattr(route_context, "route_queue", []) or [])
+            self.route_progress = float(getattr(route_context, "route_progress", 0.0) or 0.0)
+            self.route_points = list(getattr(route_context, "route_points", []) or [])
+            self.route_completed = bool(getattr(route_context, "route_completed", False))
+            self.route_replans = int(getattr(route_context, "replans", 0) or 0)
+            self.route_source = str(getattr(route_context, "route_source", "none") or "none")
+            self.destination_point = getattr(route_context, "destination_point", self.destination_point)
+            self.next_semantic_id = getattr(route_context, "next_semantic_id", self.next_semantic_id)
+            self.next_semantic_type = getattr(route_context, "next_semantic_type", self.next_semantic_type)
+            self.next_semantic_label = getattr(route_context, "next_semantic_label", self.next_semantic_label)
+            self.next_semantic_distance_m = getattr(route_context, "next_semantic_distance_m", self.next_semantic_distance_m)
+            self.expected_control_type = getattr(route_context, "expected_control_type", self.expected_control_type)
+            self.current_zone_ids = list(getattr(route_context, "current_zone_ids", []) or [])
+            self.current_zone_types = list(getattr(route_context, "current_zone_types", []) or [])
+            self.map_metadata = dict(getattr(route_context, "map_metadata", {}) or {})
+            self.available_destinations = list(getattr(route_context, "available_destinations", []) or [])
+            self.waypoint_mode_active = bool(getattr(route_context, "waypoint_mode_active", False))
+            self.node_attr = int(self.upcoming_node_attr or self.current_node_attr or 0)
+            self.initialized = True
+
+    def update_from_control_decision(self, decision) -> None:
+        with self._lock:
+            self.control_steering_deg = getattr(decision, "steering_deg", None)
+            self.control_speed_cmd = getattr(decision, "speed_cmd", None)
+            self.control_authority = str(getattr(decision, "authority", "none") or "none")
+            self.control_safety_override = bool(getattr(decision, "safety_override", False))
+            self.control_reason = str(getattr(decision, "reason", "none") or "none")
 
     def set_camera_yaw_hint(self, camera_yaw_rad: float, confidence: float) -> None:
         """Store a camera-estimated world-frame yaw for threadTracking to consume.
@@ -580,6 +667,7 @@ class TrackingState:
                 relocalization_mode=self.relocalization_mode,
                 last_relocalization_source=self.last_relocalization_source,
                 last_relocalization_error_m=self.last_relocalization_error_m,
+                localization_confidence=self.localization_confidence,
                 stopline_visible=self.stopline_visible,
                 stopline_stable=self.stopline_stable,
                 stopline_distance_m=self.stopline_distance_m,
@@ -591,6 +679,11 @@ class TrackingState:
                 stopline_last_pass_distance_m=self.stopline_last_pass_distance_m,
                 stopline_last_seen_age_s=stopline_last_seen_age_s,
                 stopline_last_pass_age_s=stopline_last_pass_age_s,
+                control_steering_deg=self.control_steering_deg,
+                control_speed_cmd=self.control_speed_cmd,
+                control_authority=self.control_authority,
+                control_safety_override=self.control_safety_override,
+                control_reason=self.control_reason,
             )
 
 
@@ -1035,6 +1128,9 @@ class threadTracking(ThreadWithStop):
             return None
 
     def _resolve_speed_mps(self, now: float) -> float:
+        current_state_message = str(
+            getattr(self, "_current_state_message", "DEFAULT") or "DEFAULT"
+        ).upper()
         speed_raw = self._speed_sub.receive()
         if speed_raw is not None:
             self._last_raw_speed = speed_raw
@@ -1062,7 +1158,7 @@ class threadTracking(ThreadWithStop):
         )
         _encoder_moving = abs(float(self._last_speed)) > 1e-4
         if (
-            self._current_state_message == "MANUAL" and
+            current_state_message == "MANUAL" and
             self._last_cmd_speed_t is not None and
             (not _encoder_fresh or not _encoder_moving)
         ):

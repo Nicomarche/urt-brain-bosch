@@ -33,11 +33,13 @@ if __name__ == "__main__":
 import threading
 import time
 
-from cv2 import meanShift
+from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
-from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
+from src.hardware.camera.threads.threadVisualController import threadVisualController
+from src.hardware.control.threads.threadControlCoordinator import threadControlCoordinator
+from src.hardware.pipeline.sharedBuffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -53,7 +55,9 @@ except ImportError as e:
 
 # GPS-free tracking (optional — requires scipy for spline interpolation)
 try:
-    from src.hardware.tracking.threadTracking import threadTracking, TrackingState
+    from src.hardware.tracking.threadNavigationPlanner import threadNavigationPlanner
+    from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
+    from src.hardware.tracking.threadTracking import TrackingState
     from src.hardware.tracking.trackVisualizer import TrackVisualizer
     import config as _cfg
     _TRACKING_ENABLED = True
@@ -62,33 +66,6 @@ except Exception as _tracking_import_err:
     _TRACKING_ENABLED = False
     _TRACKING_SHOW_WINDOW = False
     print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Tracking not available: {_tracking_import_err}")
-
-
-class LatestFrameBuffer:
-    """Thread-safe container that always exposes the newest lores BGR frame."""
-
-    def __init__(self):
-        self.frame_bgr = None
-        self.timestamp = 0.0
-        self.sequence = 0
-        self.lock = threading.Lock()
-
-    def write(self, frame):
-        """Replace the buffered frame with the latest capture."""
-        if frame is None:
-            return
-        with self.lock:
-            self.frame_bgr = frame
-            self.timestamp = time.time()
-            self.sequence += 1
-
-    def read_latest(self, copy_frame=True):
-        """Return the latest frame, timestamp, and sequence number."""
-        with self.lock:
-            if self.frame_bgr is None:
-                return None, 0.0, 0
-            frame = self.frame_bgr.copy() if copy_frame else self.frame_bgr
-            return frame, self.timestamp, self.sequence
 
 
 class processCamera(WorkerProcess):
@@ -141,6 +118,7 @@ class processCamera(WorkerProcess):
         self.sign_min_box_area = sign_min_box_area
         self.sign_action_cooldown = sign_action_cooldown
         self.frame_buffer = LatestFrameBuffer()
+        self.local_lane_buffer = LatestValueBuffer()
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
@@ -195,6 +173,7 @@ class processCamera(WorkerProcess):
         localPerceptionTh = threadLocalPerception(
             self.queuesList, self.logging, self.debugging,
             frame_buffer=self.frame_buffer,
+            local_lane_buffer=self.local_lane_buffer,
             show_debug=self.show_preview,
             debug_windows=self.debug_windows,
             enable_sign_detection=self.enable_sign_detection,
@@ -207,6 +186,14 @@ class processCamera(WorkerProcess):
             steer_override_event=steer_override_event,
         )
         self.threads.append(localPerceptionTh)
+
+        lane_observation_buffer = LatestValueBuffer()
+        stopline_observation_buffer = LatestValueBuffer()
+        pose_estimate_buffer = LatestValueBuffer()
+        route_context_buffer = LatestValueBuffer()
+        visual_candidate_buffer = LatestValueBuffer()
+        visual_state_buffer = LatestValueBuffer()
+        control_decision_buffer = LatestValueBuffer()
 
         # GPS-free tracking: dead reckoning + waypoint follower + map visualizer
         tracking_state = None
@@ -244,29 +231,61 @@ class processCamera(WorkerProcess):
                     print(f"[ processCamera ] WARNING - visualizer failed: {_vis_err}")
                     visualizer = None
 
-            trackingTh = threadTracking(
+            poseEstimatorTh = threadPoseEstimator(
                 self.queuesList,
                 tracking_state,
+                lane_observation_buffer=lane_observation_buffer,
+                stopline_observation_buffer=stopline_observation_buffer,
+                pose_estimate_buffer=pose_estimate_buffer,
+                route_context_buffer=route_context_buffer,
+                logging=self.logging,
+                debugging=self.debugging,
+            )
+            plannerTh = threadNavigationPlanner(
+                self.queuesList,
+                tracking_state,
+                pose_estimate_buffer=pose_estimate_buffer,
+                route_context_buffer=route_context_buffer,
                 logging=self.logging,
                 debugging=self.debugging,
                 visualizer=visualizer,
             )
-            self.threads.append(trackingTh)
+            self.threads.append(poseEstimatorTh)
+            self.threads.append(plannerTh)
 
-        # Add line following thread
-        # show_debug=True only when master switch SHOW_CAMERA_PREVIEW is on.
-        # Individual window toggles are controlled by debug_windows dict.
-        lineFollowingTh = threadLineFollowing(
+        laneObserverTh = threadLaneObserver(
+            self.queuesList,
+            visual_state_buffer=visual_state_buffer,
+            lane_observation_buffer=lane_observation_buffer,
+            stopline_observation_buffer=stopline_observation_buffer,
+        )
+        self.threads.append(laneObserverTh)
+
+        visualControllerTh = threadVisualController(
             self.queuesList, self.logging, self.debugging, frame_buffer=self.frame_buffer,
+            local_lane_buffer=self.local_lane_buffer,
             show_debug=self.show_preview,
             debug_windows=self.debug_windows,
             sign_action_event=sign_action_event,
             highway_mode_event=highway_mode_event,
             steer_override_event=steer_override_event,
+            visual_candidate_buffer=visual_candidate_buffer,
+            visual_state_buffer=visual_state_buffer,
         )
         if tracking_state is not None:
-            lineFollowingTh.set_tracking_state(tracking_state)
-        self.threads.append(lineFollowingTh)
+            visualControllerTh.set_tracking_state(tracking_state)
+        self.threads.append(visualControllerTh)
+
+        controlCoordinatorTh = threadControlCoordinator(
+            self.queuesList,
+            tracking_state=tracking_state,
+            visual_candidate_buffer=visual_candidate_buffer,
+            control_decision_buffer=control_decision_buffer,
+            sign_action_event=sign_action_event,
+            highway_mode_event=highway_mode_event,
+            steer_override_event=steer_override_event,
+        )
+        self.threads.append(controlCoordinatorTh)
 
         # Legacy remote sign detection path: preserved, but disabled by default.
         if self.use_legacy_remote_sign_detection and self.enable_sign_detection and SIGN_DETECTION_AVAILABLE:

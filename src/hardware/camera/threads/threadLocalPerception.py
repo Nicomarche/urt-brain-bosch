@@ -25,6 +25,7 @@ class threadLocalPerception(ThreadWithStop):
     """Runs the local lane/sign model and publishes perception outputs."""
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
+                 local_lane_buffer=None,
                  show_debug=False, debug_windows=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
@@ -36,6 +37,7 @@ class threadLocalPerception(ThreadWithStop):
         self.logger = logger
         self.debugger = debugger
         self.frame_buffer = frame_buffer
+        self.local_lane_buffer = local_lane_buffer
         self.show_debug = show_debug
         self.debug_windows = debug_windows or {}
 
@@ -537,6 +539,50 @@ class threadLocalPerception(ThreadWithStop):
             cv2.waitKey(1)
             self._last_preview_time = now
 
+    def _build_local_lane_payload(self, result, frame_timestamp, frame_sequence):
+        result_timestamp = time.time()
+        lane_points = result.get("lane_points", [])
+        lane_side_points = result.get("lane_side_points", {"left": [], "right": []})
+        lane_side_lines = result.get("lane_side_lines", {"left": [], "right": []})
+        lane_side_sources = result.get("lane_side_sources", {"left": "none", "right": "none"})
+        side_masks = result.get("side_masks", {"left": None, "right": None})
+        lane_mask = result.get("lane_mask")
+        lead_distance_px_height = float(result.get("lead_distance_px_height", 0.0) or 0.0)
+        lead_distance_cm = None
+        if lead_distance_px_height > 0.0 and self._px_per_cm > 0.1 and self._last_frame_shape:
+            lead_distance_cm = round(
+                (self._last_frame_shape[0] - lead_distance_px_height) / self._px_per_cm, 1
+            )
+
+        return {
+            "lane_points": lane_points,
+            "lane_side_points": lane_side_points,
+            "lane_side_lines": lane_side_lines,
+            "lane_side_sources": lane_side_sources,
+            "side_masks": side_masks,
+            "lane_mask": lane_mask,
+            "inference_time_ms": float(result.get("inference_time_ms", 0.0)),
+            "frame_id": int(result.get("frame_id", 0)),
+            # timestamp now represents "result published" time; keep source frame time separately.
+            "result_timestamp": result_timestamp,
+            "timestamp": result_timestamp,
+            "source_frame_timestamp": frame_timestamp or 0.0,
+            "source_frame_sequence": int(frame_sequence or 0),
+            "lane_count": len(lane_points),
+            "model_ready": bool(result.get("model_ready", False)),
+            "heading_hint_rad": float(result.get("heading_hint_rad", 0.0) or 0.0),
+            "heading_hint_confidence": float(result.get("heading_hint_confidence", 0.0) or 0.0),
+            "heading_hint_source": str(result.get("heading_hint_source", "none") or "none"),
+            "road_type_class": str(result.get("road_type_class", "unknown") or "unknown"),
+            "road_type_confidence": float(result.get("road_type_confidence", 0.0) or 0.0),
+            "road_type_source": result.get("road_type_source"),
+            "lead_distance_class": str(result.get("lead_distance_class", "none") or "none"),
+            "lead_distance_confidence": float(result.get("lead_distance_confidence", 0.0) or 0.0),
+            "lead_distance_area": float(result.get("lead_distance_area", 0.0) or 0.0),
+            "lead_distance_source": result.get("lead_distance_source"),
+            "lead_distance_cm": lead_distance_cm,
+        }
+
     def thread_work(self):
         self.state_change_handler()
         self._check_config()
@@ -561,7 +607,6 @@ class threadLocalPerception(ThreadWithStop):
         try:
             build_debug = self._should_build_debug(now)
             result = self.engine.infer(frame, build_debug=build_debug)
-            result_timestamp = time.time()
             self._last_result = result
             self._last_frame_shape = frame.shape[:2] if frame is not None else None
             self.frame_counter += 1
@@ -572,46 +617,17 @@ class threadLocalPerception(ThreadWithStop):
                 self.frame_counter = 0
                 self.fps_timer = now
 
-            lane_points = result.get("lane_points", [])
-            lane_side_points = result.get("lane_side_points", {"left": [], "right": []})
-            lane_side_lines = result.get("lane_side_lines", {"left": [], "right": []})
-            lane_side_sources = result.get("lane_side_sources", {"left": "none", "right": "none"})
-            side_masks = result.get("side_masks", {"left": None, "right": None})
-            lane_mask = result.get("lane_mask")
-            lead_distance_px_height = float(result.get("lead_distance_px_height", 0.0) or 0.0)
-            lead_distance_cm = None
-            if lead_distance_px_height > 0.0 and self._px_per_cm > 0.1 and self._last_frame_shape:
-                lead_distance_cm = round(
-                    (self._last_frame_shape[0] - lead_distance_px_height) / self._px_per_cm, 1
-                )
-            self.localLaneSender.send({
-                "lane_points": lane_points,
-                "lane_side_points": lane_side_points,
-                "lane_side_lines": lane_side_lines,
-                "lane_side_sources": lane_side_sources,
-                "side_masks": side_masks,
-                "lane_mask": lane_mask,
-                "inference_time_ms": float(result.get("inference_time_ms", 0.0)),
-                "frame_id": int(result.get("frame_id", 0)),
-                # timestamp now represents "result published" time; keep source frame time separately.
-                "result_timestamp": result_timestamp,
-                "timestamp": result_timestamp,
-                "source_frame_timestamp": frame_timestamp or 0.0,
-                "source_frame_sequence": int(frame_sequence or 0),
-                "lane_count": len(lane_points),
-                "model_ready": bool(result.get("model_ready", False)),
-                "heading_hint_rad": float(result.get("heading_hint_rad", 0.0) or 0.0),
-                "heading_hint_confidence": float(result.get("heading_hint_confidence", 0.0) or 0.0),
-                "heading_hint_source": str(result.get("heading_hint_source", "none") or "none"),
-                "road_type_class": str(result.get("road_type_class", "unknown") or "unknown"),
-                "road_type_confidence": float(result.get("road_type_confidence", 0.0) or 0.0),
-                "road_type_source": result.get("road_type_source"),
-                "lead_distance_class": str(result.get("lead_distance_class", "none") or "none"),
-                "lead_distance_confidence": float(result.get("lead_distance_confidence", 0.0) or 0.0),
-                "lead_distance_area": float(result.get("lead_distance_area", 0.0) or 0.0),
-                "lead_distance_source": result.get("lead_distance_source"),
-                "lead_distance_cm": lead_distance_cm,
-            })
+            lane_payload = self._build_local_lane_payload(result, frame_timestamp, frame_sequence)
+            if self.local_lane_buffer is not None:
+                self.local_lane_buffer.write(lane_payload)
+                queue_payload = dict(lane_payload)
+                # Keep the gateway payload light: the full-resolution masks are large
+                # numpy arrays and were creating several seconds of transport lag.
+                queue_payload["side_masks"] = {"left": None, "right": None}
+                queue_payload["lane_mask"] = None
+                self.localLaneSender.send(queue_payload)
+            else:
+                self.localLaneSender.send(lane_payload)
 
             detections = result.get("detections", [])
             self._handle_walk_area(detections, now)

@@ -19,6 +19,7 @@ try:
 except ImportError:
     _SCIPY_AVAILABLE = False
 import config as _config
+from src.hardware.pipeline.sharedTypes import VisualControlCandidate, VisualStateSnapshot
 from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -526,19 +527,27 @@ Args:
 """
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
+                 local_lane_buffer=None,
                  show_debug=False, debug_windows=None, sign_action_event=None,
-                 highway_mode_event=None, steer_override_event=None):
+                 highway_mode_event=None, steer_override_event=None,
+                 visual_candidate_buffer=None, visual_state_buffer=None,
+                 emit_motor_commands=True, tracking_state_direct_writes=True):
         super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
         self.queuesList = queuesList
         self.logger = logger
         self.debugger = debugger
         self.frame_buffer = frame_buffer
+        self.local_lane_buffer = local_lane_buffer
         self.show_debug = show_debug
         self.debug_windows = debug_windows or {}
         self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
         self._sign_action_was_active = False  # Track transitions to reset speed ramp
         self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
         self.steer_override_event = steer_override_event  # When set, sign action also controls steer (e.g. hardcoded turn)
+        self.visual_candidate_buffer = visual_candidate_buffer
+        self.visual_state_buffer = visual_state_buffer
+        self.emit_motor_commands = bool(emit_motor_commands)
+        self._tracking_state_direct_writes_enabled = bool(tracking_state_direct_writes)
 
         # Speed parameters
         self.base_speed        = float(getattr(_config, "LF_BASE_SPEED",        10))
@@ -1198,7 +1207,14 @@ Args:
         self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
-        self.localLanePerceptionSubscriber = messageHandlerSubscriber(self.queuesList, LocalLanePerception, "lastOnly", True)
+        if self.local_lane_buffer is None:
+            self.localLanePerceptionSubscriber = messageHandlerSubscriber(
+                self.queuesList, LocalLanePerception, "lastOnly", True
+            )
+        else:
+            # Local AI runs in the same processCamera process, so use the shared
+            # latest-value buffer and avoid subscribing to the heavy queue payload.
+            self.localLanePerceptionSubscriber = None
         self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
         self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ActuatorCommandStatus, "lastOnly", True)
         
@@ -1248,6 +1264,8 @@ Args:
         self._last_planner_route_blend = 0.0
         self._last_planner_route_blend_source = "none"
         self._recent_two_line_straight_until = 0.0
+        self._last_camera_yaw_hint_rad = None
+        self._last_camera_yaw_hint_confidence = 0.0
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -1341,9 +1359,14 @@ Args:
 
     def _poll_local_ai_messages(self):
         """Cache the latest local AI and actuator payloads."""
-        lane_payload = self.localLanePerceptionSubscriber.receive()
-        if lane_payload is not None:
-            self._last_local_lane_payload = lane_payload
+        if self.local_lane_buffer is not None:
+            lane_payload = self.local_lane_buffer.read_latest()
+            if lane_payload is not None:
+                self._last_local_lane_payload = lane_payload
+        elif self.localLanePerceptionSubscriber is not None:
+            lane_payload = self.localLanePerceptionSubscriber.receive()
+            if lane_payload is not None:
+                self._last_local_lane_payload = lane_payload
 
         status_payload = self.localPerceptionStatusSubscriber.receive()
         if status_payload is not None:
@@ -2321,8 +2344,14 @@ Args:
             _cam_world_yaw = _path_psi + heading_rad
             # Confidence: 1.0 when perfectly aligned, 0.0 at ±20°.
             _dr_yaw_hint_conf = max(0.0, 1.0 - abs(heading_rad) / math.radians(20.0))
-            _ts_for_yaw.set_camera_yaw_hint(_cam_world_yaw, _dr_yaw_hint_conf)
+            self._last_camera_yaw_hint_rad = float(_cam_world_yaw)
+            self._last_camera_yaw_hint_confidence = float(_dr_yaw_hint_conf)
+            if self._tracking_state_direct_writes_enabled:
+                _ts_for_yaw.set_camera_yaw_hint(_cam_world_yaw, _dr_yaw_hint_conf)
             _dr_yaw_hint_deg = math.degrees(_cam_world_yaw)
+        else:
+            self._last_camera_yaw_hint_rad = None
+            self._last_camera_yaw_hint_confidence = 0.0
         # ── End camera DR yaw correction ──────────────────────────────────────
 
         # Keep single-line heading references up to date from AI mask lines during
@@ -3897,7 +3926,11 @@ Args:
             self._stopline_missing_streak = 0
             self._stopline_stably_visible = False
             self._stopline_last_detection = None
-            if ts is not None and hasattr(ts, "set_stopline_visual_state"):
+            if (
+                self._tracking_state_direct_writes_enabled
+                and ts is not None
+                and hasattr(ts, "set_stopline_visual_state")
+            ):
                 ts.set_stopline_visual_state(
                     False,
                     stable=False,
@@ -3974,6 +4007,8 @@ Args:
                 "stopline_visible_streak": int(self._stopline_visible_streak),
                 "stopline_missing_streak": int(self._stopline_missing_streak),
                 "stopline_pass_event": bool(pass_event is not None),
+                "stopline_pass_event_payload": dict(pass_event) if isinstance(pass_event, dict) else None,
+                "stopline_source": "opencv_bev",
             }
         )
         if isinstance(detection, dict):
@@ -3986,7 +4021,11 @@ Args:
                 }
             )
 
-        if ts is not None and hasattr(ts, "set_stopline_visual_state"):
+        if (
+            self._tracking_state_direct_writes_enabled
+            and ts is not None
+            and hasattr(ts, "set_stopline_visual_state")
+        ):
             ts.set_stopline_visual_state(
                 found,
                 stable=self._stopline_stably_visible,
@@ -4278,7 +4317,7 @@ Args:
         )
         continuity_hold_active = (
             not entering_hold_active and
-            curve_state == "IN_CURVE" and
+            curve_state in {"IN_CURVE", "STRAIGHT"} and
             hint_source == "two_line" and
             hint_conf >= 0.45 and
             hint_deg >= 16.0 and
@@ -4493,14 +4532,21 @@ Args:
         if use_route_tracking:
             ts = self._tracking_state
             if ts is not None and getattr(ts, "initialized", False):
-                speed_value = self._current_speed if float(getattr(self, "_current_speed", 0.0) or 0.0) > 0.0 else self.base_speed
+                base_speed = float(
+                    getattr(self, "base_speed", getattr(self, "min_speed", 0.0)) or 0.0
+                )
+                speed_value = (
+                    self._current_speed
+                    if float(getattr(self, "_current_speed", 0.0) or 0.0) > 0.0
+                    else base_speed
+                )
                 steering = self._compute_lateral_control(
                     0, 0, speed_value,
                     speed_cap=speed_cap,
                 )
-                hold_speed = float(self.min_speed)
-                if speed_cap is not None:
-                    hold_speed = min(hold_speed, float(speed_cap))
+                hold_speed = float(
+                    self._update_progressive_speed(steering, speed_cap=speed_cap)
+                )
                 return steering, hold_speed, "route_tracking"
 
         blind_hold_steering = self._get_no_lane_hold_steering()
@@ -9735,6 +9781,86 @@ Returns:
         trace_dict = trace if isinstance(trace, dict) else {"value": trace}
         self._last_frame_trace = self._sanitize_log_value(trace_dict)
 
+    def _candidate_confidence(self):
+        lane_obs = self._lane_observation_history[-1] if self._lane_observation_history else {}
+        visible_side = str((lane_obs or {}).get("visible_side", "") or "")
+        if visible_side == "both":
+            return 1.0
+        if visible_side in {"left", "right"}:
+            return 0.65
+        debug = (self._last_frame_trace or {}).get("debug", {}) if isinstance(self._last_frame_trace, dict) else {}
+        blind_mode = str(debug.get("blind_control_mode", "") or "")
+        if blind_mode == "route_tracking":
+            return 0.2
+        if blind_mode == "visual_fallback":
+            return 0.15
+        return 0.0
+
+    def _build_visual_control_candidate(
+        self,
+        *,
+        steering_deg,
+        speed_cmd,
+        command_source,
+        active,
+        computed_steering=None,
+        computed_speed=None,
+    ):
+        debug = {}
+        if isinstance(self._last_frame_trace, dict):
+            debug = dict(self._last_frame_trace.get("debug", {}) or {})
+        direct_error_m = None
+        for key in ("two_line_direct_error_m", "sl_direct_error_m"):
+            if key in debug and debug.get(key) is not None:
+                direct_error_m = float(debug.get(key))
+                break
+        if direct_error_m is None and isinstance(self._last_frame_trace, dict):
+            trace_error_m = self._last_frame_trace.get("error_m")
+            if trace_error_m is not None:
+                direct_error_m = float(trace_error_m)
+        blind_mode = None
+        if isinstance(debug, dict):
+            blind_mode = debug.get("blind_control_mode")
+        return VisualControlCandidate(
+            timestamp=time.time(),
+            steering_deg=(float(steering_deg) if steering_deg is not None else None),
+            speed_cmd=(float(speed_cmd) if speed_cmd is not None else None),
+            confidence=self._candidate_confidence(),
+            blind_mode=str(blind_mode) if blind_mode else None,
+            source=str(getattr(self, "detection_mode", "unknown") or "unknown"),
+            direct_error_m=direct_error_m,
+            active=bool(active),
+            command_source=str(command_source or "none"),
+            computed_steering_deg=(float(computed_steering) if computed_steering is not None else None),
+            computed_speed_cmd=(float(computed_speed) if computed_speed is not None else None),
+            debug=debug,
+        )
+
+    def _publish_visual_pipeline_state(
+        self,
+        candidate,
+        *,
+        frame_sequence=0,
+    ):
+        if self.visual_candidate_buffer is not None and candidate is not None:
+            self.visual_candidate_buffer.write(candidate, timestamp=float(candidate.timestamp))
+        if self.visual_state_buffer is not None:
+            snapshot = VisualStateSnapshot(
+                timestamp=time.time(),
+                frame_sequence=int(frame_sequence or 0),
+                detection_mode=str(getattr(self, "detection_mode", "unknown") or "unknown"),
+                active=bool(self.is_line_following_active),
+                curve_state=str(getattr(self, "_curve_state", "STRAIGHT") or "STRAIGHT"),
+                heading_error_rad=float(getattr(self, "_heading_error", 0.0) or 0.0),
+                camera_yaw_hint_rad=self._last_camera_yaw_hint_rad,
+                camera_yaw_hint_confidence=float(self._last_camera_yaw_hint_confidence or 0.0),
+                frame_trace=dict(self._last_frame_trace or {}),
+                local_lane_payload=dict(self._build_local_lane_payload_log() or {}),
+                stopline_debug=dict(getattr(self, "_last_stopline_visual_debug", None) or {}),
+                candidate=candidate,
+            )
+            self.visual_state_buffer.write(snapshot, timestamp=float(snapshot.timestamp))
+
     def _reset_auto_run_log(self, state_message):
         """Reset the persistent auto-run text log when entering AUTO mode."""
         log_dir = os.path.dirname(self.auto_run_log_path)
@@ -10654,7 +10780,8 @@ Returns:
                     commanded_steering = steering_angle
                     commanded_speed = speed
                     command_source = "stale_hold" if stale_frame else "normal"
-                    self.send_motor_commands(steering_angle, speed)
+                    if self.emit_motor_commands:
+                        self.send_motor_commands(steering_angle, speed)
                     self.frames_without_line = 0
                 else:
                     self.frames_without_line += 1
@@ -10664,7 +10791,8 @@ Returns:
                         commanded_steering = 0
                         commanded_speed = self.min_speed
                         command_source = "normal"
-                        self.send_motor_commands(0, self.min_speed)
+                        if self.emit_motor_commands:
+                            self.send_motor_commands(0, self.min_speed)
             else:
                 command_source = "blocked_inactive"
                 if hasattr(self, '_last_inactive_log') == False:
@@ -10675,7 +10803,8 @@ Returns:
                     command_source = "calib_mode"
                     # Enforce minimum speed so the car moves slowly during calibration
                     calib_speed_x10 = int(round(self.min_speed * 10))
-                    self.speedMotorSender.send(str(calib_speed_x10))
+                    if self.emit_motor_commands:
+                        self.speedMotorSender.send(str(calib_speed_x10))
                     commanded_speed = self.min_speed
                     # Steering is NOT sent — the user's manual web commands control the wheels
                     # Log computed vs manual for calibration analysis
@@ -10693,6 +10822,19 @@ Returns:
                 and actuator_status.get("engine_enabled") is False
             ):
                 command_source = "blocked_klem"
+
+            visual_candidate = self._build_visual_control_candidate(
+                steering_deg=commanded_steering if commanded_steering is not None else computed_steering,
+                speed_cmd=commanded_speed if commanded_speed is not None else computed_speed,
+                command_source=command_source,
+                active=self.is_line_following_active,
+                computed_steering=computed_steering,
+                computed_speed=computed_speed,
+            )
+            self._publish_visual_pipeline_state(
+                visual_candidate,
+                frame_sequence=frame_sequence,
+            )
 
             self._log_auto_run_frame(
                 frame_sequence=frame_sequence,
@@ -11076,7 +11218,7 @@ Returns:
             _ts_for_tracking is not None and
             _tracking_speed_mps > _tracking_cam_min_speed_mps
         )
-        if _ts_for_tracking is not None:
+        if self._tracking_state_direct_writes_enabled and _ts_for_tracking is not None:
             _ts_for_tracking.set_lane_measurement_state(False, 0.0)
         if not isinstance(local_mask_guidance, dict):
             if avg_left is not None and avg_right is not None:
@@ -11250,7 +11392,11 @@ Returns:
                     # applied. With direct_error_m providing a physically reliable crosstrack
                     # signal, the heading term is not only unnecessary but actively harmful.
                     # Pass heading=0 so crosstrack is the sole driver in 2-line mode.
-                    if _tracking_camera_corrections_allowed and direct_error_m is not None:
+                    if (
+                        self._tracking_state_direct_writes_enabled
+                        and _tracking_camera_corrections_allowed
+                        and direct_error_m is not None
+                    ):
                         _lat_gain = float(getattr(
                             _config, 'TRACKING_CAMERA_LATERAL_CORRECTION_GAIN', 0.35
                         ) or 0.35)
@@ -11264,9 +11410,12 @@ Returns:
                         debug_info['tracking_camera_lateral_correction_m'] = round(_lat_corr, 4)
                         debug_info['tracking_lane_measurement_reliable'] = True
                     elif direct_error_m is not None:
-                        debug_info['tracking_camera_correction_blocked'] = (
-                            'inactive' if not self.is_line_following_active else 'low_speed'
-                        )
+                        if self._tracking_state_direct_writes_enabled:
+                            debug_info['tracking_camera_correction_blocked'] = (
+                                'inactive' if not self.is_line_following_active else 'low_speed'
+                            )
+                        else:
+                            debug_info['tracking_camera_correction_blocked'] = 'delegated_pose_estimator'
                     _two_line_heading = 0.0 if direct_error_m is not None else heading
                     steering_angle = self._compute_lateral_control(
                         error, _two_line_heading, speed_val, curve_reference=curve_reference,
@@ -12167,6 +12316,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 "sign_action_blocked_speed": False,
                 "speed_sent": True,
             }
+
+            if not self.emit_motor_commands:
+                candidate = self._build_visual_control_candidate(
+                    steering_deg=steering_angle,
+                    speed_cmd=speed,
+                    command_source="delegated_direct",
+                    active=self.is_line_following_active,
+                    computed_steering=steering_angle,
+                    computed_speed=speed,
+                )
+                self._publish_visual_pipeline_state(candidate)
+                return
 
             # If a sign action (stop, crosswalk, etc.) is active:
             # - SPEED: always blocked to not override the sign action's speed
