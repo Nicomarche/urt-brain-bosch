@@ -83,7 +83,7 @@ class DeadReckoning:
         with self._lock:
             self._x += dx
             self._y += dy
-            self._yaw = yaw_rad
+            self._yaw = yaw_end
 
     def reset(self, x: float, y: float, yaw: float) -> None:
         """Re-anchor position to a known ground truth (e.g. a stop-line node)."""

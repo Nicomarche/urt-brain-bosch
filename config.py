@@ -285,6 +285,11 @@ TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 # Steering gain used by dead reckoning.  1.0 = trust the measured steering
 # angle directly; values > 1.0 amplify the effective wheel angle.
 TRACKING_STEER_GAIN_DR = 1.0
+# Steering sign used by tracking dead reckoning.
+# -1.0 = invert Nucleo/servo sign before feeding the bicycle model.
+# Se deja invertido por defecto porque en el auto real el feedback de steering
+# quedó espejado respecto del giro observado en pista.
+TRACKING_STEER_SIGN_DR = -1.0
 
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
@@ -345,6 +350,9 @@ TRACKING_VISUAL_STOPLINE_MAX_VISIBLE_STREAK = 6
 TRACKING_SPEED_FEEDBACK_TIMEOUT_S = 0.35
 TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
 TRACKING_COMMAND_SPEED_FALLBACK_SCALE = 0.75
+# False = si no hay encoder reciente, el DR no inventa movimiento usando el
+# comando de velocidad. En MANUAL se mantiene el hold especial de más arriba.
+TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = False
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Graph node attr that represents a physical stopline. Graph guidance is only

@@ -62,6 +62,7 @@ try:
     # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
     # Keep the default at 1.0 so the measured steering is trusted directly.
     _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
+    _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", -1.0) or -1.0)
     _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
     )
@@ -124,6 +125,9 @@ try:
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S", 0.50
     )
+    _COMMAND_SPEED_FALLBACK_ENABLED = bool(
+        getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", False)
+    )
     _STEER_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
     )
@@ -144,6 +148,7 @@ except Exception:
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
+    _STEER_SIGN_DR     = -1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
     _VISUAL_LANE_RELOCALIZATION_GAIN = 0.10
@@ -166,6 +171,7 @@ except Exception:
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
     _SPEED_FEEDBACK_TIMEOUT_S = 0.35
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
+    _COMMAND_SPEED_FALLBACK_ENABLED = False
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
@@ -1000,7 +1006,7 @@ class threadTracking(ThreadWithStop):
     @staticmethod
     def _parse_steer_rad(raw_value) -> float | None:
         try:
-            return math.radians(float(raw_value) / 10.0)
+            return math.radians(float(raw_value) / 10.0) * float(_STEER_SIGN_DR)
         except (TypeError, ValueError):
             return None
 
@@ -1037,7 +1043,7 @@ class threadTracking(ThreadWithStop):
             if (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S):
                 return float(self._last_speed)
 
-        if self._last_cmd_speed_t is not None:
+        if _COMMAND_SPEED_FALLBACK_ENABLED and self._last_cmd_speed_t is not None:
             if (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S):
                 cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
                 if cmd_speed is not None:
@@ -1159,26 +1165,23 @@ class threadTracking(ThreadWithStop):
             except Exception:
                 pass
 
-        # ---- Bicycle model yaw integration (per-frame heading update).
-        # On frames where an IMU message arrived, this adds the instantaneous
-        # turning increment on top of the IMU absolute correction above.
-        # On frames without an IMU message, this is the sole heading source.
-        # yaw_rate = (v / L) * tan(steer)
-        # CurrentSteer > 0 = right (CW) → in math CCW convention yaw decreases.
-        # dt is capped at _MAX_INTEGRATION_DT to limit error from frame drops.
         _eff_steer_rad = self._last_steer_rad * _STEER_GAIN_DR
-        if abs(self._last_speed) > 0.005:
-            yaw_dt = min(dt, _MAX_INTEGRATION_DT)
-            yaw_rate = (self._last_speed / _WHEELBASE_M) * math.tan(_eff_steer_rad)
-            self._last_yaw_rad -= yaw_rate * yaw_dt
+        if self._dr is None or self._graph is None or self._path_manager is None:
+            return
+
+        # ---- Dead reckoning update (RK4 + yaw bicycle model)
+        # Let the DR own the heading integration so yaw and x/y stay synchronized.
+        # Passing a yaw that was already advanced by another integration step was
+        # exaggerating both curvature and displacement in the preview.
+        dr_dt = min(dt, _MAX_INTEGRATION_DT)
+        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
+                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
+        raw_x, raw_y, raw_yaw = self._dr.get_state()
+        self._last_yaw_rad = float(raw_yaw)
 
         # ---- Camera-based yaw correction (soft blend toward camera estimate).
-        # When the camera sees both lane lines (two-line midpoint_ref mode), it can
-        # estimate the car's absolute world-frame yaw as:
-        #   cam_yaw = path_psi_at_waypoint + camera_heading_rad
-        # This corrects accumulated bicycle-model drift (servo bias, RK4 error)
-        # without depending on the BNO055 magnetometer.
-        # Alpha ≈ 0.08: corrects ~80 % of a 20° drift over ~20 camera frames (2 s).
+        # Apply it after the DR step so the correction updates heading only, without
+        # retroactively inflating the position change of the last interval.
         _cam_yaw, _cam_conf = self.tracking_state.consume_camera_yaw_hint()
         _yaw_correction_rad = 0.0
         if _cam_yaw is not None and _cam_conf > 0.3:
@@ -1190,21 +1193,10 @@ class threadTracking(ThreadWithStop):
                 _delta += 2.0 * math.pi
             _yaw_correction_rad = _alpha * _delta
             self._last_yaw_rad += _yaw_correction_rad
-            if self._dr is not None:
-                self._dr.correct_yaw(_yaw_correction_rad)
+            self._dr.correct_yaw(_yaw_correction_rad)
+            raw_x, raw_y, raw_yaw = self._dr.get_state()
         self.tracking_state.last_yaw_correction_deg = math.degrees(_yaw_correction_rad)
 
-        if self._dr is None or self._graph is None or self._path_manager is None:
-            return
-
-        # ---- Dead reckoning update (RK4)
-        # Cap dt to limit position error during frame drops.
-        # Pass steer_rad so RK4 can account for heading change within the step —
-        # critical at high speed where Euler accumulates O(dt²) error per step.
-        dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
-                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
-        raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._consume_sign_observation(now)
 
         nav_cmd = self._nav_cmd_sub.receive()
