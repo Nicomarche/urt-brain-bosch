@@ -289,6 +289,11 @@ TRACKING_STEER_GAIN_DR = 1.0
 # El pipeline nuevo mantiene la misma convención que publican control y Nucleo
 # para no tener una inversión escondida entre pose, planner y dashboard.
 TRACKING_STEER_SIGN_DR = 1.0
+# Filtro de lag del actuador de dirección para el dead reckoning.
+# Modela el delay entre el comando de steering y la posición real de las ruedas.
+# 1.0 = instantáneo (sin filtro), 0.0 = ruedas nunca responden.
+# Empezar con 0.7 y ajustar: si el DR gira más rápido que el auto real → bajar.
+TRACKING_STEER_LAG_ALPHA = 1.0
 
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.

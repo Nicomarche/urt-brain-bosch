@@ -65,6 +65,10 @@ try:
     # Tracking now keeps the steering sign aligned with the actuator feedback so
     # the same convention flows through controller, telemetry, and DR.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
+    # First-order lag filter on the steer angle fed to dead reckoning.
+    # Models the servo actuator delay (time for wheels to reach commanded angle).
+    # 1.0 = instant (no lag), 0.0 = never responds. Good starting value: 0.5–0.8.
+    _STEER_LAG_ALPHA   = float(getattr(cfg, "TRACKING_STEER_LAG_ALPHA", 1.0) or 1.0)
     _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
     )
@@ -157,6 +161,7 @@ except Exception:
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
+    _STEER_LAG_ALPHA   = 1.0
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.18
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.02
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
@@ -732,7 +737,8 @@ class threadTracking(ThreadWithStop):
         self._sign_sub = messageHandlerSubscriber(
             queuesList, SignDetected, "lastOnly", subscribe=True
         )
-        self._last_steer_rad = 0.0   # latest steering angle in radians (math convention)
+        self._last_steer_rad = 0.0     # latest steering angle in radians (math convention)
+        self._steer_filtered_rad = 0.0 # lag-filtered steer angle used by DR
         # Location sender → dashboard map display
         self._loc_sender = messageHandlerSender(queuesList, Location)
         self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
@@ -1294,7 +1300,14 @@ class threadTracking(ThreadWithStop):
             except Exception:
                 pass
 
-        _eff_steer_rad = self._last_steer_rad * _STEER_GAIN_DR
+        _eff_steer_raw = self._last_steer_rad * _STEER_GAIN_DR
+        # First-order lag filter: models the servo actuator delay so the DR does
+        # not assume the wheels have already reached the commanded angle.
+        self._steer_filtered_rad = (
+            self._steer_filtered_rad
+            + _STEER_LAG_ALPHA * (_eff_steer_raw - self._steer_filtered_rad)
+        )
+        _eff_steer_rad = self._steer_filtered_rad
         if self._dr is None or self._graph is None or self._path_manager is None:
             return
 
