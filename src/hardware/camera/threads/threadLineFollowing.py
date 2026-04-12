@@ -1094,6 +1094,50 @@ Args:
         self.perspective_M_inv = None
         self.perspective_initialized = False
         self.bev_cm_per_px = 0.0  # metric scale: cm per pixel in BEV space (set in _init_perspective_transform)
+        self.stopline_visual_enabled = bool(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_ENABLED", True)
+        )
+        self.stopline_arm_distance_m = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_ARM_DISTANCE_M", 0.85) or 0.85
+        )
+        self.stopline_min_distance_m = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MIN_DISTANCE_M", 0.04) or 0.04
+        )
+        self.stopline_max_distance_m = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MAX_DISTANCE_M", 0.70) or 0.70
+        )
+        self.stopline_min_width_ratio = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MIN_WIDTH_RATIO", 0.55) or 0.55
+        )
+        self.stopline_min_band_rows = int(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MIN_BAND_ROWS", 4) or 4
+        )
+        self.stopline_min_confidence = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MIN_CONFIDENCE", 0.35) or 0.35
+        )
+        self.stopline_stable_frames = int(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_STABLE_FRAMES", 2) or 2
+        )
+        self.stopline_lost_frames = int(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_LOST_FRAMES", 2) or 2
+        )
+        self.stopline_x_margin_lanes = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_X_MARGIN_LANES", 1.10) or 1.10
+        )
+        self.stopline_horizontal_close_ratio = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_HORIZONTAL_CLOSE_RATIO", 0.12) or 0.12
+        )
+        self.stopline_adaptive_block_size = int(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_ADAPTIVE_BLOCK_SIZE", 31) or 31
+        )
+        self.stopline_adaptive_c = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_ADAPTIVE_C", 7.0) or 7.0
+        )
+        self._stopline_visible_streak = 0
+        self._stopline_missing_streak = 0
+        self._stopline_stably_visible = False
+        self._stopline_last_detection = None
+        self._last_stopline_visual_debug = {}
 
         self._update_hsv_arrays()
 
@@ -3579,6 +3623,317 @@ Args:
 
         return str(direct_error_context.get("source", "") or "") == "single_line"
 
+    def _stopline_visual_context(self):
+        ts = getattr(self, "_tracking_state", None)
+        stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
+        if ts is None:
+            return {
+                "active": False,
+                "route_active": False,
+                "expected": False,
+                "expected_node_id": None,
+                "expected_node_attr": 0,
+                "next_semantic_distance_m": None,
+            }
+
+        route_active = bool(getattr(ts, "route_active", False))
+        current_attr = int(getattr(ts, "current_node_attr", getattr(ts, "node_attr", 0)) or 0)
+        upcoming_attr = int(getattr(ts, "upcoming_node_attr", current_attr) or current_attr)
+        next_semantic_type = str(getattr(ts, "next_semantic_type", "") or "")
+        expected_control_type = str(getattr(ts, "expected_control_type", "") or "")
+        maneuver_type = str(getattr(ts, "maneuver_type", "") or "")
+        next_semantic_distance_m = getattr(ts, "next_semantic_distance_m", None)
+        try:
+            next_semantic_distance_m = (
+                float(next_semantic_distance_m)
+                if next_semantic_distance_m is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            next_semantic_distance_m = None
+
+        is_stopline_node = (
+            current_attr == stopline_attr or upcoming_attr == stopline_attr
+        )
+        expected = route_active and (
+            is_stopline_node
+            or next_semantic_type == "stopline"
+            or expected_control_type == "stop"
+            or maneuver_type == "stopline"
+        )
+        within_arm_distance = (
+            next_semantic_distance_m is None
+            or next_semantic_distance_m <= max(0.05, float(self.stopline_arm_distance_m))
+        )
+        expected_node_id = None
+        expected_node_attr = 0
+        if current_attr == stopline_attr:
+            expected_node_id = getattr(ts, "current_node_id", None)
+            expected_node_attr = current_attr
+        elif upcoming_attr == stopline_attr:
+            expected_node_id = getattr(ts, "upcoming_node_id", None)
+            expected_node_attr = upcoming_attr
+        elif expected:
+            expected_node_id = getattr(ts, "upcoming_node_id", None)
+            expected_node_attr = stopline_attr
+
+        active = bool(
+            self.stopline_visual_enabled
+            and (
+                (expected and within_arm_distance)
+                or self._stopline_stably_visible
+                or self._stopline_visible_streak > 0
+            )
+        )
+        return {
+            "active": active,
+            "route_active": route_active,
+            "expected": expected,
+            "current_attr": current_attr,
+            "upcoming_attr": upcoming_attr,
+            "next_semantic_type": next_semantic_type,
+            "next_semantic_distance_m": next_semantic_distance_m,
+            "expected_node_id": expected_node_id,
+            "expected_node_attr": int(expected_node_attr or 0),
+        }
+
+    def _detect_stopline_band_in_bev(self, frame):
+        if frame is None or frame.size == 0:
+            return None
+        if not getattr(self, "perspective_initialized", False):
+            return None
+
+        bev_cm_per_px = float(getattr(self, "bev_cm_per_px", 0.0) or 0.0)
+        if bev_cm_per_px <= 0.0:
+            return None
+
+        try:
+            preprocessed, _ = self._preprocess_frame(frame)
+            gray = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2GRAY)
+            gray = cv2.GaussianBlur(gray, (5, 5), 0)
+            block_size = max(3, int(self.stopline_adaptive_block_size))
+            if block_size % 2 == 0:
+                block_size += 1
+            binary = cv2.adaptiveThreshold(
+                gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY,
+                block_size,
+                float(self.stopline_adaptive_c),
+            )
+            bev = self.warp_perspective(binary)
+        except Exception:
+            return None
+
+        img_h, img_w = bev.shape[:2]
+        lane_width_px = float(self.lane_width_cm) / max(bev_cm_per_px, 1e-6)
+        if lane_width_px < 12.0:
+            return None
+
+        near_px = int(round((max(0.0, float(self.stopline_min_distance_m)) * 100.0) / bev_cm_per_px))
+        far_px = int(round((max(self.stopline_min_distance_m, float(self.stopline_max_distance_m)) * 100.0) / bev_cm_per_px))
+        y0 = max(0, int(img_h - far_px))
+        y1 = min(img_h, int(img_h - near_px))
+        x_margin = max(18, int(round(lane_width_px * max(0.6, float(self.stopline_x_margin_lanes)))))
+        center_x = int(round(img_w * 0.5))
+        x0 = max(0, center_x - x_margin)
+        x1 = min(img_w, center_x + x_margin)
+        if y0 >= y1 or x0 >= x1:
+            return None
+
+        roi = bev[y0:y1, x0:x1]
+        if roi.size == 0:
+            return None
+
+        close_w = max(5, int(round(lane_width_px * max(0.02, float(self.stopline_horizontal_close_ratio)))))
+        if close_w % 2 == 0:
+            close_w += 1
+        close_kernel = np.ones((3, close_w), dtype=np.uint8)
+        band_mask = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, close_kernel)
+        band_mask = cv2.morphologyEx(
+            band_mask,
+            cv2.MORPH_OPEN,
+            np.ones((3, 3), dtype=np.uint8),
+        )
+
+        row_counts = np.count_nonzero(band_mask > 0, axis=1)
+        min_width_px = max(10.0, lane_width_px * float(self.stopline_min_width_ratio))
+        active_rows = row_counts >= min_width_px
+        bands = []
+        start = None
+        for row_idx, active in enumerate(active_rows.tolist()):
+            if active and start is None:
+                start = row_idx
+            elif not active and start is not None:
+                bands.append((start, row_idx - 1))
+                start = None
+        if start is not None:
+            bands.append((start, len(active_rows) - 1))
+
+        min_band_rows = max(1, int(self.stopline_min_band_rows))
+        valid_bands = []
+        for band_start, band_end in bands:
+            band_rows = (band_end - band_start) + 1
+            if band_rows < min_band_rows:
+                continue
+            mean_count = float(np.mean(row_counts[band_start:band_end + 1]))
+            valid_bands.append((band_start, band_end, band_rows, mean_count))
+
+        if not valid_bands:
+            return None
+
+        band_start, band_end, band_rows, mean_count = max(
+            valid_bands,
+            key=lambda item: (item[1], item[3]),
+        )
+        band_center_y = y0 + 0.5 * float(band_start + band_end)
+        distance_m = max(0.0, ((float(img_h) - band_center_y) * bev_cm_per_px) / 100.0)
+        width_ratio = mean_count / max(lane_width_px, 1.0)
+        thickness_score = min(1.0, float(band_rows) / max(float(min_band_rows) * 2.0, 1.0))
+        confidence = max(
+            0.0,
+            min(1.0, 0.65 * min(1.5, width_ratio) + 0.35 * thickness_score),
+        )
+
+        if self._needs_debug:
+            debug_img = cv2.cvtColor(bev, cv2.COLOR_GRAY2BGR)
+            cv2.rectangle(debug_img, (x0, y0), (x1, y1), (255, 180, 0), 1)
+            cv2.rectangle(
+                debug_img,
+                (x0, y0 + int(band_start)),
+                (x1, y0 + int(band_end)),
+                (0, 255, 255),
+                2,
+            )
+            cv2.putText(
+                debug_img,
+                f"stopline {distance_m:.2f}m conf={confidence:.2f}",
+                (10, 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 255, 255),
+                1,
+            )
+            self._store_debug_image("stopline_bev", debug_img)
+            self._show_preview_window("Stopline BEV", debug_img)
+
+        return {
+            "distance_m": float(distance_m),
+            "confidence": float(confidence),
+            "width_ratio": float(width_ratio),
+            "band_rows": int(band_rows),
+            "roi": {
+                "x0": int(x0),
+                "x1": int(x1),
+                "y0": int(y0),
+                "y1": int(y1),
+            },
+        }
+
+    def _update_stopline_visual_state(self, frame):
+        debug = {
+            "stopline_visual_enabled": bool(self.stopline_visual_enabled),
+        }
+        context = self._stopline_visual_context()
+        debug.update(
+            {
+                "stopline_expected": bool(context.get("expected", False)),
+                "stopline_detection_active": bool(context.get("active", False)),
+                "stopline_expected_node_id": context.get("expected_node_id"),
+                "stopline_expected_node_attr": int(context.get("expected_node_attr", 0) or 0),
+                "stopline_expected_distance_m": context.get("next_semantic_distance_m"),
+            }
+        )
+
+        ts = getattr(self, "_tracking_state", None)
+        if not bool(context.get("active", False)):
+            self._stopline_visible_streak = 0
+            self._stopline_missing_streak = 0
+            self._stopline_stably_visible = False
+            self._stopline_last_detection = None
+            if ts is not None and hasattr(ts, "set_stopline_visual_state"):
+                ts.set_stopline_visual_state(
+                    False,
+                    stable=False,
+                    distance_m=None,
+                    confidence=0.0,
+                    source="opencv_bev",
+                    expected_node_id=context.get("expected_node_id"),
+                    expected_node_attr=context.get("expected_node_attr", 0),
+                )
+            self._last_stopline_visual_debug = debug
+            return debug
+
+        detection = self._detect_stopline_band_in_bev(frame)
+        found = bool(
+            isinstance(detection, dict)
+            and float(detection.get("confidence", 0.0) or 0.0) >= float(self.stopline_min_confidence)
+        )
+        if found:
+            self._stopline_visible_streak += 1
+            self._stopline_missing_streak = 0
+            self._stopline_last_detection = dict(detection)
+            if self._stopline_visible_streak >= max(1, int(self.stopline_stable_frames)):
+                self._stopline_stably_visible = True
+        else:
+            if self._stopline_stably_visible and isinstance(self._stopline_last_detection, dict):
+                self._stopline_missing_streak += 1
+            else:
+                self._stopline_visible_streak = 0
+                self._stopline_missing_streak = 0
+
+        pass_event = None
+        if (
+            not found
+            and self._stopline_stably_visible
+            and isinstance(self._stopline_last_detection, dict)
+            and self._stopline_missing_streak >= max(1, int(self.stopline_lost_frames))
+        ):
+            pass_event = {
+                "distance_m": float(self._stopline_last_detection.get("distance_m", 0.0) or 0.0),
+                "confidence": float(self._stopline_last_detection.get("confidence", 0.0) or 0.0),
+                "visible_frames": int(self._stopline_visible_streak),
+            }
+            self._stopline_stably_visible = False
+            self._stopline_visible_streak = 0
+            self._stopline_missing_streak = 0
+            self._stopline_last_detection = None
+
+        debug.update(
+            {
+                "stopline_visible_candidate": bool(found),
+                "stopline_stable_visible": bool(self._stopline_stably_visible),
+                "stopline_visible_streak": int(self._stopline_visible_streak),
+                "stopline_missing_streak": int(self._stopline_missing_streak),
+                "stopline_pass_event": bool(pass_event is not None),
+            }
+        )
+        if isinstance(detection, dict):
+            debug.update(
+                {
+                    "stopline_distance_m": round(float(detection.get("distance_m", 0.0) or 0.0), 4),
+                    "stopline_confidence": round(float(detection.get("confidence", 0.0) or 0.0), 4),
+                    "stopline_width_ratio": round(float(detection.get("width_ratio", 0.0) or 0.0), 4),
+                    "stopline_band_rows": int(detection.get("band_rows", 0) or 0),
+                }
+            )
+
+        if ts is not None and hasattr(ts, "set_stopline_visual_state"):
+            ts.set_stopline_visual_state(
+                found,
+                stable=self._stopline_stably_visible,
+                distance_m=(detection or {}).get("distance_m", None) if isinstance(detection, dict) else None,
+                confidence=(detection or {}).get("confidence", 0.0) if isinstance(detection, dict) else 0.0,
+                source="opencv_bev",
+                expected_node_id=context.get("expected_node_id"),
+                expected_node_attr=context.get("expected_node_attr", 0),
+                pass_event=pass_event,
+            )
+
+        self._last_stopline_visual_debug = debug
+        return debug
+
     def _planner_two_line_takeover_weight(self, nav_ctx):
         """Progressively bias steering toward route tracking on intersection approach."""
         if not isinstance(nav_ctx, dict) or not bool(nav_ctx.get("planner_priority", False)):
@@ -4948,6 +5303,14 @@ Args:
                     'relocalization_mode': getattr(self._tracking_state, 'relocalization_mode', 'map_match'),
                     'last_relocalization_source': getattr(self._tracking_state, 'last_relocalization_source', 'map_match'),
                     'last_relocalization_error_m': round(float(getattr(self._tracking_state, 'last_relocalization_error_m', 0.0) or 0.0), 5),
+                    'stopline_visible': bool(getattr(self._tracking_state, 'stopline_visible', False)),
+                    'stopline_stable': bool(getattr(self._tracking_state, 'stopline_stable', False)),
+                    'stopline_distance_m': (
+                        round(float(getattr(self._tracking_state, 'stopline_distance_m', 0.0)), 4)
+                        if getattr(self._tracking_state, 'stopline_distance_m', None) is not None else None
+                    ),
+                    'stopline_confidence': round(float(getattr(self._tracking_state, 'stopline_confidence', 0.0) or 0.0), 4),
+                    'stopline_pass_count': int(getattr(self._tracking_state, 'stopline_pass_count', 0) or 0),
                     'destination_node_id': getattr(self._tracking_state, 'destination_node_id', None),
                     'route_progress': round(float(getattr(self._tracking_state, 'route_progress', 0.0) or 0.0), 5),
                     'route_completed': bool(getattr(self._tracking_state, 'route_completed', False)),
@@ -9437,6 +9800,22 @@ Returns:
                 "last_source": str(_read("last_relocalization_source", "map_match") or "map_match"),
                 "last_error_m": round(float(_read("last_relocalization_error_m", 0.0) or 0.0), 5),
             },
+            "stopline_visual": {
+                "visible": bool(_read("stopline_visible", False)),
+                "stable": bool(_read("stopline_stable", False)),
+                "distance_m": (
+                    round(float(_read("stopline_distance_m", 0.0)), 5)
+                    if _read("stopline_distance_m", None) is not None else None
+                ),
+                "confidence": round(float(_read("stopline_confidence", 0.0) or 0.0), 4),
+                "source": str(_read("stopline_source", "none") or "none"),
+                "expected_node_id": _read("stopline_expected_node_id", None),
+                "pass_count": int(_read("stopline_pass_count", 0) or 0),
+                "last_pass_distance_m": (
+                    round(float(_read("stopline_last_pass_distance_m", 0.0)), 5)
+                    if _read("stopline_last_pass_distance_m", None) is not None else None
+                ),
+            },
         }
 
         if include_route_reference:
@@ -10009,6 +10388,14 @@ Returns:
                             'target_idx',
                             getattr(self._tracking_state, 'wp_idx', None),
                         ),
+                        "stopline_visible": bool(getattr(self._tracking_state, 'stopline_visible', False)),
+                        "stopline_stable": bool(getattr(self._tracking_state, 'stopline_stable', False)),
+                        "stopline_distance_m": (
+                            round(float(getattr(self._tracking_state, 'stopline_distance_m', 0.0)), 5)
+                            if getattr(self._tracking_state, 'stopline_distance_m', None) is not None else None
+                        ),
+                        "stopline_confidence": round(float(getattr(self._tracking_state, 'stopline_confidence', 0.0) or 0.0), 4),
+                        "stopline_pass_count": int(getattr(self._tracking_state, 'stopline_pass_count', 0) or 0),
                         # Camera-based yaw correction applied to DR this frame
                         "dr_yaw_correction_deg": round(float(getattr(self._tracking_state, 'last_yaw_correction_deg', 0.0)), 4),
                         "dr_yaw_cam_hint_deg": round(float(getattr(self._tracking_state, 'last_cam_yaw_hint_deg', 0.0)), 2),
@@ -10325,7 +10712,10 @@ Returns:
             "detection_mode": self.detection_mode,
             "frame_size": {"height": int(height), "width": int(width)},
         })
-        
+        if not getattr(self, "perspective_initialized", False):
+            self._init_perspective_transform(width, height)
+        stopline_debug = self._update_stopline_visual_state(frame)
+
         if self.show_debug:
             self._debug_log(
                 "frame_received",
@@ -10492,6 +10882,8 @@ Returns:
         stale_grace_active = (debug_info.get('local_ai_status') == 'stale_grace')
         if stale_grace_active:
             debug_info['stale_grace_active'] = True
+        if isinstance(stopline_debug, dict):
+            debug_info.update(stopline_debug)
 
         avg_left, avg_right, overlap_collapse = self._collapse_overlapping_two_lines(
             avg_left,

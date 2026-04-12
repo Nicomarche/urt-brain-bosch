@@ -34,7 +34,7 @@ from src.utils.messages.allMessages import (
 )
 
 from src.hardware.tracking.deadReckoning import DeadReckoning
-from src.hardware.tracking.trackGraph import TrackGraph
+from src.hardware.tracking.trackGraph import ATTR_STOPLINE, TrackGraph
 from src.hardware.tracking.pathManager import PathManager
 
 try:
@@ -99,6 +99,22 @@ try:
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S = getattr(
         cfg, "TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S", 0.75
     )
+    _STOPLINE_NODE_ATTR = int(getattr(cfg, "TRACKING_STOPLINE_NODE_ATTR", ATTR_STOPLINE) or ATTR_STOPLINE)
+    _VISUAL_STOPLINE_EVENT_MAX_AGE_S = getattr(
+        cfg, "TRACKING_VISUAL_STOPLINE_EVENT_MAX_AGE_S", 0.60
+    )
+    _VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S = getattr(
+        cfg, "TRACKING_VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S", 1.00
+    )
+    _VISUAL_STOPLINE_ROUTE_BEHIND_M = getattr(
+        cfg, "TRACKING_VISUAL_STOPLINE_ROUTE_BEHIND_M", 0.25
+    )
+    _VISUAL_STOPLINE_ROUTE_AHEAD_M = getattr(
+        cfg, "TRACKING_VISUAL_STOPLINE_ROUTE_AHEAD_M", 0.85
+    )
+    _VISUAL_STOPLINE_MAX_MAP_ERROR_M = getattr(
+        cfg, "TRACKING_VISUAL_STOPLINE_MAX_MAP_ERROR_M", 0.75
+    )
     _SPEED_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_SPEED_FEEDBACK_TIMEOUT_S", 0.35
     )
@@ -138,6 +154,12 @@ except Exception:
     _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
     _SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = 0.25
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.75
+    _STOPLINE_NODE_ATTR = ATTR_STOPLINE
+    _VISUAL_STOPLINE_EVENT_MAX_AGE_S = 0.60
+    _VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S = 1.00
+    _VISUAL_STOPLINE_ROUTE_BEHIND_M = 0.25
+    _VISUAL_STOPLINE_ROUTE_AHEAD_M = 0.85
+    _VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
     _SPEED_FEEDBACK_TIMEOUT_S = 0.35
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
@@ -266,6 +288,20 @@ class TrackingState:
         self.last_cam_yaw_hint_conf = 0.0
         # Last yaw correction applied (for logging only).
         self.last_yaw_correction_deg = 0.0
+        # Stopline visual state: written by threadLineFollowing, consumed by
+        # threadTracking when a stable visible stopline disappears.
+        self.stopline_visible = False
+        self.stopline_stable = False
+        self.stopline_distance_m = None
+        self.stopline_confidence = 0.0
+        self.stopline_source = "none"
+        self.stopline_expected_node_id = None
+        self.stopline_expected_node_attr = 0
+        self.stopline_pass_count = 0
+        self.stopline_last_pass_distance_m = None
+        self._stopline_last_seen_monotonic = 0.0
+        self._stopline_last_pass_monotonic = 0.0
+        self._stopline_pass_event = None
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
@@ -409,8 +445,62 @@ class TrackingState:
             if not reliable:
                 self.raw_lateral_error_m = 0.0
 
+    def set_stopline_visual_state(
+        self,
+        visible: bool,
+        *,
+        stable: bool = False,
+        distance_m: float | None = None,
+        confidence: float = 0.0,
+        source: str = "opencv_bev",
+        expected_node_id=None,
+        expected_node_attr: int = 0,
+        pass_event: dict | None = None,
+    ) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self.stopline_visible = bool(visible)
+            self.stopline_stable = bool(stable)
+            self.stopline_distance_m = (
+                float(distance_m) if distance_m is not None else None
+            )
+            self.stopline_confidence = float(max(0.0, min(1.0, confidence)))
+            self.stopline_source = str(source or "none")
+            self.stopline_expected_node_id = expected_node_id
+            self.stopline_expected_node_attr = int(expected_node_attr or 0)
+            if visible:
+                self._stopline_last_seen_monotonic = float(now)
+            if pass_event is not None:
+                payload = dict(pass_event)
+                payload.setdefault("observed_at_monotonic", float(now))
+                payload["expected_node_id"] = expected_node_id
+                payload["expected_node_attr"] = int(expected_node_attr or 0)
+                payload["source"] = str(source or "opencv_bev")
+                self._stopline_pass_event = payload
+                self.stopline_pass_count += 1
+                self._stopline_last_pass_monotonic = float(now)
+                pass_distance_m = payload.get("distance_m", None)
+                self.stopline_last_pass_distance_m = (
+                    float(pass_distance_m) if pass_distance_m is not None else None
+                )
+
+    def consume_stopline_pass_event(self):
+        with self._lock:
+            event = self._stopline_pass_event
+            self._stopline_pass_event = None
+            return dict(event) if isinstance(event, dict) else None
+
     def snapshot(self):
         with self._lock:
+            now = time.monotonic()
+            stopline_last_seen_age_s = (
+                max(0.0, float(now) - float(self._stopline_last_seen_monotonic))
+                if self._stopline_last_seen_monotonic > 0.0 else None
+            )
+            stopline_last_pass_age_s = (
+                max(0.0, float(now) - float(self._stopline_last_pass_monotonic))
+                if self._stopline_last_pass_monotonic > 0.0 else None
+            )
             return dict(
                 state_ts=time.monotonic(),
                 x=self.x, y=self.y, yaw=self.yaw,
@@ -458,6 +548,17 @@ class TrackingState:
                 relocalization_mode=self.relocalization_mode,
                 last_relocalization_source=self.last_relocalization_source,
                 last_relocalization_error_m=self.last_relocalization_error_m,
+                stopline_visible=self.stopline_visible,
+                stopline_stable=self.stopline_stable,
+                stopline_distance_m=self.stopline_distance_m,
+                stopline_confidence=self.stopline_confidence,
+                stopline_source=self.stopline_source,
+                stopline_expected_node_id=self.stopline_expected_node_id,
+                stopline_expected_node_attr=self.stopline_expected_node_attr,
+                stopline_pass_count=self.stopline_pass_count,
+                stopline_last_pass_distance_m=self.stopline_last_pass_distance_m,
+                stopline_last_seen_age_s=stopline_last_seen_age_s,
+                stopline_last_pass_age_s=stopline_last_pass_age_s,
             )
 
 
@@ -573,6 +674,7 @@ class threadTracking(ThreadWithStop):
         self._last_sign_observation = None
         self._last_semantic_relocalization_t = 0.0
         self._last_lane_visual_reloc_t = 0.0
+        self._last_visual_stopline_relocalization_t = 0.0
         self._frame_idx = 0
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
         self._last_steer_feedback_rad = 0.0
@@ -750,6 +852,136 @@ class threadTracking(ThreadWithStop):
         )
         self._last_semantic_relocalization_t = float(now)
         return True, semantic_match
+
+    @staticmethod
+    def _signed_route_delta_pts(route, current_idx: int, candidate_idx: int) -> int:
+        n = int(len(getattr(route, "wp_node_ids", []) or []))
+        if n <= 0:
+            return 0
+        current_idx = max(0, min(n - 1, int(current_idx)))
+        candidate_idx = max(0, min(n - 1, int(candidate_idx)))
+        if not bool(getattr(route, "closed_loop", False)):
+            return int(candidate_idx - current_idx)
+        forward = (candidate_idx - current_idx) % n
+        backward = (current_idx - candidate_idx) % n
+        return int(forward) if forward <= backward else -int(backward)
+
+    def _route_stopline_anchor(self, path_update, event: dict | None = None) -> dict | None:
+        route = self._path_manager.active_route if self._path_manager is not None else None
+        if route is None or route.waypoints.size == 0 or len(route.wp_node_ids) == 0:
+            return None
+
+        expected_node_id = str((event or {}).get("expected_node_id") or "") or None
+        raw_x, raw_y, _ = self._dr.get_state() if self._dr is not None else (0.0, 0.0, 0.0)
+        matched_idx = int(getattr(path_update, "matched_idx", getattr(self._path_manager, "matched_idx", 0)) or 0)
+        step_m = max(float(getattr(self._graph, "step_m", _STEP_M) or _STEP_M), 1e-6)
+        max_behind_m = max(0.0, float(_VISUAL_STOPLINE_ROUTE_BEHIND_M))
+        max_ahead_m = max(max_behind_m, float(_VISUAL_STOPLINE_ROUTE_AHEAD_M))
+
+        candidate_groups: dict[str, list[int]] = {}
+        for idx, attr in enumerate(route.wp_node_attrs):
+            if int(attr or 0) != int(_STOPLINE_NODE_ATTR):
+                continue
+            node_id = str(route.wp_node_ids[idx] or f"wp:{idx}")
+            candidate_groups.setdefault(node_id, []).append(int(idx))
+
+        if not candidate_groups:
+            return None
+
+        best = None
+        for node_id, indices in candidate_groups.items():
+            rep_idx = min(
+                indices,
+                key=lambda idx: abs(self._signed_route_delta_pts(route, matched_idx, idx)),
+            )
+            signed_delta_pts = self._signed_route_delta_pts(route, matched_idx, rep_idx)
+            signed_delta_m = float(signed_delta_pts) * step_m
+            window_penalty = 0
+            if signed_delta_m < -max_behind_m or signed_delta_m > max_ahead_m:
+                window_penalty = 1
+            wx, wy, wyaw = route.waypoints[int(rep_idx)]
+            euclid_m = math.hypot(float(wx) - float(raw_x), float(wy) - float(raw_y))
+            priority = 0 if expected_node_id is not None and node_id == expected_node_id else 1
+            score = (priority, window_penalty, abs(signed_delta_m), euclid_m)
+            candidate = {
+                "node_id": node_id,
+                "idx": int(rep_idx),
+                "x": float(wx),
+                "y": float(wy),
+                "yaw": float(wyaw),
+                "signed_delta_m": float(signed_delta_m),
+                "euclid_m": float(euclid_m),
+                "score": score,
+            }
+            if best is None or candidate["score"] < best["score"]:
+                best = candidate
+
+        return best
+
+    def _apply_visual_stopline_relocalization(self, path_update, now: float):
+        if self._dr is None or path_update is None or self._path_manager is None:
+            return False, None
+
+        event = self.tracking_state.consume_stopline_pass_event()
+        if not isinstance(event, dict):
+            return False, None
+
+        event_age = max(
+            0.0,
+            float(now) - float(event.get("observed_at_monotonic", float(now)) or float(now)),
+        )
+        if event_age > float(_VISUAL_STOPLINE_EVENT_MAX_AGE_S):
+            return False, None
+        if (
+            float(now) - float(self._last_visual_stopline_relocalization_t)
+        ) < float(_VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S):
+            return False, None
+        if not bool(getattr(path_update, "route_active", False)):
+            return False, None
+
+        route = self._path_manager.active_route
+        if route is None or route.waypoints.size == 0:
+            return False, None
+
+        current_attr = int(getattr(path_update, "current_node_attr", 0) or 0)
+        upcoming_attr = int(getattr(path_update, "upcoming_node_attr", current_attr) or current_attr)
+        next_semantic_type = str(getattr(path_update, "next_semantic_type", "") or "")
+        expected_node_id = str(event.get("expected_node_id") or "") or None
+        stopline_context = (
+            current_attr == int(_STOPLINE_NODE_ATTR)
+            or upcoming_attr == int(_STOPLINE_NODE_ATTR)
+            or next_semantic_type == "stopline"
+            or (
+                expected_node_id is not None
+                and expected_node_id in {str(node_id) for node_id in getattr(route, "node_ids", [])}
+            )
+        )
+        if not stopline_context:
+            return False, None
+        if float(path_update.map_match_error_m or 0.0) > float(_VISUAL_STOPLINE_MAX_MAP_ERROR_M):
+            return False, None
+
+        anchor = self._route_stopline_anchor(path_update, event)
+        if anchor is None:
+            return False, None
+
+        old_raw_x, old_raw_y, _ = self._dr.get_state()
+        self._dr.reset(
+            float(anchor["x"]),
+            float(anchor["y"]),
+            float(anchor["yaw"]),
+        )
+        self._last_yaw_rad = float(anchor["yaw"])
+        self._path_manager.matched_idx = int(anchor["idx"])
+        self._path_manager.target_idx = int(anchor["idx"])
+        self._last_visual_stopline_relocalization_t = float(now)
+
+        correction_m = math.hypot(
+            float(anchor["x"]) - float(old_raw_x),
+            float(anchor["y"]) - float(old_raw_y),
+        )
+        source = f"stopline_visual:{anchor['node_id']}"
+        return True, (source, float(correction_m))
 
     @staticmethod
     def _parse_speed_mps(raw_value) -> float | None:
@@ -1038,6 +1270,35 @@ class threadTracking(ThreadWithStop):
             )
             self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
 
+        visual_stopline_relocalized, visual_stopline_match = self._apply_visual_stopline_relocalization(
+            path_update,
+            now,
+        )
+        if visual_stopline_relocalized:
+            raw_x, raw_y, raw_yaw = self._dr.get_state()
+            path_update = self._path_manager.update(
+                raw_x,
+                raw_y,
+                raw_yaw,
+                speed_mps=self._last_speed,
+                min_lookahead_m=_ADVANCE_DIST,
+                lookahead_time_s=_LOOKAHEAD_TIME_S,
+                max_lookahead_m=_MAX_LOOKAHEAD_M,
+                precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
+                lookahead_pts=_LOOKAHEAD_PTS,
+                search_window=_MAP_MATCH_SEARCH_WP,
+                distance_weight=_MAP_MATCH_DISTANCE_W,
+                heading_weight=_MAP_MATCH_HEADING_W,
+            )
+            raw_lateral_error_m = self._signed_lateral_error_to_path(
+                raw_x,
+                raw_y,
+                path_update.matched_x,
+                path_update.matched_y,
+                path_update.matched_yaw,
+            )
+            self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+
         self._wp_idx = int(path_update.matched_idx)
         matched_idx = int(path_update.matched_idx)
         target_idx = int(path_update.target_idx)
@@ -1054,7 +1315,11 @@ class threadTracking(ThreadWithStop):
         relocalization_mode = "map_match"
         relocalization_source = "map_match"
         relocalization_error_m = map_match_error_m
-        if semantic_relocalized and semantic_match is not None:
+        if visual_stopline_relocalized and visual_stopline_match is not None:
+            relocalization_mode = "visual_stopline"
+            relocalization_source, stopline_error_m = visual_stopline_match
+            relocalization_error_m = float(stopline_error_m)
+        elif semantic_relocalized and semantic_match is not None:
             relocalization_mode = "semantic"
             relocalization_source, semantic_error_m = semantic_match
             relocalization_error_m = float(semantic_error_m)
