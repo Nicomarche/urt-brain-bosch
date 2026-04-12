@@ -10675,6 +10675,30 @@ Returns:
                     status_text = "ACTIVE" if self.is_line_following_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
+                    _sl_dbg = getattr(self, "_last_stopline_visual_debug", None)
+                    if isinstance(_sl_dbg, dict):
+                        _sl_armed = bool(_sl_dbg.get("stopline_detection_active", False))
+                        _sl_seen = bool(_sl_dbg.get("stopline_visible_candidate", False))
+                        _sl_stable = bool(_sl_dbg.get("stopline_stable_visible", False))
+                        _sl_conf = float(_sl_dbg.get("stopline_confidence", 0.0) or 0.0)
+                        _sl_dist = _sl_dbg.get("stopline_distance_m")
+                        if _sl_stable:
+                            _sl_color = (0, 255, 255)
+                            _sl_label = f"STOPLINE STABLE conf={_sl_conf:.2f}"
+                            if _sl_dist is not None:
+                                _sl_label += f" d={float(_sl_dist):.2f}m"
+                        elif _sl_seen:
+                            _sl_color = (0, 200, 255)
+                            _sl_streak = int(_sl_dbg.get("stopline_visible_streak", 0) or 0)
+                            _sl_label = f"STOPLINE? conf={_sl_conf:.2f} [{_sl_streak}f]"
+                        elif _sl_armed:
+                            _sl_color = (180, 180, 0)
+                            _sl_label = "STOPLINE armed"
+                        else:
+                            _sl_color = (80, 80, 80)
+                            _sl_label = "STOPLINE off"
+                        cv2.putText(debug_frame, _sl_label, (10, 115), cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.55, _sl_color, 2)
                     self._show_preview_window("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
