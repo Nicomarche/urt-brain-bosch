@@ -3650,6 +3650,21 @@ Args:
         if curve_state not in ("ENTERING", "IN_CURVE"):
             return steering_angle
 
+        nav_ctx = self._get_navigation_context()
+        _ts = getattr(self, '_tracking_state', None)
+        lane_measurement_reliable = bool(
+            getattr(_ts, 'lane_measurement_reliable', False)
+        ) if _ts is not None else False
+        if bool(nav_ctx.get("planner_priority", False)) and not lane_measurement_reliable:
+            if isinstance(debug_info, dict):
+                debug_info["single_line_curve_priority_suppressed"] = (
+                    "planner_priority_unreliable_lane"
+                )
+                debug_info["single_line_curve_priority_suppressed_mode"] = str(
+                    debug_info.get("single_line_mode", "") or "unknown"
+                )
+            return steering_angle
+
         # If graph tracking says the path ahead is straight or curving the other way,
         # bypass max-steer enforcement. This prevents
         # two failure modes:
@@ -3659,7 +3674,6 @@ Args:
         #      real curve ends, but graph lookahead says straight/opposite → bypass stops wrong
         #      +25° steer on the straight.
         # Legitimate curves (graph and visual agree on direction) still get enforced.
-        _ts = getattr(self, '_tracking_state', None)
         if _ts is not None and getattr(_ts, 'initialized', False):
             gps_sign, _ = self._graph_curve_direction(_ts)
             _curve_dir = int(getattr(self, '_curve_direction', 0))
