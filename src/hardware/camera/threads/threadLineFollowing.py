@@ -1144,6 +1144,7 @@ Args:
         self._stopline_stably_visible = False
         self._stopline_last_detection = None
         self._last_stopline_visual_debug = {}
+        self._stopline_passed = False  # set True once the stopline is seen then lost
 
         self._update_hsv_arrays()
 
@@ -1247,7 +1248,6 @@ Args:
         self._last_planner_route_blend = 0.0
         self._last_planner_route_blend_source = "none"
         self._recent_two_line_straight_until = 0.0
-        self._stop_node_reached = False
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -3944,6 +3944,7 @@ Args:
                 "visible_frames": int(self._stopline_visible_streak),
                 "triggered_by": "max_streak",
             }
+            self._stopline_passed = True
             self._stopline_stably_visible = False
             self._stopline_visible_streak = 0
             self._stopline_missing_streak = 0
@@ -3960,6 +3961,7 @@ Args:
                 "visible_frames": int(self._stopline_visible_streak),
                 "triggered_by": "missing_streak",
             }
+            self._stopline_passed = True
             self._stopline_stably_visible = False
             self._stopline_visible_streak = 0
             self._stopline_missing_streak = 0
@@ -6988,15 +6990,18 @@ Args:
         )
 
         # ── Waypoint-mode override (GPS-free tracking at precision zones) ─────
-        # When threadTracking detects a STOPLINE / INTERSECTION node ahead it
-        # sets waypoint_mode_active=True.  After the stop node, lane lines at
-        # intersections are unreliable and must be ignored entirely; GPS
-        # waypoints have full authority regardless of line visibility.
+        # Waypoint-mode: threadTracking sets waypoint_mode_active=True near
+        # precision zones (stopline/intersection).
+        # _stopline_passed: set True the moment the stopline was stably seen
+        # and then lost (pass_event fired). From that point on, visual lane
+        # detection is unreliable at the intersection and must be ignored;
+        # the path manager (dead reckoning + graph nodes) has full authority.
         _waypoint_mode_active = bool(nav_ctx["waypoint_mode_active"])
+        _stopline_passed = bool(getattr(self, "_stopline_passed", False))
         if (
             ts is not None and
             getattr(ts, "initialized", False) and
-            _waypoint_mode_active
+            (_waypoint_mode_active or _stopline_passed)
         ):
             wp_error_m = float(getattr(ts, "error_m", 0.0))
             wp_heading_rad = float(getattr(ts, "heading_rad", 0.0))
@@ -10586,21 +10591,6 @@ Returns:
                     self._last_safe_steering = steering_angle
                     if speed is not None:
                         self._last_safe_speed = speed
-
-            # Stop node detection via map position (dead reckoning, no vision)
-            if not self._stop_node_reached and self._tracking_state is not None:
-                _ts = self._tracking_state
-                _stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
-                _current_attr = int(getattr(_ts, "current_node_attr", 0) or 0)
-                _route_active = bool(getattr(_ts, "route_active", False))
-                if _route_active and _current_attr == _stopline_attr:
-                    self._stop_node_reached = True
-                    self._maneuver_manager.trigger_mission_complete()
-                    print(
-                        "\033[1;97m[ Line Following ] :\033[0m "
-                        "\033[1;91mMISSION COMPLETE\033[0m - "
-                        "Stop node reached (map position), halting all motion"
-                    )
 
             maneuver_decision = self._maneuver_manager.decide(
                 time.time(),

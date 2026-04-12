@@ -48,7 +48,6 @@ class ManeuverManager:
         self._speed_limit = None
         self._last_sign_seen: dict[str, float] = {}
         self._active_maneuver = "none"
-        self._mission_complete = False
 
     @staticmethod
     def _tracking_value(tracking_state, name: str, default=None):
@@ -184,20 +183,7 @@ class ManeuverManager:
             return None
         return float(self._speed_limit)
 
-    def trigger_mission_complete(self) -> None:
-        """Permanently halt all motion — robot has reached the stop node by map position."""
-        self._mission_complete = True
-
     def decide(self, now: float, tracking_state=None) -> ManeuverDecision:
-        if self._mission_complete:
-            return ManeuverDecision(
-                control_mode="SAFETY_STOP",
-                active_maneuver="mission_complete",
-                mission_state="MISSION_COMPLETE",
-                speed_override=0.0,
-                safety_stop=True,
-                notes="mission_complete",
-            )
         maneuver_type = str(getattr(tracking_state, "maneuver_type", "none") or "none")
         route_active = bool(getattr(tracking_state, "route_active", False))
         waypoint_mode_active = bool(getattr(tracking_state, "waypoint_mode_active", False))
