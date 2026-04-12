@@ -1196,6 +1196,7 @@ Args:
         self._last_maneuver_notes = ""
         self._last_planner_route_blend = 0.0
         self._last_planner_route_blend_source = "none"
+        self._recent_two_line_straight_until = 0.0
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -3676,6 +3677,17 @@ Args:
         # complete the curve or recover from having gone outside the outer boundary.
         # This also prevents the steering from tapering off mid-curve (turns too wide).
         if curve_state == "IN_CURVE" and curve_direction != 0:
+            steering_sign = 0
+            if float(steering_angle) > 1.0:
+                steering_sign = 1
+            elif float(steering_angle) < -1.0:
+                steering_sign = -1
+            if steering_sign != 0 and steering_sign != desired_sign:
+                if isinstance(debug_info, dict):
+                    debug_info["single_line_max_curve_steer_suppressed"] = "input_sign_conflict"
+                    debug_info["single_line_max_curve_steer_input_deg"] = round(float(steering_angle), 3)
+                    debug_info["single_line_max_curve_steer_desired_sign"] = int(desired_sign)
+                return steering_angle
             guarded_steer = float(desired_sign) * float(self.max_steering)
             if isinstance(debug_info, dict):
                 debug_info["single_line_max_curve_steer"] = True
@@ -3879,6 +3891,32 @@ Args:
         if delta_psi >= min_rad:
             return -1, delta_psi
         return 0, delta_psi
+
+    def _has_recent_two_line_straight_hint(self):
+        """Return True briefly after vision reports a stable near-straight two-line heading."""
+        hint_source = str(getattr(self, "_local_ai_heading_hint_source", "none") or "none")
+        hint_conf = float(getattr(self, "_local_ai_heading_hint_confidence", 0.0) or 0.0)
+        hint_rad = float(getattr(self, "_local_ai_heading_hint_rad", 0.0) or 0.0)
+        min_conf = max(
+            0.0,
+            min(1.0, float(getattr(_config, "CURVE_TWO_LINE_STRAIGHT_HINT_CONFIDENCE", 0.65) or 0.65)),
+        )
+        max_deg = max(
+            0.5,
+            float(getattr(_config, "CURVE_TWO_LINE_STRAIGHT_HINT_MAX_DEG", 6.0) or 6.0),
+        )
+        hold_s = max(
+            0.0,
+            float(getattr(_config, "CURVE_TWO_LINE_STRAIGHT_HINT_HOLD_S", 0.45) or 0.45),
+        )
+        if (
+            hint_source == "two_line" and
+            hint_conf >= min_conf and
+            abs(math.degrees(hint_rad)) <= max_deg
+        ):
+            self._recent_two_line_straight_until = time.time() + hold_s
+            return True
+        return time.time() <= float(getattr(self, "_recent_two_line_straight_until", 0.0) or 0.0)
 
     def _get_curve_exit_unwind_factor(
         self,
@@ -5498,6 +5536,19 @@ Args:
                 debug_info.get("single_line_transition_blend")
             )
         )
+        reversal_min_deg = 2.0
+        previous_steer = (
+            float(self._last_good_steering)
+            if self._last_good_steering is not None else None
+        )
+        current_steer = float(steering_angle) if steering_angle is not None else None
+        steer_reversal = bool(
+            previous_steer is not None and
+            current_steer is not None and (
+                (previous_steer >= reversal_min_deg and current_steer <= -reversal_min_deg) or
+                (previous_steer <= -reversal_min_deg and current_steer >= reversal_min_deg)
+            )
+        )
 
         # Check 1: Too many Hough lines = reflections/glare
         all_lines = debug_info.get('all_lines')
@@ -5516,7 +5567,7 @@ Args:
             if error_jump > self.noise_max_error_jump_px and self._noise_reject_count < self.noise_max_reject_frames:
                 # During curve entry/exit the target lane center can legitimately jump
                 # as the controller switches between straight and curve geometry.
-                if curve_transition_active or (num_lines == 1 and single_line_curve_commit):
+                if curve_transition_active or (num_lines == 1 and single_line_curve_commit) or steer_reversal:
                     return False, ""
                 return True, f"error_jump({error_jump:.0f}px>{self.noise_max_error_jump_px})"
 
@@ -5536,14 +5587,7 @@ Args:
                 # Use inclusive thresholds here: curve-priority logic frequently clamps
                 # the previous command to exactly +/-2.0°, and strict comparisons would
                 # miss the sign change and latch the car into the stale steering command.
-                reversal_min_deg = 2.0
-                previous_steer = float(self._last_good_steering)
-                current_steer = float(steering_angle)
-                if (
-                    previous_steer >= reversal_min_deg and current_steer <= -reversal_min_deg
-                ) or (
-                    previous_steer <= -reversal_min_deg and current_steer >= reversal_min_deg
-                ):
+                if steer_reversal:
                     return False, ""
                 return True, f"steer_jump({steer_jump:.0f}°>{self.noise_max_steer_jump_deg})"
 
@@ -7494,6 +7538,7 @@ Args:
         prev_state = self._curve_state
         prev_direction = int(getattr(self, '_curve_direction', 0) or 0)
         self._curve_state_frames += 1
+        recent_visual_straight = self._has_recent_two_line_straight_hint()
         if self._recent_curve_direction_frames > 0:
             self._recent_curve_direction_frames -= 1
             if self._recent_curve_direction_frames <= 0:
@@ -7532,15 +7577,18 @@ Args:
 
         if self._curve_state == "STRAIGHT":
             if num_lines == 1:
-                # Lost a line → entering curve (only reliable trigger)
-                inferred_direction = 1 if avg_left is not None else -1
-                inferred_direction, reused_recent_curve = _resolve_recent_curve_reentry_direction(
-                    inferred_direction
-                )
-                self._curve_state = "ENTERING"
-                self._curve_state_frames = 1
-                self._curve_direction = int(inferred_direction)
-                self._curve_enter_origin = "recent_curve_hold" if reused_recent_curve else "single_line"
+                if recent_visual_straight:
+                    self._curve_enter_origin = "none"
+                else:
+                    # Lost a line → entering curve (only reliable trigger)
+                    inferred_direction = 1 if avg_left is not None else -1
+                    inferred_direction, reused_recent_curve = _resolve_recent_curve_reentry_direction(
+                        inferred_direction
+                    )
+                    self._curve_state = "ENTERING"
+                    self._curve_state_frames = 1
+                    self._curve_direction = int(inferred_direction)
+                    self._curve_enter_origin = "recent_curve_hold" if reused_recent_curve else "single_line"
             elif two_line_hint_ready and two_line_hint_direction != 0:
                 # Strong, stable two-line heading hint from AI local: start pre-positioning
                 # before the outer line disappears so the car doesn't react one frame late.
@@ -7668,6 +7716,13 @@ Args:
         wrong-direction enforcement while IN_CURVE when the graph lookahead disagrees.
         """
         if tracking_state is None or not getattr(tracking_state, 'initialized', False):
+            return
+        if self._has_recent_two_line_straight_hint():
+            if self._curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+                self._curve_state = "STRAIGHT"
+                self._curve_state_frames = 0
+                self._curve_direction = 0
+                self._curve_enter_origin = "none"
             return
         gps_dir, delta_psi = self._graph_curve_direction(
             tracking_state,
