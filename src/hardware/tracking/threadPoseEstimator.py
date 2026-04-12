@@ -19,6 +19,7 @@ from src.hardware.tracking.threadTracking import (
     _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M,
     _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M,
     _STEER_GAIN_DR,
+    _STEER_LAG_ALPHA,
     _VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS,
     _VISUAL_STOPLINE_EVENT_MAX_AGE_S,
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M,
@@ -292,7 +293,12 @@ class threadPoseEstimator(threadTracking):
         if self._dr is None:
             return
 
-        eff_steer_rad = self._last_steer_rad * _STEER_GAIN_DR
+        eff_steer_raw = self._last_steer_rad * _STEER_GAIN_DR
+        self._steer_filtered_rad = (
+            self._steer_filtered_rad
+            + _STEER_LAG_ALPHA * (eff_steer_raw - self._steer_filtered_rad)
+        )
+        eff_steer_rad = self._steer_filtered_rad
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
         self._dr.update(
             self._last_speed,
@@ -383,3 +389,21 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer.write(pose_estimate, timestamp=pose_estimate.timestamp)
         if self.tracking_state is not None and hasattr(self.tracking_state, "update_from_pose_estimate"):
             self.tracking_state.update_from_pose_estimate(pose_estimate)
+
+        # Debug log (same file as parent, same format — only minimal fields available here)
+        self._frame_idx += 1
+        if self._debug_log_enabled and self._debug_log_path and \
+                (self._frame_idx % self._log_every == 0):
+            matched_x = float(raw_x)
+            matched_y = float(raw_y)
+            matched_yaw = float(raw_yaw)
+            if route_context is not None:
+                matched_x = route_context.matched_pose.x
+                matched_y = route_context.matched_pose.y
+                matched_yaw = route_context.matched_pose.yaw
+            self._write_tracking_log(
+                raw_x, raw_y, raw_yaw,
+                matched_x, matched_y, matched_yaw,
+                0.0, 0.0,
+                0, 0, 0, False, 0, dt,
+            )
