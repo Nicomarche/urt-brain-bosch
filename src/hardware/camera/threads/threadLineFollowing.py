@@ -3467,6 +3467,53 @@ Args:
 
         return max(-self.max_steering, min(self.max_steering, float(candidate)))
 
+    def _should_use_route_blind_guidance(self, nav_ctx=None):
+        """Return whether blind/no-lane control should follow route tracking."""
+        ts = getattr(self, "_tracking_state", None)
+        if ts is None or not getattr(ts, "initialized", False):
+            return False, "tracking_uninitialized"
+        if not bool(getattr(ts, "route_active", False)):
+            return False, "route_inactive"
+
+        if not isinstance(nav_ctx, dict):
+            nav_ctx = self._get_navigation_context()
+
+        if bool(nav_ctx.get("waypoint_mode_active", False)):
+            return True, "waypoint_mode"
+        if bool(nav_ctx.get("planner_priority", False)):
+            return True, "planner_priority"
+
+        map_match_error_m = abs(float(getattr(ts, "map_match_error_m", 0.0) or 0.0))
+        max_map_match_error_m = max(
+            0.05,
+            float(getattr(_config, "TRACKING_BLIND_ROUTE_MAX_MAP_MATCH_ERROR_M", 0.25) or 0.25),
+        )
+        if map_match_error_m > max_map_match_error_m:
+            return False, "map_match_unreliable"
+
+        path_heading_change_rad = abs(float(getattr(ts, "path_heading_change_rad", 0.0) or 0.0))
+        min_heading_change_rad = math.radians(max(
+            1.0,
+            float(getattr(_config, "TRACKING_BLIND_ROUTE_MIN_HEADING_CHANGE_DEG", 40.0) or 40.0),
+        ))
+        if path_heading_change_rad < min_heading_change_rad:
+            return False, "weak_path_heading"
+
+        frames_without_line = int(getattr(self, "frames_without_line", 0) or 0)
+        activation_frames = max(
+            1,
+            int(getattr(_config, "TRACKING_BLIND_ROUTE_FALLBACK_FRAMES", 2) or 2),
+        )
+        curve_state = str(getattr(self, "_curve_state", "STRAIGHT"))
+        if curve_state in ("ENTERING", "IN_CURVE", "EXITING") and frames_without_line >= activation_frames:
+            return True, "curve_state_path_heading"
+
+        hold_frames = max(0, int(getattr(self, "no_lane_hold_steering_frames", 4) or 0))
+        if frames_without_line > hold_frames:
+            return True, "extended_blind_path_heading"
+
+        return False, "visual_hold"
+
     def _get_navigation_context(self):
         """Summarize route and maneuver information published by threadTracking."""
         ts = getattr(self, "_tracking_state", None)
@@ -3974,16 +4021,40 @@ Args:
 
         return unwind_factor
 
-    def _resolve_ai_local_blind_control(self, img_w, speed_cap=None):
+    def _resolve_ai_local_blind_control(self, img_w, speed_cap=None, debug_info=None):
         """Return a safe blind-control fallback for AI_LOCAL when no lanes are visible.
 
         Priority order:
-        1. GPS waypoint control when in intersection/stopline zone (waypoint_mode_active).
+        1. Route tracking when navigation context says the blind segment belongs to the graph.
         2. Brief visual hold using the last stable steering.
         3. Full safety stop.
         """
         nav_ctx = self._get_navigation_context()
-        if nav_ctx["waypoint_mode_active"]:
+        use_route_tracking, route_reason = self._should_use_route_blind_guidance(nav_ctx)
+        if isinstance(debug_info, dict):
+            ts = getattr(self, "_tracking_state", None)
+            debug_info["blind_control_route_candidate"] = bool(use_route_tracking)
+            debug_info["blind_control_route_reason"] = str(route_reason)
+            debug_info["blind_control_frames_without_line"] = int(
+                getattr(self, "frames_without_line", 0) or 0
+            )
+            debug_info["blind_control_curve_state"] = str(
+                getattr(self, "_curve_state", "STRAIGHT")
+            )
+            debug_info["blind_control_planner_priority"] = bool(
+                nav_ctx.get("planner_priority", False)
+            )
+            if ts is not None:
+                debug_info["blind_control_path_heading_change_deg"] = round(
+                    math.degrees(float(getattr(ts, "path_heading_change_rad", 0.0) or 0.0)),
+                    3,
+                )
+                debug_info["blind_control_map_match_error_m"] = round(
+                    float(getattr(ts, "map_match_error_m", 0.0) or 0.0),
+                    5,
+                )
+
+        if use_route_tracking:
             ts = self._tracking_state
             if ts is not None and getattr(ts, "initialized", False):
                 steering = self._compute_lateral_control(
@@ -11181,7 +11252,7 @@ Returns:
             self.frames_without_line += 1
             if self._is_ai_local_active():
                 steering_angle, speed, blind_mode = self._resolve_ai_local_blind_control(
-                    img_w, speed_cap=speed_cap
+                    img_w, speed_cap=speed_cap, debug_info=debug_info
                 )
                 speed_cap = float(speed)
                 debug_info['blind_control_mode'] = blind_mode
