@@ -10,7 +10,15 @@ to O(dt⁴).
 The ODE being integrated:
     dx/dt   = v * cos(yaw)
     dy/dt   = v * sin(yaw)
-    dyaw/dt = -(v / L) * tan(steer)   [sign: right turn → yaw decreases]
+    dyaw/dt = (v / L) * tan(steer)
+
+`steer` here is already in mathematical bicycle-model convention:
+    steer < 0  → right turn  → yaw decreases
+    steer > 0  → left turn   → yaw increases
+
+Project control / Nucleo feedback uses the opposite sign convention
+(`steer > 0` means right turn), so threadTracking converts it before calling
+this module.
 
 yaw is corrected to IMU absolute heading whenever a fresh IMU sample arrives
 (handled in threadTracking), so heading never accumulates drift.  Only
@@ -52,14 +60,16 @@ class DeadReckoning:
             yaw_rad:     Absolute heading from the IMU in radians (start of step).
             dt:          Time step in seconds.
             steer_rad:   Current steering angle in radians.
-                         Positive = right turn (same sign as servo command).
+                         Positive = left turn, negative = right turn.
             wheelbase_m: Distance between axles (m).
         """
         if dt <= 0.0 or dt > 1.0:
             return
 
-        # Yaw rate from bicycle model (right turn → yaw decreases in math convention)
-        yaw_rate = -(speed_mps / wheelbase_m) * math.tan(steer_rad)
+        # Standard bicycle-model convention:
+        #   steer < 0 => right turn => yaw decreases
+        #   steer > 0 => left turn  => yaw increases
+        yaw_rate = (speed_mps / wheelbase_m) * math.tan(steer_rad)
 
         # RK4 stages — v, steer are constant within the step, so yaw_rate is
         # constant and the yaw trajectory is linear: yaw(t) = yaw_rad + yaw_rate*t.

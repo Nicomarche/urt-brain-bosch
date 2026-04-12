@@ -62,12 +62,20 @@ try:
     # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
     # Keep the default at 1.0 so the measured steering is trusted directly.
     _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
+    # Project convention: positive steering command/feedback means RIGHT turn.
+    # The DR bicycle model expects mathematical sign: positive = LEFT turn.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", -1.0) or -1.0)
     _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
     )
     _CAMERA_LATERAL_CORRECTION_MAX_M = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M", 0.08
+    )
+    _CAMERA_LATERAL_CORRECTION_STEP_MAX_M = getattr(
+        cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M", 0.015
+    )
+    _CAMERA_LATERAL_CORRECTION_COOLDOWN_S = getattr(
+        cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S", 0.10
     )
     _VISUAL_LANE_RELOCALIZATION_GAIN = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.10
@@ -149,8 +157,10 @@ except Exception:
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = -1.0
-    _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
-    _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+    _CAMERA_LATERAL_CORRECTION_GAIN = 0.18
+    _CAMERA_LATERAL_CORRECTION_MAX_M = 0.02
+    _CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
+    _CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
     _VISUAL_LANE_RELOCALIZATION_GAIN = 0.10
     _VISUAL_LANE_RELOCALIZATION_ENABLED = False
     _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
@@ -298,6 +308,7 @@ class TrackingState:
         self.last_cam_yaw_hint_conf = 0.0
         # Last yaw correction applied (for logging only).
         self.last_yaw_correction_deg = 0.0
+        self._last_camera_lateral_correction_monotonic = 0.0
         # Stopline visual state: written by threadLineFollowing, consumed by
         # threadTracking when a stable visible stopline disappears.
         self.stopline_visible = False
@@ -439,12 +450,23 @@ class TrackingState:
             lateral_error_m: Signed lane error from lane detection (m).
                              Positive = car left of lane centre.
         """
+        now = time.monotonic()
         with self._lock:
             dr = self._dr
             psi = self.path_psi
             correction_m = float(lateral_error_m)
-            self.camera_lateral_correction_m = correction_m
             self.lane_measurement_reliable = True
+            if (now - self._last_camera_lateral_correction_monotonic) < float(
+                _CAMERA_LATERAL_CORRECTION_COOLDOWN_S
+            ):
+                self.camera_lateral_correction_m = 0.0
+                return
+            max_step_m = float(_CAMERA_LATERAL_CORRECTION_STEP_MAX_M)
+            if max_step_m > 0.0:
+                correction_m = max(-max_step_m, min(max_step_m, correction_m))
+            self.camera_lateral_correction_m = correction_m
+            if abs(correction_m) > 1e-9:
+                self._last_camera_lateral_correction_monotonic = now
         if dr is not None and abs(correction_m) > 1e-9:
             dr.correct_lateral(correction_m, psi)
 
@@ -1006,6 +1028,8 @@ class threadTracking(ThreadWithStop):
     @staticmethod
     def _parse_steer_rad(raw_value) -> float | None:
         try:
+            # Raw steering follows project convention (positive = right).
+            # Convert here to mathematical bicycle-model convention.
             return math.radians(float(raw_value) / 10.0) * float(_STEER_SIGN_DR)
         except (TypeError, ValueError):
             return None
@@ -1028,11 +1052,20 @@ class threadTracking(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
-        # In MANUAL mode the Nucleo feedback stays at 0 (no odometry), so the
-        # encoder path would always return 0 and dead reckoning would never
-        # advance.  Prioritise the command speed over a zero-valued but
-        # otherwise-fresh encoder reading.
-        if self._current_state_message == "MANUAL" and self._last_cmd_speed_t is not None:
+        # In MANUAL mode the Nucleo feedback may stay at 0 (no odometry), so DR
+        # would never advance. Only use the commanded speed when encoder
+        # feedback is stale or effectively zero; if encoder feedback is fresh
+        # and moving, trust it even in MANUAL.
+        _encoder_fresh = (
+            self._last_speed_t is not None and
+            (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S)
+        )
+        _encoder_moving = abs(float(self._last_speed)) > 1e-4
+        if (
+            self._current_state_message == "MANUAL" and
+            self._last_cmd_speed_t is not None and
+            (not _encoder_fresh or not _encoder_moving)
+        ):
             cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
             if cmd_speed is not None:
                 self._last_speed = float(cmd_speed)

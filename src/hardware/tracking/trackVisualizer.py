@@ -388,12 +388,12 @@ class TrackVisualizer(threading.Thread):
             rr_wy = y - W2 * lat[1]
 
             # Ackermann inner/outer assignment depends on turn direction:
-            #   right turn (steer > 0): right wheel is inner (larger angle)
-            #   left  turn (steer < 0): left  wheel is inner (larger magnitude)
+            #   left  turn (steer > 0): left  wheel is inner (larger angle)
+            #   right turn (steer < 0): right wheel is inner (larger magnitude)
             if steer_rad >= 0:
-                fl_steer, fr_steer = steer_outer, steer_inner
-            else:
                 fl_steer, fr_steer = steer_inner, steer_outer
+            else:
+                fl_steer, fr_steer = steer_outer, steer_inner
 
             for whl_wx, whl_wy, whl_angle in [
                 (fl_wx, fl_wy, yaw + fl_steer),

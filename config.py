@@ -286,16 +286,24 @@ TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 # angle directly; values > 1.0 amplify the effective wheel angle.
 TRACKING_STEER_GAIN_DR = 1.0
 # Steering sign used by tracking dead reckoning.
-# -1.0 = invert Nucleo/servo sign before feeding the bicycle model.
-# Se deja invertido por defecto porque en el auto real el feedback de steering
-# quedó espejado respecto del giro observado en pista.
+# En este proyecto el steering publicado por control / Nucleo sigue:
+#   steer > 0 => derecha
+#   steer < 0 => izquierda
+# Pero el modelo cinemático usa convención matemática:
+#   steer > 0 => izquierda (yaw positivo)
+#   steer < 0 => derecha   (yaw negativo)
+# Por eso tracking debe invertir el signo al pasar del comando/feedback al DR.
 TRACKING_STEER_SIGN_DR = -1.0
 
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
-TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
-TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
+TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.18
+TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.02
 TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
+# Extra limiter over the per-frame camera lateral correction so two-line mode
+# can nudge the DR back toward the real lane center without teleporting it.
+TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
+TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
 
 # Corrección visual adicional hacia la ruta GraphML. OJO: esta corrección no usa
 # la posición real detectada del auto, sino el error del DR respecto del path
