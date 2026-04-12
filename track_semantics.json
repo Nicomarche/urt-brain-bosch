@@ -34,8 +34,8 @@
       "id": "intersection_1",
       "label": "Intersection 117",
       "anchor_node_id": "117",
-      "control_id": "control_2",
-      "stopline_node_id": "58"
+      "control_id": "",
+      "stopline_node_id": ""
     }
   ],
   "controls": [

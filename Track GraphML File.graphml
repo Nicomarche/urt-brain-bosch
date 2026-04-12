@@ -248,24 +248,6 @@
       <data key="d2">0</data>
       <data key="d3">true</data>
     </node>
-    <node id="47">
-      <data key="d0">0.529</data>
-      <data key="d1">2.6</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="48">
-      <data key="d0">0.524</data>
-      <data key="d1">2.919</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="49">
-      <data key="d0">0.527</data>
-      <data key="d1">3.157</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
     <node id="50">
       <data key="d0">0.546</data>
       <data key="d1">3.485</data>
@@ -293,24 +275,6 @@
     <node id="54">
       <data key="d0">1.328</data>
       <data key="d1">3.944</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="55">
-      <data key="d0">1.588</data>
-      <data key="d1">3.893</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="56">
-      <data key="d0">1.822</data>
-      <data key="d1">3.825</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="57">
-      <data key="d0">2.073</data>
-      <data key="d1">3.774</data>
       <data key="d2">0</data>
       <data key="d3">false</data>
     </node>
@@ -353,48 +317,6 @@
     <node id="67">
       <data key="d0">4.502</data>
       <data key="d1">3.208</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="68">
-      <data key="d0">4.528</data>
-      <data key="d1">2.978</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="69">
-      <data key="d0">4.528</data>
-      <data key="d1">2.727</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="70">
-      <data key="d0">4.524</data>
-      <data key="d1">2.472</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="71">
-      <data key="d0">4.511</data>
-      <data key="d1">2.212</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="72">
-      <data key="d0">4.515</data>
-      <data key="d1">1.97</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="73">
-      <data key="d0">4.507</data>
-      <data key="d1">1.723</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="74">
-      <data key="d0">4.507</data>
-      <data key="d1">1.489</data>
       <data key="d2">0</data>
       <data key="d3">false</data>
     </node>
@@ -596,27 +518,9 @@
       <data key="d2">0</data>
       <data key="d3">false</data>
     </node>
-    <node id="113">
-      <data key="d0">3.658</data>
-      <data key="d1">3.729</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="114">
-      <data key="d0">3.758</data>
-      <data key="d1">3.72</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
     <node id="115">
       <data key="d0">3.845</data>
       <data key="d1">3.697</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="116">
-      <data key="d0">3.917</data>
-      <data key="d1">3.67</data>
       <data key="d2">0</data>
       <data key="d3">false</data>
     </node>
@@ -659,24 +563,6 @@
     <node id="123">
       <data key="d0">1.185</data>
       <data key="d1">3.984</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="124">
-      <data key="d0">1.459</data>
-      <data key="d1">3.916</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="125">
-      <data key="d0">1.695</data>
-      <data key="d1">3.861</data>
-      <data key="d2">0</data>
-      <data key="d3">false</data>
-    </node>
-    <node id="126">
-      <data key="d0">1.946</data>
-      <data key="d1">3.802</data>
       <data key="d2">0</data>
       <data key="d3">false</data>
     </node>
@@ -731,22 +617,11 @@
     <edge id="37" source="43" target="44"/>
     <edge id="38" source="44" target="45"/>
     <edge id="39" source="45" target="46"/>
-    <edge id="40" source="46" target="47"/>
-    <edge id="41" source="47" target="48"/>
-    <edge id="42" source="48" target="49"/>
     <edge id="56" source="62" target="63"/>
     <edge id="57" source="63" target="64"/>
     <edge id="58" source="64" target="65"/>
     <edge id="59" source="65" target="66"/>
     <edge id="60" source="66" target="67"/>
-    <edge id="61" source="67" target="68"/>
-    <edge id="62" source="68" target="69"/>
-    <edge id="63" source="69" target="70"/>
-    <edge id="64" source="70" target="71"/>
-    <edge id="65" source="71" target="72"/>
-    <edge id="66" source="72" target="73"/>
-    <edge id="67" source="73" target="74"/>
-    <edge id="68" source="74" target="75"/>
     <edge id="69" source="75" target="76"/>
     <edge id="70" source="76" target="77"/>
     <edge id="71" source="77" target="78"/>
@@ -783,12 +658,6 @@
     <edge id="102" source="109" target="110"/>
     <edge id="103" source="110" target="111"/>
     <edge id="104" source="111" target="112"/>
-    <edge id="105" source="112" target="113"/>
-    <edge id="106" source="113" target="114"/>
-    <edge id="107" source="114" target="115"/>
-    <edge id="108" source="115" target="116"/>
-    <edge id="109" source="116" target="64"/>
-    <edge id="110" source="49" target="119"/>
     <edge id="111" source="119" target="50"/>
     <edge id="112" source="50" target="120"/>
     <edge id="113" source="120" target="51"/>
@@ -798,14 +667,12 @@
     <edge id="117" source="122" target="53"/>
     <edge id="118" source="53" target="123"/>
     <edge id="119" source="123" target="54"/>
-    <edge id="120" source="54" target="124"/>
-    <edge id="121" source="124" target="55"/>
-    <edge id="122" source="55" target="125"/>
-    <edge id="123" source="125" target="56"/>
-    <edge id="124" source="56" target="126"/>
-    <edge id="125" source="126" target="57"/>
-    <edge id="126" source="57" target="127"/>
     <edge id="127" source="127" target="128"/>
     <edge id="128" source="128" target="58"/>
+    <edge id="129" source="54" target="127"/>
+    <edge id="130" source="112" target="115"/>
+    <edge id="131" source="115" target="64"/>
+    <edge id="132" source="67" target="75"/>
+    <edge id="133" source="46" target="119"/>
   </graph>
 </graphml>

@@ -488,42 +488,6 @@
       "controlId": "",
       "parkingSpotId": "",
       "debugFlags": "",
-      "id": 47,
-      "imgX": 313.91576885406465,
-      "imgY": 1036.0430950048972,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 48,
-      "imgX": 311.3888344760039,
-      "imgY": 846.5230166503428,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 49,
-      "imgX": 313.09947643979035,
-      "imgY": 705.109947643979,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
       "id": 50,
       "imgX": 324.0235063663075,
       "imgY": 510.4407443682664,
@@ -575,42 +539,6 @@
       "id": 54,
       "imgX": 788.9794319294808,
       "imgY": 237.53183153770814,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 55,
-      "imgX": 943.1224289911851,
-      "imgY": 267.8550440744368,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 56,
-      "imgX": 1082.103819784525,
-      "imgY": 308.2859941234084,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 57,
-      "imgX": 1231.1929480901076,
-      "imgY": 338.60920666013715,
       "type": 0
     },
     {
@@ -695,90 +623,6 @@
       "id": 67,
       "imgX": 2674.0724779627812,
       "imgY": 674.6914789422135,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 68,
-      "imgX": 2689.234084231146,
-      "imgY": 811.1459353574926,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 69,
-      "imgX": 2689.234084231146,
-      "imgY": 960.2350636630754,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 70,
-      "imgX": 2686.707149853085,
-      "imgY": 1111.851126346719,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 71,
-      "imgX": 2679.1263467189033,
-      "imgY": 1265.994123408423,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 72,
-      "imgX": 2681.653281096964,
-      "imgY": 1410.0293829578843,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 73,
-      "imgX": 2676.5994123408423,
-      "imgY": 1556.5915768854065,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 74,
-      "imgX": 2676.5994123408423,
-      "imgY": 1695.5729676787464,
       "type": 0
     },
     {
@@ -1184,45 +1028,9 @@
       "controlId": "",
       "parkingSpotId": "",
       "debugFlags": "",
-      "id": 113,
-      "imgX": 2172.4654088050315,
-      "imgY": 365.0943396226415,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 114,
-      "imgX": 2231.9622641509436,
-      "imgY": 370.5031446540881,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
       "id": 115,
       "imgX": 2283.3459119496856,
       "imgY": 384.02515723270443,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 116,
-      "imgX": 2326.616352201258,
-      "imgY": 400.2515723270441,
       "type": 0
     },
     {
@@ -1307,42 +1115,6 @@
       "id": 123,
       "imgX": 703.9748427672956,
       "imgY": 213.64779874213838,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 124,
-      "imgX": 866.2389937106918,
-      "imgY": 254.2138364779874,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 125,
-      "imgX": 1006.8679245283018,
-      "imgY": 286.66666666666663,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 126,
-      "imgX": 1155.6100628930817,
-      "imgY": 321.82389937106916,
       "type": 0
     },
     {
@@ -1767,36 +1539,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 40,
-      "source": 46,
-      "target": 47
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 41,
-      "source": 47,
-      "target": 48
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 42,
-      "source": 48,
-      "target": 49
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 56,
       "source": 62,
       "target": 63
@@ -1840,86 +1582,6 @@
       "id": 60,
       "source": 66,
       "target": 67
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 61,
-      "source": 67,
-      "target": 68
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 62,
-      "source": 68,
-      "target": 69
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 63,
-      "source": 69,
-      "target": 70
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 64,
-      "source": 70,
-      "target": 71
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 65,
-      "source": 71,
-      "target": 72
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 66,
-      "source": 72,
-      "target": 73
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 67,
-      "source": 73,
-      "target": 74
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 68,
-      "source": 74,
-      "target": 75
     },
     {
       "speedHint": "",
@@ -2287,66 +1949,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 105,
-      "source": 112,
-      "target": 113
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 106,
-      "source": 113,
-      "target": 114
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 107,
-      "source": 114,
-      "target": 115
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 108,
-      "source": 115,
-      "target": 116
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 109,
-      "source": 116,
-      "target": 64
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 110,
-      "source": 49,
-      "target": 119
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 111,
       "source": 119,
       "target": 50
@@ -2437,76 +2039,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 120,
-      "source": 54,
-      "target": 124
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 121,
-      "source": 124,
-      "target": 55
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 122,
-      "source": 55,
-      "target": 125
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 123,
-      "source": 125,
-      "target": 56
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 124,
-      "source": 56,
-      "target": 126
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 125,
-      "source": 126,
-      "target": 57
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 126,
-      "source": 57,
-      "target": 127
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 127,
       "source": 127,
       "target": 128
@@ -2520,10 +2052,60 @@
       "id": 128,
       "source": 128,
       "target": 58
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 129,
+      "source": 54,
+      "target": 127
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 130,
+      "source": 112,
+      "target": 115
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 131,
+      "source": 115,
+      "target": 64
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 132,
+      "source": 67,
+      "target": 75
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 133,
+      "source": 46,
+      "target": 119
     }
   ],
-  "nextNodeId": 129,
-  "nextEdgeId": 129,
+  "nextNodeId": 130,
+  "nextEdgeId": 134,
   "imgW": 3036,
   "imgH": 2580,
   "metersPerPixel": 0.0016837326307060833,

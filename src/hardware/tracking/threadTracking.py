@@ -1581,11 +1581,13 @@ class threadTracking(ThreadWithStop):
         """Write one line to temp/tracking_debug.txt."""
         try:
             route = self._path_manager.active_route if self._path_manager is not None else None
-            if route is None or len(route.waypoints) == 0:
-                return
             now = time.monotonic()
-            wp = route.waypoints[target_idx % n_wp] if route.closed_loop else route.waypoints[min(max(0, target_idx), n_wp - 1)]
-            dist_to_wp = math.hypot(matched_x - wp[0], matched_y - wp[1])
+            if route is not None and n_wp > 0:
+                wp = route.waypoints[target_idx % n_wp] if route.closed_loop else route.waypoints[min(max(0, target_idx), n_wp - 1)]
+                dist_to_wp = math.hypot(matched_x - wp[0], matched_y - wp[1])
+            else:
+                wp = (float("nan"), float("nan"))
+                dist_to_wp = float("nan")
 
             # Speed field
             raw_spd = self._last_raw_speed
@@ -1635,7 +1637,7 @@ class threadTracking(ThreadWithStop):
                     drift_warn = f" ⚠ DRIFT_WITH_ZERO_SPEED (moved {moved*100:.1f}cm)"
             self._log_prev_xy = (matched_x, matched_y)
 
-            path_kappa = self._path_manager._get_curvature(route, target_idx)
+            path_kappa = self._path_manager._get_curvature(route, target_idx) if route is not None else 0.0
             ff_deg = math.degrees(math.atan(path_kappa * 0.258)) if abs(path_kappa) > 0.01 else 0.0
             _corr_deg = getattr(self.tracking_state, 'last_yaw_correction_deg', 0.0)
             _cam_hint = getattr(self.tracking_state, '_cam_yaw_hint_rad', None)
