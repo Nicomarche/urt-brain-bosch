@@ -1247,6 +1247,7 @@ Args:
         self._last_planner_route_blend = 0.0
         self._last_planner_route_blend_source = "none"
         self._recent_two_line_straight_until = 0.0
+        self._stop_node_reached = False
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -10585,6 +10586,21 @@ Returns:
                     self._last_safe_steering = steering_angle
                     if speed is not None:
                         self._last_safe_speed = speed
+
+            # Stop node detection via map position (dead reckoning, no vision)
+            if not self._stop_node_reached and self._tracking_state is not None:
+                _ts = self._tracking_state
+                _stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
+                _current_attr = int(getattr(_ts, "current_node_attr", 0) or 0)
+                _route_active = bool(getattr(_ts, "route_active", False))
+                if _route_active and _current_attr == _stopline_attr:
+                    self._stop_node_reached = True
+                    self._maneuver_manager.trigger_mission_complete()
+                    print(
+                        "\033[1;97m[ Line Following ] :\033[0m "
+                        "\033[1;91mMISSION COMPLETE\033[0m - "
+                        "Stop node reached (map position), halting all motion"
+                    )
 
             maneuver_decision = self._maneuver_manager.decide(
                 time.time(),
