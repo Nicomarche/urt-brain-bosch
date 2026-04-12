@@ -3526,19 +3526,18 @@ Args:
         if curve_state not in ("ENTERING", "IN_CURVE"):
             return steering_angle
 
-        # If GPS tracking is available and its path curvature sign disagrees with the
-        # visually inferred curve direction, bypass max-steer enforcement. This prevents
+        # If graph tracking says the path ahead is straight or curving the other way,
+        # bypass max-steer enforcement. This prevents
         # two failure modes:
         #   1. Intersection approach: right-lane-only visible → inferred left curve (-1)
         #      but GPS says straight/right → bypass stops wrong -25° steer.
         #   2. Post-curve straight: curve state oscillates back into IN_CURVE after the
-        #      real curve ends, but GPS path_kappa has flipped sign → bypass stops wrong
+        #      real curve ends, but graph lookahead says straight/opposite → bypass stops wrong
         #      +25° steer on the straight.
-        # Legitimate curves (GPS and visual agree on direction) still get enforced.
+        # Legitimate curves (graph and visual agree on direction) still get enforced.
         _ts = getattr(self, '_tracking_state', None)
         if _ts is not None and getattr(_ts, 'initialized', False):
-            gps_kappa = float(getattr(_ts, 'path_kappa', 0.0))
-            gps_sign = 1 if gps_kappa > 0.1 else (-1 if gps_kappa < -0.1 else 0)
+            gps_sign, _ = self._graph_curve_direction(_ts)
             _curve_dir = int(getattr(self, '_curve_direction', 0))
             if gps_sign != _curve_dir:
                 return steering_angle
@@ -3686,7 +3685,7 @@ Args:
 
         return guarded_steer
 
-    def _enforce_two_line_curve_priority(self, steering_angle, debug_info=None):
+    def _enforce_two_line_curve_priority(self, steering_angle, direct_error_m=None, debug_info=None):
         """Prevent two-line ENTERING from unwinding away from a confirmed curve."""
         if steering_angle is None:
             return steering_angle
@@ -3732,6 +3731,30 @@ Args:
         if desired_sign == 0:
             return steering_angle
 
+        # In 2-line mode we have a physical direct_error_m. If it says the car is already
+        # biased toward the inside of the active curve, don't force extra steering deeper
+        # into the curve; let the physical crosstrack controller unwind toward lane centre.
+        if direct_error_m is not None:
+            inside_error_threshold_m = max(
+                0.0,
+                float(getattr(_config, "TWO_LINE_CURVE_PRIORITY_INSIDE_ERROR_M", 0.03) or 0.03),
+            )
+            try:
+                direct_error_value = float(direct_error_m)
+            except (TypeError, ValueError):
+                direct_error_value = 0.0
+            if (
+                inside_error_threshold_m > 0.0 and
+                direct_error_value * desired_sign < -inside_error_threshold_m
+            ):
+                if isinstance(debug_info, dict):
+                    debug_info["two_line_curve_priority_suppressed"] = "inside_line_correction"
+                    debug_info["two_line_curve_priority_direct_error_m"] = round(direct_error_value, 4)
+                    debug_info["two_line_curve_priority_inside_error_m"] = round(
+                        float(inside_error_threshold_m), 4
+                    )
+                return steering_angle
+
         min_steer_deg = 0.0
         if entering_hold_active and hint_source == "two_line" and hint_conf >= 0.25 and hint_deg >= 12.0:
             min_steer_deg = max(2.5, hint_deg * 0.55)
@@ -3761,6 +3784,25 @@ Args:
                 debug_info["two_line_curve_priority_output_deg"] = round(float(guarded_steer), 3)
 
         return guarded_steer
+
+    def _graph_curve_direction(self, tracking_state=None, min_heading_change_deg=15.0):
+        """Return controller curve direction from graph lookahead heading change."""
+        ts = tracking_state if tracking_state is not None else getattr(self, "_tracking_state", None)
+        if ts is None or not getattr(ts, "initialized", False):
+            return 0, 0.0
+
+        delta_psi = float(getattr(ts, "path_heading_change_rad", 0.0) or 0.0)
+        min_rad = math.radians(max(0.0, float(min_heading_change_deg or 0.0)))
+
+        # Graph yaw uses the mathematical convention:
+        #   +dpsi = left / counter-clockwise
+        #   -dpsi = right / clockwise
+        # The controller uses +1 for right curves and -1 for left curves.
+        if delta_psi <= -min_rad:
+            return 1, delta_psi
+        if delta_psi >= min_rad:
+            return -1, delta_psi
+        return 0, delta_psi
 
     def _get_curve_exit_unwind_factor(
         self,
@@ -5373,6 +5415,13 @@ Args:
             return False, ""
 
         curve_transition_active = self._curve_state in ("ENTERING", "EXITING")
+        single_line_curve_commit = bool(
+            isinstance(debug_info, dict) and (
+                debug_info.get("single_line_max_curve_steer") or
+                debug_info.get("single_line_curve_priority") or
+                debug_info.get("single_line_transition_blend")
+            )
+        )
 
         # Check 1: Too many Hough lines = reflections/glare
         all_lines = debug_info.get('all_lines')
@@ -5391,7 +5440,7 @@ Args:
             if error_jump > self.noise_max_error_jump_px and self._noise_reject_count < self.noise_max_reject_frames:
                 # During curve entry/exit the target lane center can legitimately jump
                 # as the controller switches between straight and curve geometry.
-                if curve_transition_active:
+                if curve_transition_active or (num_lines == 1 and single_line_curve_commit):
                     return False, ""
                 return True, f"error_jump({error_jump:.0f}px>{self.noise_max_error_jump_px})"
 
@@ -5400,7 +5449,7 @@ Args:
             steer_jump = abs(steering_angle - self._last_good_steering)
             if steer_jump > self.noise_max_steer_jump_deg and self._noise_reject_count < self.noise_max_reject_frames:
                 # Exception: don't reject if we're transitioning states (curve entry/exit)
-                if curve_transition_active:
+                if curve_transition_active or (num_lines == 1 and single_line_curve_commit):
                     return False, ""
                 # Exception: don't reject when steering DIRECTION reverses.
                 # A reversal (e.g., last_good=+22° → new=-3°) indicates a legitimate
@@ -7515,24 +7564,15 @@ Args:
         ~2 m long, and 1.5 m of lookahead from matched_idx exits the arc before the
         car does — premature clearing would kill curve assistance mid-turn.
         The enforcement bypass in _enforce_single_line_curve_priority already prevents
-        wrong-direction enforcement while IN_CURVE when GPS path_kappa disagrees.
+        wrong-direction enforcement while IN_CURVE when the graph lookahead disagrees.
         """
         if tracking_state is None or not getattr(tracking_state, 'initialized', False):
             return
-        delta_psi = float(getattr(tracking_state, 'path_heading_change_rad', 0.0))
-        CURVE_ENTER_RAD = math.radians(15.0)   # >15° total heading change over 1.5m → curve
-        # path_heading_change_rad follows the path yaw convention from the graph:
-        # positive dpsi = counter-clockwise / left turn, negative dpsi = clockwise / right turn.
-        # The line-following controller uses the opposite sign convention for steering commands:
-        #   curve_direction = +1 -> right curve / steer right
-        #   curve_direction = -1 -> left curve / steer left
-        # Map the graph yaw sign explicitly here so GPS correction cannot invert real curves.
-        if delta_psi < -CURVE_ENTER_RAD:
-            gps_dir = 1
-        elif delta_psi > CURVE_ENTER_RAD:
-            gps_dir = -1
-        else:
-            gps_dir = 0
+        gps_dir, delta_psi = self._graph_curve_direction(
+            tracking_state,
+            min_heading_change_deg=15.0,
+        )
+        strong_curve_ahead = abs(float(delta_psi)) >= math.radians(25.0)
 
         if gps_dir == 0:
             # GPS sees no significant curve in the next 1.5 m.
@@ -7544,8 +7584,20 @@ Args:
                 self._curve_direction = 0
                 self._curve_enter_origin = "none"
         else:
+            if (
+                self._curve_state == "EXITING" and
+                strong_curve_ahead and
+                (self._curve_direction == 0 or self._curve_direction == gps_dir)
+            ):
+                self._curve_state = "IN_CURVE"
+                self._curve_state_frames = 1
+                self._curve_direction = gps_dir
+                self._curve_enter_origin = "none"
+                return
             # GPS sees a real curve — fix direction if visual got the sign wrong
-            if self._curve_direction != 0 and self._curve_direction != gps_dir:
+            if self._curve_direction == 0 and self._curve_state in ("ENTERING", "IN_CURVE", "EXITING"):
+                self._curve_direction = gps_dir
+            elif self._curve_direction != 0 and self._curve_direction != gps_dir:
                 self._curve_direction = gps_dir
 
     def _quick_vp_check(self, avg_left, avg_right, img_h, img_w):
@@ -10480,6 +10532,7 @@ Returns:
                     )
                     steering_angle = self._enforce_two_line_curve_priority(
                         steering_angle,
+                        direct_error_m=direct_error_m,
                         debug_info=debug_info,
                     )
 
