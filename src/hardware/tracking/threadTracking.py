@@ -1163,9 +1163,13 @@ class threadTracking(ThreadWithStop):
             (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S)
         )
         _encoder_moving = abs(float(self._last_speed)) > 1e-4
+        _cmd_fresh = (
+            self._last_cmd_speed_t is not None and
+            (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S)
+        )
         if (
             current_state_message == "MANUAL" and
-            self._last_cmd_speed_t is not None and
+            _cmd_fresh and
             (not _encoder_fresh or not _encoder_moving)
         ):
             cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
