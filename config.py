@@ -292,11 +292,13 @@ TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.35
 TRACKING_CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
 TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 
-# Cuando la cámara confirma que seguimos dentro del carril, el tracking puede
-# recentrar el dead reckoning lateralmente hacia la ruta para que el auto
-# virtual no se “vaya” de la pista mientras el auto real sigue centrado.
-TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN = 0.60
-TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M = 0.10
+# Corrección visual adicional hacia la ruta GraphML. OJO: esta corrección no usa
+# la posición real detectada del auto, sino el error del DR respecto del path
+# matcheado. Si está muy agresiva, el preview "pega" el auto virtual a la pista
+# ideal y deja de mostrar desvíos reales. Por eso queda desactivada por defecto.
+TRACKING_VISUAL_LANE_RELOCALIZATION_ENABLED = False
+TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN = 0.15
+TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
 TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
 TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
 

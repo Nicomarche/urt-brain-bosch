@@ -71,6 +71,9 @@ try:
     _VISUAL_LANE_RELOCALIZATION_GAIN = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN", 0.10
     )
+    _VISUAL_LANE_RELOCALIZATION_ENABLED = bool(
+        getattr(cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_ENABLED", False)
+    )
     _VISUAL_LANE_RELOCALIZATION_MAX_M = getattr(
         cfg, "TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M", 0.03
     )
@@ -144,6 +147,7 @@ except Exception:
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.35
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.08
     _VISUAL_LANE_RELOCALIZATION_GAIN = 0.10
+    _VISUAL_LANE_RELOCALIZATION_ENABLED = False
     _VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
     _VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
     _VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
@@ -206,7 +210,7 @@ class TrackingState:
     """Thread-safe shared state between threadTracking and threadLineFollowing.
 
     Attributes (readable by any thread in the same process):
-        x, y, yaw        Current matched pose used by the map/visualizer.
+        x, y, yaw        Current raw pose estimate (dead reckoning + sensor fusion).
         error_m          Lateral crosstrack error vs. current waypoint.
         heading_rad      Heading error vs. current waypoint tangent.
         path_psi         Path tangent angle at the current waypoint (radians).
@@ -772,16 +776,6 @@ class threadTracking(ThreadWithStop):
     def _apply_lane_visual_relocalization(self, raw_x, raw_y, raw_yaw, path_update, now: float):
         if self._dr is None or path_update is None:
             return raw_x, raw_y, raw_yaw, 0.0, 0.0
-        if not bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
-            return raw_x, raw_y, raw_yaw, 0.0, 0.0
-        # Skip in precision zones (intersections, stoplines): the car intentionally
-        # deviates from the route centreline here, so snapping it back is wrong.
-        if bool(getattr(path_update, "waypoint_mode_active", False)):
-            return raw_x, raw_y, raw_yaw, 0.0, 0.0
-        # Skip when the car is nearly stopped — prevents fighting parking manoeuvres.
-        if abs(self._last_speed) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
-            return raw_x, raw_y, raw_yaw, 0.0, 0.0
-
         raw_lateral_error_m = self._signed_lateral_error_to_path(
             raw_x,
             raw_y,
@@ -789,6 +783,19 @@ class threadTracking(ThreadWithStop):
             path_update.matched_y,
             path_update.matched_yaw,
         )
+        self.tracking_state.raw_lateral_error_m = float(raw_lateral_error_m)
+        if not bool(getattr(self.tracking_state, "lane_measurement_reliable", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+        if not bool(_VISUAL_LANE_RELOCALIZATION_ENABLED):
+            self.tracking_state.set_lane_measurement_state(True, 0.0)
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+        # Skip in precision zones (intersections, stoplines): the car intentionally
+        # deviates from the route centreline here, so snapping it back is wrong.
+        if bool(getattr(path_update, "waypoint_mode_active", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
+        # Skip when the car is nearly stopped — prevents fighting parking manoeuvres.
+        if abs(self._last_speed) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
+            return raw_x, raw_y, raw_yaw, 0.0, float(raw_lateral_error_m)
         abs_raw_error_m = abs(raw_lateral_error_m)
         if abs_raw_error_m < float(_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M):
             self.tracking_state.set_lane_measurement_state(True, 0.0)
@@ -1336,7 +1343,7 @@ class threadTracking(ThreadWithStop):
         speed_feedback_age_s = (now - self._last_speed_t) if self._last_speed_t is not None else None
         speed_command_age_s = (now - self._last_cmd_speed_t) if self._last_cmd_speed_t is not None else None
         self.tracking_state.update(
-            x=matched_x, y=matched_y, yaw=matched_yaw,
+            x=raw_x, y=raw_y, yaw=raw_yaw,
             steer_rad=self._last_steer_rad,
             error_m=error_m, heading_rad=heading_rad,
             path_psi=path_psi, path_kappa=path_kappa,

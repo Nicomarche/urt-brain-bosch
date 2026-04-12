@@ -13,7 +13,8 @@ and draws:
       HIGHWAY_RIGHT → orange
       CROSSWALK     → magenta
   • Current target waypoint (cyan circle)
-  • Car pose (scaled rectangle with Ackermann wheels, body heading)
+  • Raw car pose (scaled rectangle with Ackermann wheels, body heading)
+  • Map-matched pose as a reference marker when it differs from the raw pose
 
 If bg_image_path / track_json_path are not provided, falls back to a plain
 black canvas with auto-scaled coordinates.
@@ -276,26 +277,19 @@ class TrackVisualizer(threading.Thread):
             state = dict(self._state) if self._state is not None else None
 
         if state is not None:
-            matched_x = state.get("x", 0.0)
-            matched_y = state.get("y", 0.0)
-            matched_yaw = state.get("yaw", 0.0)
-            raw_x = state.get("raw_x", matched_x)
-            raw_y = state.get("raw_y", matched_y)
-            raw_yaw = state.get("raw_yaw", matched_yaw)
-            # Use the map-matched position for the car rectangle.
-            # The raw DR position accumulates longitudinal drift over time (the
-            # dead-reckoning always lags slightly behind the physical car because
-            # encoder feedback has inherent measurement delay).  The map-matched
-            # position is continuously corrected to the nearest point on the known
-            # path, which is consistently closer to the physical car's actual
-            # location.  Raw DR is preserved for the lateral-error overlay dot.
+            raw_x = state.get("raw_x", state.get("x", 0.0))
+            raw_y = state.get("raw_y", state.get("y", 0.0))
+            raw_yaw = state.get("raw_yaw", state.get("yaw", 0.0))
+            matched_x = state.get("matched_x", raw_x)
+            matched_y = state.get("matched_y", raw_y)
+            matched_yaw = state.get("matched_yaw", raw_yaw)
             speed_mps = state.get("speed_mps", 0.0)
             state_ts  = state.get("state_ts")
-            # Forward-predict matched position by the state snapshot age to
+            # Forward-predict the raw pose by the state snapshot age to
             # compensate for display lag (typically 50–100 ms at 10 FPS).
-            vis_x   = matched_x
-            vis_y   = matched_y
-            vis_yaw = matched_yaw
+            vis_x   = raw_x
+            vis_y   = raw_y
+            vis_yaw = raw_yaw
             if state_ts is not None and abs(speed_mps) > 0.01:
                 pred_s = min(time.monotonic() - state_ts + _PIPELINE_DELAY_S, 0.25)
                 vis_x = vis_x + speed_mps * math.cos(vis_yaw) * pred_s
@@ -428,19 +422,22 @@ class TrackVisualizer(threading.Thread):
             upcoming_node_id = state.get("upcoming_node_id")
             next_semantic = state.get("next_semantic_label") or state.get("next_semantic_type") or "none"
             relocalization_mode = state.get("relocalization_mode", "map_match")
+            match_gap_m = math.hypot(float(raw_x) - float(matched_x), float(raw_y) - float(matched_y))
 
             matched_px = self._world_to_px(matched_x, matched_y)
             cv2.circle(canvas, matched_px, 5, (0, 215, 255), 1)
-            if math.hypot(float(raw_x) - float(matched_x), float(raw_y) - float(matched_y)) > 0.03:
+            cv2.circle(canvas, matched_px, 2, (0, 215, 255), -1)
+            if match_gap_m > 0.01:
                 raw_px = self._world_to_px(raw_x, raw_y)
                 cv2.line(canvas, raw_px, matched_px, (0, 215, 255), 1)
 
             cv2.putText(canvas,
-                        f"vis x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
+                        f"raw x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
                         f"  steer={math.degrees(steer_rad):+.0f}°",
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
-                        f"raw x={raw_x:.2f}m  y={raw_y:.2f}m  yaw={math.degrees(raw_yaw):.0f}°",
+                        f"match x={matched_x:.2f}m  y={matched_y:.2f}m  yaw={math.degrees(matched_yaw):.0f}°"
+                        f"  gap={match_gap_m:.3f}m",
                         (10, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
                         f"e={state.get('error_m', 0):.3f}m  "
