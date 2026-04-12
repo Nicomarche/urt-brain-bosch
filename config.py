@@ -330,6 +330,10 @@ TRACKING_VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S = 1.00
 TRACKING_VISUAL_STOPLINE_ROUTE_BEHIND_M = 0.25
 TRACKING_VISUAL_STOPLINE_ROUTE_AHEAD_M = 0.85
 TRACKING_VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
+# Ángulo máximo que puede tener la banda detectada respecto de la horizontal en BEV.
+# Una stopline real es casi horizontal; si la línea ajustada supera este ángulo
+# se descarta como falso positivo (líneas de lane oblicuas, reflejos, etc.).
+TRACKING_VISUAL_STOPLINE_MAX_ANGLE_DEG = 20.0
 
 TRACKING_SPEED_FEEDBACK_TIMEOUT_S = 0.35
 TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50

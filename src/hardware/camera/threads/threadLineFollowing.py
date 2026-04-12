@@ -1133,6 +1133,9 @@ Args:
         self.stopline_adaptive_c = float(
             getattr(_config, "TRACKING_VISUAL_STOPLINE_ADAPTIVE_C", 7.0) or 7.0
         )
+        self.stopline_max_angle_deg = float(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MAX_ANGLE_DEG", 20.0) or 20.0
+        )
         self._stopline_visible_streak = 0
         self._stopline_missing_streak = 0
         self._stopline_stably_visible = False
@@ -3791,9 +3794,44 @@ Args:
         distance_m = max(0.0, ((float(img_h) - band_center_y) * bev_cm_per_px) / 100.0)
         width_ratio = mean_count / max(lane_width_px, 1.0)
         thickness_score = min(1.0, float(band_rows) / max(float(min_band_rows) * 2.0, 1.0))
+
+        # --- Ajuste de línea sobre centroides por fila (estilo findStopLineEx) ---
+        # Para cada fila activa de la banda calculamos el centroide horizontal (x medio
+        # de los píxeles blancos) y ajustamos una recta. Una stopline real debe ser casi
+        # horizontal en BEV; si el ángulo supera MAX_ANGLE_DEG se descarta.
+        angle_deg = 0.0
+        fit_line_pts = None
+        try:
+            band_rows_range = range(band_start, band_end + 1)
+            centroids_x = []
+            centroids_y = []
+            for r in band_rows_range:
+                row_slice = band_mask[r, :]
+                white_xs = np.where(row_slice > 0)[0]
+                if white_xs.size >= 2:
+                    centroids_x.append(float(np.mean(white_xs)) + x0)
+                    centroids_y.append(float(y0 + r))
+            if len(centroids_x) >= 2:
+                coeffs = np.polyfit(centroids_y, centroids_x, 1)
+                slope = float(coeffs[0])
+                angle_deg = abs(math.degrees(math.atan(slope)))
+                # Puntos para dibujar la recta ajustada en el debug
+                y_top = int(y0 + band_start)
+                y_bot = int(y0 + band_end)
+                x_top = int(np.polyval(coeffs, y_top))
+                x_bot = int(np.polyval(coeffs, y_bot))
+                fit_line_pts = ((x_top, y_top), (x_bot, y_bot))
+        except Exception:
+            angle_deg = 0.0
+
+        max_angle = max(5.0, float(self.stopline_max_angle_deg))
+        if angle_deg > max_angle:
+            return None
+
+        angle_score = max(0.0, 1.0 - angle_deg / max_angle)
         confidence = max(
             0.0,
-            min(1.0, 0.65 * min(1.5, width_ratio) + 0.35 * thickness_score),
+            min(1.0, 0.55 * min(1.5, width_ratio) + 0.25 * thickness_score + 0.20 * angle_score),
         )
 
         if self._needs_debug:
@@ -3806,9 +3844,11 @@ Args:
                 (0, 255, 255),
                 2,
             )
+            if fit_line_pts is not None:
+                cv2.line(debug_img, fit_line_pts[0], fit_line_pts[1], (0, 180, 255), 2)
             cv2.putText(
                 debug_img,
-                f"stopline {distance_m:.2f}m conf={confidence:.2f}",
+                f"stopline {distance_m:.2f}m conf={confidence:.2f} ang={angle_deg:.1f}",
                 (10, 20),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -3823,6 +3863,7 @@ Args:
             "confidence": float(confidence),
             "width_ratio": float(width_ratio),
             "band_rows": int(band_rows),
+            "angle_deg": float(angle_deg),
             "roi": {
                 "x0": int(x0),
                 "x1": int(x1),
@@ -10396,6 +10437,7 @@ Returns:
                         ),
                         "stopline_confidence": round(float(getattr(self._tracking_state, 'stopline_confidence', 0.0) or 0.0), 4),
                         "stopline_pass_count": int(getattr(self._tracking_state, 'stopline_pass_count', 0) or 0),
+                        "stopline_detector": dict(getattr(self, "_last_stopline_visual_debug", None) or {}),
                         # Camera-based yaw correction applied to DR this frame
                         "dr_yaw_correction_deg": round(float(getattr(self._tracking_state, 'last_yaw_correction_deg', 0.0)), 4),
                         "dr_yaw_cam_hint_deg": round(float(getattr(self._tracking_state, 'last_cam_yaw_hint_deg', 0.0)), 2),
