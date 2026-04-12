@@ -554,7 +554,7 @@ SIGN_STOP_TURN_DURATION    = 21   # Segundos para completar el arco de 90° — 
 # En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.
 # Para generar el engine desde el ONNX reentrenado, ejecutar:
 #   cd models/lane_segmentation && python build_trt.py
-LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best_weights_reentrenado_416px.engine"
+LOCAL_AI_MODEL_PATH = "models/lane_segmentation/bestUltimo.engine"
 LOCAL_AI_MIN_CONFIDENCE = 0.35
 LOCAL_AI_IMGSZ = 416
 LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
