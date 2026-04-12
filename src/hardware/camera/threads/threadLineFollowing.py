@@ -1194,6 +1194,8 @@ Args:
         self._planner_priority_active = False
         self._safety_stop_reason = ""
         self._last_maneuver_notes = ""
+        self._last_planner_route_blend = 0.0
+        self._last_planner_route_blend_source = "none"
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -3472,14 +3474,30 @@ Args:
         waypoint_mode_active = bool(getattr(ts, "waypoint_mode_active", False)) if ts is not None else False
         current_attr = int(getattr(ts, "current_node_attr", getattr(ts, "node_attr", 0)) or 0) if ts is not None else 0
         upcoming_attr = int(getattr(ts, "upcoming_node_attr", current_attr) or current_attr) if ts is not None else 0
+        next_semantic_type = str(getattr(ts, "next_semantic_type", "") or "") if ts is not None else ""
+        expected_control_type = str(getattr(ts, "expected_control_type", "") or "") if ts is not None else ""
+        next_semantic_distance_m = (
+            float(getattr(ts, "next_semantic_distance_m", 0.0))
+            if ts is not None and getattr(ts, "next_semantic_distance_m", None) is not None
+            else None
+        )
+        stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
+        intersection_attr = 2
 
         planner_priority = route_active and (
+            waypoint_mode_active or
             maneuver_type in {
+                "stopline",
                 "turn_left",
                 "turn_right",
                 "intersection_straight",
                 "roundabout",
-            }
+                "traffic_light",
+            } or
+            expected_control_type in {"stop", "traffic_light"} or
+            next_semantic_type in {"stopline", "intersection", "roundabout"} or
+            current_attr in {intersection_attr, stopline_attr} or
+            upcoming_attr in {intersection_attr, stopline_attr}
         )
 
         return {
@@ -3489,6 +3507,9 @@ Args:
             "maneuver_type": maneuver_type,
             "current_attr": current_attr,
             "upcoming_attr": upcoming_attr,
+            "next_semantic_type": next_semantic_type,
+            "expected_control_type": expected_control_type,
+            "next_semantic_distance_m": next_semantic_distance_m,
         }
 
     def _should_allow_stopline_waypoint_guidance(self, direct_error_context=None):
@@ -3509,6 +3530,61 @@ Args:
             return False
 
         return str(direct_error_context.get("source", "") or "") == "single_line"
+
+    def _planner_two_line_takeover_weight(self, nav_ctx):
+        """Progressively bias steering toward route tracking on intersection approach."""
+        if not isinstance(nav_ctx, dict) or not bool(nav_ctx.get("planner_priority", False)):
+            return 0.0
+
+        maneuver_type = str(nav_ctx.get("maneuver_type", "") or "")
+        next_semantic_type = str(nav_ctx.get("next_semantic_type", "") or "")
+        expected_control_type = str(nav_ctx.get("expected_control_type", "") or "")
+        stopline_attr = int(getattr(_config, "TRACKING_STOPLINE_NODE_ATTR", 7) or 7)
+        intersection_attr = 2
+        current_attr = int(nav_ctx.get("current_attr", 0) or 0)
+        upcoming_attr = int(nav_ctx.get("upcoming_attr", current_attr) or current_attr)
+        precision_attr_ahead = (
+            current_attr in {intersection_attr, stopline_attr} or
+            upcoming_attr in {intersection_attr, stopline_attr}
+        )
+        relevant_maneuver = (
+            maneuver_type in {"stopline", "turn_left", "turn_right", "intersection_straight", "roundabout", "traffic_light"} or
+            expected_control_type in {"stop", "traffic_light"} or
+            next_semantic_type in {"stopline", "intersection", "roundabout"}
+        )
+        if not (precision_attr_ahead or relevant_maneuver):
+            return 0.0
+
+        distance_m = nav_ctx.get("next_semantic_distance_m", None)
+        if distance_m is None:
+            return 0.75 if precision_attr_ahead else 0.0
+
+        try:
+            distance_m = max(0.0, float(distance_m))
+        except (TypeError, ValueError):
+            return 0.75 if precision_attr_ahead else 0.0
+
+        blend_start_m = max(
+            0.25,
+            float(getattr(_config, "TRACKING_INTERSECTION_ROUTE_BLEND_START_M", 0.70) or 0.70),
+        )
+        blend_full_m = max(
+            0.05,
+            min(
+                blend_start_m - 0.05,
+                float(getattr(_config, "TRACKING_INTERSECTION_ROUTE_BLEND_FULL_M", 0.18) or 0.18),
+            ),
+        )
+        if distance_m >= blend_start_m:
+            return 0.0
+
+        ratio = 1.0
+        if distance_m > blend_full_m:
+            ratio = (blend_start_m - distance_m) / max(blend_start_m - blend_full_m, 1e-6)
+
+        base_blend = 0.35
+        max_blend = 0.85
+        return max(0.0, min(1.0, base_blend + (max_blend - base_blend) * float(ratio)))
 
     def _enforce_single_line_curve_priority(
         self,
@@ -6331,6 +6407,8 @@ Args:
         - speed: controller units / measured Nucleo speed -> m/s
         """
         self._heading_error = float(heading)
+        self._last_planner_route_blend = 0.0
+        self._last_planner_route_blend_source = "none"
 
         ts = self._tracking_state
         nav_ctx = self._get_navigation_context()
@@ -6480,6 +6558,29 @@ Args:
                 path_heading = float(getattr(ts, "heading_rad", control_heading))
                 blend = 0.75 if direct_error_source == "single_line" else 1.0
                 control_heading = ((1.0 - blend) * float(heading)) + (blend * path_heading)
+                self._last_planner_route_blend = float(blend)
+                self._last_planner_route_blend_source = str(direct_error_source)
+            elif (
+                ts is not None and
+                getattr(ts, 'initialized', False) and
+                _imu_ready and
+                _planner_priority_active and
+                direct_error_source == "two_line" and
+                not _in_curve
+            ):
+                blend = self._planner_two_line_takeover_weight(nav_ctx)
+                if blend > 1e-4:
+                    path_heading = float(getattr(ts, "heading_rad", control_heading))
+                    route_error_m = float(getattr(ts, "error_m", error_m))
+                    route_error_cap_m = max(
+                        0.02,
+                        float(getattr(_config, "TRACKING_INTERSECTION_ROUTE_ERROR_CAP_M", 0.18) or 0.18),
+                    )
+                    route_error_m = max(-route_error_cap_m, min(route_error_cap_m, route_error_m))
+                    control_heading = ((1.0 - blend) * float(control_heading)) + (blend * path_heading)
+                    error_m = ((1.0 - blend) * float(error_m)) + (blend * route_error_m)
+                    self._last_planner_route_blend = float(blend)
+                    self._last_planner_route_blend_source = "two_line"
 
             # Preserve legacy px deadband behavior while using physical-state Stanley.
             if float(getattr(self, 'stanley_deadband_crosstrack_m', 0.0) or 0.0) > 0.0:
@@ -9711,6 +9812,8 @@ Returns:
                 "lead_distance_class": self._local_ai_lead_distance_class,
                 "lead_distance_confidence": round(float(self._local_ai_lead_distance_confidence), 4),
                 "curve_guard": self._stanley_last_curve_guard,
+                "planner_route_blend": round(float(getattr(self, "_last_planner_route_blend", 0.0) or 0.0), 4),
+                "planner_route_blend_source": str(getattr(self, "_last_planner_route_blend_source", "none") or "none"),
                 "current_speed_target": round(float(self._current_speed), 3),
                 "frames_without_line": int(self.frames_without_line),
                 "last_seen_side": self.last_seen_side,

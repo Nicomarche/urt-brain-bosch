@@ -673,7 +673,13 @@ class PathManager:
             float(max_lookahead_m),
         )
         target_idx = self._find_waypoint_ahead(route, self.matched_idx, lookahead_m=lookahead_m)
-        in_precision_zone = self._is_precision_zone(route, target_idx, lookahead_pts=lookahead_pts)
+        # Detect precision nodes both from the current matched pose and from the
+        # forward control target. Looking only from target_idx can skip a nearby
+        # stopline/intersection that lies between matched_idx and target_idx.
+        in_precision_zone = (
+            self._is_precision_zone(route, self.matched_idx, lookahead_pts=lookahead_pts) or
+            self._is_precision_zone(route, target_idx, lookahead_pts=lookahead_pts)
+        )
         if in_precision_zone:
             precision_lookahead = max(float(self.graph.step_m), min(lookahead_m, float(precision_lookahead_m)))
             target_idx = self._find_waypoint_ahead(route, self.matched_idx, lookahead_m=precision_lookahead)
