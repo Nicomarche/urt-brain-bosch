@@ -334,6 +334,11 @@ TRACKING_VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
 # Una stopline real es casi horizontal; si la línea ajustada supera este ángulo
 # se descarta como falso positivo (líneas de lane oblicuas, reflejos, etc.).
 TRACKING_VISUAL_STOPLINE_MAX_ANGLE_DEG = 20.0
+# Máximo de frames consecutivos que la stopline puede ser visible antes de disparar
+# pass_event aunque no haya desaparecido. Cubre el caso donde el auto llega a la línea
+# y la cámara la sigue viendo porque el auto está encima de ella (missing_streak nunca sube).
+# Debe ser > TRACKING_VISUAL_STOPLINE_STABLE_FRAMES. Con 15fps, 6 frames ≈ 0.4s al llegar.
+TRACKING_VISUAL_STOPLINE_MAX_VISIBLE_STREAK = 6
 
 TRACKING_SPEED_FEEDBACK_TIMEOUT_S = 0.35
 TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50

@@ -1136,6 +1136,9 @@ Args:
         self.stopline_max_angle_deg = float(
             getattr(_config, "TRACKING_VISUAL_STOPLINE_MAX_ANGLE_DEG", 20.0) or 20.0
         )
+        self.stopline_max_visible_streak = int(
+            getattr(_config, "TRACKING_VISUAL_STOPLINE_MAX_VISIBLE_STREAK", 6) or 6
+        )
         self._stopline_visible_streak = 0
         self._stopline_missing_streak = 0
         self._stopline_stably_visible = False
@@ -3925,7 +3928,26 @@ Args:
                 self._stopline_missing_streak = 0
 
         pass_event = None
+        _max_streak = max(int(self.stopline_stable_frames) + 1, int(self.stopline_max_visible_streak))
         if (
+            found
+            and self._stopline_stably_visible
+            and isinstance(self._stopline_last_detection, dict)
+            and self._stopline_visible_streak >= _max_streak
+        ):
+            # El auto está encima de la línea: la cámara la sigue viendo pero el missing_streak
+            # nunca sube. Tratamos el exceso de streak como "pasó la línea".
+            pass_event = {
+                "distance_m": float(self._stopline_last_detection.get("distance_m", 0.0) or 0.0),
+                "confidence": float(self._stopline_last_detection.get("confidence", 0.0) or 0.0),
+                "visible_frames": int(self._stopline_visible_streak),
+                "triggered_by": "max_streak",
+            }
+            self._stopline_stably_visible = False
+            self._stopline_visible_streak = 0
+            self._stopline_missing_streak = 0
+            self._stopline_last_detection = None
+        elif (
             not found
             and self._stopline_stably_visible
             and isinstance(self._stopline_last_detection, dict)
@@ -3935,6 +3957,7 @@ Args:
                 "distance_m": float(self._stopline_last_detection.get("distance_m", 0.0) or 0.0),
                 "confidence": float(self._stopline_last_detection.get("confidence", 0.0) or 0.0),
                 "visible_frames": int(self._stopline_visible_streak),
+                "triggered_by": "missing_streak",
             }
             self._stopline_stably_visible = False
             self._stopline_visible_streak = 0
