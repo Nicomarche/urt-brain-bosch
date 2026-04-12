@@ -295,6 +295,22 @@ TRACKING_STEER_SIGN_DR = 1.0
 # Empezar con 0.7 y ajustar: si el DR gira más rápido que el auto real → bajar.
 TRACKING_STEER_LAG_ALPHA = 1.0
 
+# Yaw estimation EKF — fuses IMU absolute heading with the kinematic (bicycle) yaw rate.
+# Kalman gain:  K = P / (P + R)
+# Measurement noise:  R = R_STRAIGHT + R_STEER_K × steer_rad²
+#   steer ≈  0° → R ≈ R_STRAIGHT (small)  → K ≈ 1  → trust IMU fully
+#   steer ≈ 25° → R ≈ 0.005 + 50×0.19 ≈ 9.7 rad²  → K ≈ 0  → ignore IMU, use kinematics
+# Replaces the hard _IMU_STEER_INHIBIT_DEG cutoff with a smooth, principled transition.
+#
+# Tuning guide:
+#   R_STRAIGHT:  increase if IMU is noisy when straight (vibration, mag interference)
+#   R_STEER_K:   increase if heading drifts during turns (servo EMI strong on your unit)
+#   Q:           increase if kinematic model drifts fast (encoder slip, steer inaccuracy)
+TRACKING_YAW_EKF_Q          = 1e-4   # process noise [rad²/s] — kinematic drift rate
+TRACKING_YAW_EKF_R_STRAIGHT = 0.005  # IMU noise [rad²] when straight (≈ 4° std dev)
+TRACKING_YAW_EKF_R_STEER_K  = 50.0   # R grows by this per rad² of steering angle
+TRACKING_YAW_EKF_P_INIT     = 0.5    # initial covariance [rad²] — high = trust first IMU
+
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.18

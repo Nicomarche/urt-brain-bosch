@@ -69,6 +69,12 @@ try:
     # Models the servo actuator delay (time for wheels to reach commanded angle).
     # 1.0 = instant (no lag), 0.0 = never responds. Good starting value: 0.5–0.8.
     _STEER_LAG_ALPHA   = float(getattr(cfg, "TRACKING_STEER_LAG_ALPHA", 1.0) or 1.0)
+    # Yaw EKF: fuse IMU absolute heading with kinematic yaw rate.
+    # K = P / (P + R), R = R_STRAIGHT + R_STEER_K * steer_rad²
+    _YAW_EKF_Q          = float(getattr(cfg, "TRACKING_YAW_EKF_Q",           1e-4) or 1e-4)
+    _YAW_EKF_R_STRAIGHT = float(getattr(cfg, "TRACKING_YAW_EKF_R_STRAIGHT",  0.005) or 0.005)
+    _YAW_EKF_R_STEER_K  = float(getattr(cfg, "TRACKING_YAW_EKF_R_STEER_K",  50.0) or 50.0)
+    _YAW_EKF_P_INIT     = float(getattr(cfg, "TRACKING_YAW_EKF_P_INIT",      0.5)  or 0.5)
     _CAMERA_LATERAL_CORRECTION_GAIN = getattr(
         cfg, "TRACKING_CAMERA_LATERAL_CORRECTION_GAIN", 0.35
     )
@@ -162,6 +168,10 @@ except Exception:
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
     _STEER_LAG_ALPHA   = 1.0
+    _YAW_EKF_Q          = 1e-4
+    _YAW_EKF_R_STRAIGHT = 0.005
+    _YAW_EKF_R_STEER_K  = 50.0
+    _YAW_EKF_P_INIT     = 0.5
     _CAMERA_LATERAL_CORRECTION_GAIN = 0.18
     _CAMERA_LATERAL_CORRECTION_MAX_M = 0.02
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
@@ -739,6 +749,7 @@ class threadTracking(ThreadWithStop):
         )
         self._last_steer_rad = 0.0     # latest steering angle in radians (math convention)
         self._steer_filtered_rad = 0.0 # lag-filtered steer angle used by DR
+        self._yaw_ekf_p = _YAW_EKF_P_INIT  # EKF heading covariance (rad²)
         # Location sender → dashboard map display
         self._loc_sender = messageHandlerSender(queuesList, Location)
         self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
@@ -1274,31 +1285,30 @@ class threadTracking(ThreadWithStop):
                     else:
                         print(_msg)
                 else:
-                    # Subsequent IMU messages: use as absolute heading reference,
-                    # same as the reference repo's `self.yaw = imu.yaw`.
-                    # Rate-limited to at most _MAX_PHYSICAL_YAW_RATE_RADS × dt_imu
-                    # to reject servo-EMI step spikes (magnetometer interference
-                    # when steering angle changes sharply).
+                    # Subsequent IMU messages: EKF correction of heading.
                     #
-                    # SERVO EMI INHIBIT: at large steering angles the servo's
-                    # static magnetic field creates a sustained bias in the
-                    # BNO055 magnetometer.  Applying the absolute correction
-                    # during those frames pulls _last_yaw_rad toward the biased
-                    # reading instead of the true heading, accelerating drift.
-                    # When |steer| >= _IMU_STEER_INHIBIT_DEG we skip the IMU
-                    # correction entirely; the bicycle model (below) provides
-                    # per-frame heading integration instead.
-                    _steer_abs_deg = abs(math.degrees(self._last_steer_rad))
-                    if _steer_abs_deg < _IMU_STEER_INHIBIT_DEG:
-                        yaw_imu = yaw_raw_rad + self._yaw_offset
-                        dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
-                        delta = yaw_imu - self._last_yaw_rad
-                        while delta > math.pi:
-                            delta -= 2.0 * math.pi
-                        while delta < -math.pi:
-                            delta += 2.0 * math.pi
-                        max_delta = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                        self._last_yaw_rad += max(-max_delta, min(max_delta, delta))
+                    # Replaces the hard steer-inhibit cutoff with a soft Kalman
+                    # gain: K = P / (P + R), where R grows with steering angle²
+                    # because the BNO055 magnetometer is biased by servo EMI at
+                    # large steer.  Result:
+                    #   steer ≈ 0°  → R ≈ R_STRAIGHT (small) → K ≈ 1 → trust IMU
+                    #   steer ≈ 25° → R ≈ 10 rad²   (large) → K ≈ 0 → trust kinematics
+                    # The transition is smooth, not a hard cutoff.
+                    yaw_imu = yaw_raw_rad + self._yaw_offset
+                    dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
+                    innov = yaw_imu - self._last_yaw_rad
+                    while innov > math.pi:
+                        innov -= 2.0 * math.pi
+                    while innov < -math.pi:
+                        innov += 2.0 * math.pi
+                    # Rate-limit innovation to reject servo-EMI step spikes
+                    max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                    innov = max(-max_innov, min(max_innov, innov))
+                    # Kalman gain: R grows with steer² → IMU less reliable when turning
+                    R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
+                    K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
+                    self._last_yaw_rad += K * innov
+                    self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
 
                 self._imu_received = True
             except Exception:
@@ -1324,6 +1334,8 @@ class threadTracking(ThreadWithStop):
                         steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
+        # EKF process noise: covariance grows over time as kinematic drift accumulates
+        self._yaw_ekf_p = min(self._yaw_ekf_p + _YAW_EKF_Q * dr_dt, 1.0)
 
         # ---- Camera-based yaw correction (soft blend toward camera estimate).
         # Apply it after the DR step so the correction updates heading only, without

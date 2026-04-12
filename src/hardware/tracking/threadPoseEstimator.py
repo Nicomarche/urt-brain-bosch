@@ -25,6 +25,10 @@ from src.hardware.tracking.threadTracking import (
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M,
     _VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S,
     _WHEELBASE_M,
+    _YAW_EKF_P_INIT,
+    _YAW_EKF_Q,
+    _YAW_EKF_R_STRAIGHT,
+    _YAW_EKF_R_STEER_K,
     threadTracking,
 )
 
@@ -275,17 +279,24 @@ class threadPoseEstimator(threadTracking):
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
                 else:
-                    steer_abs_deg = abs(math.degrees(self._last_steer_rad))
-                    if steer_abs_deg < _IMU_STEER_INHIBIT_DEG:
-                        yaw_imu = yaw_raw_rad + self._yaw_offset
-                        dt_imu = (now - prev_imu_t) if prev_imu_t is not None else 0.05
-                        delta = yaw_imu - self._last_yaw_rad
-                        while delta > math.pi:
-                            delta -= 2.0 * math.pi
-                        while delta < -math.pi:
-                            delta += 2.0 * math.pi
-                        max_delta = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                        self._last_yaw_rad += max(-max_delta, min(max_delta, delta))
+                    # EKF correction: fuse IMU absolute heading with kinematic prediction.
+                    # R scales with steer²: large steer → servo EMI biases magnetometer
+                    # → kinematic model trusted more. Smooth transition, no hard cutoff.
+                    yaw_imu = yaw_raw_rad + self._yaw_offset
+                    dt_imu = (now - prev_imu_t) if prev_imu_t is not None else 0.05
+                    innov = yaw_imu - self._last_yaw_rad
+                    while innov > math.pi:
+                        innov -= 2.0 * math.pi
+                    while innov < -math.pi:
+                        innov += 2.0 * math.pi
+                    # Rate-limit innovation to reject servo-EMI step spikes
+                    max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                    innov = max(-max_innov, min(max_innov, innov))
+                    # Kalman gain: R grows with steer² → IMU less reliable when turning
+                    R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
+                    K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
+                    self._last_yaw_rad += K * innov
+                    self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
                 self._imu_received = True
             except Exception:
                 pass
@@ -309,6 +320,8 @@ class threadPoseEstimator(threadTracking):
         )
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
+        # EKF process noise: covariance grows over time as kinematic drift accumulates
+        self._yaw_ekf_p = min(self._yaw_ekf_p + _YAW_EKF_Q * dr_dt, 1.0)
         raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
 
         route_context, _, _ = self.route_context_buffer.read_latest(with_metadata=True)
