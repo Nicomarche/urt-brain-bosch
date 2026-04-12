@@ -4057,8 +4057,9 @@ Args:
         if use_route_tracking:
             ts = self._tracking_state
             if ts is not None and getattr(ts, "initialized", False):
+                speed_value = self._current_speed if float(getattr(self, "_current_speed", 0.0) or 0.0) > 0.0 else self.base_speed
                 steering = self._compute_lateral_control(
-                    0, 0, 0,
+                    0, 0, speed_value,
                     speed_cap=speed_cap,
                 )
                 hold_speed = float(self.min_speed)
@@ -6662,16 +6663,29 @@ Args:
             )
             control_heading = float(heading)
             _in_curve = str(getattr(self, "_curve_state", "STRAIGHT")) != "STRAIGHT"
+            _planner_curve_takeover_allowed = bool(
+                _planner_priority_active and
+                _in_curve and
+                not _lane_measurement_reliable
+            )
             if (
                 ts is not None and
                 getattr(ts, 'initialized', False) and
                 _imu_ready and
                 _planner_priority_active and
                 direct_error_source in {"single_line", "blind_route"} and
-                not _in_curve
+                (not _in_curve or _planner_curve_takeover_allowed)
             ):
                 path_heading = float(getattr(ts, "heading_rad", control_heading))
                 blend = 0.75 if direct_error_source == "single_line" else 1.0
+                if (
+                    direct_error_source == "single_line" and
+                    _planner_curve_takeover_allowed
+                ):
+                    blend = max(
+                        blend,
+                        float(getattr(_config, "TRACKING_INTERSECTION_SINGLE_LINE_BLEND", 0.9) or 0.9),
+                    )
                 control_heading = ((1.0 - blend) * float(heading)) + (blend * path_heading)
                 self._last_planner_route_blend = float(blend)
                 self._last_planner_route_blend_source = str(direct_error_source)
@@ -6681,7 +6695,7 @@ Args:
                 _imu_ready and
                 _planner_priority_active and
                 direct_error_source == "two_line" and
-                not _in_curve
+                (not _in_curve or _planner_curve_takeover_allowed)
             ):
                 blend = self._planner_two_line_takeover_weight(nav_ctx)
                 if blend > 1e-4:
