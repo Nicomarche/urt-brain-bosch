@@ -1024,18 +1024,6 @@
     {
       "label": "",
       "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 115,
-      "imgX": 2283.3459119496856,
-      "imgY": 384.02515723270443,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
       "intersectionId": "intersection_1",
       "controlId": "",
       "parkingSpotId": "",
@@ -1428,6 +1416,18 @@
       "imgX": 2661.962264150943,
       "imgY": 1736.2264150943395,
       "type": 0
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 154,
+      "imgX": 2261.710691823899,
+      "imgY": 373.20754716981133,
+      "type": 11
     }
   ],
   "edges": [
@@ -2347,26 +2347,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 130,
-      "source": 112,
-      "target": 115
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 131,
-      "source": 115,
-      "target": 64
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 134,
       "source": 46,
       "target": 130
@@ -2640,10 +2620,30 @@
       "id": 161,
       "source": 153,
       "target": 75
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 162,
+      "source": 112,
+      "target": 154
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 163,
+      "source": 154,
+      "target": 64
     }
   ],
-  "nextNodeId": 154,
-  "nextEdgeId": 162,
+  "nextNodeId": 155,
+  "nextEdgeId": 164,
   "imgW": 3036,
   "imgH": 2580,
   "metersPerPixel": 0.0016837326307060833,
