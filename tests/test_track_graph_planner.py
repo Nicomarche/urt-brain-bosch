@@ -7,6 +7,9 @@ from src.hardware.tracking.trackGraph import TrackGraph
 GRAPHML_PATH = os.path.abspath(
     os.path.join(os.path.dirname(__file__), '..', 'Track GraphML File.graphml')
 )
+TRACK_EDITOR_SAVE_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'Track Editor Save.json')
+)
 
 
 class TrackGraphPlannerTests(unittest.TestCase):
@@ -52,8 +55,16 @@ class TrackGraphPlannerTests(unittest.TestCase):
 
         self.assertGreater(route.waypoints.shape[0], 0)
         self.assertIn("meters_per_pixel", route.map_metadata)
+        self.assertIn("image_width_px", route.map_metadata)
         self.assertGreater(len(route.available_destinations), 0)
         self.assertEqual(len(route.wp_semantic_types), route.waypoints.shape[0])
+
+    def test_track_editor_save_can_be_used_as_semantics_source(self):
+        graph = TrackGraph(GRAPHML_PATH, step_m=0.10, semantics_path=TRACK_EDITOR_SAVE_PATH)
+
+        self.assertEqual(graph.map_metadata.get("image_width_px"), 3036)
+        self.assertEqual(graph.map_metadata.get("image_height_px"), 2580)
+        self.assertGreater(len(graph.get_available_destinations()), 0)
 
     def test_localisation_roundtrip_uses_map_frame_bounds(self):
         start_id = self.reference_ids[0]

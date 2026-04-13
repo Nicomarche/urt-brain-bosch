@@ -56,6 +56,9 @@ class TrackSemantics:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
 
+        if isinstance(data.get("semantics"), dict):
+            data = dict(data.get("semantics") or {})
+
         self.loaded = True
         self.version = int(data.get("version", 1) or 1)
         self.map_metadata = dict(data.get("map_metadata") or {})
@@ -335,4 +338,3 @@ class TrackSemantics:
         if not closed_loop:
             return []
         return list(range(start_idx, len(node_ids))) + list(range(0, end_idx + 1))
-

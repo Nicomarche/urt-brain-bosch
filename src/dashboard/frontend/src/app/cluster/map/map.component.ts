@@ -27,12 +27,11 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import { CommonModule } from '@angular/common';
-import { Component, ElementRef, HostListener, Input, ViewChild } from '@angular/core';
+import { Component, ElementRef, Input, ViewChild } from '@angular/core';
 import { Subscription } from 'rxjs';
 
 import { WebSocketService } from '../../webSocket/web-socket.service';
 import { ClusterService } from '../cluster.service';
-import { MapCursorComponent } from './map-cursor/map-cursor.component';
 import { MapSemaphoreComponent } from './map-semaphore/map-semaphore.component';
 
 interface Semaphore {
@@ -73,10 +72,17 @@ interface MapNode {
   percentY: number;
 }
 
+interface SemaphoreMarker {
+  id: number;
+  state: string;
+  percentX: number;
+  percentY: number;
+}
+
 @Component({
   selector: 'app-map',
   standalone: true,
-  imports: [MapCursorComponent, MapSemaphoreComponent, CommonModule],
+  imports: [MapSemaphoreComponent, CommonModule],
   templateUrl: './map.component.html',
   styleUrl: './map.component.css'
 })
@@ -84,25 +90,18 @@ export class MapComponent {
   public trackWidthMeters = 20.67;
   public trackHeightMeters = 13.76;
   public mapImageSrc = '/assets/TrackPreview.jpg';
+  public mapAspectRatio = '3036 / 2580';
+  public mapImageWidthPx = 3036;
+  public mapImageHeightPx = 2580;
+  public pixelsPerMeter = 0;
+  public metersPerPixel = 0;
 
   @Input() cursorRotation: number = 0;
 
-  @ViewChild('imageElement') imageElementRef!: ElementRef<HTMLImageElement>;
   @ViewChild('imageContainer') imageContainerRef!: ElementRef<HTMLElement>;
 
   private mapX: number = 0;
   private mapY: number = 0;
-
-  private screenSize = { width: 100, height: 100 };
-  private mapSize: number = 500;
-  private mapWidth: number = 0;
-  private mapHeight: number = 0;
-
-  private cursorSize: number = 6;
-  private semaphoreSize: number = 3;
-
-  private semaphoreXOffset: number = 10;
-  private semaphoreYOffset: number = 1.45;
   private worldBounds: MapBounds = {
     xMin: 0,
     xMax: this.trackWidthMeters,
@@ -112,6 +111,7 @@ export class MapComponent {
   private yAxisInverted = true;
 
   public semaphores: Map<number, Semaphore> = new Map<number, Semaphore>();
+  public semaphoreMarkers: SemaphoreMarker[] = [];
   public routePoints: RoutePoint[] = [];
   public mapNodes: MapNode[] = [];
   public routeActive: boolean = false;
@@ -129,6 +129,7 @@ export class MapComponent {
   public currentNodeId: string = '';
   public upcomingNodeId: string = '';
   public lastManualGpsNodeId: string = '';
+  public hasLocation: boolean = false;
 
   private locationSubscription: Subscription | undefined;
   private semaphoresAndCarsSubscription: Subscription | undefined;
@@ -149,7 +150,7 @@ export class MapComponent {
         });
         this.mapX = point.x;
         this.mapY = point.y;
-        this.updateMap();
+        this.hasLocation = true;
       },
     );
 
@@ -157,7 +158,7 @@ export class MapComponent {
       (message) => {
         const recv = message.value;
         this.semaphores.set(recv.id, { x: recv.x, y: recv.y, state: recv.state });
-        this.updateMap();
+        this.rebuildSemaphoreMarkers();
       },
     );
 
@@ -233,7 +234,7 @@ export class MapComponent {
         this.nextSemanticSummary = `Próximo: ${nextSemanticLabel}`;
         this.relocalizationSummary = `Reloc: ${relocalization}${relocalizationSource}`;
 
-        this.updateMap();
+        this.rebuildSemaphoreMarkers();
       },
     );
 
@@ -242,8 +243,6 @@ export class MapComponent {
         this.currentDrivingMode = String(value ?? '');
       },
     );
-
-    this.updateMap();
   }
 
   ngOnDestroy() {
@@ -262,113 +261,16 @@ export class MapComponent {
     this.webSocketService.disconnectSocket();
   }
 
-  @HostListener('window:resize')
-  onWindowResize(): void {
-    this.updateMap();
-  }
-
-  onLoadTrack(image: HTMLImageElement): void {
-    const imageContainer = document.getElementById('map-track-image-container') as HTMLElement;
-    if (imageContainer) {
-      imageContainer.style.width = `${this.screenSize.width}%`;
-      imageContainer.style.height = `${this.screenSize.height}%`;
-    }
-
-    this.mapWidth = image.width;
-    this.mapHeight = image.height;
-
-    const map = document.getElementById('map-track-image') as HTMLElement;
-    const overlay = document.getElementById('map-route-overlay') as HTMLElement;
-    if (map) {
-      map.style.width = `${this.mapSize}%`;
-      map.style.height = 'auto';
-      this.mapWidth = this.mapSize;
-    }
-    if (overlay) {
-      overlay.style.width = `${this.mapSize}%`;
-    }
-  }
-
-  onLoadCursor(): void {
-    const cursor = document.getElementById('map-cursor') as HTMLElement;
-    if (cursor) {
-      cursor.style.width = `${this.cursorSize}%`;
-      cursor.style.height = 'auto';
-    }
-  }
-
-  onLoadSemaphore(id: number): void {
-    const semaphore = document.getElementById('map-semaphore' + id) as HTMLElement;
-    if (semaphore) {
-      semaphore.style.position = 'absolute';
-      semaphore.style.width = `${this.semaphoreSize}%`;
-      semaphore.style.height = 'auto';
-      this.updateMap();
-    }
-  }
-
-  updateMap(): void {
-    const map = document.getElementById('map-track-image') as HTMLElement;
-    if (!map) {
-      return;
-    }
-
-    let imageContainerHeight = 0;
-    if (this.imageContainerRef) {
-      const imgContainer = this.imageContainerRef.nativeElement;
-      const rect = imgContainer.getBoundingClientRect();
-      imageContainerHeight = rect.height;
-    }
-
-    if (this.imageElementRef) {
-      const image = this.imageElementRef.nativeElement;
-      this.mapWidth = this.mapSize;
-      if (imageContainerHeight > 0) {
-        this.mapHeight = (100 * image.height) / imageContainerHeight;
-      }
-    }
-
-    const top = (this.mapY * this.mapHeight) / 100 - this.mapHeight - (this.screenSize.height / 2 - this.mapHeight);
-    const left = (this.mapX * this.mapWidth) / 100 - this.mapWidth - (this.screenSize.width / 2 - this.mapWidth);
-
-    map.style.top = `${-top}%`;
-    map.style.left = `${-left}%`;
-
-    const overlay = document.getElementById('map-route-overlay') as HTMLElement;
-    if (overlay) {
-      overlay.style.top = `${-top}%`;
-      overlay.style.left = `${-left}%`;
-      overlay.style.width = `${this.mapSize}%`;
-      overlay.style.height = `${this.mapHeight}%`;
-    }
-
-    this.semaphores.forEach((value: Semaphore, key: number) => {
-      const semaphore = document.getElementById('map-semaphore' + key) as HTMLElement;
-      if (!semaphore) {
-        return;
-      }
-
-      const x = (value.x * 100 / this.trackWidthMeters);
-      const y = (value.y * 100 / this.trackHeightMeters);
-
-      const topNew = (y * this.mapHeight) / 100;
-      const leftNew = (x * this.mapWidth) / 100;
-
-      semaphore.style.top = `${(-top - this.semaphoreXOffset) + topNew}%`;
-      semaphore.style.left = `${(-left - this.semaphoreYOffset) + leftNew}%`;
-    });
-  }
-
   onMapClick(event: MouseEvent): void {
     if (this.isAutoMode) {
       return;
     }
-    if (!this.imageElementRef) {
+    if (!this.imageContainerRef) {
       return;
     }
 
-    const map = this.imageElementRef.nativeElement;
-    const rect = map.getBoundingClientRect();
+    const stage = this.imageContainerRef.nativeElement;
+    const rect = stage.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) {
       return;
     }
@@ -454,6 +356,17 @@ export class MapComponent {
       };
     }
     this.yAxisInverted = Boolean(mapMetadata.y_axis_inverted ?? true);
+    const imageWidthPx = Number(mapMetadata.image_width_px ?? this.mapImageWidthPx);
+    const imageHeightPx = Number(mapMetadata.image_height_px ?? this.mapImageHeightPx);
+    if (imageWidthPx > 0 && imageHeightPx > 0) {
+      this.mapImageWidthPx = imageWidthPx;
+      this.mapImageHeightPx = imageHeightPx;
+      this.mapAspectRatio = `${imageWidthPx} / ${imageHeightPx}`;
+    }
+    const ppm = Number(mapMetadata.pixels_per_meter ?? 0);
+    const mpp = Number(mapMetadata.meters_per_pixel ?? 0);
+    this.pixelsPerMeter = Number.isFinite(ppm) && ppm > 0 ? ppm : 0;
+    this.metersPerPixel = Number.isFinite(mpp) && mpp > 0 ? mpp : 0;
   }
 
   private toMapPercent(point: RoutePoint): RoutePoint {
@@ -523,6 +436,21 @@ export class MapComponent {
     };
   }
 
+  private rebuildSemaphoreMarkers(): void {
+    this.semaphoreMarkers = Array.from(this.semaphores.entries()).map(([id, value]) => {
+      const percent = this.toMapPercent({
+        x: Number(value.x),
+        y: Number(value.y),
+      });
+      return {
+        id,
+        state: String(value.state ?? ''),
+        percentX: percent.x,
+        percentY: percent.y,
+      };
+    });
+  }
+
   public get isAutoMode(): boolean {
     return this.currentDrivingMode === 'auto';
   }
@@ -532,6 +460,20 @@ export class MapComponent {
       return 'Auto: click en un nodo para fijar GPS manual';
     }
     return 'Click en el mapa para fijar destino';
+  }
+
+  public get mapPoseTransform(): string {
+    return `translate(${this.mapX} ${this.mapY}) rotate(${this.cursorRotation} 0 0)`;
+  }
+
+  public get mapScaleSummary(): string {
+    if (this.pixelsPerMeter > 0) {
+      return `Escala editor: ${this.pixelsPerMeter.toFixed(2)} px/m`;
+    }
+    if (this.metersPerPixel > 0) {
+      return `Escala editor: ${this.metersPerPixel.toFixed(6)} m/px`;
+    }
+    return '';
   }
 
   public isCurrentNode(node: MapNode): boolean {

@@ -73,7 +73,10 @@ class threadNavigationPlanner(ThreadWithStop):
             _here = os.path.dirname(os.path.abspath(__file__))
             _root = os.path.join(_here, "..", "..", "..")
             semantics_path = os.path.normpath(os.path.join(_root, semantics_path))
-        if not os.path.exists(semantics_path):
+        preferred_editor_save = os.path.join(os.path.dirname(semantics_path), "Track Editor Save.json")
+        if os.path.exists(preferred_editor_save):
+            semantics_path = preferred_editor_save
+        elif not os.path.exists(semantics_path):
             alt_name = os.path.join(os.path.dirname(semantics_path), "Track Semantics.json")
             semantics_path = alt_name if os.path.exists(alt_name) else None
 

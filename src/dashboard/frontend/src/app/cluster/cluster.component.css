@@ -96,14 +96,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     height: 45%;
 }
 
-.cluster-map { 
-    position: absolute;
-    top: 3%;
-    left: 20%;
-    width: 60%;
-    height: 47%;
-}
-
 .cluster-digital-container { 
     display: flex;
     position: absolute;

@@ -26,15 +26,19 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
 
-<div class="map-container">
-  <div class="map-track-container">
-    <div class="map-hud">
-      <span class="map-hud-title">Navigator</span>
-      <span class="map-hud-status">{{ navigationSummary }}</span>
-      <span class="map-hud-detail">{{ nextSemanticSummary }}</span>
-      <span class="map-hud-detail">{{ relocalizationSummary }}</span>
-      <span class="map-hud-detail" *ngIf="routeQueueSummary">Cola: {{ routeQueueSummary }}</span>
-      <div class="map-hud-controls" *ngIf="availableDestinations.length > 0">
+<div class="map-shell">
+  <div class="map-toolbar">
+    <div class="map-toolbar-copy">
+      <span class="map-toolbar-title">Navigator</span>
+      <span class="map-toolbar-status">{{ navigationSummary }}</span>
+      <span class="map-toolbar-detail">{{ nextSemanticSummary }}</span>
+      <span class="map-toolbar-detail">{{ relocalizationSummary }}</span>
+      <span class="map-toolbar-detail" *ngIf="routeQueueSummary">Cola: {{ routeQueueSummary }}</span>
+    </div>
+
+    <div class="map-toolbar-actions">
+      <span class="map-toolbar-scale" *ngIf="mapScaleSummary">{{ mapScaleSummary }}</span>
+      <div class="map-toolbar-controls" *ngIf="availableDestinations.length > 0">
         <select class="map-destination-select" [value]="selectedDestinationId" (change)="onDestinationChange($event)">
           <option *ngFor="let destination of availableDestinations" [value]="destination.id">
             {{ destination.label }}
@@ -42,67 +46,83 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
         </select>
         <button class="map-destination-btn" type="button" (click)="navigateToSelectedDestination()">Ir</button>
       </div>
-      <span class="map-hud-hint">{{ mapHint }}</span>
-    </div>
-
-    <div #imageContainer id="map-track-image-container" (click)="onMapClick($event)">
-      <img [src]="mapImageSrc" id="map-track-image" #imageElement (load)="onLoadTrack(imageElement)" alt="BFMC Track" />
-      <svg
-        id="map-route-overlay"
-        class="map-route-overlay"
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-      >
-        <polyline
-          *ngIf="routePoints.length > 1"
-          class="map-route-polyline"
-          [attr.points]="routePolylinePoints"
-        />
-        <circle
-          *ngIf="destinationPoint"
-          class="map-destination-marker"
-          [attr.cx]="destinationPercentX"
-          [attr.cy]="destinationPercentY"
-          r="1.5"
-        />
-        <g
-          *ngFor="let node of mapNodes"
-          class="map-node-group"
-          [class.map-node-group--auto]="isAutoMode"
-          [class.map-node-group--current]="isCurrentNode(node)"
-          [class.map-node-group--upcoming]="isUpcomingNode(node)"
-          [class.map-node-group--manual]="isManualGpsNode(node)"
-          (click)="onNodeClick(node, $event)"
-        >
-          <circle
-            class="map-node-dot"
-            [attr.cx]="node.percentX"
-            [attr.cy]="node.percentY"
-            [attr.r]="nodeRadius(node)"
-          />
-          <circle
-            *ngIf="isCurrentNode(node) || isUpcomingNode(node) || isManualGpsNode(node)"
-            class="map-node-ring"
-            [attr.cx]="node.percentX"
-            [attr.cy]="node.percentY"
-            [attr.r]="nodeRadius(node) + 0.8"
-          />
-          <text
-            *ngIf="isCurrentNode(node) || isUpcomingNode(node)"
-            class="map-node-label"
-            [attr.x]="node.percentX + 1.2"
-            [attr.y]="node.percentY - 1.2"
-          >
-            {{ node.node_id }}
-          </text>
-          <title>{{ nodeTooltip(node) }}</title>
-        </g>
-      </svg>
-    </div>
-
-    <div class="map-semaphores" *ngFor="let entry of semaphores | keyvalue">
-      <app-map-semaphore [id]="'map-semaphore' + entry.key" [state]="entry.value.state" (semaphoreLoaded)="onLoadSemaphore(entry.key)"/>
+      <span class="map-toolbar-hint">{{ mapHint }}</span>
     </div>
   </div>
-  <app-map-cursor id="map-cursor" (cursorLoaded)="onLoadCursor()" [cursorRotation]="cursorRotation" />
+
+  <div
+    #imageContainer
+    class="map-stage"
+    [style.aspect-ratio]="mapAspectRatio"
+    (click)="onMapClick($event)"
+  >
+    <img [src]="mapImageSrc" class="map-track-image" alt="BFMC Track" />
+
+    <svg
+      class="map-route-overlay"
+      viewBox="0 0 100 100"
+      preserveAspectRatio="none"
+    >
+      <polyline
+        *ngIf="routePoints.length > 1"
+        class="map-route-polyline"
+        [attr.points]="routePolylinePoints"
+      />
+
+      <circle
+        *ngIf="destinationPoint"
+        class="map-destination-marker"
+        [attr.cx]="destinationPercentX"
+        [attr.cy]="destinationPercentY"
+        r="1.4"
+      />
+
+      <g *ngIf="hasLocation" class="map-pose-group" [attr.transform]="mapPoseTransform">
+        <circle class="map-pose-core" cx="0" cy="0" r="1.15" />
+        <polygon class="map-pose-arrow" points="0,-2.5 1.55,1.55 0,0.8 -1.55,1.55" />
+      </g>
+
+      <g
+        *ngFor="let node of mapNodes"
+        class="map-node-group"
+        [class.map-node-group--auto]="isAutoMode"
+        [class.map-node-group--current]="isCurrentNode(node)"
+        [class.map-node-group--upcoming]="isUpcomingNode(node)"
+        [class.map-node-group--manual]="isManualGpsNode(node)"
+        (click)="onNodeClick(node, $event)"
+      >
+        <circle
+          class="map-node-dot"
+          [attr.cx]="node.percentX"
+          [attr.cy]="node.percentY"
+          [attr.r]="nodeRadius(node)"
+        />
+        <circle
+          *ngIf="isCurrentNode(node) || isUpcomingNode(node) || isManualGpsNode(node)"
+          class="map-node-ring"
+          [attr.cx]="node.percentX"
+          [attr.cy]="node.percentY"
+          [attr.r]="nodeRadius(node) + 1"
+        />
+        <text
+          *ngIf="isCurrentNode(node) || isUpcomingNode(node) || isManualGpsNode(node)"
+          class="map-node-label"
+          [attr.x]="node.percentX + 1.2"
+          [attr.y]="node.percentY - 1.1"
+        >
+          {{ node.node_id }}
+        </text>
+        <title>{{ nodeTooltip(node) }}</title>
+      </g>
+    </svg>
+
+    <div
+      *ngFor="let semaphore of semaphoreMarkers"
+      class="map-semaphore-item"
+      [style.left.%]="semaphore.percentX"
+      [style.top.%]="semaphore.percentY"
+    >
+      <app-map-semaphore [state]="semaphore.state" />
+    </div>
+  </div>
 </div>

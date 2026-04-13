@@ -130,7 +130,7 @@ class TrackGraph:
         self._load(graphml_path)
         if semantics_path is None:
             base_dir = os.path.dirname(os.path.abspath(graphml_path))
-            for candidate_name in ("track_semantics.json", "Track Semantics.json"):
+            for candidate_name in ("Track Editor Save.json", "track_semantics.json", "Track Semantics.json"):
                 candidate = os.path.join(base_dir, candidate_name)
                 if os.path.exists(candidate):
                     semantics_path = candidate

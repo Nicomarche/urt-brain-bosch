@@ -38,11 +38,12 @@ import { CommonModule } from '@angular/common'
 import * as CryptoJS from 'crypto-js';
 import { ClusterService } from './cluster/cluster.service';
 import { ConsoleComponent } from './console/console.component';
+import { MapComponent } from './cluster/map/map.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, ClusterComponent, TableComponent, StateSwitchComponent, SettingsComponent, ConsoleComponent, FormsModule],
+  imports: [CommonModule, ClusterComponent, TableComponent, StateSwitchComponent, SettingsComponent, ConsoleComponent, MapComponent, FormsModule],
   templateUrl: './app.component.html',
   styleUrl: './app.component.css'
 })

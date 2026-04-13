@@ -32,7 +32,6 @@ import { WebSocketService} from '../webSocket/web-socket.service'
 
 import { SpeedometerComponent } from './speedometer/speedometer.component';
 import { BatteryLevelComponent } from './battery-level/battery-level.component';
-import { MapComponent } from './map/map.component';
 import { CarComponent } from './car/car.component';
 import { InstantConsumptionComponent } from './instant-consumption/instant-consumption.component';
 import { StateSwitchComponent } from './state-switch/state-switch.component';
@@ -50,7 +49,7 @@ import { provideProtractorTestingSupport } from '@angular/platform-browser';
 @Component({
   selector: 'app-cluster',
   standalone: true,
-  imports: [SpeedometerComponent, BatteryLevelComponent, MapComponent, 
+  imports: [SpeedometerComponent, BatteryLevelComponent,
             CarComponent, InstantConsumptionComponent, StateSwitchComponent,
             KlSwitchComponent, SteeringComponent, LiveCameraComponent,
             WarningLightComponent, HardwareDataComponent, RecordComponent,
