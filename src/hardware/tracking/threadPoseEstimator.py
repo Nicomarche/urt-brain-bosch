@@ -31,6 +31,8 @@ from src.hardware.tracking.threadTracking import (
     _YAW_EKF_R_STEER_K,
     threadTracking,
 )
+from src.utils.messages.allMessages import Localisation
+from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 
 
 class threadPoseEstimator(threadTracking):
@@ -54,6 +56,9 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
         self._last_camera_lateral_correction_monotonic = 0.0
+        self._localisation_fix_sub = messageHandlerSubscriber(
+            queuesList, Localisation, "lastOnly", subscribe=True
+        )
 
     @staticmethod
     def _to_path_update(route_context: RouteContext | None):
@@ -171,11 +176,10 @@ class threadPoseEstimator(threadTracking):
         ):
             return False, semantic_match
 
-        _, _, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(route_context.matched_pose.x),
             float(route_context.matched_pose.y),
-            current_yaw,
+            float(route_context.matched_pose.yaw),
         )
         self._last_semantic_relocalization_t = float(now)
         return True, semantic_match
@@ -217,6 +221,41 @@ class threadPoseEstimator(threadTracking):
         correction_m = math.hypot(float(route_context.matched_pose.x) - float(old_x), float(route_context.matched_pose.y) - float(old_y))
         source = f"stopline_visual:{stopline_observation.expected_node_id or 'matched_pose'}"
         return True, (source, float(correction_m))
+
+    def _apply_localisation_fix(self, current_yaw: float):
+        if self._dr is None or self._graph is None:
+            return False, None
+        payload = self._localisation_fix_sub.receive()
+        if not isinstance(payload, dict):
+            return False, None
+
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+
+        old_x, old_y, _ = self._dr.get_state()
+        pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
+        if pose is None:
+            return False, None
+
+        x, y, yaw = pose
+        self._dr.reset(float(x), float(y), float(yaw))
+        self._last_yaw_rad = float(yaw)
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
+
+        default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
+        source = str(meta.get("source") or payload.get("source") or default_source)
+        resolved_node_id = self._graph.resolve_node_id(meta.get("node_id") or payload.get("node_id"))
+        if resolved_node_id is not None:
+            source = f"{source}:{resolved_node_id}"
+        error_m = math.hypot(float(x) - float(old_x), float(y) - float(old_y))
+        return True, {
+            "mode": "gps_fix",
+            "source": source,
+            "error_m": float(error_m),
+        }
 
     def _build_pose_estimate(
         self,
@@ -334,43 +373,60 @@ class threadPoseEstimator(threadTracking):
         if not isinstance(stopline_observation, StoplineObservation):
             stopline_observation = None
 
-        yaw_correction_rad = self._apply_camera_yaw_hint(raw_yaw, lane_observation)
-        if abs(yaw_correction_rad) > 1e-9:
+        gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw)
+        if gps_relocalized:
             raw_x, raw_y, raw_yaw = self._dr.get_state()
+            raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
+            yaw_correction_rad = 0.0
+            raw_lateral_error_m = 0.0
+            lane_relocalization_m = 0.0
+            lane_measurement_reliable = False
+            semantic_relocalized = False
+            semantic_match = None
+            stopline_relocalized = False
+            stopline_match = None
+        else:
+            yaw_correction_rad = self._apply_camera_yaw_hint(raw_yaw, lane_observation)
+            if abs(yaw_correction_rad) > 1e-9:
+                raw_x, raw_y, raw_yaw = self._dr.get_state()
 
-        self._consume_sign_observation(now)
+            self._consume_sign_observation(now)
 
-        raw_lateral_error_m = 0.0
-        if route_context is not None:
-            raw_lateral_error_m = self._signed_lateral_error_to_path(
+            raw_lateral_error_m = 0.0
+            if route_context is not None:
+                raw_lateral_error_m = self._signed_lateral_error_to_path(
+                    raw_x,
+                    raw_y,
+                    route_context.matched_pose.x,
+                    route_context.matched_pose.y,
+                    route_context.matched_pose.yaw,
+                )
+
+            raw_x, raw_y, raw_yaw, lane_relocalization_m, lane_measurement_reliable = self._apply_lane_observation(
+                route_context,
+                lane_observation,
+                now,
                 raw_x,
                 raw_y,
-                route_context.matched_pose.x,
-                route_context.matched_pose.y,
-                route_context.matched_pose.yaw,
+                raw_yaw,
             )
 
-        raw_x, raw_y, raw_yaw, lane_relocalization_m, lane_measurement_reliable = self._apply_lane_observation(
-            route_context,
-            lane_observation,
-            now,
-            raw_x,
-            raw_y,
-            raw_yaw,
-        )
+            semantic_relocalized, semantic_match = self._apply_semantic_reset(route_context, now)
+            if semantic_relocalized:
+                raw_x, raw_y, raw_yaw = self._dr.get_state()
 
-        semantic_relocalized, semantic_match = self._apply_semantic_reset(route_context, now)
-        if semantic_relocalized:
-            raw_x, raw_y, raw_yaw = self._dr.get_state()
-
-        stopline_relocalized, stopline_match = self._apply_stopline_reset(route_context, stopline_observation, now)
-        if stopline_relocalized:
-            raw_x, raw_y, raw_yaw = self._dr.get_state()
+            stopline_relocalized, stopline_match = self._apply_stopline_reset(route_context, stopline_observation, now)
+            if stopline_relocalized:
+                raw_x, raw_y, raw_yaw = self._dr.get_state()
 
         relocalization_mode = "dead_reckoning"
         relocalization_source = "dead_reckoning"
         relocalization_error_m = 0.0
-        if stopline_relocalized and stopline_match is not None:
+        if gps_relocalized and isinstance(gps_match, dict):
+            relocalization_mode = str(gps_match.get("mode") or "gps_fix")
+            relocalization_source = str(gps_match.get("source") or "gps_localisation")
+            relocalization_error_m = float(gps_match.get("error_m") or 0.0)
+        elif stopline_relocalized and stopline_match is not None:
             relocalization_mode = "visual_stopline"
             relocalization_source, relocalization_error_m = stopline_match
         elif semantic_relocalized and semantic_match is not None:

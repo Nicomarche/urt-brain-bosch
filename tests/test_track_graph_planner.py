@@ -55,6 +55,47 @@ class TrackGraphPlannerTests(unittest.TestCase):
         self.assertGreater(len(route.available_destinations), 0)
         self.assertEqual(len(route.wp_semantic_types), route.waypoints.shape[0])
 
+    def test_localisation_roundtrip_uses_map_frame_bounds(self):
+        start_id = self.reference_ids[0]
+        start_pose = self.graph.get_node_pose(start_id)
+        default_yaw = 0.321
+
+        payload = self.graph.world_to_localisation_pose(
+            start_pose[0],
+            start_pose[1],
+            timestamp=12.5,
+        )
+        world_pose = self.graph.localisation_to_world_pose(payload, default_yaw=default_yaw)
+
+        self.assertIsNotNone(world_pose)
+        self.assertAlmostEqual(world_pose[0], start_pose[0], places=4)
+        self.assertAlmostEqual(world_pose[1], start_pose[1], places=4)
+        self.assertAlmostEqual(world_pose[2], default_yaw, places=4)
+
+    def test_localisation_manual_meta_can_recover_node_yaw(self):
+        start_id = self.reference_ids[0]
+        start_pose = self.graph.get_node_pose(start_id)
+
+        payload = self.graph.world_to_localisation_pose(
+            start_pose[0],
+            start_pose[1],
+            timestamp=12.5,
+        )
+        payload["meta"] = {"node_id": start_id, "manual": True}
+        world_pose = self.graph.localisation_to_world_pose(payload, default_yaw=0.0)
+
+        self.assertIsNotNone(world_pose)
+        self.assertAlmostEqual(world_pose[2], start_pose[2], places=4)
+
+    def test_map_nodes_include_pose_and_semantic_metadata(self):
+        map_nodes = self.graph.get_map_nodes()
+
+        self.assertEqual(len(map_nodes), len(self.graph.nodes))
+        self.assertIn("node_id", map_nodes[0])
+        self.assertIn("yaw", map_nodes[0])
+        self.assertIn("semantic_types", map_nodes[0])
+        self.assertTrue(any(node["is_start"] for node in map_nodes))
+
 
 if __name__ == "__main__":
     unittest.main()

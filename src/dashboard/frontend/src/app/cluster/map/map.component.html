@@ -42,11 +42,11 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
         </select>
         <button class="map-destination-btn" type="button" (click)="navigateToSelectedDestination()">Ir</button>
       </div>
-      <span class="map-hud-hint">Click en el mapa para fijar destino</span>
+      <span class="map-hud-hint">{{ mapHint }}</span>
     </div>
 
     <div #imageContainer id="map-track-image-container" (click)="onMapClick($event)">
-      <img src="/assets/Track.svg" id="map-track-image" #imageElement (load)="onLoadTrack(imageElement)" alt="BFMC Track" />
+      <img [src]="mapImageSrc" id="map-track-image" #imageElement (load)="onLoadTrack(imageElement)" alt="BFMC Track" />
       <svg
         id="map-route-overlay"
         class="map-route-overlay"
@@ -65,6 +65,38 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. -->
           [attr.cy]="destinationPercentY"
           r="1.5"
         />
+        <g
+          *ngFor="let node of mapNodes"
+          class="map-node-group"
+          [class.map-node-group--auto]="isAutoMode"
+          [class.map-node-group--current]="isCurrentNode(node)"
+          [class.map-node-group--upcoming]="isUpcomingNode(node)"
+          [class.map-node-group--manual]="isManualGpsNode(node)"
+          (click)="onNodeClick(node, $event)"
+        >
+          <circle
+            class="map-node-dot"
+            [attr.cx]="node.percentX"
+            [attr.cy]="node.percentY"
+            [attr.r]="nodeRadius(node)"
+          />
+          <circle
+            *ngIf="isCurrentNode(node) || isUpcomingNode(node) || isManualGpsNode(node)"
+            class="map-node-ring"
+            [attr.cx]="node.percentX"
+            [attr.cy]="node.percentY"
+            [attr.r]="nodeRadius(node) + 0.8"
+          />
+          <text
+            *ngIf="isCurrentNode(node) || isUpcomingNode(node)"
+            class="map-node-label"
+            [attr.x]="node.percentX + 1.2"
+            [attr.y]="node.percentY - 1.2"
+          >
+            {{ node.node_id }}
+          </text>
+          <title>{{ nodeTooltip(node) }}</title>
+        </g>
       </svg>
     </div>
 

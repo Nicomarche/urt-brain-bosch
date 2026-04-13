@@ -140,7 +140,6 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
 
 .map-route-overlay {
     position: absolute;
-    pointer-events: none;
     overflow: visible;
 }
 
@@ -151,6 +150,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     stroke-linecap: round;
     stroke-linejoin: round;
     filter: drop-shadow(0 0 0.5rem rgba(105, 240, 174, 0.55));
+    pointer-events: none;
 }
 
 .map-destination-marker {
@@ -158,6 +158,60 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     stroke: #fff4db;
     stroke-width: 0.35;
     filter: drop-shadow(0 0 0.5rem rgba(255, 184, 107, 0.65));
+    pointer-events: none;
+}
+
+.map-node-group {
+    pointer-events: auto;
+    cursor: default;
+}
+
+.map-node-group--auto {
+    cursor: pointer;
+}
+
+.map-node-dot {
+    fill: rgba(223, 234, 248, 0.88);
+    stroke: rgba(8, 16, 32, 0.95);
+    stroke-width: 0.25;
+    transition: fill 120ms ease, stroke 120ms ease, opacity 120ms ease;
+}
+
+.map-node-ring {
+    fill: none;
+    stroke: rgba(255, 255, 255, 0.92);
+    stroke-width: 0.22;
+    stroke-dasharray: 0.8 0.55;
+}
+
+.map-node-group--current .map-node-dot {
+    fill: #69f0ae;
+    stroke: #e8fff4;
+}
+
+.map-node-group--upcoming .map-node-dot {
+    fill: #68c6ff;
+    stroke: #ebf8ff;
+}
+
+.map-node-group--manual .map-node-dot {
+    fill: #ffb86b;
+    stroke: #fff4db;
+}
+
+.map-node-group--auto:hover .map-node-dot {
+    fill: #ffd36e;
+    stroke: #fff4db;
+}
+
+.map-node-label {
+    fill: #f6fbff;
+    font-size: 2.25px;
+    font-weight: 700;
+    paint-order: stroke;
+    stroke: rgba(8, 16, 32, 0.95);
+    stroke-width: 0.6px;
+    stroke-linejoin: round;
 }
 
 #map-cursor {

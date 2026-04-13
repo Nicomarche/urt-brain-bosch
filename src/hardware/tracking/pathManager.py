@@ -784,5 +784,6 @@ class PathManager:
             "route_source": update.route_source,
             "waypoint_mode_active": bool(update.waypoint_mode_active),
             "map_metadata": dict(update.map_metadata),
+            "map_nodes": self.graph.get_map_nodes(),
             "available_destinations": list(update.available_destinations),
         }

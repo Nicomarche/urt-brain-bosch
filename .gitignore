@@ -4,6 +4,8 @@ docs/build/
 __pycache__
 **/*.pyc
 /src/dashboard/frontend/node_modules
+src/dashboard/frontend/.angular/
+src/dashboard/frontend/dist/
 **/venv/
 aiserver/models/supercombo.onnx
 src/dashboard/frontend/.angular/cache/18.2.21/dashboard/.tsbuildinfo

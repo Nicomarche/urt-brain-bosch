@@ -31,6 +31,7 @@ import { Component, ElementRef, HostListener, Input, ViewChild } from '@angular/
 import { Subscription } from 'rxjs';
 
 import { WebSocketService } from '../../webSocket/web-socket.service';
+import { ClusterService } from '../cluster.service';
 import { MapCursorComponent } from './map-cursor/map-cursor.component';
 import { MapSemaphoreComponent } from './map-semaphore/map-semaphore.component';
 
@@ -45,10 +46,31 @@ interface RoutePoint {
   y: number;
 }
 
+interface MapBounds {
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+}
+
 interface DestinationOption {
   id: string;
   label: string;
   node_id: string;
+}
+
+interface MapNode {
+  id: string;
+  node_id: string;
+  x: number;
+  y: number;
+  yaw: number;
+  attr: number;
+  is_start: boolean;
+  label: string;
+  semantic_types: string[];
+  percentX: number;
+  percentY: number;
 }
 
 @Component({
@@ -61,6 +83,7 @@ interface DestinationOption {
 export class MapComponent {
   public trackWidthMeters = 20.67;
   public trackHeightMeters = 13.76;
+  public mapImageSrc = '/assets/TrackPreview.jpg';
 
   @Input() cursorRotation: number = 0;
 
@@ -80,9 +103,17 @@ export class MapComponent {
 
   private semaphoreXOffset: number = 10;
   private semaphoreYOffset: number = 1.45;
+  private worldBounds: MapBounds = {
+    xMin: 0,
+    xMax: this.trackWidthMeters,
+    yMin: 0,
+    yMax: this.trackHeightMeters,
+  };
+  private yAxisInverted = true;
 
   public semaphores: Map<number, Semaphore> = new Map<number, Semaphore>();
   public routePoints: RoutePoint[] = [];
+  public mapNodes: MapNode[] = [];
   public routeActive: boolean = false;
   public routePolylinePoints: string = '';
   public destinationPoint: RoutePoint | null = null;
@@ -94,18 +125,30 @@ export class MapComponent {
   public availableDestinations: DestinationOption[] = [];
   public selectedDestinationId: string = '';
   public routeQueueSummary: string = '';
+  public currentDrivingMode: string = '';
+  public currentNodeId: string = '';
+  public upcomingNodeId: string = '';
+  public lastManualGpsNodeId: string = '';
 
   private locationSubscription: Subscription | undefined;
   private semaphoresAndCarsSubscription: Subscription | undefined;
   private navigationSubscription: Subscription | undefined;
+  private drivingModeSubscription: Subscription | undefined;
 
-  constructor(private webSocketService: WebSocketService) { }
+  constructor(
+    private webSocketService: WebSocketService,
+    private clusterService: ClusterService,
+  ) { }
 
   ngOnInit() {
     this.locationSubscription = this.webSocketService.receiveLocation().subscribe(
       (message) => {
-        this.mapX = (parseFloat(message.value.x) * 100 / this.trackWidthMeters);
-        this.mapY = (100 - parseFloat(message.value.y) * 100 / this.trackHeightMeters);
+        const point = this.toMapPercent({
+          x: Number(message?.value?.x ?? 0),
+          y: Number(message?.value?.y ?? 0),
+        });
+        this.mapX = point.x;
+        this.mapY = point.y;
         this.updateMap();
       },
     );
@@ -123,6 +166,8 @@ export class MapComponent {
         const value = message?.value ?? message ?? {};
         this.routeActive = Boolean(value.route_active);
         this.applyMapMetadata(value.map_metadata);
+        this.currentNodeId = String(value.current_node_id ?? '');
+        this.upcomingNodeId = String(value.upcoming_node_id ?? '');
 
         this.routePoints = Array.isArray(value.route_points)
           ? value.route_points.map((point: any) => ({
@@ -151,6 +196,12 @@ export class MapComponent {
           this.destinationPoint = null;
         }
 
+        this.mapNodes = Array.isArray(value.map_nodes)
+          ? value.map_nodes
+              .map((node: any) => this.toMapNode(node))
+              .filter((node: MapNode | null): node is MapNode => node !== null)
+          : [];
+
         this.availableDestinations = Array.isArray(value.available_destinations)
           ? value.available_destinations.map((item: any) => ({
               id: String(item?.id ?? ''),
@@ -174,14 +225,21 @@ export class MapComponent {
         const maneuverLabel = value.maneuver_type || 'none';
         const nextSemanticLabel = value.next_semantic_label || value.next_semantic_type || 'sin evento';
         const relocalization = value.relocalization_mode || 'map_match';
+        const relocalizationSource = value.last_relocalization_source ? ` · ${value.last_relocalization_source}` : '';
         const progressPct = Math.round(Number(value.route_progress ?? value.progress ?? 0) * 100);
         this.navigationSummary = this.routeActive
           ? `Ruta ${destinationLabel} · ${maneuverLabel} · ${progressPct}%`
           : 'Mapa libre';
         this.nextSemanticSummary = `Próximo: ${nextSemanticLabel}`;
-        this.relocalizationSummary = `Reloc: ${relocalization}`;
+        this.relocalizationSummary = `Reloc: ${relocalization}${relocalizationSource}`;
 
         this.updateMap();
+      },
+    );
+
+    this.drivingModeSubscription = this.clusterService.drivingMode$.subscribe(
+      (value) => {
+        this.currentDrivingMode = String(value ?? '');
       },
     );
 
@@ -197,6 +255,9 @@ export class MapComponent {
     }
     if (this.navigationSubscription) {
       this.navigationSubscription.unsubscribe();
+    }
+    if (this.drivingModeSubscription) {
+      this.drivingModeSubscription.unsubscribe();
     }
     this.webSocketService.disconnectSocket();
   }
@@ -299,6 +360,9 @@ export class MapComponent {
   }
 
   onMapClick(event: MouseEvent): void {
+    if (this.isAutoMode) {
+      return;
+    }
     if (!this.imageElementRef) {
       return;
     }
@@ -311,10 +375,13 @@ export class MapComponent {
 
     const xRatio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
     const yRatio = Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height));
+    const localY = this.yAxisInverted
+      ? (1 - yRatio) * this.trackHeightMeters
+      : yRatio * this.trackHeightMeters;
 
     const destination = {
-      x: Number((xRatio * this.trackWidthMeters).toFixed(4)),
-      y: Number(((1 - yRatio) * this.trackHeightMeters).toFixed(4)),
+      x: Number((this.worldBounds.xMin + xRatio * this.trackWidthMeters).toFixed(4)),
+      y: Number((this.worldBounds.yMin + localY).toFixed(4)),
     };
 
     this.webSocketService.sendMessageToFlask(JSON.stringify({
@@ -323,6 +390,22 @@ export class MapComponent {
         mode: 'go_to',
         destinations: [destination],
       },
+    }));
+  }
+
+  onNodeClick(node: MapNode, event: MouseEvent): void {
+    if (!this.isAutoMode) {
+      return;
+    }
+    event.stopPropagation();
+    const fix = this.buildLocalisationFix(node);
+    if (fix === null) {
+      return;
+    }
+    this.lastManualGpsNodeId = node.node_id;
+    this.webSocketService.sendMessageToFlask(JSON.stringify({
+      Name: 'Localisation',
+      Value: fix,
     }));
   }
 
@@ -349,20 +432,135 @@ export class MapComponent {
       return;
     }
 
-    const width = Number(mapMetadata.width_m ?? 0);
-    const height = Number(mapMetadata.height_m ?? 0);
+    const worldBounds = mapMetadata.world_bounds ?? {};
+    const xMin = Number(worldBounds.x_min ?? this.worldBounds.xMin);
+    const xMax = Number(worldBounds.x_max ?? this.worldBounds.xMax);
+    const yMin = Number(worldBounds.y_min ?? this.worldBounds.yMin);
+    const yMax = Number(worldBounds.y_max ?? this.worldBounds.yMax);
+    const width = Number(mapMetadata.width_m ?? Math.max(0, xMax - xMin));
+    const height = Number(mapMetadata.height_m ?? Math.max(0, yMax - yMin));
     if (width > 0.1) {
       this.trackWidthMeters = width;
     }
     if (height > 0.1) {
       this.trackHeightMeters = height;
     }
+    if (Number.isFinite(xMin) && Number.isFinite(xMax) && Number.isFinite(yMin) && Number.isFinite(yMax)) {
+      this.worldBounds = {
+        xMin,
+        xMax,
+        yMin,
+        yMax,
+      };
+    }
+    this.yAxisInverted = Boolean(mapMetadata.y_axis_inverted ?? true);
   }
 
   private toMapPercent(point: RoutePoint): RoutePoint {
+    const width = Math.max(this.trackWidthMeters, 0.001);
+    const height = Math.max(this.trackHeightMeters, 0.001);
+    const localX = Number(point.x) - this.worldBounds.xMin;
+    const localY = Number(point.y) - this.worldBounds.yMin;
+    const percentY = this.yAxisInverted
+      ? 100 - (localY * 100) / height
+      : (localY * 100) / height;
     return {
-      x: Number(((point.x * 100) / this.trackWidthMeters).toFixed(3)),
-      y: Number((100 - (point.y * 100) / this.trackHeightMeters).toFixed(3)),
+      x: Number(((localX * 100) / width).toFixed(3)),
+      y: Number(percentY.toFixed(3)),
     };
+  }
+
+  private toMapNode(node: any): MapNode | null {
+    const nodeId = String(node?.node_id ?? node?.id ?? '');
+    if (!nodeId) {
+      return null;
+    }
+    const point = this.toMapPercent({
+      x: Number(node?.x ?? 0),
+      y: Number(node?.y ?? 0),
+    });
+    return {
+      id: String(node?.id ?? nodeId),
+      node_id: nodeId,
+      x: Number(node?.x ?? 0),
+      y: Number(node?.y ?? 0),
+      yaw: Number(node?.yaw ?? 0),
+      attr: Number(node?.attr ?? 0),
+      is_start: Boolean(node?.is_start),
+      label: String(node?.label ?? `Node ${nodeId}`),
+      semantic_types: Array.isArray(node?.semantic_types)
+        ? node.semantic_types.map((item: any) => String(item))
+        : [],
+      percentX: point.x,
+      percentY: point.y,
+    };
+  }
+
+  private buildLocalisationFix(node: MapNode): Record<string, unknown> | null {
+    const localX = Number(node.x) - this.worldBounds.xMin;
+    const localY = Number(node.y) - this.worldBounds.yMin;
+    if (!Number.isFinite(localX) || !Number.isFinite(localY)) {
+      return null;
+    }
+    const timestamp = Number((Date.now() / 1000).toFixed(3));
+    const posB = this.yAxisInverted
+      ? this.trackHeightMeters - localY
+      : localY;
+    return {
+      header: {
+        stamp: timestamp,
+      },
+      timestamp,
+      posA: Number(localX.toFixed(6)),
+      posB: Number(posB.toFixed(6)),
+      rotA: 0.0,
+      rotB: 0.0,
+      meta: {
+        node_id: node.node_id,
+        source: 'manual_localisation',
+        manual: true,
+      },
+    };
+  }
+
+  public get isAutoMode(): boolean {
+    return this.currentDrivingMode === 'auto';
+  }
+
+  public get mapHint(): string {
+    if (this.isAutoMode) {
+      return 'Auto: click en un nodo para fijar GPS manual';
+    }
+    return 'Click en el mapa para fijar destino';
+  }
+
+  public isCurrentNode(node: MapNode): boolean {
+    return node.node_id === this.currentNodeId;
+  }
+
+  public isUpcomingNode(node: MapNode): boolean {
+    return node.node_id === this.upcomingNodeId;
+  }
+
+  public isManualGpsNode(node: MapNode): boolean {
+    return Boolean(this.lastManualGpsNodeId) && node.node_id === this.lastManualGpsNodeId;
+  }
+
+  public nodeRadius(node: MapNode): number {
+    if (this.isCurrentNode(node)) {
+      return 1.25;
+    }
+    if (this.isUpcomingNode(node)) {
+      return 1.05;
+    }
+    if (this.isManualGpsNode(node)) {
+      return 0.95;
+    }
+    return 0.6;
+  }
+
+  public nodeTooltip(node: MapNode): string {
+    const tags = node.semantic_types.length > 0 ? ` · ${node.semantic_types.join(', ')}` : '';
+    return `${node.label} (${node.node_id})${tags}`;
   }
 }

@@ -1,10 +1,20 @@
 import math
+import os
 import time
 import types
 import unittest
 
 from src.hardware.pipeline.sharedTypes import LaneObservation, Pose2D, RouteContext
 from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
+from src.hardware.tracking.trackGraph import TrackGraph
+
+
+GRAPHML_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'Track GraphML File.graphml')
+)
+SEMANTICS_PATH = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..', 'track_semantics.json')
+)
 
 
 class _FakeDR:
@@ -94,6 +104,40 @@ class PoseEstimatorTests(unittest.TestCase):
         self.assertAlmostEqual(estimator._dr.x, 1.2, places=4)
         self.assertAlmostEqual(estimator._dr.y, 0.3, places=4)
         self.assertAlmostEqual(estimator._dr.yaw, 0.4, places=4)
+
+    def test_apply_localisation_fix_reanchors_pose_from_manual_node(self):
+        estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+        estimator._dr = _FakeDR(x=0.1, y=0.2, yaw=0.0)
+        estimator._graph = TrackGraph(GRAPHML_PATH, step_m=0.10, semantics_path=SEMANTICS_PATH)
+        estimator._last_yaw_rad = 0.0
+        estimator._yaw_ekf_p = 0.3
+        node_id = estimator._graph.get_start_node_id()
+        node_pose = estimator._graph.get_node_pose(node_id)
+        fix_payload = estimator._graph.world_to_localisation_pose(
+            node_pose[0],
+            node_pose[1],
+            timestamp=10.0,
+        )
+        fix_payload["meta"] = {
+            "node_id": node_id,
+            "source": "manual_localisation",
+            "manual": True,
+        }
+        estimator.tracking_state = types.SimpleNamespace(
+            set_lane_measurement_state=lambda reliable, correction=0.0: None
+        )
+        estimator._localisation_fix_sub = types.SimpleNamespace(
+            receive=lambda: dict(fix_payload)
+        )
+
+        applied, payload = estimator._apply_localisation_fix(current_yaw=0.0)
+
+        self.assertTrue(applied)
+        self.assertEqual(payload["mode"], "gps_fix")
+        self.assertIn(f"manual_localisation:{node_id}", payload["source"])
+        self.assertAlmostEqual(estimator._dr.x, node_pose[0], places=4)
+        self.assertAlmostEqual(estimator._dr.y, node_pose[1], places=4)
+        self.assertAlmostEqual(estimator._dr.yaw, node_pose[2], places=4)
 
 
 if __name__ == "__main__":

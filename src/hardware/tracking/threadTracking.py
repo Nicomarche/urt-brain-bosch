@@ -991,11 +991,10 @@ class threadTracking(ThreadWithStop):
         ):
             return False, semantic_match
 
-        _, _, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(path_update.matched_x),
             float(path_update.matched_y),
-            current_yaw,
+            float(path_update.matched_yaw),
         )
         self._last_semantic_relocalization_t = float(now)
         return True, semantic_match

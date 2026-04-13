@@ -249,6 +249,172 @@ class TrackGraph:
             return {"id": node_key, "label": f"Node {node_key}", "node_id": node_key}
         return None
 
+    def _map_frame(self) -> dict[str, float | bool]:
+        metadata = self.get_map_metadata()
+        bounds = dict(metadata.get("world_bounds") or {})
+        xs = [node.x for node in self.nodes.values()]
+        ys = [node.y for node in self.nodes.values()]
+        x_min = float(bounds.get("x_min", min(xs) if xs else 0.0))
+        x_max = float(bounds.get("x_max", max(xs) if xs else x_min))
+        y_min = float(bounds.get("y_min", min(ys) if ys else 0.0))
+        y_max = float(bounds.get("y_max", max(ys) if ys else y_min))
+        width_m = float(metadata.get("width_m", max(0.0, x_max - x_min)) or max(0.0, x_max - x_min))
+        height_m = float(metadata.get("height_m", max(0.0, y_max - y_min)) or max(0.0, y_max - y_min))
+        return {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "width_m": width_m,
+            "height_m": height_m,
+            "y_axis_inverted": bool(metadata.get("y_axis_inverted", False)),
+        }
+
+    def _reference_successor(self, node_id: str) -> str | None:
+        ref_ids = [nid for nid in self.reference_node_ids if nid in self.nodes]
+        if len(ref_ids) > 1 and ref_ids[0] == ref_ids[-1]:
+            ref_ids = ref_ids[:-1]
+        if node_id not in ref_ids:
+            return None
+        start_idx = ref_ids.index(node_id)
+        for offset in range(1, len(ref_ids)):
+            candidate = ref_ids[(start_idx + offset) % len(ref_ids)]
+            if candidate != node_id:
+                return candidate
+        return None
+
+    def get_node_pose(self, node_id: str | None) -> tuple[float, float, float] | None:
+        if node_id is None:
+            return None
+        node_key = str(node_id)
+        node = self.nodes.get(node_key)
+        if node is None:
+            return None
+
+        successor_id = self._reference_successor(node_key)
+        if successor_id is None:
+            for candidate in self.adj.get(node_key, []):
+                if candidate in self.nodes and candidate != node_key:
+                    successor_id = candidate
+                    break
+
+        if successor_id is not None and successor_id in self.nodes:
+            successor = self.nodes[successor_id]
+            yaw = math.atan2(successor.y - node.y, successor.x - node.x)
+            return float(node.x), float(node.y), float(yaw)
+
+        for prev_id, next_ids in self.adj.items():
+            if node_key in next_ids and prev_id in self.nodes:
+                prev_node = self.nodes[prev_id]
+                yaw = math.atan2(node.y - prev_node.y, node.x - prev_node.x)
+                return float(node.x), float(node.y), float(yaw)
+
+        return float(node.x), float(node.y), 0.0
+
+    def get_map_nodes(self) -> list[dict]:
+        def _sort_key(item: str):
+            text = str(item)
+            return (0, int(text)) if text.isdigit() else (1, text)
+
+        payload: list[dict] = []
+        for node_id in sorted(self.nodes.keys(), key=_sort_key):
+            node = self.nodes[node_id]
+            pose = self.get_node_pose(node_id)
+            events = self.semantics.get_node_events(node_id)
+            destination = self.describe_destination(node_id)
+            primary_event = events[0] if events else None
+            label = None
+            if primary_event is not None:
+                label = primary_event.get("label")
+            if label is None and destination is not None:
+                label = destination.get("label")
+            if label is None:
+                label = f"Node {node_id}"
+            payload.append(
+                {
+                    "id": str(node_id),
+                    "node_id": str(node_id),
+                    "x": round(float(node.x), 5),
+                    "y": round(float(node.y), 5),
+                    "yaw": round(float(pose[2] if pose is not None else 0.0), 6),
+                    "attr": int(node.attribute),
+                    "is_start": bool(node.is_start),
+                    "label": str(label),
+                    "semantic_types": [
+                        str(event.get("type"))
+                        for event in events
+                        if event.get("type") is not None
+                    ],
+                }
+            )
+        return payload
+
+    def world_to_localisation_pose(
+        self,
+        x: float,
+        y: float,
+        *,
+        yaw: float | None = None,
+        timestamp: float | None = None,
+    ) -> dict:
+        frame = self._map_frame()
+        local_x = float(x) - float(frame["x_min"])
+        local_y = float(y) - float(frame["y_min"])
+        pos_b = (
+            float(frame["height_m"]) - local_y
+            if bool(frame["y_axis_inverted"])
+            else local_y
+        )
+        payload = {
+            "timestamp": float(timestamp if timestamp is not None else 0.0),
+            "posA": round(float(local_x), 6),
+            "posB": round(float(pos_b), 6),
+            "rotA": 0.0,
+            "rotB": 0.0,
+        }
+        return payload
+
+    def localisation_to_world_pose(
+        self,
+        payload: dict | None,
+        *,
+        default_yaw: float | None = None,
+    ) -> tuple[float, float, float] | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            pos_a = float(payload.get("posA"))
+            pos_b = float(payload.get("posB"))
+        except (TypeError, ValueError):
+            return None
+
+        frame = self._map_frame()
+        x = float(frame["x_min"]) + pos_a
+        if bool(frame["y_axis_inverted"]):
+            y = float(frame["y_min"]) + (float(frame["height_m"]) - pos_b)
+        else:
+            y = float(frame["y_min"]) + pos_b
+
+        yaw = float(default_yaw if default_yaw is not None else 0.0)
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        try:
+            if payload.get("yaw_rad") is not None:
+                yaw = float(payload.get("yaw_rad"))
+            elif payload.get("yaw_deg") is not None:
+                yaw = math.radians(float(payload.get("yaw_deg")))
+            else:
+                node_pose = self.get_node_pose(
+                    self.resolve_node_id(meta.get("node_id") or payload.get("node_id"))
+                )
+                if node_pose is not None:
+                    yaw = float(node_pose[2])
+        except (TypeError, ValueError):
+            pass
+
+        return float(x), float(y), float(yaw)
+
     # ------------------------------------------------------------------
     # Reference loop (compatibility / default route)
     # ------------------------------------------------------------------

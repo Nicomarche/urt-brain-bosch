@@ -211,6 +211,22 @@ class NavigationCommand(Enum):
     msgID = 23
     msgType = "dict"  # {"mode": str, "destinations": list}
 
+class Localisation(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 24
+    # ROS-compatible localisation payload:
+    # {"timestamp": float, "posA": float, "posB": float, "rotA": float, "rotB": float}
+    # Optional manual metadata may be included under "meta".
+    msgType = "dict"
+
+class LocalisationFix(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 24
+    # Backwards-compatible alias for the same localisation channel.
+    msgType = "dict"
+
 ################################# From Line Following ##################################
 class LineFollowingDebug(Enum):
     Queue = "General"

@@ -49,6 +49,8 @@ class PathManagerTests(unittest.TestCase):
         self.assertIn("route_points", status)
         self.assertGreater(len(status["route_points"]), 1)
         self.assertIn("map_metadata", status)
+        self.assertIn("map_nodes", status)
+        self.assertGreater(len(status["map_nodes"]), 1)
         self.assertIn("available_destinations", status)
 
     def test_handle_go_to_multiple_command_sets_explicit_destination(self):

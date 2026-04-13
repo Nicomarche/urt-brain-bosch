@@ -163,6 +163,21 @@ class threadNavigationPlanner(ThreadWithStop):
 
         try:
             nav_status = self._path_manager.build_navigation_status(path_update)
+            if isinstance(pose_estimate, PoseEstimate):
+                nav_status.update(
+                    {
+                        "relocalization_mode": str(pose_estimate.relocalization_mode or "dead_reckoning"),
+                        "last_relocalization_source": str(
+                            pose_estimate.last_relocalization_source or "none"
+                        ),
+                        "last_relocalization_error_m": float(
+                            pose_estimate.last_relocalization_error_m or 0.0
+                        ),
+                        "localization_confidence": float(
+                            pose_estimate.localization_confidence or 0.0
+                        ),
+                    }
+                )
             self._nav_status_sender.send(nav_status)
         except Exception:
             pass
