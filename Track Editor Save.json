@@ -368,18 +368,6 @@
       "controlId": "",
       "parkingSpotId": "",
       "debugFlags": "",
-      "id": 37,
-      "imgX": 804.1410381978452,
-      "imgY": 2375.3183153770815,
-      "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
       "id": 38,
       "imgX": 629.7825661116552,
       "imgY": 2317.1988246816845,
@@ -468,18 +456,6 @@
       "imgX": 316.4427032321254,
       "imgY": 1367.071498530852,
       "type": 0
-    },
-    {
-      "label": "",
-      "destinationId": "",
-      "intersectionId": "",
-      "controlId": "",
-      "parkingSpotId": "",
-      "debugFlags": "",
-      "id": 46,
-      "imgX": 313.8317025440311,
-      "imgY": 1163.7769080234834,
-      "type": 10
     },
     {
       "label": "",
@@ -1428,6 +1404,30 @@
       "imgX": 2261.710691823899,
       "imgY": 373.20754716981133,
       "type": 11
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 155,
+      "imgX": 776.9937106918239,
+      "imgY": 2347.421383647799,
+      "type": 10
+    },
+    {
+      "label": "",
+      "destinationId": "",
+      "intersectionId": "",
+      "controlId": "",
+      "parkingSpotId": "",
+      "debugFlags": "",
+      "id": 156,
+      "imgX": 314.54088050314465,
+      "imgY": 1206.1635220125786,
+      "type": 0
     }
   ],
   "edges": [
@@ -1727,26 +1727,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 30,
-      "source": 36,
-      "target": 37
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 31,
-      "source": 37,
-      "target": 38
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 32,
       "source": 38,
       "target": 39
@@ -1810,16 +1790,6 @@
       "id": 38,
       "source": 44,
       "target": 45
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 39,
-      "source": 45,
-      "target": 46
     },
     {
       "speedHint": "",
@@ -2347,26 +2317,6 @@
       "zoneId": "",
       "laneHint": "",
       "costMultiplier": 1,
-      "id": 134,
-      "source": 46,
-      "target": 130
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
-      "id": 135,
-      "source": 46,
-      "target": 130
-    },
-    {
-      "speedHint": "",
-      "oneway": true,
-      "zoneId": "",
-      "laneHint": "",
-      "costMultiplier": 1,
       "id": 136,
       "source": 130,
       "target": 131
@@ -2640,10 +2590,40 @@
       "id": 163,
       "source": 154,
       "target": 64
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 164,
+      "source": 155,
+      "target": 38
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 165,
+      "source": 45,
+      "target": 156
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 166,
+      "source": 156,
+      "target": 130
     }
   ],
-  "nextNodeId": 155,
-  "nextEdgeId": 164,
+  "nextNodeId": 157,
+  "nextEdgeId": 167,
   "imgW": 3036,
   "imgH": 2580,
   "metersPerPixel": 0.0016837326307060833,
