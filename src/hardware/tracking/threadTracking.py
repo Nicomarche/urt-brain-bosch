@@ -61,6 +61,7 @@ try:
     # Steering gain for dead reckoning: physical_wheel_angle / commanded_angle.
     # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
     # Keep the default at 1.0 so the measured steering is trusted directly.
+    _DR_SPEED_SCALE    = float(getattr(cfg, "TRACKING_DR_SPEED_SCALE", 1.0) or 1.0)
     _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
     # Tracking now keeps the steering sign aligned with the actuator feedback so
     # the same convention flows through controller, telemetry, and DR.
@@ -1330,7 +1331,7 @@ class threadTracking(ThreadWithStop):
         # Passing a yaw that was already advanced by another integration step was
         # exaggerating both curvature and displacement in the preview.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(self._last_speed, self._last_yaw_rad, dr_dt,
+        self._dr.update(self._last_speed * _DR_SPEED_SCALE, self._last_yaw_rad, dr_dt,
                         steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)

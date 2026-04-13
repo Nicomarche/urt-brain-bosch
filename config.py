@@ -282,6 +282,12 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # jumping into the next curve before the car actually reaches the node.
 TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 
+# Speed scale applied to the encoder reading before dead-reckoning integration.
+# 1.0 = use encoder speed as-is.  If the virtual car advances faster than the
+# real one, reduce this value (e.g. 0.85).  If it lags behind, increase it.
+# Typical range: 0.7 – 1.0 (wheel slip, encoder calibration, actuator lag).
+TRACKING_DR_SPEED_SCALE = 1.0
+
 # Steering gain used by dead reckoning.  1.0 = trust the measured steering
 # angle directly; values > 1.0 amplify the effective wheel angle.
 TRACKING_STEER_GAIN_DR = 1.0
