@@ -1154,6 +1154,7 @@ Args:
         self._stopline_last_detection = None
         self._last_stopline_visual_debug = {}
         self._stopline_passed = False  # set True once the stopline is seen then lost
+        self._post_stopline_straight_until = 0.0  # monotonic: force straight until this time after stopline pass
 
         self._update_hsv_arrays()
 
@@ -3978,6 +3979,7 @@ Args:
                 "triggered_by": "max_streak",
             }
             self._stopline_passed = True
+            self._post_stopline_straight_until = time.monotonic() + 2.0
             self._stopline_stably_visible = False
             self._stopline_visible_streak = 0
             self._stopline_missing_streak = 0
@@ -3995,6 +3997,7 @@ Args:
                 "triggered_by": "missing_streak",
             }
             self._stopline_passed = True
+            self._post_stopline_straight_until = time.monotonic() + 2.0
             self._stopline_stably_visible = False
             self._stopline_visible_streak = 0
             self._stopline_missing_streak = 0
@@ -8154,7 +8157,11 @@ Args:
             return recent_direction, True
 
         if self._curve_state == "STRAIGHT":
-            if num_lines == 1:
+            # After passing a stopline: mandatory 2-second straight phase.
+            # No curve detection allowed until _post_stopline_straight_until expires.
+            if time.monotonic() < self._post_stopline_straight_until:
+                pass  # Stay STRAIGHT, skip all ENTERING transitions
+            elif num_lines == 1:
                 if recent_visual_straight:
                     self._curve_enter_origin = "none"
                 else:

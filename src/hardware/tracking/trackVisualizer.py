@@ -290,9 +290,9 @@ class TrackVisualizer(threading.Thread):
             # Uses bicycle-model arc motion so both position AND heading update
             # correctly when the car is turning.
             steer_rad = state.get("steer_rad", 0.0)
-            vis_x   = raw_x
-            vis_y   = raw_y
-            vis_yaw = raw_yaw
+            vis_x   = matched_x
+            vis_y   = matched_y
+            vis_yaw = matched_yaw
             if state_ts is not None and abs(speed_mps) > 0.01:
                 pred_s = min(time.monotonic() - state_ts + _PIPELINE_DELAY_S, 0.25)
                 if abs(steer_rad) > 1e-3:
@@ -444,8 +444,8 @@ class TrackVisualizer(threading.Thread):
                 cv2.line(canvas, raw_px, matched_px, (0, 215, 255), 1)
 
             cv2.putText(canvas,
-                        f"raw x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
-                        f"  steer={math.degrees(steer_rad):+.0f}°",
+                        f"pos x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
+                        f"  steer={math.degrees(steer_rad):+.0f}°  [dr x={raw_x:.2f} y={raw_y:.2f}]",
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
                         f"match x={matched_x:.2f}m  y={matched_y:.2f}m  yaw={math.degrees(matched_yaw):.0f}°"
