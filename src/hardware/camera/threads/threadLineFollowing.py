@@ -7056,10 +7056,11 @@ Args:
             int(nav_ctx.get("current_node_attr", 0)) == _INTERSECTION_EXIT_ATTR
             or int(nav_ctx.get("upcoming_node_attr", 0)) == _INTERSECTION_EXIT_ATTR
         )
-        if _at_intersection_exit and _waypoint_mode_active and getattr(self, "_last_num_lines", 0) >= 2:
+        if _at_intersection_exit and (_waypoint_mode_active or _stopline_passed) and getattr(self, "_last_num_lines", 0) >= 2:
             # Two lane lines visible at intersection exit → hand off to visual
             _waypoint_mode_active = False
             _stopline_passed = False
+            self._stopline_passed = False  # reset instance variable
         if (
             ts is not None and
             getattr(ts, "initialized", False) and
@@ -10753,6 +10754,11 @@ Returns:
                 speed = min(float(speed), float(maneuver_decision.speed_cap))
             if maneuver_decision.speed_override is not None:
                 speed = float(maneuver_decision.speed_override)
+                # Refresh curve-suppression timer while stopped so the 2-second
+                # countdown starts from when movement resumes, not when the
+                # stopline was detected (which is during the 3-second physical stop).
+                if speed == 0.0 and getattr(self, "_stopline_passed", False):
+                    self._post_stopline_straight_until = time.monotonic() + 2.0
             if maneuver_decision.steer_override is not None:
                 steering_angle = float(maneuver_decision.steer_override)
             if maneuver_decision.safety_stop:
