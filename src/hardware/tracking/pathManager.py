@@ -10,6 +10,7 @@ from src.hardware.tracking.trackGraph import (
     ATTR_HIGHWAY_LEFT,
     ATTR_HIGHWAY_RIGHT,
     ATTR_INTERSECTION,
+    ATTR_INTERSECTION_EXIT,
     ATTR_NORMAL,
     ATTR_ONEWAY,
     ATTR_ROUNDABOUT,

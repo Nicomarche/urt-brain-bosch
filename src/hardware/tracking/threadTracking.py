@@ -227,7 +227,7 @@ _MAX_INTEGRATION_DT = 0.15
 # Attribute name → human label for the log
 _ATTR_NAMES = {0: "normal", 1: "crosswalk", 2: "intersection", 3: "oneway",
                4: "hw_left", 5: "hw_right", 6: "roundabout", 7: "stopline",
-               8: "dotted", 9: "dotted_xwalk"}
+               8: "dotted", 9: "dotted_xwalk", 11: "intersection_exit"}
 
 # How many dense waypoints correspond to the intersection lookahead distance
 _LOOKAHEAD_PTS = max(2, int(_INTERSECTION_LOOKAHEAD / _STEP_M))

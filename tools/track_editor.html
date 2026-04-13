@@ -165,6 +165,7 @@
   .node-DOTTED       { fill: #64748b; stroke: #94a3b8; }
   .node-DOTTED_CROSSWALK { fill: #d97706; stroke: #fbbf24; }
   .node-START        { fill: #00ff88; stroke: #ffffff; stroke-width: 2.5; }
+  .node-INTERSECTION_EXIT { fill: #a855f7; stroke: #e879f9; stroke-width: 2.5; }
 
   .node-selected { stroke: #ffd700 !important; stroke-width: 3 !important; }
 
@@ -360,6 +361,7 @@
       <option value="8">DOTTED</option>
       <option value="9">DOTTED_CROSSWALK</option>
       <option value="10">⭐ START</option>
+      <option value="11">🏁 FIN INTERSECCION</option>
     </select>
   </div>
 
@@ -421,9 +423,10 @@
 const TYPES = [
   'NORMAL','CROSSWALK','INTERSECTION','ONEWAY',
   'HIGHWAYLEFT','HIGHWAYRIGHT','ROUNDABOUT',
-  'STOPLINE','DOTTED','DOTTED_CROSSWALK','START'
+  'STOPLINE','DOTTED','DOTTED_CROSSWALK','START','INTERSECTION_EXIT'
 ];
 const START_TYPE = 10;
+const INTERSECTION_EXIT_TYPE = 11;
 
 // ─── State ───────────────────────────────────────────────────────────────────
 let nodes = [];   // { id, imgX, imgY, type }
@@ -843,7 +846,7 @@ function renderEdges() {
   });
 }
 
-function nodeRadius(type) { return type === START_TYPE ? 12 : 7; }
+function nodeRadius(type) { return (type === START_TYPE || type === INTERSECTION_EXIT_TYPE) ? 10 : 7; }
 
 function renderNodes() {
   nodeLayer.innerHTML = '';
@@ -879,6 +882,25 @@ function renderNodes() {
       lbl.setAttribute('fill', '#000'); lbl.setAttribute('pointer-events', 'none');
       lbl.textContent = 'S';
       g.appendChild(lbl);
+    } else if (node.type === INTERSECTION_EXIT_TYPE) {
+      const ring = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      ring.setAttribute('cx', p.x); ring.setAttribute('cy', p.y); ring.setAttribute('r', 15);
+      ring.setAttribute('fill', 'none');
+      ring.setAttribute('stroke', '#e879f9');
+      ring.setAttribute('stroke-width', '1');
+      ring.setAttribute('opacity', '0.35');
+      g.appendChild(ring);
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', 10);
+      circle.setAttribute('class', `node-circle node-INTERSECTION_EXIT${isSelected ? ' node-selected' : ''}`);
+      g.appendChild(circle);
+      const lbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      lbl.setAttribute('x', p.x); lbl.setAttribute('y', p.y + 4);
+      lbl.setAttribute('text-anchor', 'middle');
+      lbl.setAttribute('font-size', '8'); lbl.setAttribute('font-weight', 'bold');
+      lbl.setAttribute('fill', '#fff'); lbl.setAttribute('pointer-events', 'none');
+      lbl.textContent = 'FI';
+      g.appendChild(lbl);
     } else {
       const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       circle.setAttribute('cx', p.x); circle.setAttribute('cy', p.y); circle.setAttribute('r', 7);
@@ -887,12 +909,13 @@ function renderNodes() {
     }
 
     // ID label above node
+    const isIntersectionExit = node.type === INTERSECTION_EXIT_TYPE;
     const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
     text.setAttribute('x', p.x);
-    text.setAttribute('y', p.y - (isStart ? 16 : 11));
+    text.setAttribute('y', p.y - (isStart ? 16 : isIntersectionExit ? 14 : 11));
     text.setAttribute('text-anchor', 'middle');
     text.setAttribute('font-size', '9');
-    text.setAttribute('fill', isStart ? '#00ff88' : '#e2e8f0');
+    text.setAttribute('fill', isStart ? '#00ff88' : isIntersectionExit ? '#e879f9' : '#e2e8f0');
     text.setAttribute('pointer-events', 'none');
     text.textContent = node.id;
     g.appendChild(text);

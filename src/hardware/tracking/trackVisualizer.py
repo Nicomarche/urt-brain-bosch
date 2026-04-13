@@ -290,26 +290,10 @@ class TrackVisualizer(threading.Thread):
             # Uses bicycle-model arc motion so both position AND heading update
             # correctly when the car is turning.
             steer_rad = state.get("steer_rad", 0.0)
-            vis_x   = matched_x
-            vis_y   = matched_y
-            vis_yaw = matched_yaw
-            if state_ts is not None and abs(speed_mps) > 0.01:
-                pred_s = min(time.monotonic() - state_ts + _PIPELINE_DELAY_S, 0.25)
-                if abs(steer_rad) > 1e-3:
-                    # Arc prediction: rear-axle traces a circular arc of radius
-                    # R = WHEELBASE / tan(steer_rad)
-                    yaw_rate = (speed_mps / self._WHEELBASE) * math.tan(steer_rad)
-                    delta_yaw = yaw_rate * pred_s
-                    R = speed_mps / yaw_rate  # signed radius
-                    vis_x += R * (math.sin(vis_yaw + delta_yaw) - math.sin(vis_yaw))
-                    vis_y += -R * (math.cos(vis_yaw + delta_yaw) - math.cos(vis_yaw))
-                    vis_yaw += delta_yaw
-                else:
-                    vis_x += speed_mps * math.cos(vis_yaw) * pred_s
-                    vis_y += speed_mps * math.sin(vis_yaw) * pred_s
-            x = vis_x
-            y = vis_y
-            yaw = vis_yaw
+            # Use matched position directly — already map-snapped, no prediction needed.
+            x   = matched_x
+            y   = matched_y
+            yaw = matched_yaw
             wp_idx    = state.get("wp_idx",    0)
 
             # Active route preview and destination marker

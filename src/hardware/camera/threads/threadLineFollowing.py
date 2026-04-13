@@ -1155,6 +1155,7 @@ Args:
         self._last_stopline_visual_debug = {}
         self._stopline_passed = False  # set True once the stopline is seen then lost
         self._post_stopline_straight_until = 0.0  # monotonic: force straight until this time after stopline pass
+        self._last_num_lines = 0  # updated every frame by _update_curve_state for use in waypoint-mode exit
 
         self._update_hsv_arrays()
 
@@ -7045,8 +7046,20 @@ Args:
         # and then lost (pass_event fired). From that point on, visual lane
         # detection is unreliable at the intersection and must be ignored;
         # the path manager (dead reckoning + graph nodes) has full authority.
+        #
+        # INTERSECTION_EXIT node (attr=11): stay in waypoint mode until two lane
+        # lines are detected — that is the signal the car has cleared the intersection.
         _waypoint_mode_active = bool(nav_ctx["waypoint_mode_active"])
         _stopline_passed = bool(getattr(self, "_stopline_passed", False))
+        _INTERSECTION_EXIT_ATTR = 11
+        _at_intersection_exit = (
+            int(nav_ctx.get("current_node_attr", 0)) == _INTERSECTION_EXIT_ATTR
+            or int(nav_ctx.get("upcoming_node_attr", 0)) == _INTERSECTION_EXIT_ATTR
+        )
+        if _at_intersection_exit and _waypoint_mode_active and getattr(self, "_last_num_lines", 0) >= 2:
+            # Two lane lines visible at intersection exit → hand off to visual
+            _waypoint_mode_active = False
+            _stopline_passed = False
         if (
             ts is not None and
             getattr(ts, "initialized", False) and
@@ -8118,6 +8131,7 @@ Args:
         """
         prev_state = self._curve_state
         prev_direction = int(getattr(self, '_curve_direction', 0) or 0)
+        self._last_num_lines = int(num_lines)
         self._curve_state_frames += 1
         recent_visual_straight = self._has_recent_two_line_straight_hint()
         if self._recent_curve_direction_frames > 0:
