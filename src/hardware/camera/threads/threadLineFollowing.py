@@ -10816,10 +10816,12 @@ Returns:
                         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWAIT\033[0m - No steering, frame {self.frames_without_line}/{self.max_frames_without_line}")
                     if self.frames_without_line > self.max_frames_without_line:
                         commanded_steering = 0
-                        commanded_speed = self.min_speed
+                        # Respect ManeuverManager stop command even when no lanes visible
+                        fallback_speed = 0.0 if (speed is not None and speed == 0.0) else self.min_speed
+                        commanded_speed = fallback_speed
                         command_source = "normal"
                         if self.emit_motor_commands:
-                            self.send_motor_commands(0, self.min_speed)
+                            self.send_motor_commands(0, fallback_speed)
             else:
                 command_source = "blocked_inactive"
                 if hasattr(self, '_last_inactive_log') == False:
