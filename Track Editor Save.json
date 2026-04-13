@@ -419,7 +419,7 @@
       "id": 42,
       "imgX": 313.91576885406465,
       "imgY": 1832.0274240940253,
-      "type": 0
+      "type": 10
     },
     {
       "label": "",
@@ -1415,7 +1415,7 @@
       "id": 155,
       "imgX": 776.9937106918239,
       "imgY": 2347.421383647799,
-      "type": 10
+      "type": 0
     },
     {
       "label": "",
@@ -2620,10 +2620,20 @@
       "id": 166,
       "source": 156,
       "target": 130
+    },
+    {
+      "speedHint": "",
+      "oneway": true,
+      "zoneId": "",
+      "laneHint": "",
+      "costMultiplier": 1,
+      "id": 167,
+      "source": 36,
+      "target": 155
     }
   ],
-  "nextNodeId": 157,
-  "nextEdgeId": 167,
+  "nextNodeId": 158,
+  "nextEdgeId": 168,
   "imgW": 3036,
   "imgH": 2580,
   "metersPerPixel": 0.0016837326307060833,
@@ -2676,7 +2686,7 @@
         "id": "intersection_1",
         "label": "Intersection 117",
         "anchor_node_id": "117",
-        "control_id": "",
+        "control_id": "control_2",
         "stopline_node_id": ""
       }
     ],
