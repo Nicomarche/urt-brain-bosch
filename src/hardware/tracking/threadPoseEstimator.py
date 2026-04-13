@@ -171,13 +171,13 @@ class threadPoseEstimator(threadTracking):
         ):
             return False, semantic_match
 
+        _, _, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(route_context.matched_pose.x),
             float(route_context.matched_pose.y),
-            float(route_context.matched_pose.yaw),
+            current_yaw,
         )
         self._last_semantic_relocalization_t = float(now)
-        self._last_yaw_rad = float(route_context.matched_pose.yaw)
         return True, semantic_match
 
     def _apply_stopline_reset(
@@ -207,14 +207,13 @@ class threadPoseEstimator(threadTracking):
         if not stopline_context:
             return False, None
 
-        old_x, old_y, _ = self._dr.get_state()
+        old_x, old_y, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(route_context.matched_pose.x),
             float(route_context.matched_pose.y),
-            float(route_context.matched_pose.yaw),
+            current_yaw,
         )
         self._last_visual_stopline_relocalization_t = float(now)
-        self._last_yaw_rad = float(route_context.matched_pose.yaw)
         correction_m = math.hypot(float(route_context.matched_pose.x) - float(old_x), float(route_context.matched_pose.y) - float(old_y))
         source = f"stopline_visual:{stopline_observation.expected_node_id or 'matched_pose'}"
         return True, (source, float(correction_m))

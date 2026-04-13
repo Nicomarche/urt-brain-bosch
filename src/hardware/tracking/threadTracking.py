@@ -990,10 +990,11 @@ class threadTracking(ThreadWithStop):
         ):
             return False, semantic_match
 
+        _, _, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(path_update.matched_x),
             float(path_update.matched_y),
-            float(path_update.matched_yaw),
+            current_yaw,
         )
         self._last_semantic_relocalization_t = float(now)
         return True, semantic_match
@@ -1110,13 +1111,12 @@ class threadTracking(ThreadWithStop):
         if anchor is None:
             return False, None
 
-        old_raw_x, old_raw_y, _ = self._dr.get_state()
+        old_raw_x, old_raw_y, current_yaw = self._dr.get_state()
         self._dr.reset(
             float(anchor["x"]),
             float(anchor["y"]),
-            float(anchor["yaw"]),
+            current_yaw,
         )
-        self._last_yaw_rad = float(anchor["yaw"])
         self._path_manager.matched_idx = int(anchor["idx"])
         self._path_manager.target_idx = int(anchor["idx"])
         self._last_visual_stopline_relocalization_t = float(now)
