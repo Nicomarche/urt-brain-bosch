@@ -212,6 +212,23 @@ class TrackGraph:
         }
         payload = dict(default)
         payload.update(dict(self.semantics.map_metadata or {}))
+
+        semantics_metadata = dict(self.semantics.map_metadata or {})
+        if "world_bounds" not in semantics_metadata:
+            try:
+                width_m = float(payload.get("width_m"))
+                height_m = float(payload.get("height_m"))
+            except (TypeError, ValueError):
+                width_m = float(x_max - x_min)
+                height_m = float(y_max - y_min)
+            if width_m > 0.0 and height_m > 0.0:
+                payload["world_bounds"] = {
+                    "x_min": 0.0,
+                    "x_max": round(float(width_m), 5),
+                    "y_min": 0.0,
+                    "y_max": round(float(height_m), 5),
+                }
+
         mpp = payload.get("meters_per_pixel")
         ppm = payload.get("pixels_per_meter")
         try:

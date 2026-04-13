@@ -64,6 +64,10 @@ class TrackGraphPlannerTests(unittest.TestCase):
 
         self.assertEqual(graph.map_metadata.get("image_width_px"), 3036)
         self.assertEqual(graph.map_metadata.get("image_height_px"), 2580)
+        self.assertEqual(graph.map_metadata.get("world_bounds", {}).get("x_min"), 0.0)
+        self.assertEqual(graph.map_metadata.get("world_bounds", {}).get("y_min"), 0.0)
+        self.assertAlmostEqual(graph.map_metadata.get("world_bounds", {}).get("x_max"), 5.11181, places=5)
+        self.assertAlmostEqual(graph.map_metadata.get("world_bounds", {}).get("y_max"), 4.34403, places=5)
         self.assertGreater(len(graph.get_available_destinations()), 0)
 
     def test_localisation_roundtrip_uses_map_frame_bounds(self):
