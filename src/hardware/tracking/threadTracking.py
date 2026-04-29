@@ -345,6 +345,9 @@ class TrackingState:
         self.control_authority = "none"
         self.control_safety_override = False
         self.control_reason = "none"
+        # Acados full-MPC reference trajectory (set by threadTracking)
+        self.mpc_state_refs = None   # (N+1, 3) ndarray or None
+        self.mpc_input_refs = None   # (N, 2) ndarray or None
 
     def update(self, x, y, yaw, error_m, heading_rad, path_psi, path_kappa,
                speed_mps, wp_idx, waypoint_mode, node_attr, imu_received=False,
@@ -1543,6 +1546,21 @@ class threadTracking(ThreadWithStop):
             last_relocalization_error_m=relocalization_error_m,
             raw_lateral_error_m=raw_lateral_error_m,
         )
+
+        # ---- Acados full-MPC reference trajectory ----
+        try:
+            _mpc_N = int(getattr(cfg, "ACADOS_MPC_N", 30))
+            _mpc_T = float(getattr(cfg, "ACADOS_MPC_T", 0.05))
+            _mpc_v = float(getattr(cfg, "ACADOS_MPC_V_REF", 0.35))
+            _sr, _ir = self._path_manager.get_mpc_references(
+                matched_idx, _mpc_N, _mpc_T, _mpc_v,
+            )
+            self.tracking_state.mpc_state_refs = _sr
+            self.tracking_state.mpc_input_refs = _ir
+        except Exception:
+            self.tracking_state.mpc_state_refs = None
+            self.tracking_state.mpc_input_refs = None
+
         try:
             nav_status = self._path_manager.build_navigation_status(path_update)
             nav_status.update(

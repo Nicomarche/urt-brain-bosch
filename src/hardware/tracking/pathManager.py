@@ -752,6 +752,67 @@ class PathManager:
             available_destinations=list(getattr(route, "available_destinations", None) or self.graph.get_available_destinations()),
         )
 
+    # ------------------------------------------------------------------
+    # MPC reference trajectory extraction
+    # ------------------------------------------------------------------
+    def get_mpc_references(
+        self,
+        matched_idx: int,
+        N: int,
+        T: float,
+        v_ref: float,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """Sample *N+1* state refs and *N* input refs for the full Acados MPC.
+
+        Waypoints are sampled at the expected time-proportional positions
+        along the route (distance = v_ref * k * T for step *k*), with linear
+        interpolation between dense waypoints.
+
+        Returns
+        -------
+        state_refs : (N+1, 3) ndarray  [x, y, yaw]   or ``None``
+        input_refs : (N, 2)   ndarray  [v_ref, 0.0]   or ``None``
+        """
+        route = self.active_route
+        if route is None or route.waypoints.size == 0:
+            return None, None
+
+        n = len(route.waypoints)
+        step_m = max(float(self.graph.step_m), 1e-6)
+        safe_v = max(abs(float(v_ref)), 0.01)
+
+        state_refs = np.empty((N + 1, 3), dtype=np.float64)
+        idx0 = self._clamp_idx(route, int(matched_idx))
+        state_refs[0] = route.waypoints[idx0]
+
+        for k in range(1, N + 1):
+            dist_ahead = safe_v * k * T
+            wp_offset = dist_ahead / step_m
+            frac_idx = float(idx0) + wp_offset
+
+            idx_lo = int(frac_idx)
+            t = frac_idx - idx_lo
+            if route.closed_loop:
+                lo = idx_lo % n
+                hi = (idx_lo + 1) % n
+            else:
+                lo = min(idx_lo, n - 1)
+                hi = min(idx_lo + 1, n - 1)
+
+            wp_lo = route.waypoints[lo]
+            wp_hi = route.waypoints[hi]
+            state_refs[k, 0] = wp_lo[0] + t * (wp_hi[0] - wp_lo[0])
+            state_refs[k, 1] = wp_lo[1] + t * (wp_hi[1] - wp_lo[1])
+            yaw_diff = self._wrap_angle(float(wp_hi[2]) - float(wp_lo[2]))
+            state_refs[k, 2] = wp_lo[2] + t * yaw_diff
+
+        input_refs = np.column_stack([
+            np.full(N, safe_v, dtype=np.float64),
+            np.zeros(N, dtype=np.float64),
+        ])
+
+        return state_refs, input_refs
+
     def build_navigation_status(self, update: PathUpdate) -> dict:
         return {
             "route_active": bool(update.route_active),

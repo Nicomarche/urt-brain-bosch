@@ -691,6 +691,57 @@ Args:
                     "USE_LATERAL_MPC=True but scipy not installed — falling back to Stanley"
                 )
 
+        # ── Acados Full MPC (trajectory-tracking, speed + steering) ───────
+        self.use_acados_mpc = bool(getattr(_config, "USE_ACADOS_MPC", False))
+        self.use_acados_speed = bool(getattr(_config, "USE_ACADOS_SPEED", False))
+        self.acados_mpc = None
+        self._acados_last_v_cmd = 0.0
+        self._acados_last_delta_rad = 0.0
+        if self.use_acados_mpc:
+            try:
+                from src.hardware.mpc.acados_mpc import AcadosMPC
+                _acados_deadband = float(getattr(_config, "ACADOS_MPC_OUTPUT_DEADBAND_DEG", 0.5))
+                self.acados_mpc = AcadosMPC(
+                    max_steering_deg=self.max_steering,
+                    output_deadband_deg=_acados_deadband,
+                )
+                if self.acados_mpc.ready:
+                    print(
+                        "\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - "
+                        f"Acados Full MPC active (N={self.acados_mpc.N}, "
+                        f"speed_control={'ON' if self.use_acados_speed else 'OFF'})"
+                    )
+                    # Apply config cost weights at runtime
+                    self.acados_mpc.update_weights(
+                        x_cost=float(getattr(_config, "ACADOS_MPC_X_COST", 2.0)),
+                        y_cost=float(getattr(_config, "ACADOS_MPC_Y_COST", 2.0)),
+                        yaw_cost=float(getattr(_config, "ACADOS_MPC_YAW_COST", 0.5)),
+                        v_cost=float(getattr(_config, "ACADOS_MPC_V_COST", 1.0)),
+                        steer_cost=float(getattr(_config, "ACADOS_MPC_STEER_COST", 0.0)),
+                        delta_v_cost=float(getattr(_config, "ACADOS_MPC_DELTA_V_COST", 1.5)),
+                        delta_steer_cost=float(getattr(_config, "ACADOS_MPC_DELTA_STEER_COST", 0.75)),
+                    )
+                    # Apply config control bounds at runtime
+                    _delta_max_rad = math.radians(float(getattr(_config, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+                    self.acados_mpc.update_bounds(
+                        v_min=float(getattr(_config, "ACADOS_MPC_V_MIN", -0.5)),
+                        v_max=float(getattr(_config, "ACADOS_MPC_V_MAX", 0.5)),
+                        delta_min_rad=-_delta_max_rad,
+                        delta_max_rad=_delta_max_rad,
+                    )
+                else:
+                    print(
+                        "\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - "
+                        "USE_ACADOS_MPC=True but solver not ready (not generated or acados not installed)"
+                    )
+                    self.acados_mpc = None
+            except Exception as _e:
+                print(
+                    "\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - "
+                    f"Acados MPC init failed: {_e}"
+                )
+                self.acados_mpc = None
+
         # Single-line lane centering: how far from the visible line to aim.
         # 0.50 = exact center (17.5cm), 0.40 = closer to visible line (less overshoot).
         # If the car overshoots past center and hits the opposite line, lower this.
@@ -7074,6 +7125,28 @@ Args:
                 wp_speed_mps, _ = self._resolve_stanley_speed_mps(
                     speed_value, speed_cap=speed_cap
                 )
+            # ── Acados Full MPC (trajectory-tracking) ─────────────────────
+            if self.acados_mpc is not None:
+                _sr = getattr(ts, "mpc_state_refs", None)
+                _ir = getattr(ts, "mpc_input_refs", None)
+                if _sr is not None and _ir is not None:
+                    import numpy as _np
+                    _x0 = _np.array([
+                        float(getattr(ts, "x", 0.0)),
+                        float(getattr(ts, "y", 0.0)),
+                        float(getattr(ts, "yaw", 0.0)),
+                    ])
+                    _result = self.acados_mpc.compute(
+                        _x0, _sr, _ir,
+                        v_prev=self._acados_last_v_cmd,
+                        delta_prev=self._acados_last_delta_rad,
+                    )
+                    if _result is not None:
+                        _v_opt, _delta_deg = _result
+                        self._acados_last_v_cmd = _v_opt
+                        self._acados_last_delta_rad = math.radians(_delta_deg)
+                        return _delta_deg
+            # ── Lateral MPC fallback ──────────────────────────────────────
             if getattr(self, "use_lateral_mpc", False):
                 wp_kappa = float(getattr(ts, 'path_kappa', 0.0))
                 wp_kappa = max(min(wp_kappa, 0.3), -0.3)
@@ -7266,6 +7339,31 @@ Args:
             self._stanley_last_speed_source = str(speed_source)
             self._stanley_last_error_m = float(error_m)
             self._stanley_last_px_per_cm = float(px_per_cm)
+
+            # ── Acados Full MPC (lane-following mode) ─────────────────────
+            # When route waypoints are available, the full MPC can also run in
+            # lane-following mode.  Visual lane detection still drives
+            # relocalization; steering is computed from the trajectory.
+            if self.acados_mpc is not None and ts is not None:
+                _sr = getattr(ts, "mpc_state_refs", None)
+                _ir = getattr(ts, "mpc_input_refs", None)
+                if _sr is not None and _ir is not None and getattr(ts, "initialized", False):
+                    import numpy as _np
+                    _x0 = _np.array([
+                        float(getattr(ts, "x", 0.0)),
+                        float(getattr(ts, "y", 0.0)),
+                        float(getattr(ts, "yaw", 0.0)),
+                    ])
+                    _result = self.acados_mpc.compute(
+                        _x0, _sr, _ir,
+                        v_prev=self._acados_last_v_cmd,
+                        delta_prev=self._acados_last_delta_rad,
+                    )
+                    if _result is not None:
+                        _v_opt, _delta_deg = _result
+                        self._acados_last_v_cmd = _v_opt
+                        self._acados_last_delta_rad = math.radians(_delta_deg)
+                        return _delta_deg
 
             # Route to Lateral MPC or Stanley based on config flag.
             # Both accept the same arguments; MPC ignores yaw_rate / traj_yaw_rate /

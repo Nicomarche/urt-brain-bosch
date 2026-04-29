@@ -258,6 +258,53 @@ MPC_CROSSTRACK_K_MULT = 1.0
 # errores moderados (~5-8 cm). 0.5° permite correcciones finas sin chattering.
 MPC_OUTPUT_DEADBAND_DEG = 0.5
 
+# ── ACADOS FULL MPC (trajectory-tracking) ────────────────────────────────────
+# MPC completo que optimiza VELOCIDAD + DIRECCIÓN simultáneamente usando el
+# solver Acados (código C generado).  Requiere generar el solver una vez:
+#   python -m src.hardware.mpc.generate_solver
+#
+# USE_ACADOS_MPC: True = activa MPC completo (Acados), False = usa lateral MPC.
+# Si Acados no está instalado o el solver no fue generado, cae al MPC lateral.
+USE_ACADOS_MPC = False
+
+# Horizonte de predicción.  N × T = tiempo total de anticipación.
+# N=30, T=0.05 → 1.5s de horizonte.
+ACADOS_MPC_N = 30
+ACADOS_MPC_T = 0.05
+
+# Velocidad de referencia por defecto [m/s].  El MPC optimiza alrededor de
+# este valor.  En competencia ajustar según la zona (highway vs curva).
+ACADOS_MPC_V_REF = 0.35
+
+# Modelo del vehículo.
+ACADOS_MPC_WHEELBASE = 0.258      # distancia entre ejes [m]
+ACADOS_MPC_L_R = 0.103            # eje trasero a CG [m]
+ACADOS_MPC_L_F = 0.155            # eje delantero a CG [m]
+
+# Límites de control.
+ACADOS_MPC_V_MAX = 0.50           # velocidad máxima [m/s]
+ACADOS_MPC_V_MIN = -0.50          # velocidad mínima [m/s] (reversa)
+ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
+
+# Pesos del costo (NONLINEAR_LS).
+#   Q: penaliza desviación de la trayectoria de referencia (x, y, yaw).
+#   R: penaliza esfuerzo de control (v, delta).
+#   S: penaliza tasa de cambio de controles (Δv, Δδ).
+ACADOS_MPC_X_COST = 2.0
+ACADOS_MPC_Y_COST = 2.0
+ACADOS_MPC_YAW_COST = 0.5
+ACADOS_MPC_V_COST = 1.0
+ACADOS_MPC_STEER_COST = 0.0
+ACADOS_MPC_DELTA_V_COST = 1.5
+ACADOS_MPC_DELTA_STEER_COST = 0.75
+
+# Zona muerta de salida del MPC completo [°].
+ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.5
+
+# USE_ACADOS_SPEED: True = usar velocidad del MPC para el motor.
+# False = solo usar steering del MPC, mantener control de velocidad heurístico.
+USE_ACADOS_SPEED = False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # GPS-FREE TRACKING (dead reckoning + GraphML waypoints)
 # ═══════════════════════════════════════════════════════════════════════════════
