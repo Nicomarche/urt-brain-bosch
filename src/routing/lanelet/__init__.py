@@ -7,17 +7,20 @@
 # los queries que el `BehaviorPlanner` necesita.
 #
 #   from_graphml.py    Parser del GraphML de pista BFMC + clase
-#                       `TrackGraph` con Dijkstra (legacy unificado;
-#                       en Fase 3 se splittea: parser separado del grafo
-#                       de ruteo).
+#                       `TrackGraph` con Dijkstra. La factory
+#                       `lanelet_map.from_track_graph()` lo envuelve.
 #   semantics.py       Loader de `track_semantics.json` (atributos de
 #                       nodo: ATTR_STOPLINE=7, ATTR_INTERSECTION=2,
 #                       ATTR_HIGHWAY_LEFT/RIGHT, etc.).
-#   lanelet_map.py     (Fase 3) `LaneletMap` consultable.
-#   queries.py         (Fase 3) `LaneletKDTreeIndex` para `at_pose()`
-#                       en O(log N).
+#   lanelet_map.py     `LaneletMap` consultable: `at_pose(x, y)`,
+#                       `successors_of(id)`, `regulatory_within(id, m)`.
+#                       Dataclasses `Lanelet` + factory `from_track_graph`.
+#   queries.py         `LaneletKDTreeIndex` — index espacial sobre
+#                       puntos de centerline para `at_pose()` en O(log N).
 #
-# Pitfall conocido (apuntado en plan): los tramos highway necesitan
-# centerlines offseteadas (lanelet izquierda y derecha). Hoy el grafo
-# tiene una sola línea por tramo highway; en Fase 3 se generan las
-# lanelets desplazadas usando `_LANE_HALF_WIDTH_M`.
+# Pitfall conocido — tramos highway: hoy el grafo tiene UNA línea por
+# tramo highway con `ATTR_HIGHWAY_LEFT/RIGHT`. La lanelet hereda ese
+# atributo crudo (sin desplazamiento geométrico). El consumidor lo
+# interpreta como "estoy en un carril de highway", suficiente para
+# decisiones de comportamiento. Si BFMC 2026 exige carriles
+# físicamente separados, agregar el offset en `_densify_segment`.

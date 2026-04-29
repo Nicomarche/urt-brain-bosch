@@ -1,14 +1,23 @@
 # src/core/types/routing.py
 #
-# Tipos que describen el contexto de ruta del vehículo. Hoy `RouteContext` es
-# el output de `pathManager` (Dijkstra sobre GraphML) — en Fase 3 se
-# enriquece con `current_lanelet_id`, `next_lanelet_ids` y `regulatory_ahead`
-# cuando el GraphML pase a estar envuelto por `LaneletMap`.
+# Tipos del subsistema de ruteo. La pieza pública principal es
+# `RouteContext`: representa "dónde está el vehículo en el mapa" y "qué
+# viene a continuación" en términos del HD map. Es el contrato de
+# comunicación entre el `RoutePlanner` (productor) y los consumidores
+# (BehaviorPlanner, dashboard).
 #
-# Diseño: RouteContext es "denso" a propósito — incluye lo que necesita el
-# BehaviorPlanner (zona actual, semánticos próximos) y lo que necesita el
-# dashboard (route_points para dibujar). Si esto crece más, partir en
-# RouteCoreContext (lo crítico para planning) + RouteDebugContext (UI).
+# Diseño:
+#   - `RouteContext` es **denso a propósito** — mete tanto info crítica
+#     para planning (current_lanelet_id, regulatory_ahead) como info de UI
+#     (route_points). Si crece más, se splittea en RouteCoreContext +
+#     RouteDebugContext sin romper consumidores actuales (siguen leyendo
+#     un solo dataclass).
+#   - `RegulatoryElement` vive en `core/types/` (no en `routing/lanelet/`)
+#     porque `RouteContext` lo referencia, y `core/types/` no puede
+#     depender de paquetes concretos (DIP — la abstracción no depende
+#     del detalle).
+#
+# Convenciones de unidades: igual que `pose.py` (metros, radianes, segs).
 
 from __future__ import annotations
 
@@ -19,12 +28,44 @@ from src.core.types.pose import Pose2D
 
 
 @dataclass(frozen=True)
+class RegulatoryElement:
+    """Elemento regulatorio del HD map — stopline, crosswalk, yield, etc.
+
+    Inspirado en `lanelet2::RegulatoryElement` de Autoware. En BFMC los
+    regulatory elements se derivan de:
+      - Atributos de nodo del GraphML (`ATTR_STOPLINE=7`,
+        `ATTR_CROSSWALK=1`, `ATTR_INTERSECTION=2`).
+      - Records de `track_semantics.json` (controls, intersections,
+        crosswalks).
+
+    Invariantes:
+      - `kind ∈ {"stopline", "crosswalk", "intersection", "yield",
+        "speed_limit", "parking", "highway_zone", "roundabout"}`.
+      - `position_xy` está en el mismo frame que las lanelets (ENU del
+        mapa BFMC, coincide con coordenadas del GraphML).
+      - `data` es un dict libre con datos específicos del tipo
+        (ej. para "speed_limit", `{"speed_mps": 0.6}`; para
+        "crosswalk", `{"width_m": 1.5}`).
+
+    Diseño: frozen para que se puedan compartir entre threads sin
+    locks. Si necesitás mutar uno, construí otro con `dataclasses.replace`.
+    """
+
+    element_id: str
+    kind: str
+    position_xy: tuple[float, float]
+    anchor_node_id: str | None = None
+    label: str = ""
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class RouteContext:
     """Estado actual de la ruta del vehículo.
 
     Los campos `current_*`, `upcoming_*`, `next_semantic_*` se actualizan
-    cada vez que el `pathManager` recibe una nueva PoseEstimate. Son la
-    fuente de verdad de "dónde estoy" en términos de mapa.
+    cada vez que el `route_planner` recibe una nueva `PoseEstimate`. Son
+    la fuente de verdad de "dónde estoy" en términos de mapa.
 
     Invariantes:
       - `route_progress ∈ [0, 1]` cuando `route_active`. 0 si no hay ruta.
@@ -32,7 +73,16 @@ class RouteContext:
       - `path_kappa` en 1/m. Positivo = curvatura izquierda, negativo derecha.
       - `expected_control_type ∈ {None, "intersection", "stopline",
         "crosswalk", "parking", "highway", "roundabout"}` — pista para que
-        el BehaviorPlanner active el escenario correcto.
+        el `BehaviorPlanner` active el escenario correcto.
+      - **Fase 3:** `current_lanelet_id` es el ID de la lanelet en la que
+        está el ego según el `LaneletMap.at_pose(...)`. None si fuera
+        del mapa o si el LaneletMap no fue inyectado al planner.
+      - **Fase 3:** `next_lanelet_ids` es la cadena de sucesoras a lo
+        largo de la ruta activa (orden topológico). Vacío si no hay ruta.
+      - **Fase 3:** `regulatory_ahead` lista (en orden de distancia
+        creciente) los regulatory elements dentro de
+        `LANELET_LOOKAHEAD_M` desde la pose actual. El `BehaviorPlanner`
+        consume esto para decidir stopline / crosswalk / yield ahead.
     """
 
     timestamp: float = 0.0
@@ -72,3 +122,8 @@ class RouteContext:
     current_zone_types: list[str] = field(default_factory=list)
     map_metadata: dict[str, Any] = field(default_factory=dict)
     available_destinations: list[dict[str, Any]] = field(default_factory=list)
+
+    # Fase 3 (LaneletMap) — enriquecimiento del contexto de ruta.
+    current_lanelet_id: str | None = None
+    next_lanelet_ids: tuple[str, ...] = ()
+    regulatory_ahead: tuple[RegulatoryElement, ...] = ()
