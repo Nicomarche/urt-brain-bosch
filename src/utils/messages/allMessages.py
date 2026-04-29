@@ -261,21 +261,24 @@ class ActuatorCommandStatus(Enum):
     msgType = "dict"  # klem, serial state, last movement command, block reason
 
 ################################# From Sign Detection ##################################
+# NOTA: hasta el cleanup de Fase 0 estos mensajes los publicaba el threadSignDetection
+# remoto (eliminado). Hoy el publisher es threadLocalPerception (YOLO local). El campo
+# Owner se actualiza para que el routing del gateway no quede con metadata estancada.
 class SignDetected(Enum):
     Queue = "General"
-    Owner = "threadSignDetection"
+    Owner = "threadLocalPerception"
     msgID = 1
     msgType = "dict"  # {"sign": str, "confidence": float, "timestamp": float}
 
 class SignDetectionDebug(Enum):
     Queue = "General"
-    Owner = "threadSignDetection"
+    Owner = "threadLocalPerception"
     msgID = 2
     msgType = "str"  # base64 encoded debug image with bounding boxes
 
 class SignDetectionStatus(Enum):
     Queue = "General"
-    Owner = "threadSignDetection"
+    Owner = "threadLocalPerception"
     msgID = 3
     msgType = "dict"  # {"enabled": bool, "fps": float, "last_sign": str}
 

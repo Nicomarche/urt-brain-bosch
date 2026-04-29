@@ -1,8 +1,0 @@
-# ============================================
-# Dependencias del cliente (Raspberry Pi)
-# ============================================
-# Mínimas dependencias para mantener la RPi ligera
-
-websockets
-opencv-python
-numpy

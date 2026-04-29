@@ -1,3 +1,26 @@
+// line-following.component.ts
+//
+// Componente Angular del panel "Line Following" del dashboard de operador.
+//
+// Responsabilidad: ofrecer una UI mínima para:
+//   1. Mostrar el estado del pipeline de percepción (AI Local YOLO TensorRT 416 px).
+//   2. Configurar parámetros de stream de debug (FPS, calidad, escala).
+//   3. Exponer sliders editables para velocidad de seguimiento de carril y
+//      recuperación de curvas cerradas.
+//   4. Reflejar el estado real (motor habilitado, comando aplicado, conexión serial).
+//
+// Por qué AI Local solamente: los modos legacy (OpenCV, LSTR, HybridNets remoto,
+// Supercombo) fueron eliminados durante el cleanup de la Fase 0 del port a
+// arquitectura "Autoware-light". Hoy la única fuente de verdad de detección de
+// carriles es el modelo YOLO TensorRT que corre embebido en el proceso de cámara.
+//
+// Comunicación: este componente envía mensajes 'LineFollowingConfig' por
+// WebSocket al backend Flask, y se suscribe a los streams 'lineFollowingDebug'
+// (frame JPEG base64) y 'lineFollowingStatus' (telemetría JSON).
+//
+// Persistencia: la última configuración se guarda en localStorage para que el
+// operador no pierda el setup entre recargas del navegador.
+
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
@@ -21,20 +44,12 @@ interface DebugView {
   description: string;
 }
 
-interface LstrModel {
-  id: number;
-  name: string;
-  resolution: string;
-  speed: string;
-}
-
 interface DebugStatus {
   steering: number | null;
   speed: number | null;
   mode: string;
   view: string;
   active: boolean;
-  lstr_available: boolean;
   computed_steering?: number | null;
   computed_speed?: number | null;
   commanded_steering?: number | null;
@@ -52,12 +67,6 @@ interface DebugStatus {
   local_ai_ready?: boolean;
   local_ai_infer_ms?: number;
   local_ai_fps?: number;
-  hybridnets_connected?: boolean;
-  hybridnets_roundtrip_ms?: number;
-  hybridnets_server_fps?: number;
-  supercombo_connected?: boolean;
-  supercombo_roundtrip_ms?: number;
-  supercombo_server_fps?: number;
 }
 
 @Component({
@@ -68,30 +77,14 @@ interface DebugStatus {
   styleUrls: ['./line-following.component.css']
 })
 export class LineFollowingComponent implements OnInit, OnDestroy {
-  
-  // Mode selection
-  selectedMode: string = 'opencv';
-  lstrAvailable: boolean = true;  // Assume available by default, will be updated by backend
-  
-  // LSTR Model selection
-  selectedLstrModel: number = 0;
-  lstrModels: LstrModel[] = [
-    { id: 0, name: 'Ultra Rápido', resolution: '180×320', speed: '~15 FPS' },
-    { id: 1, name: 'Rápido', resolution: '240×320', speed: '~12 FPS' },
-    { id: 2, name: 'Balanceado', resolution: '360×640', speed: '~8 FPS' },
-    { id: 3, name: 'Preciso', resolution: '480×640', speed: '~5 FPS' },
-    { id: 4, name: 'Máxima Calidad', resolution: '720×1280', speed: '~2 FPS' },
-  ];
 
-  // HybridNets AI Server settings
-  hybridnetsServerUrl: string = 'ws://127.0.0.1:8500/ws/steering';
-  hybridnetsJpegQuality: number = 70;
-  hybridnetsTimeout: number = 2.0;
-  hybridnetsConnected: boolean = false;
-  hybridnetsRoundtripMs: number = 0;
-  hybridnetsServerFps: number = 0;
+  // El único modo soportado tras el cleanup. Se mantiene la propiedad por compatibilidad
+  // con el contrato de mensajes del backend ('detection_mode'), pero no es seleccionable.
+  readonly selectedMode: string = 'ai_local';
 
-  // Local AI settings (runtime path for deprecated remote AI modes)
+  // Parámetros del runtime AI Local. min_confidence y input_size se leen una sola vez
+  // al inicializar el detector — cambiarlos requiere reinicio del proceso de cámara.
+  // 'interval' es el período de inferencia (s); subirlo baja FPS y CPU.
   localAiMinConfidence: number = 0.35;
   localAiInputSize: number = 320;
   localAiInterval: number = 0.04;
@@ -99,121 +92,40 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   localAiFps: number = 0;
   localAiInferMs: number = 0;
 
-  // Supercombo AI Server settings (openpilot model)
-  supercomboServerUrl: string = 'ws://127.0.0.1:8500/ws/steering';
-  supercomboJpegQuality: number = 70;
-  supercomboTimeout: number = 2.0;
-  supercomboConnected: boolean = false;
-  supercomboRoundtripMs: number = 0;
-  supercomboServerFps: number = 0;
-  
-  // Debug view selection
+  // Selector de vista de debug. id 0 = stream apagado (ahorra ancho de banda).
+  // El resto son frames intermedios del pipeline que el thread de cámara emite por WS.
   selectedDebugView: number = 0;
   debugViews: DebugView[] = [
-    { id: 0, name: 'Apagado', icon: '🚫', description: 'Stream de debug desactivado para máximo rendimiento.' },
-    { id: 1, name: 'Final', icon: '🎯', description: 'Resultado final con líneas detectadas y trayectoria calculada.' },
-    { id: 2, name: 'CLAHE', icon: '🌓', description: 'Imagen normalizada con CLAHE para mejor contraste.' },
-    { id: 3, name: 'Ajustada', icon: '☀️', description: 'Imagen con brillo y contraste ajustados.' },
-    { id: 4, name: 'HSV', icon: '🎨', description: 'Imagen convertida al espacio de color HSV.' },
-    { id: 5, name: 'Blanco', icon: '⚪', description: 'Máscara de detección de líneas blancas.' },
-    { id: 6, name: 'Amarillo', icon: '🟡', description: 'Máscara de detección de líneas amarillas.' },
-    { id: 7, name: 'Combinada', icon: '🔀', description: 'Máscara combinada de blanco y amarillo.' },
-    { id: 8, name: 'Bird Eye', icon: '🦅', description: 'Vista de pájaro (perspectiva superior).' },
-    { id: 9, name: 'Ventana', icon: '📊', description: 'Ventana deslizante para detección de carriles.' },
-    { id: 10, name: 'LSTR IA', icon: '🤖', description: 'Salida del modelo de IA LSTR con carriles detectados.' },
+    { id: 0, name: 'Apagado', icon: 'OFF', description: 'Stream de debug desactivado para máximo rendimiento.' },
+    { id: 1, name: 'Final', icon: 'F', description: 'Resultado final con líneas detectadas y trayectoria calculada.' },
+    { id: 8, name: 'Bird Eye', icon: 'BEV', description: 'Vista de pájaro (perspectiva superior).' },
+    { id: 11, name: 'AI Local', icon: 'AI', description: 'Salida del modelo YOLO TensorRT con máscara de carriles.' },
   ];
-  
-  // Stream settings
+
+  // Stream de debug — el operador puede bajar FPS/calidad/escala para conservar
+  // ancho de banda en pista (4G) sin perder visibilidad del pipeline.
   streamFps: number = 5;
   streamQuality: number = 50;
   streamScale: number = 0.5;
-  
-  // Adaptive lighting toggles
-  useClahe: boolean = true;
-  useAdaptiveWhite: boolean = true;
-  useGradientFallback: boolean = true;
-  
-  // Curve recovery toggle
+
+  // Toggle de la rutina de recovery de curvas cerradas. Sigue siendo útil en AI Local
+  // mientras la lógica de "salir de carril" no migre al BehaviorPlanner (Fase 4).
   useCurveRecovery: boolean = true;
-  
-  // Expandable sections
+
+  // Estado UI: qué tarjetas de configuración están desplegadas. Solo conservamos
+  // los grupos vigentes en AI Local (speed) más recovery (transición a Fase 4).
   expandedSections: { [key: string]: boolean } = {
     speed: false,
-    pid: false,
-    feedforward: false,
-    roi: false,
-    white: false,
-    yellow: false,
-    image: false,
-    edge: false,
-    bfmc: false,
-    adaptive: false,
-    recovery: false
+    recovery: false,
   };
 
-  // All sliders organized by group (defaults synced with threadLineFollowing.py)
+  // Sliders activos. El array se mantiene como lista plana porque el template lo
+  // filtra por grupo vía getSlidersByGroup() — agregar un grupo nuevo no requiere
+  // tocar la UI ni el sendConfig().
   sliders: SliderConfig[] = [
-    // Speed
     { key: 'base_speed', label: 'Velocidad Base', min: 5, max: 40, step: 1, value: 15, group: 'speed' },
     { key: 'max_speed', label: 'Velocidad Máxima', min: 10, max: 50, step: 1, value: 25, group: 'speed' },
     { key: 'min_speed', label: 'Velocidad Mínima', min: 5, max: 30, step: 1, value: 8, group: 'speed' },
-    // PID (basado en bfmc24-brain - error en píxeles)
-    { key: 'max_error_px', label: 'Offset Máx (px)', min: 10, max: 100, step: 1, value: 40, group: 'pid' },
-    { key: 'kp', label: 'Proporcional (Kp)', min: 0, max: 1, step: 0.005, value: 0.08, group: 'pid' },
-    { key: 'ki', label: 'Integral (Ki)', min: 0, max: 1, step: 0.005, value: 0.05, group: 'pid' },
-    { key: 'kd', label: 'Derivativo (Kd)', min: 0, max: 1, step: 0.005, value: 0.05, group: 'pid' },
-    { key: 'smoothing_factor', label: 'Suavizado', min: 0.1, max: 1.0, step: 0.05, value: 0.5, group: 'pid' },
-    { key: 'max_steering', label: 'Ángulo Máx Giro', min: 5, max: 25, step: 1, value: 25, group: 'pid' },
-    { key: 'lookahead', label: 'Lookahead (Anticipación)', min: 0.1, max: 0.8, step: 0.05, value: 0.4, group: 'pid' },
-    { key: 'dead_zone_ratio', label: 'Zona Muerta (px)', min: 0, max: 100, step: 5, value: 50, group: 'pid' },
-    { key: 'integral_reset_interval', label: 'Reset Integral (cada N frames)', min: 1, max: 50, step: 1, value: 10, group: 'pid' },
-    // Feed-Forward curve prediction
-    { key: 'wheelbase', label: 'Distancia entre ejes (m)', min: 0.15, max: 0.35, step: 0.005, value: 0.260, group: 'feedforward' },
-    { key: 'ff_weight', label: 'Peso Feed-Forward', min: 0.0, max: 1.0, step: 0.05, value: 0.6, group: 'feedforward' },
-    { key: 'curvature_threshold', label: 'Umbral Curvatura', min: 0.1, max: 2.0, step: 0.1, value: 0.5, group: 'feedforward' },
-    // ROI
-    { key: 'roi_height_start', label: 'Inicio Altura', min: 0.1, max: 0.8, step: 0.05, value: 0.35, group: 'roi' },
-    { key: 'roi_height_end', label: 'Fin Altura', min: 0.7, max: 1.0, step: 0.02, value: 1.0, group: 'roi' },
-    { key: 'roi_width_margin_top', label: 'Margen Superior', min: 0.1, max: 0.5, step: 0.05, value: 0.35, group: 'roi' },
-    { key: 'roi_width_margin_bottom', label: 'Margen Inferior', min: 0.0, max: 0.3, step: 0.05, value: 0.15, group: 'roi' },
-    // White HSV
-    { key: 'white_h_min', label: 'H Mín', min: 0, max: 180, step: 1, value: 81, group: 'white' },
-    { key: 'white_h_max', label: 'H Máx', min: 0, max: 180, step: 1, value: 180, group: 'white' },
-    { key: 'white_s_min', label: 'S Mín', min: 0, max: 255, step: 1, value: 0, group: 'white' },
-    { key: 'white_s_max', label: 'S Máx', min: 0, max: 255, step: 1, value: 98, group: 'white' },
-    { key: 'white_v_min', label: 'V Mín', min: 0, max: 255, step: 1, value: 200, group: 'white' },
-    { key: 'white_v_max', label: 'V Máx', min: 0, max: 255, step: 1, value: 255, group: 'white' },
-    // Yellow HSV
-    { key: 'yellow_h_min', label: 'H Mín', min: 0, max: 180, step: 1, value: 173, group: 'yellow' },
-    { key: 'yellow_h_max', label: 'H Máx', min: 0, max: 180, step: 1, value: 86, group: 'yellow' },
-    { key: 'yellow_s_min', label: 'S Mín', min: 0, max: 255, step: 1, value: 100, group: 'yellow' },
-    { key: 'yellow_s_max', label: 'S Máx', min: 0, max: 255, step: 1, value: 255, group: 'yellow' },
-    { key: 'yellow_v_min', label: 'V Mín', min: 0, max: 255, step: 1, value: 100, group: 'yellow' },
-    { key: 'yellow_v_max', label: 'V Máx', min: 0, max: 255, step: 1, value: 255, group: 'yellow' },
-    // Image processing
-    { key: 'brightness', label: 'Brillo', min: -100, max: 100, step: 5, value: 5, group: 'image' },
-    { key: 'contrast', label: 'Contraste', min: 0.5, max: 2.0, step: 0.1, value: 0.8, group: 'image' },
-    { key: 'blur_kernel', label: 'Kernel Blur', min: 1, max: 15, step: 2, value: 3, group: 'image' },
-    { key: 'morph_kernel', label: 'Kernel Morph', min: 1, max: 15, step: 2, value: 7, group: 'image' },
-    // Edge detection
-    { key: 'canny_low', label: 'Canny Bajo', min: 10, max: 200, step: 10, value: 100, group: 'edge' },
-    { key: 'canny_high', label: 'Canny Alto', min: 50, max: 300, step: 10, value: 150, group: 'edge' },
-    { key: 'hough_threshold', label: 'Umbral Hough', min: 5, max: 150, step: 5, value: 50, group: 'edge' },
-    { key: 'hough_min_line_length', label: 'Long. Mín Línea', min: 5, max: 150, step: 5, value: 50, group: 'edge' },
-    { key: 'hough_max_line_gap', label: 'Espacio Máx Línea', min: 10, max: 300, step: 10, value: 150, group: 'edge' },
-    // BFMC-style parameters
-    { key: 'binary_threshold', label: 'Umbral Binario', min: 50, max: 255, step: 5, value: 165, group: 'bfmc' },
-    { key: 'binary_threshold_retry', label: 'Umbral Reintento', min: 30, max: 200, step: 5, value: 90, group: 'bfmc' },
-    { key: 'line_angle_filter', label: 'Filtro Ángulo Línea (°)', min: 5, max: 60, step: 5, value: 30, group: 'bfmc' },
-    { key: 'line_merge_distance', label: 'Distancia Merge (px)', min: 50, max: 300, step: 25, value: 175, group: 'bfmc' },
-    // Adaptive lighting
-    { key: 'clahe_clip_limit', label: 'CLAHE Clip', min: 1.0, max: 5.0, step: 0.5, value: 2.0, group: 'adaptive' },
-    { key: 'clahe_grid_size', label: 'CLAHE Grid', min: 4, max: 16, step: 2, value: 8, group: 'adaptive' },
-    { key: 'adaptive_white_percentile', label: 'Percentil Blanco', min: 80, max: 98, step: 1, value: 92, group: 'adaptive' },
-    { key: 'adaptive_white_min_threshold', label: 'Umbral Mín Blanco', min: 150, max: 220, step: 5, value: 180, group: 'adaptive' },
-    { key: 'gradient_percentile', label: 'Percentil Gradiente', min: 75, max: 95, step: 1, value: 85, group: 'adaptive' },
-    { key: 'strip_threshold_relax', label: 'Strip Relax (pts)', min: 0, max: 60, step: 2, value: 0, group: 'adaptive' },
-    // Curve recovery
     { key: 'recovery_max_steer_frames', label: 'Frames Max Giro', min: 2, max: 15, step: 1, value: 6, group: 'recovery' },
     { key: 'recovery_reverse_speed', label: 'Velocidad Reversa', min: -20, max: -3, step: 1, value: -8, group: 'recovery' },
     { key: 'recovery_reverse_time_min', label: 'Reversa Min (s)', min: 0.1, max: 1.0, step: 0.05, value: 0.3, group: 'recovery' },
@@ -228,7 +140,6 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   private debugStreamSubscription: Subscription | null = null;
   private debugStatusSubscription: Subscription | null = null;
 
-  // Debug stream properties
   debugImageSrc: string | null = null;
   debugStatus: DebugStatus | null = null;
   debugStreamEnabled: boolean = true;
@@ -240,15 +151,9 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
 
   constructor(private webSocketService: WebSocketService) {}
 
-  private normalizeMode(mode: string | null | undefined): string {
-    if (mode === 'hybridnets' || mode === 'supercombo') {
-      return 'ai_local';
-    }
-    return mode || 'opencv';
-  }
-
   ngOnInit(): void {
-    // Load saved config from localStorage if available
+    // Restaurar última configuración del operador. Si el JSON está corrupto,
+    // se ignora silenciosamente — no bloqueamos el panel por un localStorage roto.
     const savedConfig = localStorage.getItem('lineFollowingConfig');
     if (savedConfig) {
       try {
@@ -259,7 +164,8 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
       }
     }
 
-    // Subscribe to debug stream
+    // Stream de imagen: el backend manda JPEGs base64 cada streamFps frames.
+    // El template los muestra vía data URI directo en un <img>.
     this.debugStreamSubscription = this.webSocketService
       .receiveLineFollowingDebug()
       .subscribe((imageData: string) => {
@@ -268,36 +174,15 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
         }
       });
 
-    // Subscribe to debug status
+    // Stream de estado: telemetría a ~5 Hz con steering/speed comandados,
+    // estado del actuador y métricas del modelo AI. Sirve para diagnóstico en pista.
     this.debugStatusSubscription = this.webSocketService
       .receiveLineFollowingStatus()
       .subscribe((status: DebugStatus) => {
         this.debugStatus = status;
-        this.selectedMode = this.normalizeMode(status?.mode || this.selectedMode);
-        this.lstrAvailable = status?.lstr_available ?? false;
         this.localAiReady = status?.local_ai_ready ?? false;
         this.localAiInferMs = status?.local_ai_infer_ms ?? 0;
         this.localAiFps = status?.local_ai_fps ?? 0;
-        // Update HybridNets connection status
-        if (status?.hybridnets_connected !== undefined) {
-          this.hybridnetsConnected = status.hybridnets_connected;
-        }
-        if (status?.hybridnets_roundtrip_ms !== undefined) {
-          this.hybridnetsRoundtripMs = status.hybridnets_roundtrip_ms;
-        }
-        if (status?.hybridnets_server_fps !== undefined) {
-          this.hybridnetsServerFps = status.hybridnets_server_fps;
-        }
-        // Update Supercombo connection status
-        if (status?.supercombo_connected !== undefined) {
-          this.supercomboConnected = status.supercombo_connected;
-        }
-        if (status?.supercombo_roundtrip_ms !== undefined) {
-          this.supercomboRoundtripMs = status.supercombo_roundtrip_ms;
-        }
-        if (status?.supercombo_server_fps !== undefined) {
-          this.supercomboServerFps = status.supercombo_server_fps;
-        }
       });
   }
 
@@ -313,26 +198,13 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     }
   }
 
-  // Mode methods
-  setMode(mode: string): void {
-    mode = this.normalizeMode(mode);
-    if ((mode === 'lstr' || mode === 'hybrid') && !this.lstrAvailable) return;
-    this.selectedMode = mode;
-    this.debouncedSendConfig();
-  }
-
   getModeDisplayName(): string {
-    const names: { [key: string]: string } = {
-      'opencv': 'OpenCV',
-      'lstr': 'LSTR IA',
-      'hybrid': 'Híbrido',
-      'ai_local': 'AI Local',
-      'hybridnets': 'HybridNets',
-      'supercombo': 'Supercombo'
-    };
-    return names[this.selectedMode] || this.selectedMode;
+    return 'AI Local';
   }
 
+  // Etiqueta humana para la fuente del comando actual: "Normal" significa que el
+  // controller (Stanley/MPC) está mandando, "Recovery" cuando la rutina de curvas
+  // toma control, "Señal" cuando el override de signActions está activo.
   getCommandSourceLabel(): string {
     const source = this.debugStatus?.command_source;
     const labels: { [key: string]: string } = {
@@ -346,6 +218,8 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     return source ? (labels[source] || source) : '--';
   }
 
+  // Resumen del estado del actuador para que el operador entienda en una sola
+  // línea por qué el robot no se mueve si está parado.
   getActuatorLabel(): string {
     if (this.debugStatus?.serial_connected === false) {
       return 'Serial desconectado';
@@ -366,57 +240,6 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.debouncedSendConfig();
   }
 
-  // HybridNets methods
-  setHybridnetsServerUrl(url: string): void {
-    this.hybridnetsServerUrl = url;
-    this.debouncedSendConfig();
-  }
-
-  setHybridnetsJpegQuality(quality: number): void {
-    this.hybridnetsJpegQuality = quality;
-    this.debouncedSendConfig();
-  }
-
-  setHybridnetsTimeout(timeout: number): void {
-    this.hybridnetsTimeout = timeout;
-    this.debouncedSendConfig();
-  }
-
-  setHybridnetsEndpoint(endpoint: string): void {
-    const base = this.hybridnetsServerUrl.replace(/\/ws\/.*$/, '');
-    this.hybridnetsServerUrl = base + endpoint;
-    this.debouncedSendConfig();
-  }
-
-  // Supercombo methods
-  setSupercomboServerUrl(url: string): void {
-    this.supercomboServerUrl = url;
-    this.debouncedSendConfig();
-  }
-
-  setSupercomboJpegQuality(quality: number): void {
-    this.supercomboJpegQuality = quality;
-    this.debouncedSendConfig();
-  }
-
-  setSupercomboTimeout(timeout: number): void {
-    this.supercomboTimeout = timeout;
-    this.debouncedSendConfig();
-  }
-
-  setSupercomboEndpoint(endpoint: string): void {
-    const base = this.supercomboServerUrl.replace(/\/ws\/.*$/, '');
-    this.supercomboServerUrl = base + endpoint;
-    this.debouncedSendConfig();
-  }
-
-  // LSTR Model methods
-  setLstrModel(modelId: number): void {
-    this.selectedLstrModel = modelId;
-    this.debouncedSendConfig();
-  }
-
-  // Debug view methods
   setDebugView(viewId: number): void {
     this.selectedDebugView = viewId;
     if (viewId === 0) {
@@ -430,7 +253,6 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     return view ? view.description : '';
   }
 
-  // Stream settings methods
   setStreamFps(fps: number): void {
     this.streamFps = fps;
     this.debouncedSendConfig();
@@ -446,64 +268,27 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     this.debouncedSendConfig();
   }
 
-  // Toggle methods
-  toggleClahe(): void {
-    this.useClahe = !this.useClahe;
-    this.debouncedSendConfig();
-  }
-
-  toggleAdaptiveWhite(): void {
-    this.useAdaptiveWhite = !this.useAdaptiveWhite;
-    this.debouncedSendConfig();
-  }
-
-  toggleGradientFallback(): void {
-    this.useGradientFallback = !this.useGradientFallback;
-    this.debouncedSendConfig();
-  }
-
   toggleCurveRecovery(): void {
     this.useCurveRecovery = !this.useCurveRecovery;
     this.debouncedSendConfig();
   }
 
-  // Section toggle
   toggleSection(section: string): void {
     this.expandedSections[section] = !this.expandedSections[section];
   }
 
-  // Check if a section group is relevant to the current detection mode
-  isSectionVisibleForMode(group: string): boolean {
-    // These sections are always visible regardless of mode
-    const alwaysVisible = ['speed'];
-    if (alwaysVisible.includes(group)) return true;
-
-    // PID and control params are used by opencv, lstr, and hybrid (local processing)
-    const controlSections = ['pid', 'feedforward'];
-    if (controlSections.includes(group)) {
-      return this.selectedMode === 'opencv' || this.selectedMode === 'lstr' || this.selectedMode === 'hybrid' || this.selectedMode === 'ai_local';
-    }
-
-    // OpenCV-specific image processing (also shown in hybrid mode since it uses OpenCV pipeline)
-    const opencvSections = ['roi', 'white', 'yellow', 'image', 'edge', 'bfmc', 'adaptive', 'recovery'];
-    if (opencvSections.includes(group)) {
-      return this.selectedMode === 'opencv' || this.selectedMode === 'hybrid';
-    }
-
-    return true;
-  }
-
-  // Get sliders by group
   getSlidersByGroup(group: string): SliderConfig[] {
     return this.sliders.filter(s => s.group === group);
   }
 
   onSliderChange(slider: SliderConfig): void {
-    // HTML range inputs return strings - force back to number
+    // <input type="range"> entrega strings — forzar a Number antes de enviar al backend.
     slider.value = Number(slider.value);
     this.debouncedSendConfig();
   }
 
+  // Debounce de 100 ms: agrupa cambios rápidos del operador (ej. arrastrar un slider)
+  // en un único mensaje al backend, en vez de inundar el WebSocket.
   private debouncedSendConfig(): void {
     if (this.updateTimeout) {
       clearTimeout(this.updateTimeout);
@@ -515,51 +300,34 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
 
   sendConfig(): void {
     const config: { [key: string]: number | string } = {};
-    
-    // Add mode settings
-    config['detection_mode'] = this.normalizeMode(this.selectedMode);
-    config['lstr_model_size'] = this.selectedLstrModel;
+
+    config['detection_mode'] = this.selectedMode;
     config['local_ai_min_confidence'] = Number(this.localAiMinConfidence);
     config['local_ai_imgsz'] = Number(this.localAiInputSize);
     config['local_ai_interval'] = Number(this.localAiInterval);
-    
-    // Add stream settings
+
     config['stream_debug_view'] = this.selectedDebugView;
     config['stream_debug_fps'] = this.streamFps;
     config['stream_debug_quality'] = this.streamQuality;
     config['stream_debug_scale'] = this.streamScale;
-    
-    // Add toggle settings
-    config['use_clahe'] = this.useClahe ? 1 : 0;
-    config['use_adaptive_white'] = this.useAdaptiveWhite ? 1 : 0;
-    config['use_gradient_fallback'] = this.useGradientFallback ? 1 : 0;
+
     config['use_curve_recovery'] = this.useCurveRecovery ? 1 : 0;
-    
-    // Add all slider values (ensure numbers, not strings from range inputs)
+
     for (const slider of this.sliders) {
       config[slider.key] = Number(slider.value);
     }
-    
-    // Save to localStorage
+
     localStorage.setItem('lineFollowingConfig', JSON.stringify(config));
-    
-    // Send to backend
+
     const message = JSON.stringify({
       Name: 'LineFollowingConfig',
       Value: config
     });
-    
+
     this.webSocketService.sendMessageToFlask(message);
   }
 
   applyConfig(config: { [key: string]: any }): void {
-    // Apply mode
-    if (config['detection_mode']) {
-      this.selectedMode = this.normalizeMode(config['detection_mode']);
-    }
-    if (config['lstr_model_size'] !== undefined) {
-      this.selectedLstrModel = config['lstr_model_size'];
-    }
     if (config['local_ai_min_confidence'] !== undefined) {
       this.localAiMinConfidence = Number(config['local_ai_min_confidence']);
     }
@@ -569,30 +337,7 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     if (config['local_ai_interval'] !== undefined) {
       this.localAiInterval = Number(config['local_ai_interval']);
     }
-    
-    // Apply HybridNets settings
-    if (config['hybridnets_server_url']) {
-      this.hybridnetsServerUrl = config['hybridnets_server_url'];
-    }
-    if (config['hybridnets_jpeg_quality'] !== undefined) {
-      this.hybridnetsJpegQuality = config['hybridnets_jpeg_quality'];
-    }
-    if (config['hybridnets_timeout'] !== undefined) {
-      this.hybridnetsTimeout = config['hybridnets_timeout'];
-    }
-    
-    // Apply Supercombo settings
-    if (config['supercombo_server_url']) {
-      this.supercomboServerUrl = config['supercombo_server_url'];
-    }
-    if (config['supercombo_jpeg_quality'] !== undefined) {
-      this.supercomboJpegQuality = config['supercombo_jpeg_quality'];
-    }
-    if (config['supercombo_timeout'] !== undefined) {
-      this.supercomboTimeout = config['supercombo_timeout'];
-    }
-    
-    // Apply stream settings
+
     if (config['stream_debug_view'] !== undefined) {
       this.selectedDebugView = config['stream_debug_view'];
     }
@@ -605,22 +350,11 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
     if (config['stream_debug_scale'] !== undefined) {
       this.streamScale = config['stream_debug_scale'];
     }
-    
-    // Apply toggles
-    if (config['use_clahe'] !== undefined) {
-      this.useClahe = config['use_clahe'] === 1;
-    }
-    if (config['use_adaptive_white'] !== undefined) {
-      this.useAdaptiveWhite = config['use_adaptive_white'] === 1;
-    }
-    if (config['use_gradient_fallback'] !== undefined) {
-      this.useGradientFallback = config['use_gradient_fallback'] === 1;
-    }
+
     if (config['use_curve_recovery'] !== undefined) {
       this.useCurveRecovery = config['use_curve_recovery'] === 1;
     }
-    
-    // Apply sliders (ensure numbers)
+
     for (const slider of this.sliders) {
       if (config[slider.key] !== undefined) {
         slider.value = Number(config[slider.key]);
@@ -629,61 +363,41 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   }
 
   resetDefaults(): void {
-    // Reset mode
-    this.selectedMode = 'opencv';
-    this.selectedLstrModel = 0;
     this.localAiMinConfidence = 0.35;
     this.localAiInputSize = 320;
     this.localAiInterval = 0.04;
-    
-    // Reset HybridNets
-    this.hybridnetsServerUrl = 'ws://127.0.0.1:8500/ws/steering';
-    this.hybridnetsJpegQuality = 70;
-    this.hybridnetsTimeout = 2.0;
-    
-    // Reset Supercombo
-    this.supercomboServerUrl = 'ws://127.0.0.1:8500/ws/steering';
-    this.supercomboJpegQuality = 70;
-    this.supercomboTimeout = 2.0;
-    
-    // Reset stream
+
     this.selectedDebugView = 0;
     this.streamFps = 5;
     this.streamQuality = 50;
     this.streamScale = 0.5;
-    
-    // Reset toggles
-    this.useClahe = true;
-    this.useAdaptiveWhite = true;
-    this.useGradientFallback = true;
-    
-    // Reset sliders to defaults (synced with threadLineFollowing.py)
+
+    this.useCurveRecovery = true;
+
+    // Defaults sincronizados con threadLineFollowing.py — mover a backend cuando
+    // BehaviorPlanner sea la fuente de verdad de speed (Fase 4).
     const defaults: { [key: string]: number } = {
-      base_speed: 15, max_speed: 25, min_speed: 8,
-      max_error_px: 40, kp: 0.08, ki: 0.05, kd: 0.05, smoothing_factor: 0.5,
-      max_steering: 25, lookahead: 0.4, dead_zone_ratio: 50, integral_reset_interval: 10,
-      wheelbase: 0.260, ff_weight: 0.6, curvature_threshold: 0.5,
-      roi_height_start: 0.35, roi_height_end: 1.0, roi_width_margin_top: 0.35, roi_width_margin_bottom: 0.15,
-      white_h_min: 81, white_h_max: 180, white_s_min: 0, white_s_max: 98, white_v_min: 200, white_v_max: 255,
-      yellow_h_min: 173, yellow_h_max: 86, yellow_s_min: 100, yellow_s_max: 255, yellow_v_min: 100, yellow_v_max: 255,
-      brightness: 5, contrast: 0.8, blur_kernel: 3, morph_kernel: 7,
-      canny_low: 100, canny_high: 150, hough_threshold: 50, hough_min_line_length: 50, hough_max_line_gap: 150,
-      binary_threshold: 165, binary_threshold_retry: 90, line_angle_filter: 30, line_merge_distance: 175,
-      clahe_clip_limit: 2.0, clahe_grid_size: 8,
-      adaptive_white_percentile: 92, adaptive_white_min_threshold: 180,
-      gradient_percentile: 85,
-      strip_threshold_relax: 0
+      base_speed: 15,
+      max_speed: 25,
+      min_speed: 8,
+      recovery_max_steer_frames: 6,
+      recovery_reverse_speed: -8,
+      recovery_reverse_time_min: 0.3,
+      recovery_reverse_time_max: 1.5,
+      recovery_reverse_steer_scale: 1.5,
+      recovery_pre_turn_time: 0.6,
+      recovery_realign_time: 0.6,
+      recovery_error_shrink_ratio: 0.85,
     };
-    
+
     for (const slider of this.sliders) {
       if (defaults[slider.key] !== undefined) {
         slider.value = defaults[slider.key];
       }
     }
-    
-    // Clear image
+
     this.debugImageSrc = null;
-    
+
     localStorage.removeItem('lineFollowingConfig');
     this.sendConfig();
   }

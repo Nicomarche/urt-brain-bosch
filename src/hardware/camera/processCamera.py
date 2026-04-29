@@ -45,14 +45,6 @@ from src.statemachine.systemMode import SystemMode
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.utils.messages.allMessages import StateChange
 
-# Sign detection (optional — requires tflite-runtime and model file)
-try:
-    from src.hardware.camera.threads.threadSignDetection import threadSignDetection
-    SIGN_DETECTION_AVAILABLE = True
-except ImportError as e:
-    SIGN_DETECTION_AVAILABLE = False
-    print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Sign detection not available: {e}")
-
 # GPS-free tracking (optional — requires scipy for spline interpolation)
 try:
     from src.hardware.tracking.threadNavigationPlanner import threadNavigationPlanner
@@ -90,7 +82,7 @@ class processCamera(WorkerProcess):
                  picamera_hdr_glare_threshold=0.04,
                  publish_serial_stream=True,
                  enable_sign_detection=True, sign_detection_actions=False,
-                 sign_min_confidence=0.50, sign_server_url="ws://127.0.0.1:8500/ws/signs",
+                 sign_min_confidence=0.50,
                  sign_min_box_area=0.01,
                  sign_action_cooldown=15.0):
         self.queuesList = queueList
@@ -113,8 +105,6 @@ class processCamera(WorkerProcess):
         self.enable_sign_detection = enable_sign_detection
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
-        self.sign_server_url = sign_server_url
-        self.use_legacy_remote_sign_detection = False  # Deprecated runtime path, kept for future reuse
         self.sign_min_box_area = sign_min_box_area
         self.sign_action_cooldown = sign_action_cooldown
         self.frame_buffer = LatestFrameBuffer()
@@ -286,27 +276,6 @@ class processCamera(WorkerProcess):
             steer_override_event=steer_override_event,
         )
         self.threads.append(controlCoordinatorTh)
-
-        # Legacy remote sign detection path: preserved, but disabled by default.
-        if self.use_legacy_remote_sign_detection and self.enable_sign_detection and SIGN_DETECTION_AVAILABLE:
-            signDetTh = threadSignDetection(
-                self.queuesList, self.logging, self.debugging,
-                server_url=self.sign_server_url,
-                enable_actions=self.sign_detection_actions,
-                min_confidence=self.sign_min_confidence,
-                min_box_area=self.sign_min_box_area,
-                action_cooldown=self.sign_action_cooldown,
-                show_debug=self.show_preview,
-                sign_action_event=sign_action_event,
-                highway_mode_event=highway_mode_event,
-                steer_override_event=steer_override_event,
-            )
-            self.threads.append(signDetTh)
-        elif self.use_legacy_remote_sign_detection and self.enable_sign_detection and not SIGN_DETECTION_AVAILABLE:
-            print(
-                f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - "
-                f"Sign detection enabled in config but tflite-runtime not installed"
-            )
 
 
 # =================================== EXAMPLE =========================================

@@ -27,21 +27,13 @@ from src.templates.threadwithstop import ThreadWithStop
 from src.statemachine.systemMode import SystemMode
 from src.hardware.camera.threads.maneuverManager import ManeuverManager
 
-# Import LSTR detector (AI-based lane detection)
-try:
-    from src.hardware.camera.threads.lstrDetector import LSTRDetector, LSTRModelType
-    LSTR_AVAILABLE = True
-except ImportError as e:
-    LSTR_AVAILABLE = False
-    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR not available: {e}")
-
-# Import HybridNets remote AI client
-try:
-    from aiserver.client import HybridNetsClient
-    HYBRIDNETS_CLIENT_AVAILABLE = True
-except ImportError as e:
-    HYBRIDNETS_CLIENT_AVAILABLE = False
-    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - HybridNets client not available: {e}")
+# DECISIÓN: este archivo se reescribe completo en Fase 1 (port Autoware) — se descompone
+# en src/perception/{camera,lane,signs,stopline}/. Los detectores legacy (LSTR, HybridNets,
+# Supercombo) ya fueron borrados como archivos físicos y desde aiserver/. Estas dos
+# constantes existen solo para que los métodos legacy internos no exploten con NameError
+# durante el período de transición; nunca pasan a True. Todo este archivo desaparece.
+LSTR_AVAILABLE = False
+HYBRIDNETS_CLIENT_AVAILABLE = False
 
 
 class DetectionMode(Enum):

@@ -1,3 +1,10 @@
+/*
+ * line-following.component.css
+ * Estilos del panel "Line Following" del dashboard. Tras el cleanup de Fase 0,
+ * solo queda el modo AI Local — se eliminaron todas las clases de mode-buttons,
+ * model-buttons (LSTR), hybridnets-* (renombradas a ai-local-*) y remote-mode-hint.
+ */
+
 .line-following-config {
   background: #1a1a2e;
   border-radius: 12px;
@@ -6,7 +13,6 @@
   overflow-y: auto;
 }
 
-/* Header */
 .header {
   display: flex;
   justify-content: space-between;
@@ -42,7 +48,7 @@
   box-shadow: 0 4px 12px rgba(255, 107, 107, 0.4);
 }
 
-/* AI Analysis Panel */
+/* ----- Panel de telemetría en vivo (stream JPEG + stats) ----- */
 .ai-analysis-panel {
   background: linear-gradient(135deg, #252542, #1e1e38);
   border-radius: 12px;
@@ -121,12 +127,6 @@
   padding: 40px;
 }
 
-.no-stream-icon {
-  font-size: 3rem;
-  margin-bottom: 12px;
-  opacity: 0.5;
-}
-
 .no-stream p {
   margin: 5px 0;
   color: #888;
@@ -170,7 +170,7 @@
   color: #2ed573;
 }
 
-/* Config Sections */
+/* ----- Secciones de configuración (cards plegables) ----- */
 .config-section {
   background: #252542;
   border-radius: 10px;
@@ -213,130 +213,16 @@
   font-size: 0.8rem;
 }
 
-/* Button Groups */
 .button-group {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
 }
 
-/* Mode Buttons */
-.mode-buttons {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 12px;
-}
-
-.mode-btn {
-  background: #1a1a2e;
-  border: 2px solid #3a3a5c;
-  border-radius: 12px;
-  padding: 16px 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  text-align: center;
-  position: relative;
-}
-
-.mode-btn:hover:not(:disabled) {
-  border-color: #5352ed;
-  background: #252542;
-}
-
-.mode-btn.selected {
-  border-color: #4fc3f7;
-  background: linear-gradient(135deg, rgba(79, 195, 247, 0.15), rgba(79, 195, 247, 0.05));
-  box-shadow: 0 0 20px rgba(79, 195, 247, 0.2);
-}
-
-.mode-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.mode-icon {
-  font-size: 2rem;
-}
-
-.mode-name {
-  font-size: 1rem;
-  font-weight: 600;
-  color: #fff;
-}
-
-.mode-desc {
-  font-size: 0.75rem;
-  color: #888;
-  line-height: 1.4;
-}
-
-.mode-badge {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  background: #ff6b6b;
-  color: white;
-  font-size: 0.65rem;
-  padding: 3px 6px;
-  border-radius: 4px;
-}
-
-/* Model Buttons */
-.model-buttons {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 8px;
-}
-
-.model-btn {
-  background: #1a1a2e;
-  border: 2px solid #3a3a5c;
-  border-radius: 8px;
-  padding: 12px 8px;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  text-align: center;
-}
-
-.model-btn:hover {
-  border-color: #5352ed;
-  background: #252542;
-}
-
-.model-btn.selected {
-  border-color: #2ed573;
-  background: linear-gradient(135deg, rgba(46, 213, 115, 0.15), rgba(46, 213, 115, 0.05));
-}
-
-.model-name {
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #fff;
-}
-
-.model-resolution {
-  font-size: 0.7rem;
-  color: #4fc3f7;
-  font-family: monospace;
-}
-
-.model-speed {
-  font-size: 0.65rem;
-  color: #888;
-}
-
-/* View Buttons */
+/* ----- Botones del selector de vista de debug ----- */
 .view-buttons {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 
@@ -365,7 +251,9 @@
 }
 
 .view-icon {
-  font-size: 1.2rem;
+  font-size: 0.8rem;
+  font-family: 'Monaco', monospace;
+  color: #ffa502;
 }
 
 .view-name {
@@ -384,7 +272,7 @@
   border-left: 3px solid #ffa502;
 }
 
-/* Inline Controls */
+/* ----- Controles inline (FPS / calidad / escala del stream) ----- */
 .inline-controls {
   display: flex;
   gap: 20px;
@@ -431,7 +319,6 @@
   font-weight: 600;
 }
 
-/* Section Hints */
 .section-hint {
   margin: 0 0 12px 0;
   padding: 10px 12px;
@@ -443,21 +330,7 @@
   border-left: 3px solid #4fc3f7;
 }
 
-/* Remote Mode Hint */
-.remote-mode-hint {
-  border: 1px dashed #555;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.remote-mode-hint p {
-  margin: 0;
-  color: #888;
-  font-size: 0.85rem;
-  line-height: 1.5;
-  text-align: center;
-}
-
-/* Slider Content */
+/* ----- Sliders (rangos de velocidad / recovery) ----- */
 .slider-content {
   padding-top: 8px;
 }
@@ -521,7 +394,7 @@
   font-family: 'Monaco', monospace;
 }
 
-/* Toggle Row */
+/* ----- Toggle ON/OFF (e.g. recovery curva) ----- */
 .toggle-row {
   display: flex;
   justify-content: space-between;
@@ -561,7 +434,6 @@
   transform: scale(1.05);
 }
 
-/* Actions */
 .actions {
   margin-top: 20px;
   display: flex;
@@ -589,7 +461,6 @@
   box-shadow: 0 6px 20px rgba(76, 175, 80, 0.4);
 }
 
-/* Scrollbar */
 .line-following-config::-webkit-scrollbar {
   width: 8px;
 }
@@ -608,24 +479,9 @@
   background: linear-gradient(135deg, #555, #666);
 }
 
-/* HybridNets Mode Button */
-.hybridnets-btn.selected {
-  border-color: #ff6348;
-  background: linear-gradient(135deg, rgba(255, 99, 72, 0.15), rgba(255, 99, 72, 0.05));
-  box-shadow: 0 0 20px rgba(255, 99, 72, 0.2);
-}
-
-.server-badge {
-  background: #ff4757 !important;
-}
-
-.hybridnets-btn.selected .server-badge {
-  background: #2ed573 !important;
-}
-
-/* HybridNets Config Section */
-.hybridnets-config {
-  border: 1px solid rgba(255, 99, 72, 0.3);
+/* ----- Bloque de configuración del runtime AI Local ----- */
+.ai-local-config {
+  border: 1px solid rgba(79, 195, 247, 0.3);
   background: linear-gradient(135deg, #252542, #2a2045);
 }
 
@@ -642,39 +498,6 @@
 .connection-status.connected {
   background: linear-gradient(135deg, #2ed573, #26c066);
   animation: pulse 2s infinite;
-}
-
-.server-url-row {
-  margin-bottom: 14px;
-}
-
-.server-url-row label {
-  display: block;
-  color: #888;
-  font-size: 0.8rem;
-  margin-bottom: 6px;
-}
-
-.server-url-input {
-  width: 100%;
-  background: #1a1a2e;
-  border: 2px solid #3a3a5c;
-  border-radius: 8px;
-  padding: 10px 14px;
-  color: #4fc3f7;
-  font-size: 0.85rem;
-  font-family: 'Monaco', 'Consolas', monospace;
-  outline: none;
-  transition: border-color 0.2s;
-  box-sizing: border-box;
-}
-
-.server-url-input:focus {
-  border-color: #ff6348;
-}
-
-.server-url-input::placeholder {
-  color: #555;
 }
 
 .server-info-grid {
@@ -735,51 +558,43 @@
   color: #ff4757;
 }
 
-.hybridnets-hint {
+.ai-local-hint {
   margin: 0;
   padding: 10px;
-  background: rgba(255, 99, 72, 0.08);
+  background: rgba(79, 195, 247, 0.08);
   border-radius: 6px;
   font-size: 0.78rem;
   color: #aaa;
-  border-left: 3px solid #ff6348;
+  border-left: 3px solid #4fc3f7;
   line-height: 1.5;
 }
 
-.hybridnets-hint code {
+.ai-local-hint code {
   background: rgba(255, 255, 255, 0.1);
   padding: 2px 6px;
   border-radius: 3px;
-  color: #ff6348;
+  color: #4fc3f7;
   font-size: 0.8rem;
 }
 
-/* Responsive */
+/* ----- Responsive ----- */
 @media (max-width: 900px) {
   .ai-content {
     grid-template-columns: 1fr;
   }
-  
+
   .ai-stats {
     flex-direction: row;
     flex-wrap: wrap;
   }
-  
+
   .stat-item {
     flex: 1;
     min-width: 100px;
   }
-  
-  .mode-buttons {
-    grid-template-columns: repeat(3, 1fr);
-  }
-  
-  .model-buttons {
-    grid-template-columns: repeat(3, 1fr);
-  }
-  
+
   .view-buttons {
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
 
   .server-info-grid {
@@ -793,32 +608,24 @@
     gap: 12px;
   }
 
-  .mode-buttons {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  
-  .model-buttons {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  
   .view-buttons {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(2, 1fr);
   }
-  
+
   .inline-controls {
     flex-direction: column;
     gap: 12px;
   }
-  
+
   .control-item {
     justify-content: space-between;
     width: 100%;
   }
-  
+
   .slider-row {
     grid-template-columns: 90px 1fr 50px;
   }
-  
+
   .ai-indicators {
     flex-wrap: wrap;
     gap: 6px;

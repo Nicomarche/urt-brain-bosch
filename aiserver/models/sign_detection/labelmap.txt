@@ -1,9 +1,0 @@
-stop
-parking
-priority
-crosswalk
-highway_entrance
-highway_exit
-roundabout
-one_way
-no_entry

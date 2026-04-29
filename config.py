@@ -567,22 +567,15 @@ DEBUG_WINDOWS = {
     "canny_edges":      True,  # Vista de bordes Canny
     "control_panel":    False,  # Panel de control con PID, velocidad, steering
     "steering_angle":   True,  # Angulo final de giro (calculado/comandado) en tiempo real
-    "ai_analysis":      False,  # Analisis de LSTR / AI
-    "hybrid_fusion":    False,  # Fusion hibrida OpenCV + LSTR
     "ai_local_overlay": True,  # Visualizacion local del modelo de IA (carriles + senales)
     "ai_local_masks":   True,  # Mascaras izquierda/derecha/combinada del modelo local
     "ai_local_signs":   True,  # Detecciones de senales/objetos no-carril del modelo local
 }
 
 # ===================== SIGN DETECTION =====================
-# Deteccion de senales de trafico via AI Server remoto (WebSocket).
-# El modelo MobilenetV2 SSD TFLite corre en el servidor, no en la RPi.
-# Requiere: pip install websockets
+# Deteccion de senales de trafico embebida en el motor de percepcion local
+# (YOLO local TensorRT). Sin servidor remoto.
 ENABLE_SIGN_DETECTION = True
-
-# URL WebSocket del AI Server (endpoint de senales de trafico)
-# Legacy: ya no se usa en runtime cuando corre la percepcion local.
-SIGN_SERVER_URL = "ws://localhost:8500/ws/signs"
 
 # Ejecutar acciones al detectar senales (stop, reducir velocidad, etc.)
 # False = solo detecta y publica (modo seguro para testing)

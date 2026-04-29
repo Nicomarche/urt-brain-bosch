@@ -189,13 +189,6 @@ class LocalPerceptionEngine:
 
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
         primary = os.path.join(repo_root, model_path)
-        if os.path.isfile(primary):
-            return primary
-
-        legacy = os.path.join(repo_root, "aiserver", "models", "lane_segmentation", os.path.basename(model_path))
-        if os.path.isfile(legacy):
-            return legacy
-
         return primary
 
     def _resolve_device(self, requested_device, model_ext=None):

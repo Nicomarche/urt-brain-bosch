@@ -1,10 +1,18 @@
+<!--
+  line-following.component.html
+  Panel mínimo de operador para AI Local (YOLO TensorRT 416 px).
+  Sin selector de modo (solo hay uno), sin sliders OpenCV (pipeline eliminado),
+  sin clientes remotos (HybridNets/Supercombo eliminados).
+  Las secciones de control fino (PID, MPC, behavior) viven en otros panels
+  cuando la Fase 4 del port deje el BehaviorPlanner como fuente de verdad.
+-->
 <div class="line-following-config">
   <div class="header">
     <h3>Configuracion de Seguimiento de Linea</h3>
     <button class="btn-reset" (click)="resetDefaults()">Restaurar Valores</button>
   </div>
 
-  <!-- AI Analysis Window -->
+  <!-- Panel de telemetría en vivo: stream JPEG + estado del actuador y del modelo IA -->
   <div class="ai-analysis-panel" *ngIf="debugStreamEnabled">
     <div class="ai-header">
       <h4>Analisis en Tiempo Real</h4>
@@ -15,17 +23,16 @@
         <span class="indicator mode-indicator">{{ getModeDisplayName() }}</span>
       </div>
     </div>
-    
+
     <div class="ai-content">
       <div class="ai-video-container">
         <img [src]="debugImageSrc" *ngIf="debugImageSrc" alt="Debug View" class="ai-video"/>
         <div class="no-stream" *ngIf="!debugImageSrc">
-          <div class="no-stream-icon">📷</div>
           <p>Esperando stream de video...</p>
           <p class="hint">Selecciona una vista de debug para comenzar</p>
         </div>
       </div>
-      
+
       <div class="ai-stats">
         <div class="stat-item">
           <span class="stat-label">Vista</span>
@@ -61,19 +68,13 @@
           <span class="stat-label">Real</span>
           <span class="stat-value">{{ debugStatus?.actual_steering !== null && debugStatus?.actual_steering !== undefined ? (debugStatus?.actual_steering | number:'1.1-1') + '°' : '--' }}</span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode !== 'ai_local'">
-          <span class="stat-label">LSTR</span>
-          <span class="stat-value" [class.available]="debugStatus?.lstr_available">
-            {{ debugStatus?.lstr_available ? 'Disponible' : 'No disponible' }}
-          </span>
-        </div>
-        <div class="stat-item" *ngIf="selectedMode === 'ai_local'">
+        <div class="stat-item">
           <span class="stat-label">Modelo IA</span>
           <span class="stat-value" [class.available]="localAiReady">
             {{ localAiReady ? (localAiInferMs | number:'1.0-0') + 'ms' : 'No listo' }}
           </span>
         </div>
-        <div class="stat-item" *ngIf="selectedMode === 'ai_local'">
+        <div class="stat-item">
           <span class="stat-label">FPS IA</span>
           <span class="stat-value" [class.available]="localAiReady">
             {{ localAiFps | number:'1.0-1' }}
@@ -83,56 +84,8 @@
     </div>
   </div>
 
-  <!-- Detection Mode Selection -->
-  <div class="config-section">
-    <div class="section-header">
-      <h4>Modo de Deteccion</h4>
-    </div>
-    <div class="button-group mode-buttons">
-      <button 
-        class="mode-btn" 
-        [class.selected]="selectedMode === 'opencv'"
-        (click)="setMode('opencv')">
-        <span class="mode-icon">👁️</span>
-        <span class="mode-name">OpenCV</span>
-        <span class="mode-desc">Mascaras HSV + Sliding Window. Configurable, funciona sin GPU.</span>
-      </button>
-      <button 
-        class="mode-btn" 
-        [class.selected]="selectedMode === 'lstr'"
-        (click)="setMode('lstr')"
-        [disabled]="!lstrAvailable">
-        <span class="mode-icon">🤖</span>
-        <span class="mode-name">LSTR AI</span>
-        <span class="mode-desc">Red neuronal local. Mas preciso, no necesita calibrar HSV.</span>
-        <span class="mode-badge" *ngIf="!lstrAvailable">No disponible</span>
-      </button>
-      <button 
-        class="mode-btn" 
-        [class.selected]="selectedMode === 'hybrid'"
-        (click)="setMode('hybrid')"
-        [disabled]="!lstrAvailable">
-        <span class="mode-icon">⚡</span>
-        <span class="mode-name">Hibrido</span>
-        <span class="mode-desc">Fusion OpenCV + LSTR. Usa ambos y combina resultados.</span>
-        <span class="mode-badge" *ngIf="!lstrAvailable">No disponible</span>
-      </button>
-      <button 
-        class="mode-btn hybridnets-btn" 
-        [class.selected]="selectedMode === 'ai_local'"
-        (click)="setMode('ai_local')">
-        <span class="mode-icon">🧠</span>
-        <span class="mode-name">AI Local</span>
-        <span class="mode-desc"><code>Best416px.engine</code> corre dentro del auto con TensorRT. Detecta carriles con IA y el giro lo sigue haciendo Stanley local.</span>
-        <span class="mode-badge server-badge" *ngIf="selectedMode === 'ai_local'">
-          {{ localAiReady ? 'Listo' : 'Inicializando' }}
-        </span>
-      </button>
-    </div>
-  </div>
-
-  <!-- Local AI Configuration -->
-  <div class="config-section hybridnets-config" *ngIf="selectedMode === 'ai_local'">
+  <!-- Configuración del runtime AI Local (modelo YOLO TensorRT) -->
+  <div class="config-section ai-local-config">
     <div class="section-header">
       <h4>AI Local</h4>
       <span class="connection-status" [class.connected]="localAiReady">
@@ -142,7 +95,7 @@
 
     <div class="server-info-grid">
       <div class="server-info-item">
-        <span class="info-label">Confianza mínima</span>
+        <span class="info-label">Confianza minima</span>
         <div class="btn-group-small">
           <button *ngFor="let conf of [0.2, 0.35, 0.5, 0.65]"
                   [class.selected]="localAiMinConfidence === conf"
@@ -180,39 +133,21 @@
       </div>
     </div>
 
-    <p class="hybridnets-hint">
-      El modelo corre dentro del proceso de cámara. No hace falta levantar <code>server.py</code> ni configurar red.
+    <p class="ai-local-hint">
+      El modelo corre dentro del proceso de camara. No hace falta levantar
+      <code>server.py</code> ni configurar red.
     </p>
   </div>
 
-  <!-- LSTR Model Selection -->
-  <div class="config-section" *ngIf="selectedMode === 'lstr' || selectedMode === 'hybrid'">
-    <div class="section-header">
-      <h4>Modelo LSTR</h4>
-    </div>
-    <p class="section-hint">Selecciona el tamano del modelo. Mas grande = mas preciso pero mas lento.</p>
-    <div class="button-group model-buttons">
-      <button 
-        *ngFor="let model of lstrModels"
-        class="model-btn" 
-        [class.selected]="selectedLstrModel === model.id"
-        (click)="setLstrModel(model.id)">
-        <span class="model-name">{{ model.name }}</span>
-        <span class="model-resolution">{{ model.resolution }}</span>
-        <span class="model-speed">{{ model.speed }}</span>
-      </button>
-    </div>
-  </div>
-
-  <!-- Debug View Selection -->
+  <!-- Selector de vista de debug. id 0 = stream apagado para ahorrar BW. -->
   <div class="config-section">
     <div class="section-header">
       <h4>Vista de Debug</h4>
     </div>
     <div class="button-group view-buttons">
-      <button 
+      <button
         *ngFor="let view of debugViews"
-        class="view-btn" 
+        class="view-btn"
         [class.selected]="selectedDebugView === view.id"
         (click)="setDebugView(view.id)">
         <span class="view-icon">{{ view.icon }}</span>
@@ -224,7 +159,7 @@
     </p>
   </div>
 
-  <!-- Stream Settings -->
+  <!-- Stream Settings (FPS / calidad / escala del JPEG enviado al dashboard) -->
   <div class="config-section compact">
     <div class="section-header">
       <h4>Configuracion del Stream</h4>
@@ -233,7 +168,7 @@
       <div class="control-item">
         <label>FPS</label>
         <div class="btn-group-small">
-          <button *ngFor="let fps of [1, 5, 10, 15]" 
+          <button *ngFor="let fps of [1, 5, 10, 15]"
                   [class.selected]="streamFps === fps"
                   (click)="setStreamFps(fps)">{{ fps }}</button>
         </div>
@@ -241,7 +176,7 @@
       <div class="control-item">
         <label>Calidad</label>
         <div class="btn-group-small">
-          <button *ngFor="let q of [30, 50, 70, 90]" 
+          <button *ngFor="let q of [30, 50, 70, 90]"
                   [class.selected]="streamQuality === q"
                   (click)="setStreamQuality(q)">{{ q }}%</button>
         </div>
@@ -249,7 +184,7 @@
       <div class="control-item">
         <label>Escala</label>
         <div class="btn-group-small">
-          <button *ngFor="let s of [0.25, 0.5, 0.75, 1.0]" 
+          <button *ngFor="let s of [0.25, 0.5, 0.75, 1.0]"
                   [class.selected]="streamScale === s"
                   (click)="setStreamScale(s)">{{ s * 100 }}%</button>
         </div>
@@ -257,14 +192,14 @@
     </div>
   </div>
 
-  <!-- ==================== SPEED (always visible) ==================== -->
+  <!-- Velocidad: límites usados por el line follower hasta que el BehaviorPlanner los reemplace en Fase 4 -->
   <div class="config-section">
     <div class="section-header clickable" (click)="toggleSection('speed')">
-      <h4>🚗 Velocidad</h4>
-      <span class="toggle-icon">{{ expandedSections['speed'] ? '▼' : '▶' }}</span>
+      <h4>Velocidad</h4>
+      <span class="toggle-icon">{{ expandedSections['speed'] ? 'v' : '>' }}</span>
     </div>
     <div class="slider-content" *ngIf="expandedSections['speed']">
-      <p class="section-hint">Limites de velocidad del coche. En AI Local y en OpenCV el giro final lo sigue calculando el controlador local segun el angulo de correccion.</p>
+      <p class="section-hint">Limites de velocidad del coche en seguimiento de carril.</p>
       <div class="slider-row" *ngFor="let slider of getSlidersByGroup('speed')">
         <label>{{ slider.label }}</label>
         <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
@@ -274,185 +209,14 @@
     </div>
   </div>
 
-  <!-- ==================== PID (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('pid')">
-    <div class="section-header clickable" (click)="toggleSection('pid')">
-      <h4>🎯 Control PID</h4>
-      <span class="toggle-icon">{{ expandedSections['pid'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['pid']">
-      <p class="section-hint">Controlador Proporcional-Integral-Derivativo. Kp corrige el error actual, Ki corrige errores acumulados, Kd amortigua oscilaciones. El error se mide en pixeles.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('pid')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== Feed-Forward (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('feedforward')">
-    <div class="section-header clickable" (click)="toggleSection('feedforward')">
-      <h4>🔮 Prediccion de Curvas (Feed-Forward)</h4>
-      <span class="toggle-icon">{{ expandedSections['feedforward'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['feedforward']">
-      <p class="section-hint">Anticipa curvas usando la curvatura detectada. Peso FF=0 usa solo PID, FF=1 usa solo prediccion. Combina ambos para mejor respuesta en curvas.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('feedforward')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== ROI (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('roi')">
-    <div class="section-header clickable" (click)="toggleSection('roi')">
-      <h4>📐 Region de Interes (ROI)</h4>
-      <span class="toggle-icon">{{ expandedSections['roi'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['roi']">
-      <p class="section-hint">Define que parte de la imagen se analiza. Inicio/Fin Altura controla la franja vertical (0=arriba, 1=abajo). Los margenes recortan los lados para ignorar el entorno.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('roi')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== Image Processing (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('image')">
-    <div class="section-header clickable" (click)="toggleSection('image')">
-      <h4>☀️ Procesamiento de Imagen</h4>
-      <span class="toggle-icon">{{ expandedSections['image'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['image']">
-      <p class="section-hint">Ajustes de brillo, contraste y filtros previos a la deteccion. Brillo compensa iluminacion pobre. Blur reduce ruido. Morph cierra huecos en las lineas detectadas.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('image')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== HSV White (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('white')">
-    <div class="section-header clickable" (click)="toggleSection('white')">
-      <h4>⚪ Linea Blanca (HSV)</h4>
-      <span class="toggle-icon">{{ expandedSections['white'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['white']">
-      <p class="section-hint">Rango HSV para detectar lineas blancas. H=tono (color), S=saturacion (pureza), V=valor (brillo). Usa la vista de debug "Blanco" para calibrar en tiempo real.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('white')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== HSV Yellow (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('yellow')">
-    <div class="section-header clickable" (click)="toggleSection('yellow')">
-      <h4>🟡 Linea Amarilla (HSV)</h4>
-      <span class="toggle-icon">{{ expandedSections['yellow'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['yellow']">
-      <p class="section-hint">Rango HSV para detectar lineas amarillas. El H min puede ser mayor que H max (rango envolvente que cruza 0/180). Usa la vista "Amarillo" para calibrar.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('yellow')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== Edge Detection (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('edge')">
-    <div class="section-header clickable" (click)="toggleSection('edge')">
-      <h4>📏 Deteccion de Bordes</h4>
-      <span class="toggle-icon">{{ expandedSections['edge'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['edge']">
-      <p class="section-hint">Canny detecta bordes por gradiente de intensidad (bajo/alto = umbrales de histéresis). Hough transforma bordes en lineas rectas: umbral=votos minimos, longitud minima y espacio maximo entre segmentos.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('edge')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== BFMC Parameters (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('bfmc')">
-    <div class="section-header clickable" (click)="toggleSection('bfmc')">
-      <h4>🏎️ Parametros BFMC</h4>
-      <span class="toggle-icon">{{ expandedSections['bfmc'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['bfmc']">
-      <p class="section-hint">Parametros del estilo BFMC. Umbral binario convierte a blanco/negro (reintento usa valor mas bajo si no detecta lineas). Filtro de angulo descarta lineas casi horizontales. Merge agrupa lineas cercanas.</p>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('bfmc')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- ==================== Adaptive Lighting (opencv / hybrid only) ==================== -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('adaptive')">
-    <div class="section-header clickable" (click)="toggleSection('adaptive')">
-      <h4>💡 Iluminacion Adaptativa</h4>
-      <span class="toggle-icon">{{ expandedSections['adaptive'] ? '▼' : '▶' }}</span>
-    </div>
-    <div class="slider-content" *ngIf="expandedSections['adaptive']">
-      <p class="section-hint">CLAHE normaliza el contraste localmente (compensa sombras/reflejos). Blanco adaptativo ajusta el umbral automaticamente segun la imagen. Gradiente fallback usa bordes cuando el color falla.</p>
-      <div class="toggle-row">
-        <label>CLAHE</label>
-        <button class="toggle-btn" [class.active]="useClahe" (click)="toggleClahe()">
-          {{ useClahe ? 'ON' : 'OFF' }}
-        </button>
-      </div>
-      <div class="toggle-row">
-        <label>Blanco Adaptativo</label>
-        <button class="toggle-btn" [class.active]="useAdaptiveWhite" (click)="toggleAdaptiveWhite()">
-          {{ useAdaptiveWhite ? 'ON' : 'OFF' }}
-        </button>
-      </div>
-      <div class="toggle-row">
-        <label>Fallback Gradiente</label>
-        <button class="toggle-btn" [class.active]="useGradientFallback" (click)="toggleGradientFallback()">
-          {{ useGradientFallback ? 'ON' : 'OFF' }}
-        </button>
-      </div>
-      <div class="slider-row" *ngFor="let slider of getSlidersByGroup('adaptive')">
-        <label>{{ slider.label }}</label>
-        <input type="range" [min]="slider.min" [max]="slider.max" [step]="slider.step"
-               [(ngModel)]="slider.value" (input)="onSliderChange(slider)"/>
-        <span class="value">{{ slider.value }}</span>
-      </div>
-    </div>
-  </div>
-
-  <!-- Curve Recovery Section -->
-  <div class="config-section" *ngIf="isSectionVisibleForMode('recovery')">
-    <div class="section-header" (click)="toggleSection('recovery')">
+  <!-- Curve Recovery: rutina que retrocede + corrige cuando el auto se sale del carril -->
+  <div class="config-section">
+    <div class="section-header clickable" (click)="toggleSection('recovery')">
       <h3>Recuperacion en Curva</h3>
-      <span class="toggle-icon">{{ expandedSections['recovery'] ? '▼' : '▶' }}</span>
+      <span class="toggle-icon">{{ expandedSections['recovery'] ? 'v' : '>' }}</span>
     </div>
     <div class="section-content" *ngIf="expandedSections['recovery']">
-      <p class="section-hint">Si el auto llega a max giro y el error NO baja (no se esta corrigiendo), frena y retrocede. El tiempo de reversa escala con el error: poco error = reversa corta, mucho error = reversa larga. "Ratio Error Corrigiendo" define el umbral: si el error baja a ese ratio, NO activa reversa (el auto se esta corrigiendo solo).</p>
+      <p class="section-hint">Si el auto llega a max giro y el error NO baja (no se esta corrigiendo), frena y retrocede. El tiempo de reversa escala con el error.</p>
       <div class="toggle-row">
         <label>Recuperacion Curva</label>
         <button class="toggle-btn" [class.active]="useCurveRecovery" (click)="toggleCurveRecovery()">
@@ -466,15 +230,6 @@
         <span class="value">{{ slider.value }}</span>
       </div>
     </div>
-  </div>
-
-  <!-- Mode-specific hint when in local AI mode -->
-  <div class="config-section remote-mode-hint" *ngIf="selectedMode === 'ai_local'">
-    <p>En modo AI Local, el modelo detecta carriles y señales dentro del auto. No usa servidor web; el steering sigue saliendo del mismo controlador Stanley/PID local.</p>
-  </div>
-
-  <div class="config-section remote-mode-hint" *ngIf="selectedMode === 'lstr'">
-    <p>En modo LSTR AI, la red neuronal detecta los carriles directamente. Los filtros HSV, bordes y procesamiento de imagen no se usan - solo se aplican velocidad, PID y parametros de control.</p>
   </div>
 
   <div class="actions">
