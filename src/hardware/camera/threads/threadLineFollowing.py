@@ -512,8 +512,8 @@ Args:
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  local_lane_buffer=None,
-                 show_debug=False, debug_windows=None, sign_action_event=None,
-                 highway_mode_event=None, steer_override_event=None,
+                 show_debug=False, debug_windows=None,
+                 highway_mode_event=None,
                  visual_candidate_buffer=None, visual_state_buffer=None,
                  emit_motor_commands=True, tracking_state_direct_writes=True):
         super(threadLineFollowing, self).__init__(pause=0.05)  # 20Hz — camara produce ~5 FPS, no necesita polling mas rapido
@@ -524,10 +524,12 @@ Args:
         self.local_lane_buffer = local_lane_buffer
         self.show_debug = show_debug
         self.debug_windows = debug_windows or {}
-        self.sign_action_event = sign_action_event  # When set, sign action is active — don't send motor commands
-        self._sign_action_was_active = False  # Track transitions to reset speed ramp
+        # Phase 6: `sign_action_event`, `steer_override_event` y el flag
+        # `_sign_action_was_active` se borraron — las ramas que los leían
+        # ya eran no-op (los motor sends salen exclusivamente del
+        # `motor_command_dispatcher`, y todo override por sign vive ahora
+        # en `ManeuverManager` + scenarios del `BehaviorPlanner`).
         self.highway_mode_event = highway_mode_event  # When set, car is on highway — use higher speeds
-        self.steer_override_event = steer_override_event  # When set, sign action also controls steer (e.g. hardcoded turn)
         self.visual_candidate_buffer = visual_candidate_buffer
         self.visual_state_buffer = visual_state_buffer
         self.emit_motor_commands = bool(emit_motor_commands)
@@ -9703,10 +9705,11 @@ Much faster and better for curves than blind sliding window."""
                     commanded_speed = self.min_speed
                     self._log_calib_frame(steering_angle)
 
-            if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
-                if command_source in ("normal", "stale_hold"):
-                    command_source = "sign_override"
-                commanded_speed = None
+            # Phase 6: la rama que reaccionaba a `sign_action_event` para
+            # marcar `command_source = "sign_override"` y limpiar el speed
+            # se eliminó junto con `signActions.py`. La decisión de stop/
+            # override por sign ahora la toma `ManeuverManager` y termina
+            # en el `BehaviorOutput` que produce el `BehaviorPlanner`.
 
             actuator_status = self._last_actuator_status or {}
             if (
@@ -11089,34 +11092,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 self._publish_visual_pipeline_state(candidate)
                 return
 
-            # Sign action activo (stop, crosswalk, etc.):
-            # Phase 6: ningún writer de SteerMotor/SteerSpeed sale de acá. El
-            # `motor_command_dispatcher` es la única salida; este thread solo
-            # registra el cómputo para diagnóstico. Mantenemos los flags de
-            # estado porque el resto del thread (logs, dashboard) los consume.
-            if self.sign_action_event and self.sign_action_event.is_set():
-                self._sign_action_was_active = True
-                self._last_requested_motor_command["sign_action_blocked_speed"] = True
-                self._last_requested_motor_command["speed_sent"] = False
-                if not (self.steer_override_event and self.steer_override_event.is_set()):
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN(computed)\033[0m - Steer: {steer_value} (sign action active; dispatcher decides)")
-                return
-
-            # Just resumed from a sign action — reset speed ramp to effective min_speed
-            # so the car starts slow instead of jumping to its previous speed.
-            # In highway mode, use highway_min_speed so the car doesn't crawl on the highway.
-            if self._sign_action_was_active:
-                self._sign_action_was_active = False
-                _, resume_min = self._get_effective_speeds()
-                self._current_speed = resume_min
-                speed_value = int(round(resume_min * 10))
-                self._last_requested_motor_command["speed"] = float(resume_min)
-                self._last_requested_motor_command["speed_x10"] = int(speed_value)
-                print(
-                    f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mRESUME\033[0m - "
-                    f"Speed reset to min ({resume_min}) after sign action"
-                )
+            # Phase 6: las ramas que filtraban por `sign_action_event` y
+            # `steer_override_event` se borraron junto con `signActions.py`.
+            # Toda decisión de freno/override por sign vive ahora en:
+            #   - `ManeuverManager.decide(...)` para overrides de
+            #     speed_cap/speed_override (lo aplica el `BehaviorPlanner`
+            #     vía velocity_overlay), y
+            #   - los `IScenario` de `src/behavior/scenarios/` que producen
+            #     el `BehaviorOutput` con `stop_required=True` cuando la
+            #     lanelet activa lo amerita.
+            # Si en el futuro se necesita un "post-stop ramp" desde min_speed,
+            # se implementa como overlay de velocidad en `velocity_overlay.py`,
+            # NO como flag local de este thread.
 
             # Normal operation — Phase 6: motor writes salen del dispatcher.
             # Acá solo dejamos el log diagnóstico para que en pista se pueda

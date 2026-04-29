@@ -203,8 +203,9 @@ export class LineFollowingComponent implements OnInit, OnDestroy {
   }
 
   // Etiqueta humana para la fuente del comando actual: "Normal" significa que el
-  // controller (Stanley/MPC) está mandando, "Recovery" cuando la rutina de curvas
-  // toma control, "Señal" cuando el override de signActions está activo.
+  // controller (MPC) está mandando, "Recovery" cuando la rutina de curvas toma
+  // control, "Señal" cuando el override del ManeuverManager (ex-signActions) está
+  // activo a través de un escenario del BehaviorPlanner.
   getCommandSourceLabel(): string {
     const source = this.debugStatus?.command_source;
     const labels: { [key: string]: string } = {

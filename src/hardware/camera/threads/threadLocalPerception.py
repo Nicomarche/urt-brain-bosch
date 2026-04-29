@@ -5,7 +5,10 @@ import cv2
 
 import config
 from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEngine
-from src.hardware.camera.threads.signActions import SignActions
+from src.perception.signs.sign_classifier import (
+    is_actionable_sign,
+    normalize_sign_name,
+)
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import (
@@ -29,8 +32,15 @@ class threadLocalPerception(ThreadWithStop):
                  show_debug=False, debug_windows=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
-                 action_cooldown=15.0, sign_action_event=None,
-                 highway_mode_event=None, steer_override_event=None):
+                 action_cooldown=15.0):
+        # Phase 6: `sign_action_event` y `steer_override_event` se borraron
+        # del constructor cuando `signActions.py` desapareció. Ya no había
+        # ningún consumidor con efecto real (las ramas en threadLineFollowing
+        # eran no-op tras Phase 6, y `_handle_walk_area` los seteaba sin que
+        # nada en el path del dispatcher los leyera). `highway_mode_event`
+        # sigue vivo pero ya no se setea desde acá: lo gestiona ManeuverManager
+        # en threadLineFollowing.
+        del action_cooldown  # parámetro legacy aceptado para compat de llamadores
         # Keep scheduler granularity tight so local_ai_interval can reach high FPS targets.
         super(threadLocalPerception, self).__init__(pause=0.001)
         self.queuesList = queuesList
@@ -99,15 +109,6 @@ class threadLocalPerception(ThreadWithStop):
         self.signDetectedSender = messageHandlerSender(self.queuesList, SignDetected)
         self.signStatusSender = messageHandlerSender(self.queuesList, SignDetectionStatus)
         self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
-
-        self.sign_actions = SignActions(
-            self.queuesList,
-            sign_action_event=sign_action_event,
-            action_cooldown=action_cooldown,
-            highway_mode_event=highway_mode_event,
-            steer_override_event=steer_override_event,
-            crosswalk_done_callback=self._on_crosswalk_done,
-        )
 
         self.engine = self._build_engine()
         print(
@@ -271,10 +272,6 @@ class threadLocalPerception(ThreadWithStop):
         except (TypeError, ValueError, IndexError, ZeroDivisionError):
             return None
 
-    def _on_crosswalk_done(self):
-        """Called by SignActions after a crosswalk action completes (unused for now)."""
-        pass
-
     def _enter_parking_mode(self):
         """Send a StateChange PARKING when in AUTO mode to start the parking sequence."""
         if self._current_mode != "auto":
@@ -292,16 +289,31 @@ class threadLocalPerception(ThreadWithStop):
             )
 
     def _handle_walk_area(self, detections, now):
-        """Stop when a walk_area is detected close enough; resume after pedestrians clear.
+        """Track walk-area detections y, en modo AUTO, dispara cambio a PARKING.
 
-        Rules:
-        - Only trigger when the walk_area bbox area >= WALK_AREA_MIN_BOX_AREA
-          (filters detections that are too far away).
-        - On first trigger (outside cooldown): stop the car.
-        - While stopped:
-            · If an obstacle/pedestrian is visible → keep stopped, reset timer.
-            · If no obstacle → start WALK_AREA_STOP_DURATION-second clear timer.
-            · Once the timer expires → resume and (if AUTO mode) enter PARKING mode.
+        Phase 6 (post-port Autoware): este método YA NO frena el auto. El
+        freno por crosswalk/walk-area lo decide el `BehaviorPlanner` —
+        scenarios `Crosswalk` (priority 70) e `Intersection` (priority 60)
+        producen `BehaviorOutput` con `stop_required=True` o `speed_profile`
+        bajo cuando la lanelet activa tiene los attributes correspondientes.
+        Lo único que sigue siendo responsabilidad de este método es:
+
+          1. Observar walk_area + presencia/ausencia de obstáculo.
+          2. Mantener una pequeña máquina de estados con cooldown para
+             saber cuándo "se cruzó" una zona walk_area.
+          3. Disparar `StateChange("PARKING")` en modo AUTO cuando se
+             cruzó la zona — eso hace que la state machine entre al
+             scenario `Parking` del BehaviorPlanner.
+
+        Reglas:
+        - Sólo se considera la zona si bbox area >= WALK_AREA_MIN_BOX_AREA
+          (filtra detecciones lejanas con poca confianza espacial).
+        - Activación con cooldown: WALK_AREA_COOLDOWN segundos desde el
+          último resume. Esto evita re-disparos si la cámara sigue viendo
+          la misma zona unos frames después de haberla cruzado.
+        - Mientras está activa, esperamos WALK_AREA_STOP_DURATION segundos
+          sin obstáculo antes de considerar la zona "cruzada" → emit
+          PARKING.
         """
         _OBSTACLE_CLASSES = frozenset({
             "obstacle", "pedestrian", "person", "yaya", "human",
@@ -324,7 +336,6 @@ class threadLocalPerception(ThreadWithStop):
                     pass
 
         walk_area_close = best_walk_area_box_area >= self._walk_area_min_box_area
-        walk_area_seen = best_walk_area_box_area > 0.0
 
         obstacle_seen = any(
             str(d.get("class", "")).strip().lower() in _OBSTACLE_CLASSES
@@ -338,22 +349,18 @@ class threadLocalPerception(ThreadWithStop):
             # Respect cooldown after last resume
             if now - self._walk_area_last_cleared < self._walk_area_cooldown:
                 return
-            # Activate walk-area stop
+            # Activate walk-area observation window. La detención efectiva
+            # del auto la dispara el scenario Crosswalk vía BehaviorOutput.
             self._walk_area_active = True
             self._walk_area_no_obstacle_since = None if obstacle_seen else now
-            if self.sign_actions.sign_action_event:
-                self.sign_actions.sign_action_event.set()
-            self.sign_actions._send_speed(0)
             print(
                 f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mWALK_AREA\033[0m - "
-                f"Walk area detectada (box={best_walk_area_box_area:.1%}), auto detenido "
+                f"Walk area observada (box={best_walk_area_box_area:.1%}) "
                 f"{'(obstáculo presente)' if obstacle_seen else '(sin obstáculo, esperando 3s)'}"
             )
             return
 
-        # Walk area is active — keep car stopped and track obstacle state
-        self.sign_actions._send_speed(0)
-
+        # Walk area window activa — actualizar reloj según presencia de obstáculo
         if obstacle_seen:
             if self._walk_area_no_obstacle_since is not None:
                 print(
@@ -366,18 +373,16 @@ class threadLocalPerception(ThreadWithStop):
                 self._walk_area_no_obstacle_since = now
                 print(
                     f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
-                    f"Sin obstáculo, esperando {self._walk_area_stop_duration:.0f}s para reanudar"
+                    f"Sin obstáculo, esperando {self._walk_area_stop_duration:.0f}s para considerar zona cruzada"
                 )
             elif now - self._walk_area_no_obstacle_since >= self._walk_area_stop_duration:
-                # Zona despejada por suficiente tiempo → reanudar y entrar en modo PARKING
+                # Zona despejada por suficiente tiempo → entrar en modo PARKING.
                 self._walk_area_active = False
                 self._walk_area_no_obstacle_since = None
                 self._walk_area_last_cleared = now
-                if self.sign_actions.sign_action_event:
-                    self.sign_actions.sign_action_event.clear()
                 print(
                     f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA\033[0m - "
-                    f"Zona despejada, reanudando marcha"
+                    f"Zona cruzada, solicitando modo PARKING"
                 )
                 self._enter_parking_mode()
 
@@ -391,7 +396,7 @@ class threadLocalPerception(ThreadWithStop):
             return
 
         raw_sign_name = str(best.get("class", ""))
-        sign_name = SignActions.normalize_sign_name(raw_sign_name) or raw_sign_name
+        sign_name = normalize_sign_name(raw_sign_name) or raw_sign_name
         box = best.get("box", [0, 0, 0, 0])
         if len(box) != 4:
             box = [0, 0, 0, 0]
@@ -415,7 +420,7 @@ class threadLocalPerception(ThreadWithStop):
             sign_name, self.sign_min_box_area
         )
         is_close = box_area >= effective_min_box
-        is_actionable = SignActions.is_actionable_sign(sign_name)
+        is_actionable = is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
         dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""
         print(

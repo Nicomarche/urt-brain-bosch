@@ -5,7 +5,20 @@ from dataclasses import dataclass
 
 import config
 
-from src.hardware.camera.threads.signActions import SignActions
+from src.perception.signs.sign_classifier import normalize_sign_name
+
+# ----------------------------------------------------------------
+# Defaults locales (reemplazan a las constantes que vivían en SignActions
+# antes de que ese módulo fuera borrado en Phase 6). Cada uno se sobre-
+# escribe con `getattr(config, ...)` en `__init__`, así que tunearlos
+# desde `config.py` sigue funcionando igual que antes.
+# ----------------------------------------------------------------
+_DEFAULT_BASE_SPEED = 5
+_DEFAULT_LOW_SPEED = 3
+_DEFAULT_SPEED_20 = 3
+_DEFAULT_SPEED_30 = 5
+_DEFAULT_STOP_DURATION = 3.0
+_DEFAULT_CROSSWALK_DURATION = 3.0
 
 
 @dataclass
@@ -28,13 +41,13 @@ class ManeuverManager:
         self.state_change_sender = state_change_sender
         self.highway_mode_event = highway_mode_event
 
-        self.base_speed = float(getattr(config, "SIGN_BASE_SPEED", SignActions.BASE_SPEED))
-        self.low_speed = float(getattr(config, "SIGN_LOW_SPEED", SignActions.LOW_SPEED))
-        self.speed_20 = float(getattr(config, "SIGN_SPEED_20", SignActions.SPEED_20))
-        self.speed_30 = float(getattr(config, "SIGN_SPEED_30", SignActions.SPEED_30))
-        self.stop_duration = float(getattr(config, "SIGN_STOP_DURATION", SignActions.STOP_DURATION))
+        self.base_speed = float(getattr(config, "SIGN_BASE_SPEED", _DEFAULT_BASE_SPEED))
+        self.low_speed = float(getattr(config, "SIGN_LOW_SPEED", _DEFAULT_LOW_SPEED))
+        self.speed_20 = float(getattr(config, "SIGN_SPEED_20", _DEFAULT_SPEED_20))
+        self.speed_30 = float(getattr(config, "SIGN_SPEED_30", _DEFAULT_SPEED_30))
+        self.stop_duration = float(getattr(config, "SIGN_STOP_DURATION", _DEFAULT_STOP_DURATION))
         self.crosswalk_duration = float(
-            getattr(config, "SIGN_CROSSWALK_DURATION", SignActions.CROSSWALK_DURATION)
+            getattr(config, "SIGN_CROSSWALK_DURATION", _DEFAULT_CROSSWALK_DURATION)
         )
         self.red_light_max_wait = float(getattr(config, "SIGN_RED_LIGHT_MAX_WAIT", 10.0))
         self.yellow_light_duration = float(getattr(config, "SIGN_YELLOW_LIGHT_DURATION", 2.0))
@@ -119,7 +132,7 @@ class ManeuverManager:
     def observe_sign(self, payload: dict | None, current_mode: str = "", tracking_state=None) -> None:
         if not isinstance(payload, dict):
             return
-        sign_name = SignActions.normalize_sign_name(payload.get("sign"))
+        sign_name = normalize_sign_name(payload.get("sign"))
         if not sign_name:
             return
         if not self._sign_matches_route_context(sign_name, tracking_state):

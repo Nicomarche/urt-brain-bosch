@@ -147,17 +147,14 @@ class processCamera(WorkerProcess):
     # ===================================== INIT TH ======================================
     def _init_threads(self):
         """Create the Camera Publisher thread, Line Following thread, and Sign Detection thread."""
-        # Shared event: when set, a sign action (stop, crosswalk, etc.) is active
-        # and line following must NOT send motor commands.
-        sign_action_event = threading.Event()
-
-        # Shared event: when set, car is on highway — line following uses higher speeds.
+        # Shared event: when set, car is on highway — line following uses higher
+        # speeds. Lo setea/clarea `ManeuverManager` (dentro de threadLineFollowing)
+        # cuando observa highway_entrance/exit signs. Es lo único que sobrevive
+        # de la familia de Events que coordinaba el viejo `signActions.py`:
+        # `sign_action_event` y `steer_override_event` desaparecieron al
+        # quedar inertes tras Phase 6 (motor writes salen exclusivamente del
+        # `motor_command_dispatcher`).
         highway_mode_event = threading.Event()
-
-        # Shared event: when set, a sign action controls BOTH speed AND steer
-        # (e.g. hardcoded 90° left turn after stop sign). Line following must not
-        # send steer commands while this event is active.
-        steer_override_event = threading.Event()
 
         # Camera preview window: only if master switch AND individual toggle are on
         show_cam_preview = self.show_preview and self.debug_windows.get("camera_preview", False)
@@ -191,9 +188,6 @@ class processCamera(WorkerProcess):
             sign_min_confidence=self.sign_min_confidence,
             sign_min_box_area=self.sign_min_box_area,
             action_cooldown=self.sign_action_cooldown,
-            sign_action_event=sign_action_event,
-            highway_mode_event=highway_mode_event,
-            steer_override_event=steer_override_event,
         )
         self.threads.append(localPerceptionTh)
 
@@ -313,9 +307,7 @@ class processCamera(WorkerProcess):
             local_lane_buffer=self.local_lane_buffer,
             show_debug=self.show_preview,
             debug_windows=self.debug_windows,
-            sign_action_event=sign_action_event,
             highway_mode_event=highway_mode_event,
-            steer_override_event=steer_override_event,
             visual_candidate_buffer=visual_candidate_buffer,
             visual_state_buffer=visual_state_buffer,
         )
