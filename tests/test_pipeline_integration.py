@@ -3,7 +3,7 @@ import types
 import unittest
 
 from src.perception.lane.lane_observer_thread import threadLaneObserver
-from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
+from src.control.navigation_control_policy import NavigationControlPolicy
 from src.core.messaging.buffers import LatestValueBuffer
 from src.core.types import Pose2D, RouteContext, VisualControlCandidate, VisualStateSnapshot
 from src.localization.pose_estimator_thread import threadPoseEstimator

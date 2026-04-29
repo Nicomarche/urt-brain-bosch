@@ -2,8 +2,8 @@ import time
 import types
 import unittest
 
-from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
-from src.hardware.control.threads.threadControlCoordinator import threadControlCoordinator
+from src.control.navigation_control_policy import NavigationControlPolicy
+from src.control.motor_command_dispatcher import threadControlCoordinator
 from src.core.messaging.buffers import LatestValueBuffer
 from src.core.types import VisualControlCandidate
 

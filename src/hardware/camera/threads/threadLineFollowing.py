@@ -691,7 +691,7 @@ Args:
         self._acados_last_delta_rad = 0.0
         if self.use_acados_mpc:
             try:
-                from src.hardware.mpc.acados_mpc import AcadosMPC
+                from src.control.motion_controller import AcadosMPC
                 _acados_deadband = float(getattr(_config, "ACADOS_MPC_OUTPUT_DEADBAND_DEG", 0.5))
                 self.acados_mpc = AcadosMPC(
                     max_steering_deg=self.max_steering,

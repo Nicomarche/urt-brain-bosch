@@ -2,7 +2,7 @@
 
 Usage (from threadLineFollowing or any control loop):
 
-    from src.hardware.mpc.acados_mpc import AcadosMPC
+    from src.control.motion_controller import AcadosMPC
 
     mpc = AcadosMPC()                       # loads generated solver
     v_opt, delta_deg = mpc.compute(

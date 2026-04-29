@@ -47,15 +47,15 @@ Desde la raiz del proyecto:
 
 ```bash
 cd /path/to/urt-brain-bosch
-python -m src.hardware.mpc.generate_solver
+python -m src.control._acados_solver_gen
 ```
 
 Opciones:
 ```bash
-python -m src.hardware.mpc.generate_solver --N 30 --T 0.05        # 1.5s horizonte (default)
-python -m src.hardware.mpc.generate_solver --N 40 --T 0.04        # 1.6s horizonte
-python -m src.hardware.mpc.generate_solver --N 20 --T 0.05        # 1.0s (mas rapido en RPi)
-python -m src.hardware.mpc.generate_solver --delta_max_deg 23      # limitar steering
+python -m src.control._acados_solver_gen --N 30 --T 0.05        # 1.5s horizonte (default)
+python -m src.control._acados_solver_gen --N 40 --T 0.04        # 1.6s horizonte
+python -m src.control._acados_solver_gen --N 20 --T 0.05        # 1.0s (mas rapido en RPi)
+python -m src.control._acados_solver_gen --delta_max_deg 23      # limitar steering
 ```
 
 Esto genera codigo C en `src/hardware/mpc/c_generated_code/` y lo compila en una shared library.
@@ -75,7 +75,7 @@ Si `USE_ACADOS_MPC = True` pero Acados no esta instalado o el solver no fue gene
 
 ```bash
 python3 -c "
-from src.hardware.mpc.acados_mpc import AcadosMPC
+from src.control.motion_controller import AcadosMPC
 mpc = AcadosMPC()
 print('Acados MPC ready:', mpc.ready)
 if mpc.ready:

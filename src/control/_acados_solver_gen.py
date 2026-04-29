@@ -4,8 +4,8 @@
 Run once (on any machine with acados + casadi installed) to produce C code:
 
     cd /path/to/urt-brain-bosch
-    python -m src.hardware.mpc.generate_solver          # defaults: N=30, T=0.05
-    python -m src.hardware.mpc.generate_solver --N 40 --T 0.04   # custom
+    python -m src.control._acados_solver_gen          # defaults: N=30, T=0.05
+    python -m src.control._acados_solver_gen --N 40 --T 0.04   # custom
 
 The solver C code is written to  src/hardware/mpc/c_generated_code/
 and compiled into a shared library on first import by AcadosOcpSolver.

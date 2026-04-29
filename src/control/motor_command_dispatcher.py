@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 
 import config as _config
-from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
+from src.control.navigation_control_policy import NavigationControlPolicy
 from src.core.types import ControlDecision, VisualControlCandidate
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange

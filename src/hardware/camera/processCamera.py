@@ -38,7 +38,7 @@ from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
 from src.hardware.camera.threads.threadVisualController import threadVisualController
-from src.hardware.control.threads.threadControlCoordinator import threadControlCoordinator
+from src.control.motor_command_dispatcher import threadControlCoordinator
 from src.core.messaging.buffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode

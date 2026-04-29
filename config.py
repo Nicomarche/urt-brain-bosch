@@ -261,7 +261,7 @@ MPC_OUTPUT_DEADBAND_DEG = 0.5
 # ── ACADOS FULL MPC (trajectory-tracking) ────────────────────────────────────
 # MPC completo que optimiza VELOCIDAD + DIRECCIÓN simultáneamente usando el
 # solver Acados (código C generado).  Requiere generar el solver una vez:
-#   python -m src.hardware.mpc.generate_solver
+#   python -m src.control._acados_solver_gen
 #
 # USE_ACADOS_MPC: True = activa MPC completo (Acados), False = usa lateral MPC.
 # Si Acados no está instalado o el solver no fue generado, cae al MPC lateral.
