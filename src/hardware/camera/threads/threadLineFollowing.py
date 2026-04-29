@@ -29,21 +29,13 @@ from src.hardware.camera.threads.maneuverManager import ManeuverManager
 
 # DECISIÓN: este archivo se reescribe completo en Fase 1 (port Autoware) — se descompone
 # en src/perception/{camera,lane,signs,stopline}/. Los detectores legacy (LSTR, HybridNets,
-# Supercombo) ya fueron borrados como archivos físicos y desde aiserver/. Estas dos
-# constantes existen solo para que los métodos legacy internos no exploten con NameError
-# durante el período de transición; nunca pasan a True. Todo este archivo desaparece.
-LSTR_AVAILABLE = False
-HYBRIDNETS_CLIENT_AVAILABLE = False
+# Supercombo) fueron eliminados (Phase 0 cleanup); este archivo solo opera en modo
+# AI_LOCAL (YOLO TensorRT) hasta que termine de migrar a src/perception/.
 
 
 class DetectionMode(Enum):
-    """Lane detection modes."""
-    OPENCV = "opencv"           # BFMC-style OpenCV (Threshold + Canny + Hough)
-    LSTR = "lstr"              # AI-based LSTR model (local)
-    HYBRID = "hybrid"           # Fusion of OpenCV + LSTR (combines both for better accuracy)
+    """Único modo soportado tras Phase 0 cleanup: YOLO TensorRT local."""
     AI_LOCAL = "ai_local"      # Local YOLO lane perception (best.pt) + local BFMC/Stanley control
-    HYBRIDNETS = "hybridnets"  # Legacy/deprecated alias preserved for compatibility
-    SUPERCOMBO = "supercombo"  # Legacy/deprecated alias preserved for compatibility
 
 
 class ParkingState(Enum):
@@ -564,7 +556,7 @@ Args:
 
         # PID Controller (values from ricardolopezb/bfmc24-brain configs.py)
         # Error is fed in raw pixels (not normalized). Kp=0.075 → 293px error = 22° max steering.
-        self.max_error_px = 40   # Pixel offset reference (used by LSTR normalization)
+        self.max_error_px = 40   # Pixel offset máximo de referencia para normalizar el error en el PID lateral.
         self.kp = 0.08  # Proportional gain (bfmc24-brain: PID_KP)
         self.ki = 0.05   # Integral gain (bfmc24-brain: PID_KI)
         self.kd = 0.05   # Derivative gain (bfmc24-brain: PID_KD)
@@ -976,23 +968,10 @@ Args:
         self._auto_threshold_val = self.binary_threshold  # Valor suavizado inicial
 
         # Detection mode parameters
-        self.detection_mode = DetectionMode.AI_LOCAL.value # "opencv", "lstr", or "hybrid"
-        self.lstr_model_size = 0  # 0=180x320, 1=240x320, 2=360x640, 3=480x640, 4=720x1280
-        self.lstr_detector = None
-        self.lstr_fallback_threshold = 0.01  # Switch to LSTR if detection < 1% of pixels
-        self.lstr_confidence_threshold = 0.5  # Minimum confidence for LSTR detection
-        self._current_lstr_model_size = -1  # Track current loaded model
-        
-        # Hybrid fusion parameters
-        self.hybrid_opencv_weight = 0.4   # Weight for OpenCV detection (0-1)
-        self.hybrid_lstr_weight = 0.6     # Weight for LSTR detection (0-1) - AI is more robust
-        self.hybrid_agreement_bonus = 1.2  # Multiply confidence when both agree
-        
-        # HybridNets remote AI server parameters
-        self.hybridnets_server_url = "ws://127.0.0.1:8500/ws/steering"
-        self.hybridnets_jpeg_quality = 70
-        self.hybridnets_timeout = 2.0  # GPU inference <100ms + network ~50ms; 2s es suficiente
-        self.hybridnets_max_result_age = 0.35  # Ignore stale AI geometry; use local recovery instead
+        # Phase 0 cleanup: AI_LOCAL es el único modo soportado tras eliminar
+        # LSTR / HybridNets / Supercombo / OpenCV. La variable se mantiene
+        # como string por compatibilidad con el dashboard y los logs.
+        self.detection_mode = DetectionMode.AI_LOCAL.value
         self.local_ai_max_result_age = 0.35
         self.local_ai_stale_grace_s = 0.20
         self.local_ai_latency_warn_ms = 450.0
@@ -1013,7 +992,6 @@ Args:
         # 0.15 = clip only top 15% of frame; standard roi_height_start=0.35 is too
         # aggressive for AI masks and causes "No lines detected" in curves.
         self.ai_local_roi_height_start = 0.15
-        self._hybridnets_client = None
         self._last_local_lane_payload = None
         self._last_local_perception_status = None
         self._last_actuator_status = None
@@ -1102,15 +1080,7 @@ Args:
         self._theta_dmae_deg = 0.0
         self._offset_dma_m = 0.0
         
-        # Supercombo remote AI server parameters (same protocol as HybridNets)
-        self.supercombo_server_url = "ws://127.0.0.1:8500/ws/steering"
-        self.supercombo_jpeg_quality = 70
-        self.supercombo_timeout = 2.0
-        self._supercombo_client = None
-        
-        self._init_lstr_detector()
-        # Legacy remote clients stay available, but are now initialized lazily
-        # only if an old code path explicitly requests them.
+        # Phase 0 cleanup: Supercombo / HybridNets remote-server attributes removed.
 
         # Debug streaming parameters
         self.stream_debug_view = 0  # 0=off, 1-10=different views
@@ -1332,75 +1302,9 @@ Args:
         self.yellow_lower = np.array([self.yellow_h_min, self.yellow_s_min, self.yellow_v_min])
         self.yellow_upper = np.array([self.yellow_h_max, self.yellow_s_max, self.yellow_v_max])
 
-    def _init_lstr_detector(self):
-        """Initialize LSTR detector if available."""
-        if not LSTR_AVAILABLE:
-            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR not available, using OpenCV only")
-            self.lstr_detector = None
-            return
-        
-        # Map model size index to model type
-        model_types = [
-            LSTRModelType.LSTR_180X320,   # 0 - Fastest
-            LSTRModelType.LSTR_240X320,   # 1 - Fast
-            LSTRModelType.LSTR_360X640,   # 2 - Medium
-            LSTRModelType.LSTR_480X640,   # 3 - Slow
-            LSTRModelType.LSTR_720X1280,  # 4 - Slowest
-        ]
-        
-        model_idx = max(0, min(4, int(self.lstr_model_size)))
-        selected_model = model_types[model_idx]
-        
-        # Skip if already loaded the same model
-        if self._current_lstr_model_size == model_idx and self.lstr_detector is not None:
-            return
-        
-        try:
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mINFO\033[0m - Loading LSTR model: {selected_model.value}")
-            self.lstr_detector = LSTRDetector(model_type=selected_model)
-            if self.lstr_detector.is_available:
-                self._current_lstr_model_size = model_idx
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - LSTR detector initialized: {selected_model.value}")
-            else:
-                print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - LSTR model not found, using OpenCV only")
-                self.lstr_detector = None
-        except Exception as e:
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to init LSTR: {e}")
-            self.lstr_detector = None
 
-    def _init_hybridnets_client(self):
-        """Initialize HybridNets remote AI client if available."""
-        if not HYBRIDNETS_CLIENT_AVAILABLE:
-            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - HybridNets client not available")
-            self._hybridnets_client = None
-            return
-        
-        try:
-            client_url = self._resolve_hybridnets_inference_url()
-            self._hybridnets_client = HybridNetsClient(
-                server_url=client_url,
-                jpeg_quality=self.hybridnets_jpeg_quality,
-                timeout=self.hybridnets_timeout,
-            )
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client created (server: {client_url})")
-        except Exception as e:
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to create HybridNets client: {e}")
-            self._hybridnets_client = None
 
-    def _resolve_hybridnets_inference_url(self):
-        """Always use full inference so local BFMC/Stanley consumes remote lane geometry."""
-        url = str(self.hybridnets_server_url).strip()
-        if "/ws/" in url:
-            base = url.split("/ws/", 1)[0]
-            return base + "/ws/inference"
-        return url.rstrip("/") + "/ws/inference"
 
-    def _normalize_detection_mode(self, mode):
-        """Map deprecated remote AI modes to the local AI runtime path."""
-        mode_str = str(mode).strip()
-        if mode_str in (DetectionMode.HYBRIDNETS.value, DetectionMode.SUPERCOMBO.value):
-            return DetectionMode.AI_LOCAL.value
-        return mode_str
 
     def _poll_local_ai_messages(self):
         """Cache the latest local AI and actuator payloads."""
@@ -2865,301 +2769,9 @@ Args:
 
         return avg_left, avg_right
 
-    def _start_hybridnets_client(self):
-        """Start or restart the HybridNets client connection."""
-        if self._hybridnets_client is None:
-            self._init_hybridnets_client()
-        
-        if self._hybridnets_client is not None:
-            # Siempre limpiar datos viejos al (re)arrancar para no procesar frames stale
-            self._hybridnets_client.flush()
-            
-            if not self._hybridnets_client.connected:
-                try:
-                    self._hybridnets_client.start()
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - HybridNets client started, connecting to {self._hybridnets_client.server_url}")
-                except Exception as e:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start HybridNets client: {e}")
 
-    def _stop_hybridnets_client(self):
-        """Stop the HybridNets client."""
-        if self._hybridnets_client is not None:
-            try:
-                self._hybridnets_client.stop()
-            except Exception:
-                pass
 
-    # ================================================================
-    # Supercombo remote AI client (same protocol as HybridNets)
-    # ================================================================
 
-    def _init_supercombo_client(self):
-        """Initialize Supercombo remote AI client if available."""
-        if not HYBRIDNETS_CLIENT_AVAILABLE:
-            print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARNING\033[0m - Supercombo client not available (needs websockets)")
-            self._supercombo_client = None
-            return
-        
-        try:
-            self._supercombo_client = HybridNetsClient(
-                server_url=self.supercombo_server_url,
-                jpeg_quality=self.supercombo_jpeg_quality,
-                timeout=self.supercombo_timeout,
-            )
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Supercombo client created (server: {self.supercombo_server_url})")
-        except Exception as e:
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to create Supercombo client: {e}")
-            self._supercombo_client = None
-
-    def _start_supercombo_client(self):
-        """Start or restart the Supercombo client connection."""
-        if self._supercombo_client is None:
-            self._init_supercombo_client()
-        
-        if self._supercombo_client is not None:
-            self._supercombo_client.flush()
-            
-            if not self._supercombo_client.connected:
-                try:
-                    self._supercombo_client.start()
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Supercombo client started, connecting to {self.supercombo_server_url}")
-                except Exception as e:
-                    print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to start Supercombo client: {e}")
-
-    def _stop_supercombo_client(self):
-        """Stop the Supercombo client."""
-        if self._supercombo_client is not None:
-            try:
-                self._supercombo_client.stop()
-            except Exception:
-                pass
-
-    def _detect_with_supercombo(self, frame):
-        """
-        Detect lanes using remote Supercombo AI server (openpilot model).
-        
-        Uses the same WebSocket protocol as HybridNets:
-        sends JPEG frame, receives steering angle.
-        
-        Args:
-            frame: BGR image
-            
-        Returns:
-            tuple: (steering_angle, speed, debug_frame)
-        """
-        height, width = frame.shape[:2]
-        
-        # Ensure client is running
-        if self._supercombo_client is None or not self._supercombo_client.connected:
-            self._start_supercombo_client()
-            if not self._supercombo_client or not self._supercombo_client.connected:
-                debug_frame = frame.copy()
-                cv2.rectangle(debug_frame, (0, 0), (width, 60), (20, 20, 40), -1)
-                cv2.putText(debug_frame, "SUPERCOMBO - Connecting...", (10, 25),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-                cv2.putText(debug_frame, f"Server: {self.supercombo_server_url}", (10, 50),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
-                self._store_debug_image('final', debug_frame)
-                return None, self.min_speed, debug_frame
-        
-        start_time = time.time()
-        
-        # Send frame and get result
-        result = self._supercombo_client.send_frame(frame, block=True)
-        
-        total_time_ms = (time.time() - start_time) * 1000
-        
-        # Create debug frame
-        debug_frame = frame.copy()
-        cv2.rectangle(debug_frame, (0, 0), (width, 80), (20, 20, 40), -1)
-        cv2.putText(debug_frame, "SUPERCOMBO (openpilot)", (10, 25),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-        
-        if result is None:
-            cv2.putText(debug_frame, "No response from server", (10, 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            stats = self._supercombo_client.get_stats()
-            cv2.putText(debug_frame, f"Connected: {stats['connected']} | Sent: {stats['frames_sent']}", (10, 70),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (150, 150, 150), 1)
-            self._store_debug_image('final', debug_frame)
-            return None, self.min_speed, debug_frame
-        
-        # Parse result (same format as HybridNets /ws/steering endpoint)
-        if 's' in result:
-            steering_angle = result.get('s')
-            confidence = result.get('c', 0)
-            error_norm = result.get('e', 0)
-            server_time = result.get('t', 0)
-            frame_id = result.get('f', 0)
-            roundtrip = result.get('roundtrip_ms', 0)
-        else:
-            steering_info = result.get('steering', {})
-            steering_angle = steering_info.get('steering_angle')
-            confidence = steering_info.get('confidence', 0)
-            error_norm = steering_info.get('error_normalized', 0)
-            server_time = result.get('inference_time_ms', 0)
-            frame_id = result.get('frame_id', 0)
-            roundtrip = result.get('roundtrip_ms', 0)
-        
-        cv2.putText(debug_frame, f"Server: {server_time:.0f}ms | Roundtrip: {roundtrip:.0f}ms", (10, 50),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1)
-        
-        if steering_angle is not None:
-            steering_angle = min(max(steering_angle, -self.max_steering), self.max_steering)
-            self.last_steering = steering_angle
-            self.previous_error = error_norm
-            
-            # Calculate speed based on steering magnitude
-            abs_steer = abs(steering_angle)
-            if abs_steer > 15:
-                speed = self.min_speed
-            elif abs_steer > 8:
-                speed = (self.min_speed + self.max_speed) / 2
-            else:
-                speed = self.max_speed
-            
-            # Diagnostic logging
-            if not hasattr(self, '_supercombo_frame_count'):
-                self._supercombo_frame_count = 0
-            self._supercombo_frame_count += 1
-            if self._supercombo_frame_count <= 5 or self._supercombo_frame_count % 20 == 0:
-                steer_serial = int(round(steering_angle * 10))
-                speed_serial = int(round(speed * 10))
-                print(f"\033[1;97m[ Supercombo ] :\033[0m "
-                      f"steer={steering_angle:.1f}deg (serial:{steer_serial}) | "
-                      f"speed={speed:.0f} (serial:{speed_serial}) | "
-                      f"conf={confidence:.2f} | "
-                      f"server={server_time:.0f}ms RT={roundtrip:.0f}ms | "
-                      f"frame#{self._supercombo_frame_count}")
-            
-            # Draw steering info
-            steer_color = (0, 255, 0) if abs(steering_angle) < 10 else (0, 165, 255) if abs(steering_angle) < 20 else (0, 0, 255)
-            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f} deg (x10={int(round(steering_angle*10))})", (width - 280, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, steer_color, 2)
-            cv2.putText(debug_frame, f"Confidence: {confidence:.2f}", (width - 200, 55),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(debug_frame, f"Speed: {speed:.0f} (x10={int(round(speed*10))})", (width - 280, 75),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            
-            # Draw center indicator
-            center_x = width // 2
-            center_y = int(height * 0.8)
-            offset_px = int((steering_angle / self.max_steering) * (width / 4))
-            cv2.line(debug_frame, (center_x, height), (center_x, int(height * 0.6)), (0, 255, 255), 2)
-            cv2.arrowedLine(debug_frame, (center_x, center_y), (center_x + offset_px, center_y - 30),
-                           steer_color, 3)
-            
-            self._store_debug_image('final', debug_frame)
-            self._store_debug_image('supercombo', debug_frame)
-            return steering_angle, speed, debug_frame
-        else:
-            print(f"\033[1;97m[ Supercombo ] :\033[0m \033[1;91mNO LANES\033[0m - server returned steering=None | "
-                  f"server={server_time:.0f}ms RT={roundtrip:.0f}ms")
-            cv2.putText(debug_frame, "No lanes detected", (10, 70),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-            self._store_debug_image('final', debug_frame)
-            return None, self.min_speed, debug_frame
-
-    def _detect_with_hybridnets(self, frame):
-        """
-        Detect lanes using the remote AI server, but keep local BFMC control.
-
-        The server only provides lane geometry (lane_points). The local thread
-        keeps using the same Stanley/PID, single-lane tracking, swept-path, and
-        recovery logic as the OpenCV pipeline.
-
-        Returns:
-            tuple: (avg_left, avg_right, img_h, img_w, canny_like, debug_info)
-        """
-        height, width = frame.shape[:2]
-
-        debug_info = {
-            'pipeline_label': 'AI Lanes + BFMC Control',
-        }
-        empty_mask = np.zeros((height, width), dtype=np.uint8)
-        y_start = int(self.roi_height_start * height)
-        y_end = int(self.roi_height_end * height)
-        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
-        roi_mask = np.zeros_like(empty_mask)
-        cv2.fillPoly(roi_mask, roi_vertices, 255)
-        debug_info['roi_vertices'] = roi_vertices
-
-        if self._hybridnets_client is None or not self._hybridnets_client.connected:
-            self._start_hybridnets_client()
-            if not self._hybridnets_client or not self._hybridnets_client.connected:
-                self._smooth_detected_line(None, 'left')
-                self._smooth_detected_line(None, 'right')
-                debug_info['pipeline_label'] = 'AI Lanes - Connecting'
-                debug_info['remote_status'] = 'connecting'
-                return None, None, height, width, empty_mask, debug_info
-
-        # Non-blocking send keeps the control loop running at camera rate instead
-        # of waiting on network+GPU latency every cycle.
-        result = self._hybridnets_client.send_frame(frame, block=False)
-        last_result_time = getattr(self._hybridnets_client, '_last_result_time', 0.0)
-        result_age = (time.time() - last_result_time) if last_result_time else None
-
-        if result is None:
-            self._smooth_detected_line(None, 'left')
-            self._smooth_detected_line(None, 'right')
-            debug_info['pipeline_label'] = 'AI Lanes - Waiting first result'
-            debug_info['remote_status'] = 'warming_up'
-            return None, None, height, width, empty_mask, debug_info
-
-        if result_age is None or result_age > self.hybridnets_max_result_age:
-            self._smooth_detected_line(None, 'left')
-            self._smooth_detected_line(None, 'right')
-            debug_info['pipeline_label'] = 'AI Lanes - Stale result'
-            debug_info['remote_status'] = 'stale'
-            debug_info['remote_result_age_ms'] = round((result_age or 0.0) * 1000, 1)
-            return None, None, height, width, empty_mask, debug_info
-
-        lane_points = result.get('lane_points', [])
-        server_time = float(result.get('inference_time_ms', 0) or 0)
-        roundtrip = float(result.get('roundtrip_ms', 0) or 0)
-        frame_id = int(result.get('frame_id', 0) or 0)
-
-        debug_info['remote_server_time_ms'] = server_time
-        debug_info['remote_roundtrip_ms'] = roundtrip
-        debug_info['remote_frame_id'] = frame_id
-        debug_info['remote_lane_count'] = len(lane_points)
-        debug_info['remote_result_age_ms'] = round(result_age * 1000, 1)
-
-        lane_mask = empty_mask
-        lane_mask_b64 = result.get('lane_mask_b64')
-        if lane_mask_b64:
-            try:
-                lane_bytes = base64.b64decode(lane_mask_b64)
-                decoded = cv2.imdecode(np.frombuffer(lane_bytes, np.uint8), cv2.IMREAD_GRAYSCALE)
-                if decoded is not None:
-                    lane_mask = decoded
-            except Exception:
-                pass
-        lane_mask = cv2.bitwise_and(lane_mask, roi_mask)
-
-        avg_left, avg_right = self._remote_lane_points_to_lines(lane_points, height, width)
-        avg_left = self._smooth_detected_line(avg_left, 'left')
-        avg_right = self._smooth_detected_line(avg_right, 'right')
-        debug_info['threshold'] = 'AI'
-        debug_info['left_lines'] = [avg_left] if avg_left is not None else []
-        debug_info['right_lines'] = [avg_right] if avg_right is not None else []
-
-        if not hasattr(self, '_hybridnets_frame_count'):
-            self._hybridnets_frame_count = 0
-        self._hybridnets_frame_count += 1
-
-        if self._hybridnets_frame_count <= 5 or self._hybridnets_frame_count % 20 == 0:
-            print(f"\033[1;97m[ HybridNets ] :\033[0m "
-                  f"lanes={len(lane_points)} "
-                  f"L={'Y' if avg_left is not None else 'N'} "
-                  f"R={'Y' if avg_right is not None else 'N'} | "
-                  f"server={server_time:.0f}ms RT={roundtrip:.0f}ms | "
-                  f"frame#{self._hybridnets_frame_count}")
-
-        if avg_left is None and avg_right is None:
-            debug_info['pipeline_label'] = 'AI Lanes - No lanes'
-
-        return avg_left, avg_right, height, width, lane_mask, debug_info
 
     def _detect_with_local_ai(self, frame):
         """Consume locally inferred lane geometry and keep BFMC/Stanley as the controller."""
@@ -5036,7 +4648,6 @@ Args:
         self.last_line_position = None
         self.frames_without_line = 0
         self.last_turn_direction = 0
-        self._hybridnets_frame_count = 0
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;96mPID\033[0m - State reset (P/I/D cleared)")
 
     def _init_error_kalman(self):
@@ -5177,21 +4788,12 @@ Args:
         cv2.circle(panel, (panel_width - 25, 25), 10, status_color, -1)
         
         # Detection Mode
+        # Phase 0 cleanup: AI_LOCAL es el único modo soportado. El panel
+        # mantiene la línea por compatibilidad visual con el dashboard.
         y_pos = 70
         cv2.putText(panel, "Mode:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-        mode_colors = {'opencv': (0, 200, 0), 'lstr': (255, 100, 0), 'hybrid': (255, 255, 0), 'ai_local': (255, 180, 0)}
-        mode_color = mode_colors.get(self.detection_mode, (200, 200, 200))
-        cv2.putText(panel, self.detection_mode.upper(), (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
-        
-        # LSTR Status
-        y_pos += 30
-        cv2.putText(panel, "LSTR:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-        if self.lstr_detector is not None and self.lstr_detector.is_available:
-            cv2.putText(panel, f"OK ({self.lstr_detector.model_type.value})", (80, y_pos), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        else:
-            cv2.putText(panel, "Not Available", (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
-        
+        cv2.putText(panel, self.detection_mode.upper(), (80, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 180, 0), 2)
+
         # Steering
         y_pos += 35
         cv2.putText(panel, "Steering:", (15, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
@@ -5357,18 +4959,12 @@ Args:
             return
         self._last_stream_time = current_time
         
-        # Debug view mapping
+        # Debug view mapping.
+        # Phase 0 cleanup: tras eliminar el pipeline OpenCV (CLAHE/HSV/Hough/sliding
+        # window) y los detectores remotos (LSTR/HybridNets/Supercombo) solo queda
+        # `final`, que renderiza el overlay del lane sobre el frame original.
         view_names = {
             1: 'final',           # Final result with lane overlay
-            2: 'clahe',           # CLAHE normalized
-            3: 'adjusted',        # Brightness/contrast adjusted
-            4: 'hsv',             # HSV color space
-            5: 'white_mask',      # White line mask
-            6: 'yellow_mask',     # Yellow line mask
-            7: 'combined_mask',   # Combined mask
-            8: 'birds_eye',       # Bird's eye view
-            9: 'sliding_window',  # Sliding window visualization
-            10: 'lstr',           # LSTR AI result
         }
         
         view_name = view_names.get(self.stream_debug_view, 'off')
@@ -5414,7 +5010,6 @@ Args:
                 'maneuver_notes': self._last_maneuver_notes or None,
                 'view': view_name,
                 'active': self.is_line_following_active,
-                'lstr_available': self.lstr_detector is not None and self.lstr_detector.is_available,
                 'computed_steering': round(computed_steering, 2) if computed_steering is not None else None,
                 'computed_speed': round(computed_speed, 2) if computed_speed is not None else None,
                 'commanded_steering': round(commanded_steering, 2) if commanded_steering is not None else None,
@@ -5505,159 +5100,11 @@ Args:
         lab = cv2.merge([l_channel, a_channel, b_channel])
         return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    def _adaptive_white_detection(self, frame):
-        """Detect white lines using adaptive thresholding based on image statistics.
-        
-        Instead of fixed V threshold, calculates threshold dynamically based on
-        the percentile of brightness in the current frame. This adapts to
-        different lighting conditions automatically.
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Calculate adaptive threshold based on percentile
-        threshold = np.percentile(gray, self.adaptive_white_percentile)
 
-        # Ensure minimum threshold to avoid detecting everything as white
-        threshold = max(threshold, self.adaptive_white_min_threshold)
-        
-        # Create binary mask for white regions
-        _, white_mask = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-        
-        return white_mask, threshold
 
-    def _gradient_based_detection(self, frame):
-        """Detect lane lines using gradient (edge) information.
-        
-        This method is less sensitive to color/lighting changes because it
-        focuses on detecting edges (where brightness changes sharply).
-        Useful as a fallback when color detection fails.
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Apply Sobel filters to detect edges in X and Y directions
-        sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        
-        # Calculate gradient magnitude
-        gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-        
-        # Normalize to 0-255 range
-        gradient_magnitude = np.uint8(255 * gradient_magnitude / np.max(gradient_magnitude + 1e-6))
-        # Calculate adaptive threshold based on percentile
-        threshold = np.percentile(gradient_magnitude, self.gradient_percentile)
 
-        # Create binary mask for strong gradients (edges)
-        _, gradient_mask = cv2.threshold(gradient_magnitude, threshold, 255, cv2.THRESH_BINARY)
 
-        return gradient_mask
 
-    def _create_hsv_mask(self, hsv, h_min, h_max, s_min, s_max, v_min, v_max):
-        """Create an HSV mask, supporting hue ranges that wrap around 0."""
-        lower = np.array([h_min, s_min, v_min])
-        upper = np.array([h_max, s_max, v_max])
-
-        if h_min <= h_max:
-            return cv2.inRange(hsv, lower, upper)
-
-        lower_wrap = np.array([0, s_min, v_min])
-        upper_wrap = np.array([h_max, s_max, v_max])
-        lower_tail = np.array([h_min, s_min, v_min])
-        upper_tail = np.array([179, s_max, v_max])
-
-        return cv2.bitwise_or(
-            cv2.inRange(hsv, lower_wrap, upper_wrap),
-            cv2.inRange(hsv, lower_tail, upper_tail)
-        )
-
-    def _filter_line_like_components(self, mask):
-        """Keep only connected components that resemble elongated lane markings."""
-        if not self.use_component_filter:
-            return mask
-
-        contours_data = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = contours_data[0] if len(contours_data) == 2 else contours_data[1]
-        filtered = np.zeros_like(mask)
-
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < self.component_min_area:
-                continue
-
-            x, y, w, h = cv2.boundingRect(contour)
-            if max(w, h) < self.component_min_height:
-                continue
-
-            rect = cv2.minAreaRect(contour)
-            rect_w, rect_h = rect[1]
-            long_side = max(rect_w, rect_h)
-            short_side = max(min(rect_w, rect_h), 1.0)
-            if long_side < self.component_min_height:
-                continue
-
-            aspect_ratio = long_side / short_side
-            if aspect_ratio < self.component_min_aspect_ratio:
-                continue
-
-            vx, vy, _, _ = cv2.fitLine(contour, cv2.DIST_L2, 0, 0.01, 0.01)
-            angle = abs(math.degrees(math.atan2(float(vy), float(vx))))
-            if angle < self.component_min_angle:
-                continue
-
-            cv2.drawContours(filtered, [contour], -1, 255, -1)
-
-        return filtered
-
-    def _adaptive_local_threshold(self, gray_image):
-        """Local adaptive thresholding, as suggested by classic layered lane pipelines."""
-        block_size = max(3, int(self.local_adaptive_block_size))
-        if block_size % 2 == 0:
-            block_size += 1
-
-        adaptive_mask = cv2.adaptiveThreshold(
-            gray_image,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY,
-            block_size,
-            self.local_adaptive_c
-        )
-        return self._filter_line_like_components(adaptive_mask)
-
-    def _hough_lines_by_half(self, canny):
-        """Run Hough independently on each half of the image and keep strongest segments."""
-        height, width = canny.shape[:2]
-        split_x = width // 2
-        selected_lines = []
-
-        for x_start, x_end in ((0, split_x), (split_x, width)):
-            half = canny[:, x_start:x_end]
-            half_lines = cv2.HoughLinesP(
-                half, 1, np.pi / 180,
-                self.hough_threshold,
-                minLineLength=self.hough_min_line_length,
-                maxLineGap=self.hough_max_line_gap
-            )
-            if half_lines is None:
-                continue
-
-            scored_lines = []
-            for line in half_lines:
-                x1, y1, x2, y2 = line[0]
-                x1 += x_start
-                x2 += x_start
-                length_sq = (x2 - x1) ** 2 + (y2 - y1) ** 2
-                scored_lines.append(
-                    (length_sq, np.array([[x1, y1, x2, y2]], dtype=np.int32))
-                )
-
-            scored_lines.sort(key=lambda item: item[0], reverse=True)
-            limit = max(1, int(self.hough_max_lines_per_side))
-            selected_lines.extend(line for _, line in scored_lines[:limit])
-
-        if len(selected_lines) == 0:
-            return None
-
-        return np.array(selected_lines, dtype=np.int32)
 
     def _preprocess_frame(self, frame):
         """Apply all preprocessing steps to make detection robust to lighting changes.
@@ -5684,430 +5131,8 @@ Args:
         
         return preprocessed, debug_info
 
-    def _create_combined_mask(self, frame, preprocessed):
-        """Create a combined mask using multiple detection methods.
-        
-        Combines:
-        1. HSV-based color detection (white and yellow)
-        2. Adaptive white detection (if enabled)
-        3. Gradient-based detection as fallback (if enabled)
-        
-        Returns:
-            combined_mask: Binary mask with detected lane pixels
-            debug_info: Dictionary with intermediate masks for debugging
-        """
-        debug_info = {}
-        needs_debug = self._needs_debug
-        
-        # Convert to HSV for color-based detection
-        hsv = cv2.cvtColor(preprocessed, cv2.COLOR_BGR2HSV)
-        if needs_debug:
-            debug_info['hsv'] = hsv.copy()
-        
-        # Standard HSV-based white detection
-        white_mask_hsv = cv2.inRange(hsv, self.white_lower, self.white_upper)
-        if needs_debug:
-            debug_info['white_hsv'] = white_mask_hsv.copy()
 
-        # Yellow detection (usually more stable across lighting)
-        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
-        if needs_debug:
-            debug_info['yellow'] = yellow_mask.copy()
-        
-        # Start with HSV-based masks
-        combined_mask = cv2.bitwise_or(white_mask_hsv, yellow_mask)
-        
-        # Add adaptive white detection if enabled
-        if self.use_adaptive_white:
-            adaptive_white_mask, adaptive_threshold = self._adaptive_white_detection(preprocessed)
-            if needs_debug:
-                debug_info['adaptive_white'] = adaptive_white_mask.copy()
-            debug_info['adaptive_threshold'] = adaptive_threshold
-            
-            # Combine with existing mask (OR operation)
-            combined_mask = cv2.bitwise_or(combined_mask, adaptive_white_mask)
-        
-        # Add gradient fallback if enabled and main detection is weak
-        if self.use_gradient_fallback:
-            # Check if we have enough detected pixels
-            white_pixel_count = np.sum(combined_mask > 0)
-            total_pixels = combined_mask.shape[0] * combined_mask.shape[1]
-            detection_ratio = white_pixel_count / total_pixels
-            
-            # If detection is weak (less than 1% of image), use gradient fallback
-            if detection_ratio < 0.01:
-                gradient_mask = self._gradient_based_detection(preprocessed)
-                if needs_debug:
-                    debug_info['gradient'] = gradient_mask.copy()
-                debug_info['gradient_used'] = True
-                
-                # Combine gradient mask with color masks
-                combined_mask = cv2.bitwise_or(combined_mask, gradient_mask)
-            else:
-                debug_info['gradient_used'] = False
-        
-        if needs_debug:
-            debug_info['combined_raw'] = combined_mask.copy()
 
-        return combined_mask, debug_info
-
-    def _detect_with_lstr(self, frame):
-        """
-        Detect lanes using LSTR (AI-based detection).
-        
-        Args:
-            frame: BGR image
-            
-        Returns:
-            tuple: (steering_angle, speed, lane_center, debug_frame) or (None, None, None, None) if failed
-        """
-        if self.lstr_detector is None or not self.lstr_detector.is_available:
-            return None, None, None, None
-        
-        try:
-            height, width = frame.shape[:2]
-            
-            # Run LSTR detection
-            start_time = time.time()
-            lanes, lane_ids = self.lstr_detector.detect_lanes(frame)
-            inference_time = (time.time() - start_time) * 1000  # ms
-            
-            # Create AI analysis window (always, even if no lanes)
-            ai_analysis_frame = frame.copy()
-            
-            # Draw AI analysis header
-            cv2.rectangle(ai_analysis_frame, (0, 0), (width, 80), (20, 20, 40), -1)
-            cv2.putText(ai_analysis_frame, "LSTR AI ANALYSIS", (10, 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(ai_analysis_frame, f"Model: {self.lstr_detector.model_type.value}", (10, 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(ai_analysis_frame, f"Inference: {inference_time:.1f}ms", (10, 70),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(ai_analysis_frame, f"Lanes: {len(lanes)}", (width - 100, 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0) if len(lanes) > 0 else (0, 0, 255), 2)
-            
-            if len(lanes) == 0:
-                cv2.putText(ai_analysis_frame, "NO LANES DETECTED", (width//2 - 120, height//2),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                
-                # Show AI analysis window even when no detection
-                if self._is_window_enabled("ai_analysis"):
-                    self._show_preview_window("AI Analysis - LSTR", ai_analysis_frame)
-                
-                self._store_debug_image('lstr', ai_analysis_frame)
-                return None, None, None, None
-            
-            # Get lane center
-            lane_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
-            
-            if lane_center is None:
-                if self._is_window_enabled("ai_analysis"):
-                    self._show_preview_window("AI Analysis - LSTR", ai_analysis_frame)
-                return None, None, None, None
-            
-            # === CURVE PREDICTION: Estimate curvature from full lane shape ===
-            curvature, turn_sign = self.lstr_detector.estimate_path_curvature(width)
-            
-            # Feed-forward: geometric Ackermann steering angle for detected curvature
-            ff_steer = 0.0
-            radius = 0.0
-            if abs(curvature) > self.curvature_threshold and turn_sign != 0:
-                # Convert pixel curvature to approximate real-world radius
-                # The camera sees ~1m ahead in ~height pixels, so pixels_per_meter ≈ height
-                pixels_per_meter = height  # Rough approximation
-                real_curvature = curvature * pixels_per_meter  # 1/meters
-                if real_curvature > 0.01:
-                    radius = 1.0 / real_curvature  # meters
-                    # Ackermann formula: steer = atan(wheelbase / radius)
-                    ff_steer = math.degrees(math.atan(self.wheelbase / radius)) * turn_sign
-                    # Clamp feed-forward to physical limits
-                    ff_steer = max(min(ff_steer, self.max_steering), -self.max_steering)
-            
-            # === PID: fine corrections based on lane center error ===
-            frame_center = width / 2
-            error = lane_center - frame_center
-            # Normalize: ±max_error_px maps to [-1, 1] (40px offset = 25° steering)
-            error_normalized = max(min(error / self.max_error_px, 1.0), -1.0)
-            
-            pid_steer = self.pid.compute(error_normalized)
-            
-            # === BLEND: combine feed-forward prediction with PID correction ===
-            if abs(ff_steer) > 0.1:
-                # Curve detected: blend feed-forward + PID
-                steering_angle = self.ff_weight * ff_steer + (1.0 - self.ff_weight) * pid_steer
-            else:
-                # Straight road: use pure PID
-                steering_angle = pid_steer
-            
-            # Clamp to physical limits
-            steering_angle = max(min(steering_angle, self.max_steering), -self.max_steering)
-            
-            # Optional smoothing for stability
-            if hasattr(self, 'last_steering'):
-                steering_angle = self.smoothing_factor * steering_angle + (1 - self.smoothing_factor) * self.last_steering
-                steering_angle = max(min(steering_angle, self.max_steering), -self.max_steering)
-            
-            if self.show_debug:
-                p_term = self.pid.Kp * error_normalized
-                i_term = self.pid.Ki * self.pid.integral
-                d_term = self.pid.Kd * (error_normalized - self.pid.prev_error) if hasattr(self.pid, 'prev_error') else 0
-                if abs(ff_steer) > 0.1:
-                    curve_dir = "R" if turn_sign > 0 else "L"
-                    radius_str = f"R={radius:.2f}m" if radius > 0 else "R=inf"
-                    print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;95mCURVE {curve_dir}\033[0m - "
-                          f"curv:{curvature:.4f} {radius_str} FF:{ff_steer:.1f}° PID:{pid_steer:.1f}° "
-                          f"-> steer:{steering_angle:.1f}° (w={self.ff_weight:.1f})")
-                else:
-                    print(f"\033[1;97m[ LSTR ] :\033[0m \033[1;96mPID\033[0m - err:{error_normalized:.3f} steer:{steering_angle:.1f}° "
-                          f"P={p_term:.1f} I={i_term:.1f} D={d_term:.1f} "
-                          f"(Kp={self.pid.Kp:.1f} Ki={self.pid.Ki:.1f} Kd={self.pid.Kd:.1f})")
-            
-            # === ADAPTIVE SPEED based on curvature ===
-            if abs(curvature) > 2.0:
-                speed = self.min_speed  # Tight curve: minimum speed
-            elif abs(curvature) > 1.0:
-                speed = (self.min_speed + self.max_speed) / 2  # Moderate curve
-            else:
-                speed = self.max_speed  # Straight: full speed
-            
-            # Create debug frame with lane overlay
-            debug_frame = self.lstr_detector.draw_lanes(frame)
-            
-            # Draw header
-            cv2.rectangle(debug_frame, (0, 0), (width, 80), (20, 20, 40), -1)
-            cv2.putText(debug_frame, "LSTR AI ANALYSIS", (10, 25), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(debug_frame, f"Model: {self.lstr_detector.model_type.value}", (10, 50),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(debug_frame, f"Inference: {inference_time:.1f}ms ({1000/max(1,inference_time):.1f} FPS)", (10, 70),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            
-            # Draw lane info on right side
-            cv2.putText(debug_frame, f"Lanes: {len(lanes)}", (width - 100, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-            cv2.putText(debug_frame, f"Steer: {steering_angle:.1f}", (width - 130, 55),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            cv2.putText(debug_frame, f"Speed: {speed:.0f}", (width - 100, 75),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-            
-            # Draw curvature / feed-forward info bar
-            curv_bar_y = 85
-            if abs(ff_steer) > 0.1:
-                curve_dir = "R" if turn_sign > 0 else "L"
-                radius_str = f"R={radius:.2f}m" if radius > 0 else ""
-                cv2.rectangle(debug_frame, (0, curv_bar_y), (width, curv_bar_y + 25), (80, 0, 80), -1)
-                cv2.putText(debug_frame, f"CURVE {curve_dir} {radius_str} FF:{ff_steer:.1f} PID:{pid_steer:.1f} w={self.ff_weight:.1f}",
-                           (10, curv_bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 150, 255), 1)
-            else:
-                cv2.putText(debug_frame, f"STRAIGHT  PID:{pid_steer:.1f}",
-                           (10, curv_bar_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (150, 255, 150), 1)
-            
-            # Draw lane center indicator
-            center_y = int(height * 0.7)
-            cv2.circle(debug_frame, (int(lane_center), center_y), 12, (255, 0, 255), -1)
-            cv2.line(debug_frame, (int(frame_center), center_y - 30), (int(frame_center), center_y + 30), (0, 255, 255), 2)
-            cv2.arrowedLine(debug_frame, (int(frame_center), center_y), (int(lane_center), center_y), (255, 0, 255), 2)
-            
-            # Draw offset text
-            offset_text = f"Offset: {error:.0f}px"
-            cv2.putText(debug_frame, offset_text, (int(frame_center) - 50, center_y - 40),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-            
-            # Show AI analysis window
-            if self._is_window_enabled("ai_analysis"):
-                self._show_preview_window("AI Analysis - LSTR", debug_frame)
-            
-            # Store LSTR result for streaming
-            self._store_debug_image('lstr', debug_frame)
-            self._store_debug_image('final', debug_frame)
-            
-            return steering_angle, speed, lane_center, debug_frame
-            
-        except Exception as e:
-            print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - LSTR detection failed: {e}")
-            return None, None, None, None
-
-    def _detect_hybrid_fusion(self, frame):
-        """
-        Detect lanes using FUSION of OpenCV and LSTR.
-        
-        Both detectors run and their results are combined:
-        - If both detect: weighted average of steering angles
-        - If only one detects: use that one (with reduced confidence)
-        - If neither detects: return None
-        
-        Returns:
-            tuple: (steering_angle, speed, debug_frame) or (None, speed, debug_frame)
-        """
-        height, width = frame.shape[:2]
-        
-        # Initialize perspective if needed
-        if not self.perspective_initialized:
-            self._init_perspective_transform(width, height)
-        
-        # Run both detectors
-        opencv_steering = None
-        opencv_center = None
-        lstr_steering = None
-        lstr_center = None
-        
-        # 1. Run OpenCV detection (simplified - just get the lane center)
-        try:
-            preprocessed, _ = self._preprocess_frame(frame)
-            white_mask = self._threshold_white(preprocessed)
-            binary_warped = self.warp_perspective(white_mask)
-            leftx, lefty, rightx, righty = self.sliding_window(binary_warped)
-            left_fit, right_fit, lane_center_warped, curvature = self.fit_polynomial(
-                leftx, lefty, rightx, righty, binary_warped.shape
-            )
-            
-            if lane_center_warped is not None:
-                # Transform back to original coordinates
-                y_eval = int(height * (1.0 - self.lookahead))
-                y_eval_warped = int(binary_warped.shape[0] * (1.0 - self.lookahead))
-                
-                point_warped = np.array([[[lane_center_warped, y_eval_warped]]], dtype=np.float32)
-                point_original = cv2.perspectiveTransform(point_warped, self.perspective_M_inv)
-                opencv_center = point_original[0][0][0]
-                
-                # Calculate OpenCV steering
-                frame_center = width / 2
-                error_norm = (opencv_center - frame_center) / frame_center
-                opencv_steering = self.kp * error_norm  # Simplified PID
-        except Exception as e:
-            if self.show_debug:
-                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;93mOpenCV failed\033[0m - {e}")
-        
-        # 2. Run LSTR detection
-        try:
-            if self.lstr_detector is not None and self.lstr_detector.is_available:
-                lanes, _ = self.lstr_detector.detect_lanes(frame)
-                if len(lanes) > 0:
-                    lstr_center = self.lstr_detector.get_lane_center(width, y_position_ratio=1.0 - self.lookahead)
-                    if lstr_center is not None:
-                        frame_center = width / 2
-                        error_norm = (lstr_center - frame_center) / frame_center
-                        lstr_steering = self.kp * error_norm  # Simplified PID
-        except Exception as e:
-            if self.show_debug:
-                print(f"\033[1;97m[ HYBRID ] :\033[0m \033[1;93mLSTR failed\033[0m - {e}")
-        
-        # 3. Combine results
-        final_steering = None
-        confidence = 0.0
-        source = "NONE"
-        
-        if opencv_steering is not None and lstr_steering is not None:
-            # Both detected - weighted fusion
-            final_steering = (
-                self.hybrid_opencv_weight * opencv_steering + 
-                self.hybrid_lstr_weight * lstr_steering
-            )
-            
-            # Check agreement - if they agree, boost confidence
-            steering_diff = abs(opencv_steering - lstr_steering)
-            if steering_diff < 5:  # Within 5 degrees
-                confidence = 1.0 * self.hybrid_agreement_bonus
-                source = "FUSION (agree)"
-            else:
-                confidence = 0.8
-                source = f"FUSION (diff:{steering_diff:.1f}°)"
-                
-        elif opencv_steering is not None:
-            # Only OpenCV detected
-            final_steering = opencv_steering
-            confidence = 0.6
-            source = "OpenCV only"
-            
-        elif lstr_steering is not None:
-            # Only LSTR detected
-            final_steering = lstr_steering
-            confidence = 0.8  # LSTR is more reliable
-            source = "LSTR only"
-        
-        # Apply smoothing and clamp
-        if final_steering is not None:
-            # Apply dead zone
-            if abs(final_steering) < self.dead_zone_ratio * self.kp:
-                final_steering = 0
-            
-            # Smooth with previous
-            if hasattr(self, 'last_steering'):
-                smooth = 0.4
-                final_steering = smooth * final_steering + (1 - smooth) * self.last_steering
-            
-            # Clamp
-            final_steering = min(max(final_steering, -self.max_steering), self.max_steering)
-            self.last_steering = final_steering
-        
-        # Calculate speed based on steering
-        if final_steering is not None:
-            abs_steer = abs(final_steering)
-            if abs_steer > 15:
-                speed = self.min_speed
-            elif abs_steer > 8:
-                speed = (self.min_speed + self.max_speed) / 2
-            else:
-                speed = self.max_speed
-        else:
-            speed = self.min_speed
-        
-        # Create debug frame
-        debug_frame = frame.copy()
-        
-        # Draw header
-        cv2.rectangle(debug_frame, (0, 0), (width, 100), (20, 20, 40), -1)
-        cv2.putText(debug_frame, "HYBRID FUSION MODE", (10, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-        
-        # Draw detection sources
-        y_pos = 50
-        if opencv_steering is not None:
-            cv2.putText(debug_frame, f"OpenCV: {opencv_steering:.1f} deg", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-            if opencv_center is not None:
-                cv2.circle(debug_frame, (int(opencv_center), int(height * 0.8)), 8, (0, 255, 0), -1)
-        else:
-            cv2.putText(debug_frame, "OpenCV: --", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
-        
-        y_pos = 70
-        if lstr_steering is not None:
-            cv2.putText(debug_frame, f"LSTR: {lstr_steering:.1f} deg", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 100, 0), 1)
-            if lstr_center is not None:
-                cv2.circle(debug_frame, (int(lstr_center), int(height * 0.8)), 8, (255, 100, 0), -1)
-        else:
-            cv2.putText(debug_frame, "LSTR: --", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (100, 100, 100), 1)
-        
-        y_pos = 90
-        if final_steering is not None:
-            cv2.putText(debug_frame, f"FINAL: {final_steering:.1f} deg [{source}]", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-            # Draw final center
-            final_center = width/2 + (final_steering / self.max_steering) * (width/4)
-            cv2.circle(debug_frame, (int(final_center), int(height * 0.85)), 12, (0, 255, 255), 3)
-        else:
-            cv2.putText(debug_frame, "FINAL: NO DETECTION", (10, y_pos),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-        
-        # Draw frame center reference
-        cv2.line(debug_frame, (width//2, height - 50), (width//2, height), (255, 255, 255), 2)
-        
-        if self._is_window_enabled("hybrid_fusion"):
-            self._show_preview_window("HYBRID Fusion", debug_frame)
-            if final_steering is not None:
-                self._debug_log(
-                    "hybrid_fusion",
-                    f"\033[1;97m[ HYBRID ] :\033[0m \033[1;96m{source}\033[0m - "
-                    f"Steer: {final_steering:.1f}° (OpenCV:{opencv_steering}, LSTR:{lstr_steering})",
-                )
-        
-        self._store_debug_image('hybrid', debug_frame)
-        self._store_debug_image('final', debug_frame)
-        
-        return final_steering, speed, debug_frame
 
     # ==================================================================
     # BFMC-style lane detection helpers
@@ -6126,7 +5151,7 @@ Args:
         If noisy, the frame should be rejected and previous steering maintained.
         
         Args:
-            debug_info: Dict from _bfmc_image_processing with 'all_lines' etc.
+            debug_info: Dict del detector con 'all_lines' y métricas de Hough.
             error: Current computed error in pixels (or None)
             steering_angle: Current computed steering angle (or None)
             num_lines: Number of lines detected (0, 1, or 2)
@@ -7029,9 +6054,14 @@ Args:
         return psi_ss, traj_yaw_rate, steer_damping_delta
 
     def _is_ai_local_active(self):
-        """Return True when the current detection runtime is the local AI path."""
-        current_mode = self._normalize_detection_mode(getattr(self, 'detection_mode', DetectionMode.OPENCV.value))
-        return current_mode == DetectionMode.AI_LOCAL.value
+        """Return True when the local AI detector está activo.
+
+        Phase 0 cleanup: AI_LOCAL es el único modo soportado tras la limpieza
+        de LSTR/HybridNets/Supercombo/OpenCV. Devuelve siempre True porque no
+        existe otra ruta de detección. Se conserva como método para no romper
+        a los ~15 callers que dependen de la API.
+        """
+        return True
 
     def _should_use_stanley_controller(self):
         """AI Local is always Stanley; other modes follow the dashboard toggle."""
@@ -7692,126 +6722,7 @@ Args:
 
         return error, heading
 
-    def _bfmc_image_processing(self, image, threshold_override=None, kernel_override=None):
-        """
-        BFMC-style image processing pipeline.
-        
-        1. Apply ROI (bottom portion of image)
-        2. Convert to grayscale
-        3. Binary threshold
-        4. Median blur for noise removal
-        5. Canny edge detection
-        6. HoughLinesP for line detection
-        7. Classify, merge, and average lines
-        
-        Args:
-            image: BGR frame
-            threshold_override: Override binary threshold (for retry)
-            kernel_override: Override median blur kernel (for retry)
-            
-        Returns:
-            (avg_left_line, avg_right_line, height, width, canny_image, debug_info)
-        """
-        threshold_val = threshold_override if threshold_override is not None else self.binary_threshold
-        kernel_val = kernel_override if kernel_override is not None else self.blur_kernel
-        if kernel_val % 2 == 0:
-            kernel_val += 1
 
-        height, width = image.shape[:2]
-        debug_info = {}
-        needs_debug = self._needs_debug
-
-        # 1. ROI mask — simple rectangular ROI (no hood notch).
-        y_start = int(self.roi_height_start * height)
-        y_end = int(self.roi_height_end * height)
-        roi_vertices = np.array([[(0, y_start), (width, y_start), (width, y_end), (0, y_end)]], dtype=np.int32)
-        mask = np.zeros_like(image)
-        cv2.fillPoly(mask, roi_vertices, (255, 255, 255))
-        masked_image = cv2.bitwise_and(image, mask)
-        if needs_debug:
-            debug_info['roi'] = masked_image.copy()
-            debug_info['roi_vertices'] = roi_vertices.copy()
-
-        # 2. Grayscale
-        grey_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2GRAY)
-        if needs_debug:
-            debug_info['grey'] = grey_image.copy()
-
-        # 3. Binary threshold
-        _, binary_image = cv2.threshold(grey_image, threshold_val, 255, cv2.THRESH_BINARY)
-        if needs_debug:
-            debug_info['binary'] = binary_image.copy()
-
-        # 4. Median blur
-        noiseless = cv2.medianBlur(binary_image, kernel_val)
-        if needs_debug:
-            debug_info['noiseless'] = noiseless.copy()
-
-        # 5. Canny
-        canny = cv2.Canny(noiseless, self.canny_low, self.canny_high)
-        if needs_debug:
-            debug_info['canny'] = canny.copy()
-
-        # 6. HoughLinesP
-        lines = cv2.HoughLinesP(
-            canny, 1, np.pi / 180,
-            self.hough_threshold,
-            minLineLength=self.hough_min_line_length,
-            maxLineGap=self.hough_max_line_gap
-        )
-
-        # 7. Classify → merge → average
-        left_lines, right_lines = self._bfmc_classify_lines(lines)
-        merged_left = self._bfmc_merge_lines(left_lines)
-        merged_right = self._bfmc_merge_lines(right_lines)
-        avg_left = self._bfmc_average_lines(merged_left)
-        avg_right = self._bfmc_average_lines(merged_right)
-        avg_left = self._smooth_detected_line(avg_left, 'left')
-        avg_right = self._smooth_detected_line(avg_right, 'right')
-
-        debug_info['all_lines'] = lines
-        debug_info['left_lines'] = merged_left
-        debug_info['right_lines'] = merged_right
-        debug_info['threshold'] = threshold_val
-
-        return avg_left, avg_right, height, width, canny, debug_info
-
-    def _bfmc_classify_lines(self, lines):
-        """
-        Classify detected lines into left and right lanes by slope.
-        
-        Left lane lines have negative slope (going up-left).
-        Right lane lines have positive slope (going up-right).
-        Lines with angle below self.line_angle_filter are horizontal → rejected.
-        
-        Based on MarcosLaneDetector.lines_classifier()
-        """
-        left_lines = []
-        right_lines = []
-
-        if lines is None:
-            return left_lines, right_lines
-
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            dx = x2 - x1
-            if dx == 0:
-                slope = np.pi / 2
-            else:
-                slope = np.arctan((y2 - y1) / dx)
-
-            angle_degrees = np.degrees(abs(slope))
-
-            # Reject near-horizontal lines
-            if angle_degrees < self.line_angle_filter:
-                continue
-
-            if slope < 0:
-                left_lines.append(line)
-            else:
-                right_lines.append(line)
-
-        return left_lines, right_lines
 
     def _bfmc_merge_lines(self, lines):
         """
@@ -9217,9 +8128,6 @@ Args:
         """Transform image to bird's eye view."""
         return cv2.warpPerspective(img, self.perspective_M, (img.shape[1], img.shape[0]))
 
-    def unwarp_perspective(self, img):
-        """Transform image back from bird's eye view."""
-        return cv2.warpPerspective(img, self.perspective_M_inv, (img.shape[1], img.shape[0]))
 
     def _reclassify_masks_via_bev(self, side_masks, side_lines=None):
         """Correct left/right lane mask classification using bird's eye view centroids.
@@ -9376,72 +8284,6 @@ Args:
         histogram = np.sum(binary_img[binary_img.shape[0]//2:, :], axis=0)
         return histogram
 
-    def find_lane_pixels_sliding_window(self, binary_warped):
-        """Find lane pixels using sliding window method.
-
-Returns:
-    leftx, lefty, rightx, righty: Pixel coordinates of left and right lane pixels
-    out_img: Visualization image
-"""
-        histogram = self.get_histogram(binary_warped)
-        out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
-        
-        midpoint = int(histogram.shape[0] // 2)
-        leftx_base = np.argmax(histogram[:midpoint])
-        rightx_base = np.argmax(histogram[midpoint:]) + midpoint
-        
-        window_height = int(binary_warped.shape[0] // self.nwindows)
-        
-        nonzero = binary_warped.nonzero()
-        nonzeroy = np.array(nonzero[0])
-        nonzerox = np.array(nonzero[1])
-        
-        leftx_current = leftx_base
-        rightx_current = rightx_base
-        
-        left_lane_inds = []
-        right_lane_inds = []
-        
-        for window in range(self.nwindows):
-            win_y_low = binary_warped.shape[0] - (window + 1) * window_height
-            win_y_high = binary_warped.shape[0] - window * window_height
-            
-            win_xleft_low = leftx_current - self.window_margin
-            win_xleft_high = leftx_current + self.window_margin
-            win_xright_low = rightx_current - self.window_margin
-            win_xright_high = rightx_current + self.window_margin
-            
-            cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
-            cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
-            
-            good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                             (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)).nonzero()[0]
-            good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-                              (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)).nonzero()[0]
-            
-            left_lane_inds.append(good_left_inds)
-            right_lane_inds.append(good_right_inds)
-            
-            if len(good_left_inds) > self.minpix:
-                leftx_current = int(np.mean(nonzerox[good_left_inds]))
-            if len(good_right_inds) > self.minpix:
-                rightx_current = int(np.mean(nonzerox[good_right_inds]))
-        
-        try:
-            left_lane_inds = np.concatenate(left_lane_inds)
-            right_lane_inds = np.concatenate(right_lane_inds)
-        except ValueError:
-            pass
-        
-        leftx = nonzerox[left_lane_inds] if len(left_lane_inds) > 0 else np.array([])
-        lefty = nonzeroy[left_lane_inds] if len(left_lane_inds) > 0 else np.array([])
-        rightx = nonzerox[right_lane_inds] if len(right_lane_inds) > 0 else np.array([])
-        righty = nonzeroy[right_lane_inds] if len(right_lane_inds) > 0 else np.array([])
-        
-        out_img[lefty, leftx] = [255, 0, 0]
-        out_img[righty, rightx] = [0, 0, 255]
-        
-        return leftx, lefty, rightx, righty, out_img
 
     def _search_around_poly(self, binary_warped, out_img, nonzerox, nonzeroy):
         """Search for lane pixels around the previous polynomial fit.
@@ -9466,50 +8308,6 @@ Much faster and better for curves than blind sliding window."""
         
         return leftx, lefty, rightx, righty
 
-    def fit_polynomial(self, leftx, lefty, rightx, righty, img_shape):
-        """Fit a second order polynomial to lane pixels.
-
-Returns:
-    left_fit, right_fit: Polynomial coefficients
-    lane_center: Center of the lane at the bottom of the image
-    curvature: Estimated curvature
-"""
-        left_fit = None
-        right_fit = None
-        lane_center = img_shape[1] // 2
-        curvature = None
-        
-        if len(leftx) > 50:
-            left_fit = np.polyfit(lefty, leftx, 2)
-            self.left_fit_history.append(left_fit)
-            if len(self.left_fit_history) > self.fit_history_size:
-                self.left_fit_history.pop(0)
-            left_fit = np.mean(self.left_fit_history, axis=0)
-            self.left_fit = left_fit
-        
-        if len(rightx) > 50:
-            right_fit = np.polyfit(righty, rightx, 2)
-            self.right_fit_history.append(right_fit)
-            if len(self.right_fit_history) > self.fit_history_size:
-                self.right_fit_history.pop(0)
-            right_fit = np.mean(self.right_fit_history, axis=0)
-            self.right_fit = right_fit
-        
-        y_eval = img_shape[0] - 1
-        
-        if left_fit is not None and right_fit is not None:
-            left_x = left_fit[0] * y_eval**2 + left_fit[1] * y_eval + left_fit[2]
-            right_x = right_fit[0] * y_eval**2 + right_fit[1] * y_eval + right_fit[2]
-            lane_center = int((left_x + right_x) / 2)
-            curvature = self._calculate_curvature(left_fit, right_fit, y_eval)
-        elif left_fit is not None:
-            left_x = left_fit[0] * y_eval**2 + left_fit[1] * y_eval + left_fit[2]
-            lane_center = int(left_x + img_shape[1] * 0.3)
-        elif right_fit is not None:
-            right_x = right_fit[0] * y_eval**2 + right_fit[1] * y_eval + right_fit[2]
-            lane_center = int(right_x - img_shape[1] * 0.3)
-        
-        return left_fit, right_fit, lane_center, curvature
 
     def _calculate_curvature(self, left_fit, right_fit, y_eval):
         """Calculate radius of curvature in pixels."""
@@ -9558,11 +8356,12 @@ Returns:
         """Apply configuration from dashboard sliders."""
         try:
             normalized_config = dict(config)
-            if 'detection_mode' in normalized_config:
-                normalized_config['detection_mode'] = self._normalize_detection_mode(normalized_config['detection_mode'])
+            # Phase 0 cleanup: detection_mode legacy aliases (hybridnets/supercombo)
+            # ya no existen; cualquier valor que llegue se trata como AI_LOCAL en
+            # process_frame, así que aquí no necesitamos normalizar.
 
             # String parameters (URLs, mode names) - do NOT convert to number
-            string_params = {'detection_mode', 'hybridnets_server_url', 'supercombo_server_url'}
+            string_params = {'detection_mode'}
             # Integer parameters - must be int for OpenCV kernels, thresholds, etc.
             int_params = {'blur_kernel', 'morph_kernel', 'canny_low', 'canny_high',
                          'hough_threshold', 'hough_min_line_length', 'hough_max_line_gap',
@@ -9571,15 +8370,14 @@ Returns:
                          'yellow_s_min', 'yellow_s_max', 'yellow_v_min', 'yellow_v_max',
                          'dilate_kernel', 'use_dilation',
                          'binary_threshold', 'binary_threshold_retry', 'line_angle_filter',
-                         'line_merge_distance', 'lstr_model_size', 'stream_debug_view',
+                         'line_merge_distance', 'stream_debug_view',
                          'stream_debug_fps', 'stream_debug_quality', 'use_clahe',
                          'use_adaptive_white', 'use_gradient_fallback', 'clahe_grid_size',
                          'adaptive_white_tophat_kernel', 'adaptive_white_tophat_min_threshold',
                          'use_local_adaptive_threshold', 'local_adaptive_block_size',
                          'use_auto_threshold', 'auto_threshold_percentile',
                          'auto_threshold_min', 'auto_threshold_max',
-                         'integral_reset_interval', 'hybridnets_jpeg_quality',
-                         'supercombo_jpeg_quality', 'brightness',
+                         'integral_reset_interval', 'brightness',
                          'use_component_filter', 'component_min_area', 'component_min_height',
                          'hough_max_lines_per_side',
                          'use_swept_path', 'curve_speed_reduction',
@@ -9627,14 +8425,11 @@ Returns:
                      'use_auto_threshold', 'auto_threshold_percentile',
                      'auto_threshold_min', 'auto_threshold_max',
                      # Detection mode
-                     'detection_mode', 'lstr_model_size',
+                     'detection_mode',
                      # Debug streaming
                      'stream_debug_view', 'stream_debug_fps', 'stream_debug_quality', 'stream_debug_scale',
-                     # HybridNets remote AI server
-                     'hybridnets_server_url', 'hybridnets_jpeg_quality', 'hybridnets_timeout', 'local_ai_max_result_age',
-                     'ai_local_use_mask_geometry',
-                     # Supercombo remote AI server
-                     'supercombo_server_url', 'supercombo_jpeg_quality', 'supercombo_timeout',
+                     # AI_LOCAL config
+                     'local_ai_max_result_age', 'ai_local_use_mask_geometry',
                      # Swept path / car geometry parameters
                      'use_swept_path', 'car_length', 'car_width', 'car_wheelbase_cm',
                      'car_front_overhang', 'car_rear_overhang',
@@ -9826,32 +8621,9 @@ Returns:
                 # Reset PID state to prevent corruption between modes
                 self._reset_pid_state()
             
-            # Reload LSTR model if size changed
-            if 'lstr_model_size' in normalized_config:
-                self._init_lstr_detector()
-            
-            # Reconnect HybridNets client if server URL changed
-            if 'hybridnets_server_url' in normalized_config:
-                self._stop_hybridnets_client()
-                self._init_hybridnets_client()
-            
-            # Reconnect Supercombo client if server URL changed
-            if 'supercombo_server_url' in normalized_config:
-                self._stop_supercombo_client()
-                self._init_supercombo_client()
-            
-            # Start/stop remote AI clients based on mode
-            if 'detection_mode' in normalized_config:
-                if normalized_config['detection_mode'] == DetectionMode.HYBRIDNETS.value:
-                    self._start_hybridnets_client()
-                    self._stop_supercombo_client()
-                elif normalized_config['detection_mode'] == DetectionMode.SUPERCOMBO.value:
-                    self._start_supercombo_client()
-                    self._stop_hybridnets_client()
-                else:
-                    self._stop_hybridnets_client()
-                    self._stop_supercombo_client()
-            
+            # Phase 0 cleanup: legacy detector reload (LSTR / HybridNets / Supercombo)
+            # eliminado. AI_LOCAL no requiere reconexión de servidor remoto.
+
             self._update_hsv_arrays()
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mCONFIG\033[0m - Updated {len(applied)} params: {', '.join(applied[:8])}{'...' if len(applied) > 8 else ''}")
         except Exception as e:
@@ -11044,25 +9816,22 @@ Returns:
                     )
                 self._flush_preview_windows()
         except Exception as e:
+            import traceback as _tb
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
+            _tb.print_exc()
 
     def process_frame(self, frame):
-        """Process frame using selected detection mode.
-        
-        Supports multiple modes:
-        - opencv: Traditional HSV + sliding window (default)
-        - lstr: AI-based LSTR transformer model
-        - hybrid: FUSION of OpenCV + LSTR (runs both, combines results)
-        - ai_local: Local YOLO lane detection + local BFMC/Stanley control
-        - hybridnets / supercombo: deprecated aliases mapped to ai_local
+        """Procesa un frame de cámara y devuelve (steering_deg, speed, debug_frame).
 
-Returns:
-    tuple: (steering_angle, speed, debug_frame)
-"""
+        Tras Phase 0 cleanup el ÚNICO modo soportado es AI_LOCAL: percepción
+        local YOLO TensorRT (`_detect_with_local_ai`) + control BFMC/Stanley
+        local. Cualquier otro valor de `self.detection_mode` se reescribe a
+        AI_LOCAL para que el resto del thread (debug overlays, status
+        messages) no observe cadenas legacy persistidas en config.
+        """
         height, width = frame.shape[:2]
-        normalized_mode = self._normalize_detection_mode(self.detection_mode)
-        if normalized_mode != self.detection_mode:
-            self.detection_mode = normalized_mode
+        if self.detection_mode != DetectionMode.AI_LOCAL.value:
+            self.detection_mode = DetectionMode.AI_LOCAL.value
         self._set_frame_trace({
             "status": "processing",
             "detection_mode": self.detection_mode,
@@ -11079,150 +9848,20 @@ Returns:
                 f"Mode: {self.detection_mode}",
             )
         
-        # Handle SUPERCOMBO remote AI server mode
-        if self.detection_mode == DetectionMode.SUPERCOMBO.value:
-            try:
-                steering, speed, debug = self._detect_with_supercombo(frame)
-                if steering is not None:
-                    self.frames_without_line = 0
-                self._set_frame_trace({
-                    "status": "supercombo",
-                    "detection_mode": self.detection_mode,
-                    "steering_deg": steering,
-                    "speed": speed,
-                })
-                return steering, speed, debug
-            except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mSUPERCOMBO ERROR\033[0m - {e}")
-                debug_frame = frame.copy()
-                cv2.putText(debug_frame, f"Supercombo Error: {str(e)[:50]}", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                self._set_frame_trace({
-                    "status": "supercombo_error",
-                    "detection_mode": self.detection_mode,
-                    "error": str(e),
-                })
-                return None, self.min_speed, debug_frame
-        
-        # Handle HYBRID fusion mode (runs both detectors and combines)
-        if self.detection_mode == DetectionMode.HYBRID.value:
-            try:
-                steering, speed, debug = self._detect_hybrid_fusion(frame)
-                if steering is not None:
-                    self.frames_without_line = 0
-                self._set_frame_trace({
-                    "status": "hybrid",
-                    "detection_mode": self.detection_mode,
-                    "steering_deg": steering,
-                    "speed": speed,
-                })
-                return steering, speed, debug
-            except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mHYBRID ERROR\033[0m - {e}")
-                debug_frame = frame.copy()
-                cv2.putText(debug_frame, f"HYBRID Error: {str(e)[:50]}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                self._set_frame_trace({
-                    "status": "hybrid_error",
-                    "detection_mode": self.detection_mode,
-                    "error": str(e),
-                })
-                return None, self.min_speed, debug_frame
-        
-        # Handle LSTR-only mode
-        if self.detection_mode == DetectionMode.LSTR.value:
-            try:
-                steering, speed, center, debug = self._detect_with_lstr(frame)
-                if steering is not None:
-                    self.last_line_position = center
-                    self.last_steering = steering
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mLSTR\033[0m - Steer: {steering:.1f}° Speed: {speed:.1f}")
-                    self._set_frame_trace({
-                        "status": "lstr",
-                        "detection_mode": self.detection_mode,
-                        "steering_deg": steering,
-                        "speed": speed,
-                        "lane_center_x": center,
-                    })
-                    return steering, speed, debug
-                else:
-                    # LSTR failed, return no detection
-                    if self.show_debug:
-                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mLSTR\033[0m - No lanes detected")
-                    debug_frame = frame.copy()
-                    cv2.putText(debug_frame, "LSTR: No lanes detected", (10, 30), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    self._set_frame_trace({
-                        "status": "lstr_no_lanes",
-                        "detection_mode": self.detection_mode,
-                    })
-                    return None, self.min_speed, debug_frame
-            except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mLSTR ERROR\033[0m - {e}")
-                debug_frame = frame.copy()
-                cv2.putText(debug_frame, f"LSTR Error: {str(e)[:50]}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                self._set_frame_trace({
-                    "status": "lstr_error",
-                    "detection_mode": self.detection_mode,
-                    "error": str(e),
-                })
-                return None, self.min_speed, debug_frame
-        
-        using_remote_lanes = self.detection_mode in (DetectionMode.AI_LOCAL.value, DetectionMode.HYBRIDNETS.value)
-
-        if using_remote_lanes:
-            try:
-                if self.detection_mode == DetectionMode.AI_LOCAL.value:
-                    avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_local_ai(frame)
-                else:
-                    avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_hybridnets(frame)
-            except Exception as e:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mAI LOCAL ERROR\033[0m - {e}")
-                debug_frame = frame.copy()
-                cv2.putText(debug_frame, f"AI Local Error: {str(e)[:50]}", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
-                self._set_frame_trace({
-                    "status": "ai_local_error",
-                    "detection_mode": self.detection_mode,
-                    "error": str(e),
-                })
-                return None, self.min_speed, debug_frame
-        else:
-            # Match bfmc24-brain StanleyLaneDetector.image_processing(): raw frame goes
-            # directly into ROI -> grayscale -> threshold -> median -> canny -> hough.
-            avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(frame)
-
-            # BFMC retry: if no lines detected, try lower threshold (from MarcosLaneDetector)
-            if avg_left is None and avg_right is None:
-                avg_left, avg_right, img_h, img_w, canny, debug_info = self._bfmc_image_processing(
-                    frame,
-                    threshold_override=self.binary_threshold_retry,
-                    kernel_override=3
-                )
-
-            if 'hsv' in debug_info:
-                self._store_debug_image('hsv', cv2.cvtColor(debug_info['hsv'], cv2.COLOR_HSV2BGR))
-            if 'white_mask' in debug_info:
-                self._store_debug_image('white_mask', cv2.cvtColor(debug_info['white_mask'], cv2.COLOR_GRAY2BGR))
-            if 'yellow_mask' in debug_info:
-                self._store_debug_image('yellow_mask', cv2.cvtColor(debug_info['yellow_mask'], cv2.COLOR_GRAY2BGR))
-            if 'combined_mask' in debug_info:
-                self._store_debug_image('combined_mask', cv2.cvtColor(debug_info['combined_mask'], cv2.COLOR_GRAY2BGR))
-
-            # Show debug windows (only enabled ones)
-            if self.show_debug:
-                if 'roi' in debug_info:
-                    self._show_preview_window("ROI", debug_info['roi'])
-                if self._is_window_enabled("binary_threshold") and 'binary' in debug_info:
-                    bin_display = cv2.cvtColor(debug_info['binary'], cv2.COLOR_GRAY2BGR)
-                    cv2.putText(bin_display, f"Threshold: {debug_info.get('threshold', '?')}", (10, 20),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
-                    self._show_preview_window("2. Binary Threshold", bin_display)
-                if self._is_window_enabled("canny_edges") and 'canny' in debug_info:
-                    self._show_preview_window("3. Canny Edges", debug_info['canny'])
-                self._store_debug_image('canny', cv2.cvtColor(canny, cv2.COLOR_GRAY2BGR))
+        # Phase 0 cleanup: AI_LOCAL es el único pipeline soportado.
+        try:
+            avg_left, avg_right, img_h, img_w, canny, debug_info = self._detect_with_local_ai(frame)
+        except Exception as e:
+            print(f"[1;97m[ Line Following ] :[0m [1;91mAI LOCAL ERROR[0m - {e}")
+            debug_frame = frame.copy()
+            cv2.putText(debug_frame, f"AI Local Error: {str(e)[:50]}", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+            self._set_frame_trace({
+                "status": "ai_local_error",
+                "detection_mode": self.detection_mode,
+                "error": str(e),
+            })
+            return None, self.min_speed, debug_frame
 
         # Calculate steering based on detected lines
         steering_angle = None
@@ -12763,8 +11402,6 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
 
     def stop(self):
         """Stop the thread and cleanup."""
-        self._stop_hybridnets_client()
-        self._stop_supercombo_client()
         if self.show_debug:
             cv2.destroyAllWindows()
         super(threadLineFollowing, self).stop()
