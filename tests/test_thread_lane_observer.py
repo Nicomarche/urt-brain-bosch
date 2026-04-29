@@ -1,6 +1,6 @@
 import unittest
 
-from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
+from src.perception.lane.lane_observer_thread import threadLaneObserver
 from src.core.types import VisualControlCandidate, VisualStateSnapshot
 
 

@@ -2,7 +2,7 @@ import math
 import types
 import unittest
 
-from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
+from src.perception.lane.lane_observer_thread import threadLaneObserver
 from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
 from src.core.messaging.buffers import LatestValueBuffer
 from src.core.types import Pose2D, RouteContext, VisualControlCandidate, VisualStateSnapshot

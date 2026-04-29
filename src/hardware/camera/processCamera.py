@@ -33,7 +33,7 @@ if __name__ == "__main__":
 import threading
 import time
 
-from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
+from src.perception.lane.lane_observer_thread import threadLaneObserver
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
