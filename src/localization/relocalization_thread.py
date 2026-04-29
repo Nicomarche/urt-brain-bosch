@@ -33,9 +33,9 @@ from src.core.messaging.allMessages import (
     SteerMotor,
 )
 
-from src.hardware.tracking.deadReckoning import DeadReckoning
-from src.hardware.tracking.trackGraph import ATTR_STOPLINE, TrackGraph
-from src.hardware.tracking.pathManager import PathManager
+from src.localization.dead_reckoning import DeadReckoning
+from src.routing.lanelet.from_graphml import ATTR_STOPLINE, TrackGraph
+from src.routing.route_planner import PathManager
 
 try:
     import config as cfg

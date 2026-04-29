@@ -5,8 +5,8 @@ import types
 import unittest
 
 from src.core.types import LaneObservation, Pose2D, RouteContext
-from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
-from src.hardware.tracking.trackGraph import TrackGraph
+from src.localization.pose_estimator_thread import threadPoseEstimator
+from src.routing.lanelet.from_graphml import TrackGraph
 
 
 GRAPHML_PATH = os.path.abspath(

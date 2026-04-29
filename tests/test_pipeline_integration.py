@@ -6,7 +6,7 @@ from src.perception.lane.lane_observer_thread import threadLaneObserver
 from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
 from src.core.messaging.buffers import LatestValueBuffer
 from src.core.types import Pose2D, RouteContext, VisualControlCandidate, VisualStateSnapshot
-from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
+from src.localization.pose_estimator_thread import threadPoseEstimator
 
 
 class _FakeDR:

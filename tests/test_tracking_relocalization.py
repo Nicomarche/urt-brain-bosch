@@ -3,7 +3,7 @@ import time
 import types
 import unittest
 
-from src.hardware.tracking.threadTracking import threadTracking
+from src.localization.relocalization_thread import threadTracking
 
 
 class _FakeDR:

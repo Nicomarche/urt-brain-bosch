@@ -4,8 +4,8 @@ import os
 import time
 
 from src.core.types import Pose2D, PoseEstimate, RouteContext
-from src.hardware.tracking.pathManager import PathManager
-from src.hardware.tracking.threadTracking import (
+from src.routing.route_planner import PathManager
+from src.localization.relocalization_thread import (
     _ADVANCE_DIST,
     _GRAPHML_PATH,
     _LOOKAHEAD_PTS,
@@ -18,7 +18,7 @@ from src.hardware.tracking.threadTracking import (
     _SEMANTICS_PATH,
     _STEP_M,
 )
-from src.hardware.tracking.trackGraph import TrackGraph
+from src.routing.lanelet.from_graphml import TrackGraph
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import Location, NavigationCommand, NavigationStatus
 from src.core.messaging.messageHandlerSender import messageHandlerSender

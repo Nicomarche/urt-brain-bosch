@@ -29,7 +29,7 @@ try:
 except ImportError:
     _SCIPY_OK = False
 
-from src.hardware.tracking.trackSemantics import TrackSemantics
+from src.routing.lanelet.semantics import TrackSemantics
 
 ATTR_NORMAL = 0
 ATTR_CROSSWALK = 1

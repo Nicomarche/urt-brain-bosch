@@ -5,7 +5,7 @@ import unittest
 from collections import deque
 
 from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
-from src.hardware.tracking.threadTracking import TrackingState
+from src.localization.relocalization_thread import TrackingState
 
 
 class ManualRunLoggingTests(unittest.TestCase):

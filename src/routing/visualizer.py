@@ -35,7 +35,7 @@ except ImportError:
     _CV2_OK = False
     warnings.warn("[trackVisualizer] cv2 not available — visualizer disabled")
 
-from src.hardware.tracking.trackGraph import (
+from src.routing.lanelet.from_graphml import (
     TrackGraph,
     ATTR_NORMAL, ATTR_CROSSWALK, ATTR_INTERSECTION, ATTR_ONEWAY,
     ATTR_HIGHWAY_LEFT, ATTR_HIGHWAY_RIGHT, ATTR_ROUNDABOUT, ATTR_STOPLINE,

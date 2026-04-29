@@ -6,7 +6,7 @@ import time
 from types import SimpleNamespace
 
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
-from src.hardware.tracking.threadTracking import (
+from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
     _CAMERA_LATERAL_CORRECTION_GAIN,
     _CAMERA_LATERAL_CORRECTION_MAX_M,

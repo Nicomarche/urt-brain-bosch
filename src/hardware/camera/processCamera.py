@@ -47,10 +47,10 @@ from src.core.messaging.allMessages import StateChange
 
 # GPS-free tracking (optional — requires scipy for spline interpolation)
 try:
-    from src.hardware.tracking.threadNavigationPlanner import threadNavigationPlanner
-    from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
-    from src.hardware.tracking.threadTracking import TrackingState
-    from src.hardware.tracking.trackVisualizer import TrackVisualizer
+    from src.routing.navigation_planner_thread import threadNavigationPlanner
+    from src.localization.pose_estimator_thread import threadPoseEstimator
+    from src.localization.relocalization_thread import TrackingState
+    from src.routing.visualizer import TrackVisualizer
     import config as _cfg
     _TRACKING_ENABLED = True
     _TRACKING_SHOW_WINDOW = getattr(_cfg, "TRACKING_SHOW_WINDOW", True)
@@ -193,7 +193,7 @@ class processCamera(WorkerProcess):
             visualizer = None
             if _TRACKING_SHOW_WINDOW:
                 try:
-                    from src.hardware.tracking.trackGraph import TrackGraph
+                    from src.routing.lanelet.from_graphml import TrackGraph
                     import config as _cfg_vis
                     _graphml = getattr(_cfg_vis, "TRACKING_GRAPHML", "Track GraphML File.graphml")
                     _step = getattr(_cfg_vis, "TRACKING_WAYPOINT_STEP_M", 0.05)

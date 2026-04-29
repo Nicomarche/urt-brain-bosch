@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from src.hardware.tracking.trackGraph import TrackGraph
+from src.routing.lanelet.from_graphml import TrackGraph
 
 
 GRAPHML_PATH = os.path.abspath(

@@ -2,9 +2,9 @@ import os
 import unittest
 
 from src.core.types import Pose2D
-from src.hardware.tracking.threadNavigationPlanner import threadNavigationPlanner
-from src.hardware.tracking.pathManager import PathManager
-from src.hardware.tracking.trackGraph import TrackGraph
+from src.routing.navigation_planner_thread import threadNavigationPlanner
+from src.routing.route_planner import PathManager
+from src.routing.lanelet.from_graphml import TrackGraph
 
 
 GRAPHML_PATH = os.path.abspath(
