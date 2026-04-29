@@ -11,6 +11,14 @@ pyserial==3.5
 scipy>=1.15,<2
 ultralytics>=8.3,<9
 
+# Localization (EKF7) — Phase 2 of the Autoware-inspired refactor.
+# filterpy provides ExtendedKalmanFilter with battle-tested numerics
+# (Joseph form covariance update, no need to roll our own).
+# pyproj converts WGS84 GPS lat/lon to a local ENU tangent plane so the
+# filter operates in meters instead of degrees.
+filterpy>=1.4.5,<2
+pyproj>=3.6,<4
+
 # Optional: LSTR AI-based lane detection (requires ONNX model)
 # onnxruntime>=1.16.0   # Uncomment to enable LSTR mode
 # For Raspberry Pi, use: pip install onnxruntime

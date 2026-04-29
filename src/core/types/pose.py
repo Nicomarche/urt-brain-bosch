@@ -61,3 +61,16 @@ class PoseEstimate:
     lane_measurement_reliable: bool = False
     camera_lateral_correction_m: float = 0.0
     imu_received: bool = False
+
+    # Fase 2 (EKF7) — campos nuevos que enriquecen el estado del filtro:
+    #   `localization_mode` se setea a "ekf7" cuando la fusión proviene
+    #     del Filtro Kalman Extendido completo. Coexiste con
+    #     `relocalization_mode`, que documenta el subsistema activo de
+    #     reanclaje (lane_visual, semantic, stopline_match). Los
+    #     consumidores que sólo necesitan saber "es estimación robusta o
+    #     dead_reckoning" leen `localization_mode`.
+    #   `gps_fix_quality ∈ [0, 1]` deriva del residual GPS más reciente
+    #     normalizado por su sigma — 1.0 = match perfecto, 0.0 = el
+    #     EKF descartó el GPS por outlier en los últimos updates.
+    localization_mode: str = "dead_reckoning"
+    gps_fix_quality: float = 0.0

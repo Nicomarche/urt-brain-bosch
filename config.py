@@ -364,6 +364,42 @@ TRACKING_YAW_EKF_R_STRAIGHT = 0.005  # IMU noise [rad²] when straight (≈ 4° 
 TRACKING_YAW_EKF_R_STEER_K  = 50.0   # R grows by this per rad² of steering angle
 TRACKING_YAW_EKF_P_INIT     = 0.5    # initial covariance [rad²] — high = trust first IMU
 
+# ---------------------------------------------------------------------------
+# EKF7 — Phase 2: full 7-state planar localizer.
+# Replaces the legacy yaw-only EKF above when Phase 2 wires the new pose
+# estimator. Sigmas are *standard deviations*, not variances.
+#
+# El filtro vive en `src/localization/ekf/state_filter.py` y se inicializa
+# con (lat0, lon0) del origen ENU local. La pista de Cluj BFMC entra en
+# ~50×50 m, así que el plano TM es plano-plano.
+# ---------------------------------------------------------------------------
+
+# Origen del marco ENU local. Cluj-Napoca, BFMC 2024 venue.
+# Si corrés en otra pista, sustituí estos valores con un GPS fix
+# tomado al borde de la pista al inicio de la sesión.
+LOCAL_FRAME_ORIGIN_LATLON = (46.7682, 23.5870)
+
+# Ruido GPS (m). El GPS BFMC tiene 1–5 m noise + 100–300 ms latencia,
+# así que conservamos un sigma alto para que no domine la fusión.
+EKF_GPS_R_M = 1.5
+
+# Ruido IMU (yaw_rate en rad/s, accel longitudinal en m/s²).
+EKF_IMU_R_OMEGA = 0.015        # ≈ 0.86°/s std
+EKF_IMU_R_ACCEL = 0.30         # m/s² — incluye vibración de chasis
+
+# Ruido del encoder de rueda (m/s).
+EKF_ENCODER_R_VX = 0.10
+
+# Ruido del lane-normal update (offset lateral en m).
+EKF_R_LANE_NORMAL_M = 0.05
+
+# Ruido del landmark match (sigma metros, asume isotropía simple).
+EKF_LANDMARK_R_M = 0.30
+
+# Tiempo máximo aceptable de un GPS fix antes de descartarlo (s).
+# A 100–300 ms de latencia BFMC, 0.5 s es generoso pero no patológico.
+EKF_GPS_MAX_AGE_S = 0.5
+
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.18
