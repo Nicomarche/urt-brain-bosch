@@ -1,8 +1,11 @@
+import logging
 import threading
 import time
 
 import config
-from src.core.messaging.allMessages import SpeedMotor, SteerMotor
+from src.core.messaging.allMessages import SpeedMotor, SteerMotor  # noqa: F401  (legacy refs en _send_speed/_send_steer; ver Phase 6 abajo)
+
+_LOG = logging.getLogger(__name__)
 
 
 class SignActions:
@@ -293,23 +296,44 @@ class SignActions:
         self.last_action_time[action_group] = now
         return True
 
-    def _send_speed(self, speed):
-        speed_value = str(int(round(speed * 10)))
-        self.queuesList["General"].put({
-            "Owner": SpeedMotor.Owner.value,
-            "msgID": SpeedMotor.msgID.value,
-            "msgType": SpeedMotor.msgType.value,
-            "msgValue": speed_value,
-        })
+    # ----------------------------------------------------------------
+    # Phase 6 (post-port Autoware): SignActions YA NO escribe motores.
+    #
+    # En la arquitectura nueva, el ÚNICO writer de SpeedMotor/SteerMotor
+    # en runtime de competencia es `motor_command_dispatcher`, que recibe
+    # `MotorCommand` desde `MotionController.compute(BehaviorOutput, Pose)`.
+    # `BehaviorOutput` lo produce el `BehaviorPlanner` orquestando scenarios
+    # (LaneKeep, Intersection, Crosswalk, Parking, Highway, Roundabout).
+    #
+    # Los antiguos `_send_speed` / `_send_steer` se mantienen como helpers
+    # NO-OP para no romper los call sites internos del módulo (giros 90°
+    # hardcodeados, overrides de speed por SLOW/STOP). La salida correcta
+    # de cada uno de esos comportamientos es un `IScenario` apropiado en
+    # `src/behavior/scenarios/` que produzca el `BehaviorOutput` deseado.
+    #
+    # Si ves estos warns en el log, significa que un sign trigger todavía
+    # está intentando manipular motores fuera del dispatcher — eso es la
+    # señal para migrar el comportamiento a un scenario.
+    # ----------------------------------------------------------------
+    def _send_speed(self, speed):  # noqa: ARG002  (firma preservada para compat)
+        if not getattr(self, "_warned_send_speed", False):
+            _LOG.warning(
+                "SignActions._send_speed(%s) suprimido — Phase 6: el dispatcher "
+                "es el único writer de SpeedMotor. Migrar este comportamiento a "
+                "un IScenario en src/behavior/scenarios/.",
+                speed,
+            )
+            self._warned_send_speed = True
 
-    def _send_steer(self, angle_deg):
-        steer_value = str(int(round(angle_deg * 10)))
-        self.queuesList["General"].put({
-            "Owner": SteerMotor.Owner.value,
-            "msgID": SteerMotor.msgID.value,
-            "msgType": SteerMotor.msgType.value,
-            "msgValue": steer_value,
-        })
+    def _send_steer(self, angle_deg):  # noqa: ARG002
+        if not getattr(self, "_warned_send_steer", False):
+            _LOG.warning(
+                "SignActions._send_steer(%s) suprimido — Phase 6: el dispatcher "
+                "es el único writer de SteerMotor. Migrar este comportamiento a "
+                "un IScenario en src/behavior/scenarios/.",
+                angle_deg,
+            )
+            self._warned_send_steer = True
 
     def _execute_left_turn_90(self):
         """Giro izquierda 90° hardcodeado.

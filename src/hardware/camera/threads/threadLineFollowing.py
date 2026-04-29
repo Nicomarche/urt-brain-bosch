@@ -1218,8 +1218,11 @@ Args:
         self.just_seen_two_lines = False
 
         # Message handlers
-        self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
-        self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
+        # Phase 6 (post-port Autoware): este thread NO escribe SpeedMotor/SteerMotor.
+        # El único writer en runtime de competencia es `motor_command_dispatcher`,
+        # alimentado por `MotionController.compute(BehaviorOutput, Pose)`. Si
+        # alguna vez aparece la tentación de re-instanciar estos senders acá,
+        # se está rompiendo la invariante de "una sola fuente de verdad".
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
         if self.local_lane_buffer is None:
@@ -9692,13 +9695,12 @@ Much faster and better for curves than blind sliding window."""
                 # CALIBRATION MODE: manual mode only — run algorithm silently, enforce min speed
                 if self._calib_mode_active:
                     command_source = "calib_mode"
-                    # Enforce minimum speed so the car moves slowly during calibration
-                    calib_speed_x10 = int(round(self.min_speed * 10))
-                    if self.emit_motor_commands:
-                        self.speedMotorSender.send(str(calib_speed_x10))
+                    # Phase 6: ya NO mandamos SpeedMotor desde acá. Si el usuario
+                    # quiere mover el auto en calibración debe hacerlo desde el
+                    # dashboard (ese sí entra como mensaje SpeedMotor inbound) o
+                    # construir un escenario de calibración en `src/behavior/`.
+                    # Lo único que persiste es el log para análisis offline.
                     commanded_speed = self.min_speed
-                    # Steering is NOT sent — the user's manual web commands control the wheels
-                    # Log computed vs manual for calibration analysis
                     self._log_calib_frame(steering_angle)
 
             if self.sign_action_event and self.sign_action_event.is_set() and commanded_steering is not None:
@@ -11087,19 +11089,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 self._publish_visual_pipeline_state(candidate)
                 return
 
-            # If a sign action (stop, crosswalk, etc.) is active:
-            # - SPEED: always blocked to not override the sign action's speed
-            # - STEER: kept sending for lane alignment UNLESS steer_override_event is
-            #   also set (e.g. hardcoded turn), in which case the sign action controls
-            #   both speed and steer.
+            # Sign action activo (stop, crosswalk, etc.):
+            # Phase 6: ningún writer de SteerMotor/SteerSpeed sale de acá. El
+            # `motor_command_dispatcher` es la única salida; este thread solo
+            # registra el cómputo para diagnóstico. Mantenemos los flags de
+            # estado porque el resto del thread (logs, dashboard) los consume.
             if self.sign_action_event and self.sign_action_event.is_set():
                 self._sign_action_was_active = True
                 self._last_requested_motor_command["sign_action_blocked_speed"] = True
                 self._last_requested_motor_command["speed_sent"] = False
                 if not (self.steer_override_event and self.steer_override_event.is_set()):
-                    self.steerMotorSender.send(str(steer_value))
                     if self.show_debug:
-                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN\033[0m - Steer: {steer_value} (sign action active, speed blocked)")
+                        print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mALIGN(computed)\033[0m - Steer: {steer_value} (sign action active; dispatcher decides)")
                 return
 
             # Just resumed from a sign action — reset speed ramp to effective min_speed
@@ -11117,13 +11118,15 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     f"Speed reset to min ({resume_min}) after sign action"
                 )
 
-            # Normal operation — send both steer and speed
-            self.steerMotorSender.send(str(steer_value))
-            self.speedMotorSender.send(str(speed_value))
-            
-            # Log motor commands only in debug mode to avoid I/O overhead on RPi
+            # Normal operation — Phase 6: motor writes salen del dispatcher.
+            # Acá solo dejamos el log diagnóstico para que en pista se pueda
+            # comparar "lo que el lane follower hubiera mandado" contra "lo
+            # que el dispatcher efectivamente despachó". Sin este contraste,
+            # el operador no puede detectar disonancias entre percepción y
+            # decisión final.
+            self._last_requested_motor_command["speed_sent"] = False
             if self.show_debug:
-                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR\033[0m - Steer: {steer_value} Speed: {speed_value}")
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR(computed)\033[0m - Steer: {steer_value} Speed: {speed_value} (dispatcher decides)")
             
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Failed to send motor commands: {e}")
