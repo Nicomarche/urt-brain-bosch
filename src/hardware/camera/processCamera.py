@@ -39,9 +39,21 @@ from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
 from src.hardware.camera.threads.threadVisualController import threadVisualController
 
-# Phase 6 control pipeline: BehaviorOutput → MotionController → MotorCommand
-# → safety_gate → SpeedMotor/SteerMotor. Estos cuatro componentes son la
-# ÚNICA fuente de verdad para el motor en runtime de competencia.
+# Phase 4–6 control pipeline:
+#   BehaviorPlanner (Phase 4) → BehaviorOutput → MotionController (Phase 6)
+#   → MotorCommand → safety_gate → SpeedMotor/SteerMotor (firmware).
+# Estos cinco componentes son la ÚNICA fuente de verdad para el motor en
+# runtime de competencia. Sin BehaviorPlanner el dispatcher no recibe
+# BehaviorOutput fresco, el safety_gate dispara su fallback() y el auto
+# se queda con speed=0. Por eso el thread del planner se instancia acá.
+from src.behavior.planner import BehaviorPlanner
+from src.behavior.planner_thread import threadBehaviorPlanner
+from src.behavior.scenarios.crosswalk import Crosswalk
+from src.behavior.scenarios.highway import Highway
+from src.behavior.scenarios.intersection import Intersection
+from src.behavior.scenarios.lane_keep import LaneKeep
+from src.behavior.scenarios.parking import Parking
+from src.behavior.scenarios.roundabout import Roundabout
 from src.control.controller_thread import threadMotionController
 from src.control.motion_controller import MotionController
 from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
@@ -193,37 +205,67 @@ class processCamera(WorkerProcess):
         visual_state_buffer = LatestValueBuffer()
         control_decision_buffer = LatestValueBuffer()
 
-        # Phase 6: buffers del path de control nuevo. behavior_output_buffer
-        # lo escribirá `threadBehaviorPlanner` (Phase 4) cuando esté
-        # wireado; motor_command_buffer es el contrato entre el
-        # `threadMotionController` y el `threadMotorCommandDispatcher`.
+        # Phase 4–6: buffers del path de control nuevo.
+        # `behavior_output_buffer` lo escribe `threadBehaviorPlanner` (single
+        # source of truth de velocidad y target_path) y lo leen
+        # `threadMotionController` (para el MPC) y `threadMotorCommandDispatcher`
+        # (para el watchdog del safety_gate).
+        # `motor_command_buffer` es el contrato entre `threadMotionController`
+        # y `threadMotorCommandDispatcher`: el primero produce un MotorCommand
+        # tipado, el segundo lo escribe a SpeedMotor/SteerMotor.
         behavior_output_buffer = LatestValueBuffer()
         motor_command_buffer = LatestValueBuffer()
 
-        # GPS-free tracking: dead reckoning + waypoint follower + map visualizer
+        # GPS-free tracking: dead reckoning + waypoint follower + map visualizer.
+        # El TrackGraph se carga acá una sola vez y se reusa para:
+        #   1. dar contexto al pose estimator + navigation planner (route_context),
+        #   2. construir un `LaneletMap` consumido por el `BehaviorPlanner`
+        #      (escenarios `Intersection`, `Crosswalk`, `Highway`, etc.),
+        #   3. opcionalmente alimentar el `TrackVisualizer` (ventana OpenCV).
+        # Si el GraphML falta, todo el bloque se desactiva — `BehaviorPlanner`
+        # corre con `lanelet_map=None` y solo `LaneKeep` (priority=0) puede
+        # disparar.
         tracking_state = None
+        track_graph = None
+        lanelet_map = None
         if _TRACKING_ENABLED:
             tracking_state = TrackingState()
 
+            try:
+                from src.routing.lanelet.from_graphml import TrackGraph
+                from src.routing.lanelet.lanelet_map import from_track_graph
+                import config as _cfg_track
+                _graphml = getattr(_cfg_track, "TRACKING_GRAPHML", "Track GraphML File.graphml")
+                _step = getattr(_cfg_track, "TRACKING_WAYPOINT_STEP_M", 0.05)
+                import os
+                if not os.path.isabs(_graphml):
+                    _root = os.path.normpath(
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "..", "..", "..")
+                    )
+                    _graphml = os.path.join(_root, _graphml)
+                track_graph = TrackGraph(_graphml, step_m=_step)
+                # `from_track_graph` densifica centerlines a 0.20 m por defecto:
+                # más resolución que el waypoint step (0.05 m) hace `at_pose`
+                # más preciso sin disparar memoria.
+                lanelet_map = from_track_graph(track_graph)
+            except Exception as _graph_err:
+                print(f"[ processCamera ] WARNING - track graph load failed: {_graph_err}")
+                track_graph = None
+                lanelet_map = None
+
             visualizer = None
-            if _TRACKING_SHOW_WINDOW:
+            if _TRACKING_SHOW_WINDOW and track_graph is not None:
                 try:
-                    from src.routing.lanelet.from_graphml import TrackGraph
-                    import config as _cfg_vis
-                    _graphml = getattr(_cfg_vis, "TRACKING_GRAPHML", "Track GraphML File.graphml")
-                    _step = getattr(_cfg_vis, "TRACKING_WAYPOINT_STEP_M", 0.05)
-                    import os
-                    if not os.path.isabs(_graphml):
-                        _root = os.path.normpath(
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         "..", "..", "..")
-                        )
-                        _graphml = os.path.join(_root, _graphml)
-                    graph = TrackGraph(_graphml, step_m=_step)
-                    _json_path = os.path.join(_root, "Track Editor Save.json")
-                    _img_path  = os.path.join(_root, "CamScanner 16-3-26 18.52_1.JPG")
+                    import os as _os_vis
+                    _root = _os_vis.path.normpath(
+                        _os_vis.path.join(_os_vis.path.dirname(_os_vis.path.abspath(__file__)),
+                                          "..", "..", "..")
+                    )
+                    _json_path = _os_vis.path.join(_root, "Track Editor Save.json")
+                    _img_path  = _os_vis.path.join(_root, "CamScanner 16-3-26 18.52_1.JPG")
                     visualizer = TrackVisualizer(
-                        graph,
+                        track_graph,
                         bg_image_path=_img_path,
                         track_json_path=_json_path,
                     )
@@ -280,6 +322,65 @@ class processCamera(WorkerProcess):
         if tracking_state is not None:
             visualControllerTh.set_tracking_state(tracking_state)
         self.threads.append(visualControllerTh)
+
+        # ── Phase 4 BehaviorPlanner ─────────────────────────────────────
+        # Compone los seis escenarios y arranca el thread del planner. Este
+        # es el único productor legítimo de `behavior_output_buffer` —
+        # antes de wireado, el dispatcher veía el buffer vacío, el
+        # `safety_gate` disparaba `fallback()` y el firmware recibía
+        # speed=0 indefinidamente.
+        #
+        # Inyectamos dependencias por constructor (DIP):
+        #   - `BehaviorPlanner` recibe la lista de scenarios. Cada scenario
+        #     respeta la interfaz `IScenario` (priority + is_active + plan).
+        #   - El `lanelet_map` puede ser `None` cuando el GraphML no está
+        #     disponible — el planner_thread degrada a un `RouteContext`
+        #     vacío y solo `LaneKeep` se activa.
+        #   - Los buffers se comparten con pose_estimator, navigation_planner,
+        #     lane_observer y motion_controller, todos creados arriba.
+        try:
+            import config as _cfg_behavior
+            _behavior_dt_s = float(getattr(_cfg_behavior, "BEHAVIOR_DT_S", 0.05))
+            _behavior_horizon_n = int(getattr(_cfg_behavior, "BEHAVIOR_HORIZON_N", 20))
+            _behavior_nominal = float(getattr(_cfg_behavior, "BEHAVIOR_NOMINAL_SPEED_MPS", 0.50))
+            _behavior_max = float(getattr(_cfg_behavior, "BEHAVIOR_MAX_SPEED_MPS", 1.00))
+            _behavior_pause = float(getattr(_cfg_behavior, "BEHAVIOR_THREAD_PAUSE_S", 0.05))
+        except Exception:
+            _behavior_dt_s = 0.05
+            _behavior_horizon_n = 20
+            _behavior_nominal = 0.50
+            _behavior_max = 1.00
+            _behavior_pause = 0.05
+
+        behavior_planner = BehaviorPlanner(
+            scenarios=[
+                Parking(),
+                Crosswalk(),
+                Intersection(),
+                Roundabout(),
+                Highway(),
+                LaneKeep(),
+            ]
+        )
+        behaviorPlannerTh = threadBehaviorPlanner(
+            self.queuesList,
+            planner=behavior_planner,
+            lanelet_map=lanelet_map,
+            pose_estimate_buffer=pose_estimate_buffer,
+            route_context_buffer=route_context_buffer,
+            lane_observation_buffer=lane_observation_buffer,
+            stopline_observation_buffer=stopline_observation_buffer,
+            tracked_objects_buffer=None,  # Phase 5 MOTTracker aún sin thread wireado
+            behavior_output_buffer=behavior_output_buffer,
+            dt_s=_behavior_dt_s,
+            horizon_n=_behavior_horizon_n,
+            nominal_speed_mps=_behavior_nominal,
+            max_speed_mps=_behavior_max,
+            pause_s=_behavior_pause,
+            logging=self.logging,
+            debugging=self.debugging,
+        )
+        self.threads.append(behaviorPlannerTh)
 
         # ── Phase 6 control pipeline ──────────────────────────────────────
         # Single source of truth: BehaviorPlanner produce el plan
