@@ -4,11 +4,18 @@
 #
 #   frame BGR ──► YOLO TensorRT ──► LaneObservation
 #                                ──► StoplineObservation
-#                                ──► (Fase 5) DetectedObject ──► TrackedObject
+#                                ──► DetectedObject (raw bbox)
+#                                ──► TrackedObject (con ID estable + velocidad)
 #
 # LaneObservation y StoplineObservation son las "mediciones" que consume el
 # pipeline de localización (relocalization cascade en EKF7) y el
 # BehaviorPlanner (caps de velocidad por crosswalk/intersection).
+#
+# DetectedObject es la salida cruda por frame del YOLO para clases
+# no-sign (peatones, otros autos, semáforos como objeto). TrackedObject
+# es lo que produce el `MOTTracker` (Fase 5) tras asociar detecciones
+# frame-a-frame, con ID persistente y estimación de velocidad. El
+# BehaviorPlanner consume `TrackedObject` para slowdowns / yields.
 #
 # VisualControlCandidate y VisualStateSnapshot son tipos legacy de la era
 # Stanley/PID. Sobreviven en Fase 1 porque el thread de control coordinator
@@ -51,6 +58,60 @@ class LaneObservation:
     camera_yaw_hint_confidence: float = 0.0
     blind_mode: str | None = None
     debug: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DetectedObject:
+    """Detección cruda (sin tracking) de un objeto en el frame.
+
+    Producida por el YOLO para clases no-sign (peatón, otro vehículo,
+    obstáculo). Contiene bbox en píxeles + posición proyectada al plano
+    de tierra (asume cámara calibrada). Sin ID, sin velocidad: eso lo
+    agrega el `MOTTracker` (Fase 5).
+
+    Invariantes:
+      - `class_name`: identificador legible ("pedestrian", "car", etc.).
+      - `bbox_xyxy`: (x1, y1, x2, y2) en píxeles del frame original.
+      - `position_world_xy`: (x, y) en metros, frame ENU del mapa.
+        None si no hay calibración suficiente para proyectar.
+      - `confidence ∈ [0, 1]`: score del detector.
+    """
+
+    timestamp: float = 0.0
+    class_id: int = -1
+    class_name: str = "unknown"
+    confidence: float = 0.0
+    bbox_xyxy: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    position_world_xy: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True)
+class TrackedObject:
+    """Objeto con ID estable y velocidad estimada — output del MOTTracker.
+
+    El `MOTTracker` asocia `DetectedObject` frame-a-frame (Hungarian +
+    KF constant-velocity) y produce esto. El `BehaviorPlanner` consume
+    `tuple[TrackedObject, ...]` para decidir slowdowns/yield/stop.
+
+    Invariantes:
+      - `track_id` persiste entre frames mientras la asociación se mantenga.
+      - `position_world_xy`: (x, y) en metros, frame ENU del mapa.
+      - `velocity_world_xy`: (vx, vy) en m/s, frame ENU. (0, 0) si el track
+        es nuevo y aún no hay suficientes muestras.
+      - `age_frames`: cuántos frames consecutivos lleva activo. Filtrar
+        tracks con `age_frames < 3` reduce falsos positivos.
+      - `class_name` se hereda de la primera detección asociada.
+    """
+
+    timestamp: float = 0.0
+    track_id: int = -1
+    class_id: int = -1
+    class_name: str = "unknown"
+    confidence: float = 0.0
+    position_world_xy: tuple[float, float] = (0.0, 0.0)
+    velocity_world_xy: tuple[float, float] = (0.0, 0.0)
+    age_frames: int = 0
+    bbox_xyxy: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 
 
 @dataclass(frozen=True)

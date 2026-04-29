@@ -408,3 +408,37 @@ class NavigationStatus(Enum):
     Owner = "threadTracking"
     msgID = 2
     msgType = "dict"  # route state, current/upcoming node, maneuver, route preview
+
+################################# From Behavior Planner ##################################
+# BehaviorOutput es la única fuente de verdad de velocidad y referencia de path:
+# producido por BehaviorPlanner.plan() a partir de pose+route+lane+regulators+tracked_objects.
+# El MotionController (Acados MPC) lo consume para generar steering+throttle.
+class BehaviorOutputMsg(Enum):
+    Queue = "General"
+    Owner = "threadBehaviorPlanner"
+    msgID = 1
+    # value format: {"timestamp": float, "dt": float, "scenario_name": str,
+    #                "valid": bool, "stop_required": bool,
+    #                "target_path": list[list[float]],   # (N+1, 3) -> [x, y, psi]
+    #                "speed_profile": list[float],        # (N,)
+    #                "notes": dict}
+    msgType = "dict"
+
+class BehaviorPlannerStatus(Enum):
+    Queue = "General"
+    Owner = "threadBehaviorPlanner"
+    msgID = 2
+    # value format: {"active_scenario": str, "horizon_n": int, "fps": float,
+    #                "last_plan_dt_ms": float}
+    msgType = "dict"
+
+################################# From Object Tracker (MOT) ##################################
+class TrackedObjectsMsg(Enum):
+    Queue = "General"
+    Owner = "threadObjectTracker"
+    msgID = 1
+    # value format: {"timestamp": float,
+    #                "objects": [{"track_id": int, "kind": str,
+    #                             "x": float, "y": float, "vx": float, "vy": float,
+    #                             "confidence": float, "age_frames": int}, ...]}
+    msgType = "dict"

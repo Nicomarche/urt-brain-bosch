@@ -400,6 +400,31 @@ EKF_LANDMARK_R_M = 0.30
 # A 100–300 ms de latencia BFMC, 0.5 s es generoso pero no patológico.
 EKF_GPS_MAX_AGE_S = 0.5
 
+# ============================================================================
+# BEHAVIOR PLANNER (Phase 4 — Autoware-inspired single source of truth)
+# ============================================================================
+# El BehaviorPlanner es la ÚNICA fuente de verdad de velocidad: ningún otro
+# módulo decide cuánto va a ir el auto. El MotionController (MPC) consume
+# `BehaviorOutput.target_path` + `speed_profile` y produce el MotorCommand.
+#
+# Tasa nominal: 20 Hz (dt = 0.05 s). El MPC corre al mismo dt, así que el
+# tamaño del horizonte se mide en steps de 50 ms.
+BEHAVIOR_DT_S = 0.05
+BEHAVIOR_HORIZON_N = 20
+
+# Velocidad nominal de lane_keep "limpio" (sin signs, sin regulators).
+# 0.50 m/s = ~5 cm/step, conservador para BFMC.
+BEHAVIOR_NOMINAL_SPEED_MPS = 0.50
+
+# Hard cap absoluto. Aplicado por velocity_overlay al final, ningún
+# scenario puede emitir velocidades por encima. Para la primera prueba
+# en taller (V3), bajar a 0.5 m/s antes de pista.
+BEHAVIOR_MAX_SPEED_MPS = 1.00
+
+# Tasa de actualización del thread (s). Con pause=0.05 corremos a ~20 Hz,
+# emparejando dt del MPC.
+BEHAVIOR_THREAD_PAUSE_S = 0.05
+
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
 TRACKING_CAMERA_LATERAL_CORRECTION_GAIN = 0.18
