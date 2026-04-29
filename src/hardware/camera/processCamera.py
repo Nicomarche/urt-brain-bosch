@@ -38,7 +38,15 @@ from src.templates.workerprocess import WorkerProcess
 from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
 from src.hardware.camera.threads.threadVisualController import threadVisualController
-from src.control.motor_command_dispatcher import threadControlCoordinator
+
+# Phase 6 control pipeline: BehaviorOutput → MotionController → MotorCommand
+# → safety_gate → SpeedMotor/SteerMotor. Estos cuatro componentes son la
+# ÚNICA fuente de verdad para el motor en runtime de competencia.
+from src.control.controller_thread import threadMotionController
+from src.control.motion_controller import MotionController
+from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
+from src.control.safety_gate import SafetyGate
+
 from src.core.messaging.buffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
@@ -185,6 +193,13 @@ class processCamera(WorkerProcess):
         visual_state_buffer = LatestValueBuffer()
         control_decision_buffer = LatestValueBuffer()
 
+        # Phase 6: buffers del path de control nuevo. behavior_output_buffer
+        # lo escribirá `threadBehaviorPlanner` (Phase 4) cuando esté
+        # wireado; motor_command_buffer es el contrato entre el
+        # `threadMotionController` y el `threadMotorCommandDispatcher`.
+        behavior_output_buffer = LatestValueBuffer()
+        motor_command_buffer = LatestValueBuffer()
+
         # GPS-free tracking: dead reckoning + waypoint follower + map visualizer
         tracking_state = None
         if _TRACKING_ENABLED:
@@ -266,16 +281,33 @@ class processCamera(WorkerProcess):
             visualControllerTh.set_tracking_state(tracking_state)
         self.threads.append(visualControllerTh)
 
-        controlCoordinatorTh = threadControlCoordinator(
+        # ── Phase 6 control pipeline ──────────────────────────────────────
+        # Single source of truth: BehaviorPlanner produce el plan
+        # (target_path + speed_profile), MotionController lo ejecuta en
+        # un MPC acoplado, el dispatcher lo manda al firmware con un
+        # safety_gate que detecta staleness.
+        motion_controller = MotionController()
+        motionControllerTh = threadMotionController(
             self.queuesList,
-            tracking_state=tracking_state,
-            visual_candidate_buffer=visual_candidate_buffer,
-            control_decision_buffer=control_decision_buffer,
-            sign_action_event=sign_action_event,
-            highway_mode_event=highway_mode_event,
-            steer_override_event=steer_override_event,
+            controller=motion_controller,
+            behavior_output_buffer=behavior_output_buffer,
+            pose_estimate_buffer=pose_estimate_buffer,
+            motor_command_buffer=motor_command_buffer,
+            logging=self.logging,
+            debugging=self.debugging,
         )
-        self.threads.append(controlCoordinatorTh)
+        self.threads.append(motionControllerTh)
+
+        dispatcherTh = threadMotorCommandDispatcher(
+            self.queuesList,
+            motor_command_buffer=motor_command_buffer,
+            safety_gate=SafetyGate(),
+            behavior_output_buffer=behavior_output_buffer,
+            pose_estimate_buffer=pose_estimate_buffer,
+            logging=self.logging,
+            debugging=self.debugging,
+        )
+        self.threads.append(dispatcherTh)
 
 
 # =================================== EXAMPLE =========================================

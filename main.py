@@ -1,41 +1,65 @@
-# Copyright (c) 2019, Bosch Engineering Center Cluj and BFMC orginazers
-# All rights reserved.
-
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions are met:
-
-# 1. Redistributions of source code must retain the above copyright notice, this
-#    list of conditions and the following disclaimer.
-
-# 2. Redistributions in binary form must reproduce the above copyright notice,
-#    this list of conditions and the following disclaimer in the documentation
-#    and/or other materials provided with the distribution.
-
-# 3. Neither the name of the copyright holder nor the names of its
-#    contributors may be used to endorse or promote products derived from
-#    this software without specific prior written permission.
-
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# main.py
 #
-# To start the project: 
+# Punto de entrada del stack URT Brain. Lanza 4 procesos independientes
+# que se comunican vía cola IPC con prioridades (Critical/Warning/General/
+# Config/Log):
 #
+#   1. processCamera     — perception + control (cámara, YOLO, lane fitting,
+#                          MOT, EKF7, route, BehaviorPlanner, MotionController,
+#                          dispatcher).
+#   2. processSerial     — UART al Nucleo STM32 (lee IMU/encoder, escribe
+#                          motor).
+#   3. processDashboard  — Flask + WebSocket para operación remota.
+#   4. processGateway    — router de mensajes entre los otros 3.
+#
+# El flujo de control va:
+#
+#   cámara → percepción → localización → ruta → BehaviorPlanner →
+#   MotionController (MPC) → dispatcher (safety_gate) → serial → Nucleo
+#
+# Una sola fuente de verdad por decisión:
+#   - Steering sale SOLO de `MotionController.compute(BehaviorOutput, Pose)
+#     → MotorCommand`.
+#   - Speed sale SOLO de `BehaviorPlanner.plan(...).speed_profile[0]`,
+#     ejecutada por el MPC.
+#   - El `motor_command_dispatcher` es el ÚNICO writer de `SpeedMotor` /
+#     `SteerMotor` en runtime de competencia.
+#   - El `safety_gate` emite STOP automático si BehaviorOutput stale > 500
+#     ms o PoseEstimate stale > 300 ms.
+#
+# Estructura de paquetes (post-Fase 6):
+#   src/core/         — tipos compartidos (frozen dataclasses) + Protocols
+#                       (DIP). Sin lógica.
+#   src/perception/   — captura + lane + signs + tracking (MOT).
+#   src/localization/ — EKF7 + relocalization.
+#   src/routing/      — Lanelet HD map + Dijkstra route planner.
+#   src/behavior/     — BehaviorPlanner + scenarios + velocity overlay.
+#   src/control/      — MotionController + safety_gate + dispatcher.
+#
+# Para ejecutar:
 #       chmod +x setup.sh
 #       ./setup.sh
 #       cd src/dashboard/frontend
 #       npm start
-#       answer "y" to the popup
-#       close the frontend (CTRL + C)
+#       (CTRL+C cuando arranque la UI)
 #       cd ../..
+#       python3 main.py
 #
+# Copyright (c) 2019, Bosch Engineering Center Cluj and BFMC organizers
+# All rights reserved. (BSD-3 — texto original abajo)
+# ===================================================================
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+# THIS SOFTWARE IS PROVIDED "AS IS" — see project root for full BSD-3 text.
+
 # ===================================== GENERAL IMPORTS ==================================
 
 import sys

@@ -442,3 +442,18 @@ class TrackedObjectsMsg(Enum):
     #                             "x": float, "y": float, "vx": float, "vy": float,
     #                             "confidence": float, "age_frames": int}, ...]}
     msgType = "dict"
+
+################################# From MotionController + Dispatcher ##################################
+# MotorCommandMsg: snapshot del comando que el dispatcher acaba de despachar
+# (post-safety-gate). Lo usa el dashboard para mostrar al operador qué
+# manda al firmware en cada instante. NO es el path crítico — el path
+# crítico es SpeedMotor + SteerMotor (ya existen arriba). Esto es solo
+# telemetría.
+class MotorCommandMsg(Enum):
+    Queue = "General"
+    Owner = "threadMotorCommandDispatcher"
+    msgID = 1
+    # value format: {"timestamp": float, "steering_deg": float,
+    #                "speed_mps": float, "valid": bool, "source": str,
+    #                "reason": str}
+    msgType = "dict"

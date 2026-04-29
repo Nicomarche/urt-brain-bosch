@@ -16,15 +16,22 @@
 # Jetson Nano, plan B es un MPC scipy con la misma interfaz — el contrato
 # no cambia.
 #
-# El tipo `MotorCommand` lo define `src/core/types/control.py` en Fase 6;
-# por ahora la firma usa el legacy `ControlDecision` mientras la transición
-# está en curso. Cuando MotorCommand exista, el Protocol se actualiza.
+# Pre/postcondiciones:
+#   - Pre: `pose.timestamp` reciente (< 200 ms). Si stale, el llamador
+#     debe usar el `safety_gate`, NO este método. El controller asume
+#     que la pose es buena.
+#   - Pre: `behavior_output.valid == True`. Si el planner emitió un plan
+#     inválido, el controller no inventa nada — devuelve `MotorCommand`
+#     con `valid=False` y razón "behavior_invalid".
+#   - Post: `MotorCommand.valid == True` ⇒ steering ∈ [-25°, +25°] y
+#     speed >= 0 (el clamp ocurre adentro del compute()).
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from src.core.types.control import ControlDecision
+from src.core.types.behavior import BehaviorOutput
+from src.core.types.control import MotorCommand
 from src.core.types.pose import PoseEstimate
 
 
@@ -32,16 +39,14 @@ from src.core.types.pose import PoseEstimate
 class IMotionController(Protocol):
     """Convierte la decisión del planner en comandos para el actuador."""
 
-    def compute(self, behavior_output: object, pose: PoseEstimate) -> ControlDecision:
+    def compute(
+        self, behavior_output: BehaviorOutput, pose: PoseEstimate
+    ) -> MotorCommand:
         """Resuelve un step del MPC dado el plan y la pose actual.
 
-        `behavior_output` es `BehaviorOutput` (definido en Fase 4); aquí
-        está como `object` para evitar acoplamiento durante la transición.
-        Retorno tipo `ControlDecision` será reemplazado por `MotorCommand`
-        cuando exista.
-
-        Pre: `pose.timestamp` reciente (< 200 ms). Si stale, el llamador
-        debe usar el SafetyGate, no este método.
+        Si `behavior_output.valid == False` o `behavior_output.stop_required
+        == True`, debe devolver `MotorCommand(valid=False, ...)` con la
+        `reason` correspondiente. NO inventar comandos.
         """
         ...
 
