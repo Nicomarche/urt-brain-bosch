@@ -9,14 +9,16 @@
 # BEV + Hungarian via scipy.optimize.linear_sum_assignment). Sin re-ID
 # (deep_sort_realtime) porque trae torch y eso no entra en Jetson Nano.
 #
-# Los tipos `DetectedObject` y `TrackedObject` los define
-# `src/core/types/perception.py` en Fase 5; por ahora la firma usa `object`
-# para evitar acoplar Phase 1 a Phase 5.
+# Los tipos `DetectedObject` y `TrackedObject` viven en
+# `src/core/types/perception.py`. Esta interfaz cierra el contrato:
+# `BehaviorPlanner` consume el `tuple[TrackedObject, ...]` que devuelve
+# el tracker, sin conocer la implementación concreta (DIP).
 
 from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
+from src.core.types.perception import DetectedObject, TrackedObject
 from src.core.types.pose import PoseEstimate
 
 
@@ -26,17 +28,16 @@ class IObjectTracker(Protocol):
 
     def step(
         self,
-        detections: list[object],
+        detections: list[DetectedObject],
         dt: float,
         ego_pose: PoseEstimate,
-    ) -> list[object]:
+    ) -> list[TrackedObject]:
         """Avanza un tick del tracker.
 
-        `detections` son objetos `DetectedObject` recién emitidos por el
-        detector (Fase 5). `ego_pose` se usa para proyectar las posiciones
-        a coordenadas mundo (BEV-mundo) si el tracker mantiene tracks en
-        marco mundo. Retorno: `list[TrackedObject]` con IDs estables y
-        velocidad estimada.
+        `detections` son `DetectedObject` recién emitidos por el detector.
+        `ego_pose` se usa para resolver las coordenadas mundo en caso de
+        que el tracker necesite proyectar/transformar. Retorno:
+        `list[TrackedObject]` con IDs estables y velocidad estimada.
         """
         ...
 
