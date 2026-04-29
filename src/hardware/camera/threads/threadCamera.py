@@ -38,7 +38,7 @@ try:
 except ImportError:
     PICAMERA2_AVAILABLE = False
 
-from src.utils.messages.allMessages import (
+from src.core.messaging.allMessages import (
     mainCamera,
     serialCamera,
     Recording,
@@ -46,11 +46,11 @@ from src.utils.messages.allMessages import (
     Brightness,
     Contrast,
 )
-from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import StateChange
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.allMessages import StateChange
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.statemachine.systemMode import SystemMode
 
 class threadCamera(ThreadWithStop):

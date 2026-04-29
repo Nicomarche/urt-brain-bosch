@@ -8,7 +8,7 @@ from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEng
 from src.hardware.camera.threads.signActions import SignActions
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import (
+from src.core.messaging.allMessages import (
     LineFollowingConfig,
     LineFollowingStatus,
     LocalLanePerception,
@@ -17,8 +17,8 @@ from src.utils.messages.allMessages import (
     SignDetectionStatus,
     StateChange,
 )
-from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
 
 class threadLocalPerception(ThreadWithStop):

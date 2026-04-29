@@ -43,17 +43,17 @@ from flask_socketio import SocketIO
 from flask_cors import CORS
 from enum import Enum
 
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.templates.workerprocess import WorkerProcess
-from src.utils.messages.allMessages import Semaphores, StateChange
+from src.core.messaging.allMessages import Semaphores, StateChange
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.transitionTable import TransitionTable
 from src.statemachine.systemMode import SystemMode
 from src.dashboard.components.calibration import Calibration
 from src.dashboard.components.ip_manger import IpManager
 
-import src.utils.messages.allMessages as allMessages
+import src.core.messaging.allMessages as allMessages
 
 
 class processDashboard(WorkerProcess):

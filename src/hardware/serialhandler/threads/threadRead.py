@@ -34,7 +34,7 @@ import serial
 from datetime import datetime, timedelta
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import (
+from src.core.messaging.allMessages import (
     BatteryLvl,
     ImuData,
     ImuAck,
@@ -50,7 +50,7 @@ from src.utils.messages.allMessages import (
     SteeringLimits,
     AliveSignal
 )
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 
 class threadRead(ThreadWithStop):

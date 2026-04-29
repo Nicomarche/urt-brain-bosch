@@ -39,11 +39,11 @@ from src.hardware.camera.threads.threadCamera import threadCamera
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
 from src.hardware.camera.threads.threadVisualController import threadVisualController
 from src.hardware.control.threads.threadControlCoordinator import threadControlCoordinator
-from src.hardware.pipeline.sharedBuffers import LatestFrameBuffer, LatestValueBuffer
+from src.core.messaging.buffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.allMessages import StateChange
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.allMessages import StateChange
 
 # GPS-free tracking (optional — requires scipy for spline interpolation)
 try:

@@ -4,7 +4,7 @@ import time
 import types
 import unittest
 
-from src.hardware.pipeline.sharedTypes import LaneObservation, Pose2D, RouteContext
+from src.core.types import LaneObservation, Pose2D, RouteContext
 from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
 from src.hardware.tracking.trackGraph import TrackGraph
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from src.hardware.pipeline.sharedTypes import ControlDecision, VisualControlCandidate
+from src.core.types import ControlDecision, VisualControlCandidate
 
 
 class NavigationControlPolicy:

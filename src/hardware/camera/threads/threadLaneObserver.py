@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from src.hardware.pipeline.sharedTypes import LaneObservation, StoplineObservation, VisualStateSnapshot
+from src.core.types import LaneObservation, StoplineObservation, VisualStateSnapshot
 from src.templates.threadwithstop import ThreadWithStop
 
 

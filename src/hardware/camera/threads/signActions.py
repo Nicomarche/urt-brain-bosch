@@ -2,7 +2,7 @@ import threading
 import time
 
 import config
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor
+from src.core.messaging.allMessages import SpeedMotor, SteerMotor
 
 
 class SignActions:

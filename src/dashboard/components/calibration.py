@@ -39,9 +39,9 @@ from scipy.interpolate import CubicSpline
 
 from string import Template
 
-from src.utils.messages.allMessages import ControlCalib, CalibPWMData, CalibRunDone
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.allMessages import ControlCalib, CalibPWMData, CalibRunDone
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.statemachine.stateMachine import StateMachine
 
 

@@ -40,10 +40,10 @@ from src.templates.workerprocess import WorkerProcess
 from src.hardware.serialhandler.threads.filehandler import FileHandler
 from src.hardware.serialhandler.threads.threadRead import threadRead
 from src.hardware.serialhandler.threads.threadWrite import threadWrite
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.statemachine.systemMode import SystemMode
-from src.utils.messages.allMessages import StateChange, SerialConnectionState
+from src.core.messaging.allMessages import StateChange, SerialConnectionState
 
 class processSerialHandler(WorkerProcess):
     """This process handle connection between NUCLEO and Raspberry PI.\n

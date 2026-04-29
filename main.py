@@ -64,8 +64,8 @@ from src.hardware.camera.processCamera import processCamera
 from src.hardware.serialhandler.processSerialHandler import processSerialHandler
 from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.allMessages import StateChange
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.allMessages import StateChange
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from config import (

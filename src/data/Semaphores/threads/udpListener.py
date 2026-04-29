@@ -27,9 +27,9 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 
 import json
-from src.utils.messages.allMessages import Semaphores
+from src.core.messaging.allMessages import Semaphores
 from twisted.internet import protocol
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 class udpListener(protocol.DatagramProtocol):
     """This class is used to receive the information from the servers.

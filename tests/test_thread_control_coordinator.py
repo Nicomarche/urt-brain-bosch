@@ -4,8 +4,8 @@ import unittest
 
 from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
 from src.hardware.control.threads.threadControlCoordinator import threadControlCoordinator
-from src.hardware.pipeline.sharedBuffers import LatestValueBuffer
-from src.hardware.pipeline.sharedTypes import VisualControlCandidate
+from src.core.messaging.buffers import LatestValueBuffer
+from src.core.types import VisualControlCandidate
 
 
 class _FakeSender:

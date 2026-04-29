@@ -33,8 +33,8 @@ import atexit
 from typing import Dict
 from src.statemachine.systemMode import SystemMode
 from src.statemachine.transitionTable import TransitionTable
-from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.allMessages import StateChange
+from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.allMessages import StateChange
 
 class StateMachine:
     """

@@ -48,9 +48,9 @@ def main():
     file_path_threads = os.path.join(directory_path_threads, f"thread{package_name}.py")
     with open(file_path_threads, 'w') as file:
         file.write(f'from src.templates.threadwithstop import ThreadWithStop\n')
-        file.write(f'from src.utils.messages.allMessages import (mainCamera)\n')
-        file.write(f'from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber\n')
-        file.write(f'from src.utils.messages.messageHandlerSender import messageHandlerSender\n\n')
+        file.write(f'from src.core.messaging.allMessages import (mainCamera)\n')
+        file.write(f'from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber\n')
+        file.write(f'from src.core.messaging.messageHandlerSender import messageHandlerSender\n\n')
         file.write(f'class thread{package_name}(ThreadWithStop):\n')
         file.write(f'    """This thread handles {package_name}.\n')
         file.write(f'    Args:\n')

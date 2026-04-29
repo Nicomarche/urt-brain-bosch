@@ -1,7 +1,7 @@
 import unittest
 
 from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
-from src.hardware.pipeline.sharedTypes import VisualControlCandidate, VisualStateSnapshot
+from src.core.types import VisualControlCandidate, VisualStateSnapshot
 
 
 class LaneObserverTests(unittest.TestCase):

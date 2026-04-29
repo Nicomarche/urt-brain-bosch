@@ -4,8 +4,8 @@ import unittest
 
 from src.hardware.camera.threads.threadLaneObserver import threadLaneObserver
 from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
-from src.hardware.pipeline.sharedBuffers import LatestValueBuffer
-from src.hardware.pipeline.sharedTypes import Pose2D, RouteContext, VisualControlCandidate, VisualStateSnapshot
+from src.core.messaging.buffers import LatestValueBuffer
+from src.core.types import Pose2D, RouteContext, VisualControlCandidate, VisualStateSnapshot
 from src.hardware.tracking.threadPoseEstimator import threadPoseEstimator
 
 

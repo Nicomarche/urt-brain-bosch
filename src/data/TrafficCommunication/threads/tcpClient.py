@@ -28,8 +28,8 @@
 
 import json
 from threading import Event
-from src.utils.messages.allMessages import Location
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.allMessages import Location
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 from twisted.internet import protocol
 
 # The server itself. Creates a new Protocol for each new connection and has the info for all of them.

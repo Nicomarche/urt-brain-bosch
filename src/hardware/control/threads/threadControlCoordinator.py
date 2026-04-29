@@ -4,11 +4,11 @@ import time
 
 import config as _config
 from src.hardware.control.navigationControlPolicy import NavigationControlPolicy
-from src.hardware.pipeline.sharedTypes import ControlDecision, VisualControlCandidate
+from src.core.types import ControlDecision, VisualControlCandidate
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange
-from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange
+from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
 
 class threadControlCoordinator(ThreadWithStop):

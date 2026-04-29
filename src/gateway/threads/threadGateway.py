@@ -30,7 +30,7 @@ import queue
 import time
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import (
+from src.core.messaging.allMessages import (
     ActuatorCommandStatus,
     CurrentSpeed,
     CurrentSteer,

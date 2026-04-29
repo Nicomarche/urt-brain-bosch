@@ -1,7 +1,7 @@
 import os
 import unittest
 
-from src.hardware.pipeline.sharedTypes import Pose2D
+from src.core.types import Pose2D
 from src.hardware.tracking.threadNavigationPlanner import threadNavigationPlanner
 from src.hardware.tracking.pathManager import PathManager
 from src.hardware.tracking.trackGraph import TrackGraph

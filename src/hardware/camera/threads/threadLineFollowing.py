@@ -19,10 +19,10 @@ try:
 except ImportError:
     _SCIPY_AVAILABLE = False
 import config as _config
-from src.hardware.pipeline.sharedTypes import VisualControlCandidate, VisualStateSnapshot
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
-from src.utils.messages.messageHandlerSender import messageHandlerSender
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.types import VisualControlCandidate, VisualStateSnapshot
+from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
+from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
 from src.statemachine.systemMode import SystemMode
 from src.hardware.camera.threads.maneuverManager import ManeuverManager

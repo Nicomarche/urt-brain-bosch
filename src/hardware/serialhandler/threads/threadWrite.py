@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 
 from src.hardware.serialhandler.threads.messageconverter import MessageConverter
 from src.templates.threadwithstop import ThreadWithStop
-from src.utils.messages.allMessages import (
+from src.core.messaging.allMessages import (
     ActuatorCommandStatus,
     Klem,
     Control,
@@ -49,8 +49,8 @@ from src.utils.messages.allMessages import (
     IsAlive,
     RequestSteerLimits
 )
-from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
-from src.utils.messages.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 
 class threadWrite(ThreadWithStop):
