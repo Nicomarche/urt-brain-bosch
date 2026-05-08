@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
+from src.core.types.perception import lane_observation_supports_lateral_relocalization
 from src.utils.live_log import live_log
 from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
@@ -179,14 +180,13 @@ class threadPoseEstimator(threadTracking):
             return raw_x, raw_y, raw_yaw, 0.0, False
         if abs(self._last_speed) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
             return raw_x, raw_y, raw_yaw, 0.0, False
+        if not lane_observation_supports_lateral_relocalization(lane_observation):
+            return raw_x, raw_y, raw_yaw, 0.0, False
 
         measurement = lane_observation.direct_error_m
         if measurement is None:
             measurement = lane_observation.lateral_offset_m
         if measurement is None:
-            return raw_x, raw_y, raw_yaw, 0.0, False
-        quality = float(lane_observation.quality or 0.0)
-        if quality < 0.35:
             return raw_x, raw_y, raw_yaw, 0.0, False
 
         # NOTA: probamos modo CONFIDENT (snap rápido cuando quality≥0.7)
@@ -563,6 +563,19 @@ class threadPoseEstimator(threadTracking):
             reloc_error_m=float(relocalization_error_m or 0.0),
             lane_correction_m=float(lane_relocalization_m or 0.0),
             lane_reliable=bool(lane_measurement_reliable),
+            lane_measurement_mode=(
+                str(lane_observation.measurement_mode or "none")
+                if lane_observation is not None
+                else "none"
+            ),
+            lane_direct_error_valid=bool(
+                lane_observation.direct_error_valid if lane_observation is not None else False
+            ),
+            lane_control_policy_mode=(
+                lane_observation.control_policy_mode
+                if lane_observation is not None
+                else None
+            ),
             raw_lateral_error_m=float(raw_lateral_error_m or 0.0),
             imu_received=bool(getattr(self, "_imu_received", False)),
             ts_pose=float(pose_estimate.timestamp),

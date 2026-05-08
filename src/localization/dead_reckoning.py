@@ -7,18 +7,23 @@ with large dt (frame drops): Euler integration uses only the start-of-step
 heading, accumulating O(dt²) position error per step, while RK4 reduces that
 to O(dt⁴).
 
-The ODE being integrated:
+The ODE is integrated directly in the active OSM/map frame:
     dx/dt   = v * cos(yaw)
     dy/dt   = v * sin(yaw)
-    dyaw/dt = (v / L) * tan(steer)
+    dyaw/dt = -(v / L) * tan(steer)
 
-`steer` here is already in mathematical bicycle-model convention:
-    steer < 0  → right turn  → yaw decreases
-    steer > 0  → left turn   → yaw increases
+Frame/convention details:
+    - map `x` grows to the right
+    - map `y` grows downward (same orientation as the dashboard)
+    - map `yaw` is 0 along +x and grows clockwise
+    - `steer > 0` still means wheels turned to the LEFT (ISO/controller sign)
 
-Project control / Nucleo feedback uses the opposite sign convention
-(`steer > 0` means right turn), so threadTracking converts it before calling
-this module.
+With a clockwise-positive yaw, a physical left turn must DECREASE yaw.
+That is why the kinematic yaw-rate term carries a leading minus sign here.
+
+Project control / Nucleo feedback uses the opposite raw wire steering
+convention (`steer > 0` means right turn), so threadTracking converts it
+before calling this module.
 
 yaw is corrected to IMU absolute heading whenever a fresh IMU sample arrives
 (handled in threadTracking), so heading never accumulates drift.  Only
@@ -66,10 +71,9 @@ class DeadReckoning:
         if dt <= 0.0 or dt > 1.0:
             return
 
-        # Standard bicycle-model convention:
-        #   steer < 0 => right turn => yaw decreases
-        #   steer > 0 => left turn  => yaw increases
-        yaw_rate = (speed_mps / wheelbase_m) * math.tan(steer_rad)
+        # OSM/map frame convention:
+        #   yaw grows clockwise, so a physical LEFT turn must decrease yaw.
+        yaw_rate = -(speed_mps / wheelbase_m) * math.tan(steer_rad)
 
         # RK4 stages — v, steer are constant within the step, so yaw_rate is
         # constant and the yaw trajectory is linear: yaw(t) = yaw_rad + yaw_rate*t.

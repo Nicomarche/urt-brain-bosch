@@ -38,6 +38,16 @@ if TYPE_CHECKING:
     from src.routing.lanelet.lanelet_map import LaneletMap
 
 
+_STRAIGHT_ROUTE_HEADING_TOL_DEG = 8.0
+_STRAIGHT_HOLD_MAX_YAW_DELTA_DEG = 8.0
+_STRAIGHT_HOLD_PREFIX_M = 0.45
+_STRAIGHT_HOLD_ROUTE_WINDOW_M = 0.60
+_STRAIGHT_HOLD_EARLY_RECENTER_FORWARD_M = 0.45
+_STRAIGHT_HOLD_EARLY_RECENTER_LATERAL_M = 0.005
+_ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M = 0.12
+_ROUTE_LOCAL_RECENTER_TAIL_M = 0.60
+
+
 def build_target_path(
     lanelet_map: "LaneletMap",
     start_lanelet_id: str,
@@ -145,7 +155,9 @@ def build_target_path_from_route(
     target_speed_mps: float,
     horizon_n: int,
     dt: float,
-) -> np.ndarray:
+    *,
+    return_metadata: bool = False,
+) -> np.ndarray | tuple[np.ndarray, dict[str, float | int | str]]:
     """Construye una referencia cruda siguiendo la ruta activa.
 
     A diferencia de `build_target_path(...)`, esta variante toma la ruta
@@ -161,17 +173,23 @@ def build_target_path_from_route(
     """
     pose_xy = np.asarray(start_xy, dtype=float)
     if horizon_n <= 0:
-        return np.array([[pose_xy[0], pose_xy[1], float(start_yaw_rad)]], dtype=float)
+        out = np.array([[pose_xy[0], pose_xy[1], float(start_yaw_rad)]], dtype=float)
+        if return_metadata:
+            return out, _bridge_metadata(bridge_mode="matched_route_only")
+        return out
 
     route = _coerce_route_waypoints(route_waypoints)
     if route.shape[0] == 0:
-        return np.tile(np.array([pose_xy[0], pose_xy[1], float(start_yaw_rad)]), (horizon_n + 1, 1))
+        out = np.tile(np.array([pose_xy[0], pose_xy[1], float(start_yaw_rad)]), (horizon_n + 1, 1))
+        if return_metadata:
+            return out, _bridge_metadata(bridge_mode="matched_route_only")
+        return out
 
     idx0 = max(0, min(int(matched_idx), route.shape[0] - 1))
     route_tail = route[idx0:]
     route_tail_xy = np.asarray(route_tail[:, :2], dtype=float)
     matched_xy_arr = _coerce_xy(matched_xy, fallback_xy=route_tail_xy[0])
-    route_corridor_xy = _prepend_xy(route_tail_xy, matched_xy_arr)
+    route_corridor_xy = _trim_route_corridor_from_matched_point(route_tail_xy, matched_xy_arr)
     # Importante: el yaw del corredor debe salir de la geometría real de la
     # ruta, no del micro-segmento matched->first_wp. Ese gap puede ser de
     # milímetros y flippear de +pi a 0 por ruido numérico, generando un
@@ -182,21 +200,68 @@ def build_target_path_from_route(
     step_arc = max(0.10, float(target_speed_mps) * float(dt))
     pose_gap_m = float(np.linalg.norm(pose_xy - matched_xy_arr))
     yaw_delta_rad = abs(_wrap_angle(route_start_yaw - float(start_yaw_rad)))
+    yaw_delta_deg = float(math.degrees(yaw_delta_rad))
+    early_recenter_snap = _requires_straight_hold_for_early_recenter(
+        pose_xy=pose_xy,
+        route_start_yaw_rad=float(route_start_yaw),
+        matched_xy=matched_xy_arr,
+        pose_gap_m=pose_gap_m,
+        protected_prefix_m=_STRAIGHT_HOLD_PREFIX_M,
+    )
     bridge_goal_idx = _select_bridge_goal_idx(
         route_corridor_xy,
         step_arc=step_arc,
         pose_gap_m=pose_gap_m,
+    )
+    bridge_meta = _bridge_metadata(bridge_mode="matched_route_only")
+    route_is_straight = _is_route_locally_straight(
+        route_tail_xy,
+        route_start_yaw_rad=route_start_yaw,
+        window_m=_STRAIGHT_HOLD_ROUTE_WINDOW_M,
+        heading_tol_deg=_STRAIGHT_ROUTE_HEADING_TOL_DEG,
+    )
+    local_recenter_only = (
+        route_is_straight
+        and (
+            pose_gap_m > _ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M
+            or yaw_delta_deg > _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG
+        )
+    )
+    use_straight_hold = (
+        route_is_straight
+        and route_corridor_xy.shape[0] >= 2
+        and (pose_gap_m > 0.02 or early_recenter_snap)
+        and pose_gap_m <= _ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M
+        and yaw_delta_rad <= math.radians(_STRAIGHT_HOLD_MAX_YAW_DELTA_DEG)
     )
     use_connector = (
         route_corridor_xy.shape[0] >= 2
         and bridge_goal_idx >= 1
         and (
             pose_gap_m > 0.02
-            or yaw_delta_rad > math.radians(8.0)
+            or yaw_delta_rad > math.radians(_STRAIGHT_HOLD_MAX_YAW_DELTA_DEG)
         )
     )
 
-    if use_connector:
+    if use_straight_hold:
+        straight_polyline_xy, straight_meta = _build_straight_hold_route_merge(
+            pose_xy=pose_xy,
+            start_yaw_rad=float(start_yaw_rad),
+            route_start_yaw_rad=float(route_start_yaw),
+            route_corridor_xy=route_corridor_xy,
+            step_arc=step_arc,
+            pose_gap_m=pose_gap_m,
+            protected_prefix_m=_STRAIGHT_HOLD_PREFIX_M,
+        )
+        if straight_polyline_xy is not None:
+            polyline_xy = straight_polyline_xy
+            bridge_meta = straight_meta
+            bridge_reason = "straight_hold"
+            bridge_goal_idx = int(bridge_meta.get("route_goal_idx", bridge_goal_idx))
+        else:
+            use_straight_hold = False
+
+    if not use_straight_hold and use_connector:
         goal_xy = np.asarray(route_corridor_xy[bridge_goal_idx], dtype=float)
         goal_yaw = _heading_with_fallback(
             route_corridor_xy,
@@ -220,11 +285,23 @@ def build_target_path_from_route(
         polyline_xy = connector_xy
         tail_after_goal = route_corridor_xy[bridge_goal_idx + 1 :]
         if tail_after_goal.shape[0] > 0:
+            if local_recenter_only:
+                tail_after_goal = _truncate_polyline_prefix(
+                    tail_after_goal,
+                    max_arc_m=_ROUTE_LOCAL_RECENTER_TAIL_M,
+                )
             polyline_xy = np.vstack([polyline_xy, tail_after_goal])
-        bridge_reason = "connector"
+        bridge_reason = "local_recenter_connector" if local_recenter_only else "connector"
+        bridge_meta = _bridge_metadata(
+            bridge_mode="connector",
+            merge_start_idx=1,
+            merge_end_idx=int(connector_xy.shape[0] - 1),
+            route_goal_idx=int(bridge_goal_idx),
+        )
     else:
-        polyline_xy = route_corridor_xy
-        bridge_reason = "matched_route_only"
+        if not use_straight_hold:
+            polyline_xy = route_corridor_xy
+            bridge_reason = "matched_route_only"
 
     if polyline_xy.shape[0] < 2:
         polyline_xy = np.vstack([pose_xy, matched_xy_arr])
@@ -239,9 +316,16 @@ def build_target_path_from_route(
         pose_gap_m=float(pose_gap_m),
         route_start_yaw_rad=float(route_start_yaw),
         start_yaw_rad=float(start_yaw_rad),
-        yaw_delta_deg=float(math.degrees(yaw_delta_rad)),
+        yaw_delta_deg=float(yaw_delta_deg),
+        route_is_straight=bool(route_is_straight),
+        local_recenter_only=bool(local_recenter_only),
+        early_recenter_snap=bool(early_recenter_snap),
         bridge_goal_idx=int(bridge_goal_idx),
         bridge_reason=str(bridge_reason),
+        bridge_mode=str(bridge_meta.get("bridge_mode", bridge_reason)),
+        protected_prefix_m=float(bridge_meta.get("protected_prefix_m", 0.0) or 0.0),
+        merge_start_idx=bridge_meta.get("merge_start_idx"),
+        merge_end_idx=bridge_meta.get("merge_end_idx"),
         path_points=int(target_path.shape[0]),
         first_ref=[
             round(float(target_path[0, 0]), 3),
@@ -254,6 +338,8 @@ def build_target_path_from_route(
             round(float(target_path[-1, 2]), 4),
         ],
     )
+    if return_metadata:
+        return target_path, bridge_meta
     return target_path
 
 
@@ -538,18 +624,216 @@ def _coerce_xy(candidate_xy, fallback_xy: np.ndarray) -> np.ndarray:
         return np.asarray(fallback_xy, dtype=float)
 
 
-def _prepend_xy(polyline_xy: np.ndarray, point_xy: np.ndarray) -> np.ndarray:
-    if polyline_xy.shape[0] == 0:
-        return np.asarray([point_xy], dtype=float)
-    if np.linalg.norm(polyline_xy[0] - point_xy) <= 1e-6:
-        return np.array(polyline_xy, copy=True)
-    return np.vstack([np.asarray(point_xy, dtype=float), polyline_xy])
+def _trim_route_corridor_from_matched_point(
+    polyline_xy: np.ndarray,
+    matched_xy: np.ndarray,
+) -> np.ndarray:
+    """Start the route corridor at the matched point without reversing first."""
+
+    pts = np.asarray(polyline_xy, dtype=float)
+    matched = np.asarray(matched_xy, dtype=float)
+    if pts.shape[0] == 0:
+        return matched.reshape(1, 2)
+    if pts.shape[0] < 2:
+        if np.linalg.norm(pts[0] - matched) <= 1e-6:
+            return np.array(pts, copy=True)
+        return np.vstack([matched, pts[0]])
+
+    best_seg_idx = 0
+    best_proj = np.asarray(pts[0], dtype=float)
+    best_dist = math.inf
+    for idx in range(pts.shape[0] - 1):
+        p0 = np.asarray(pts[idx], dtype=float)
+        p1 = np.asarray(pts[idx + 1], dtype=float)
+        seg = p1 - p0
+        seg_len2 = float(np.dot(seg, seg))
+        if seg_len2 <= 1e-12:
+            continue
+        rel = matched - p0
+        t = max(0.0, min(1.0, float(np.dot(rel, seg) / seg_len2)))
+        proj = p0 + t * seg
+        dist = float(np.linalg.norm(matched - proj))
+        if dist < best_dist:
+            best_dist = dist
+            best_seg_idx = idx
+            best_proj = proj
+
+    tail = pts[best_seg_idx + 1 :]
+    pieces: list[np.ndarray] = [np.asarray(best_proj, dtype=float)]
+    if tail.shape[0] > 0:
+        if np.linalg.norm(tail[0] - best_proj) > 1e-6:
+            pieces.extend(tail)
+        else:
+            pieces.extend(tail[1:])
+    if len(pieces) < 2:
+        pieces.append(np.asarray(pts[-1], dtype=float))
+    return np.vstack(pieces)
 
 
 def _polyline_arc_length(polyline_xy: np.ndarray) -> float:
     if polyline_xy.shape[0] < 2:
         return 0.0
     return float(np.sum(np.linalg.norm(np.diff(polyline_xy, axis=0), axis=1)))
+
+
+def _bridge_metadata(
+    *,
+    bridge_mode: str,
+    protected_prefix_m: float = 0.0,
+    merge_start_idx: int | None = None,
+    merge_end_idx: int | None = None,
+    route_goal_idx: int | None = None,
+) -> dict[str, float | int | str]:
+    meta: dict[str, float | int | str] = {
+        "bridge_mode": str(bridge_mode),
+        "protected_prefix_m": float(protected_prefix_m),
+    }
+    if merge_start_idx is not None:
+        meta["merge_start_idx"] = int(merge_start_idx)
+    if merge_end_idx is not None:
+        meta["merge_end_idx"] = int(merge_end_idx)
+    if route_goal_idx is not None:
+        meta["route_goal_idx"] = int(route_goal_idx)
+    return meta
+
+
+def _is_route_locally_straight(
+    route_tail_xy: np.ndarray,
+    *,
+    route_start_yaw_rad: float,
+    window_m: float,
+    heading_tol_deg: float,
+) -> bool:
+    if route_tail_xy.shape[0] < 2:
+        return False
+    end_idx = _arc_index_at_distance(route_tail_xy, distance_m=max(0.10, float(window_m)))
+    end_heading = _heading_with_fallback(
+        route_tail_xy,
+        idx=max(0, min(end_idx, route_tail_xy.shape[0] - 1)),
+        fallback=float(route_start_yaw_rad),
+    )
+    heading_delta_deg = abs(
+        math.degrees(_wrap_angle(float(end_heading) - float(route_start_yaw_rad)))
+    )
+    return heading_delta_deg <= float(heading_tol_deg)
+
+
+def _build_straight_hold_route_merge(
+    *,
+    pose_xy: np.ndarray,
+    start_yaw_rad: float,
+    route_start_yaw_rad: float,
+    route_corridor_xy: np.ndarray,
+    step_arc: float,
+    pose_gap_m: float,
+    protected_prefix_m: float,
+) -> tuple[np.ndarray | None, dict[str, float | int | str]]:
+    if route_corridor_xy.shape[0] < 2:
+        return None, _bridge_metadata(bridge_mode="matched_route_only")
+
+    merge_target_arc_m = max(
+        float(protected_prefix_m) + max(0.20, 3.0 * float(pose_gap_m)),
+        0.70,
+    )
+    route_goal_idx = _arc_index_at_distance(route_corridor_xy, distance_m=merge_target_arc_m)
+    prefix_yaw_rad = _straight_hold_prefix_yaw(
+        current_yaw_rad=float(start_yaw_rad),
+        route_yaw_rad=float(route_start_yaw_rad),
+    )
+    prefix_local = np.array([float(protected_prefix_m), 0.0], dtype=float)
+    prefix_samples = max(
+        2,
+        int(math.ceil(float(protected_prefix_m) / max(float(step_arc), 1e-6))),
+    )
+
+    local_goal = None
+    goal_xy = None
+    while route_goal_idx < route_corridor_xy.shape[0]:
+        goal_xy = np.asarray(route_corridor_xy[route_goal_idx], dtype=float)
+        local_goal = _world_to_local(goal_xy - pose_xy, yaw_rad=float(prefix_yaw_rad))
+        if float(local_goal[0]) > float(protected_prefix_m) + 0.05:
+            break
+        route_goal_idx += 1
+
+    if goal_xy is None or local_goal is None:
+        return None, _bridge_metadata(bridge_mode="matched_route_only")
+    if route_goal_idx >= route_corridor_xy.shape[0]:
+        return None, _bridge_metadata(bridge_mode="matched_route_only")
+    if float(local_goal[0]) <= float(protected_prefix_m) + 0.05:
+        return None, _bridge_metadata(bridge_mode="matched_route_only")
+
+    merge_dx = float(local_goal[0] - prefix_local[0])
+    merge_samples = max(
+        4,
+        int(math.ceil(max(merge_dx, 0.05) / max(float(step_arc), 1e-6))) + 1,
+    )
+
+    local_points = [np.array([0.0, 0.0], dtype=float)]
+    for idx in range(1, prefix_samples + 1):
+        alpha = float(idx) / float(prefix_samples)
+        local_points.append(
+            np.array([float(prefix_local[0]) * alpha, 0.0], dtype=float)
+        )
+    merge_start_idx = len(local_points)
+    for idx in range(1, merge_samples + 1):
+        alpha = float(idx) / float(merge_samples)
+        smooth_alpha = _smoothstep(alpha)
+        x_val = float(prefix_local[0] + merge_dx * alpha)
+        y_val = float(local_goal[1]) * smooth_alpha
+        local_points.append(np.array([x_val, y_val], dtype=float))
+
+    merge_xy = np.asarray(
+        [_local_to_world(pt, origin_xy=pose_xy, yaw_rad=float(prefix_yaw_rad)) for pt in local_points],
+        dtype=float,
+    )
+    polyline_xy = merge_xy
+    tail_after_goal = route_corridor_xy[route_goal_idx + 1 :]
+    if tail_after_goal.shape[0] > 0:
+        polyline_xy = np.vstack([polyline_xy, tail_after_goal])
+
+    return polyline_xy, _bridge_metadata(
+        bridge_mode="straight_hold",
+        protected_prefix_m=float(protected_prefix_m),
+        merge_start_idx=int(merge_start_idx),
+        merge_end_idx=int(len(local_points) - 1),
+        route_goal_idx=int(route_goal_idx),
+    )
+
+
+def _requires_straight_hold_for_early_recenter(
+    *,
+    pose_xy: np.ndarray,
+    route_start_yaw_rad: float,
+    matched_xy: np.ndarray,
+    pose_gap_m: float,
+    protected_prefix_m: float,
+) -> bool:
+    if pose_gap_m <= 1e-6:
+        return False
+    local_goal = _world_to_local(
+        np.asarray(matched_xy, dtype=float) - np.asarray(pose_xy, dtype=float),
+        yaw_rad=float(route_start_yaw_rad),
+    )
+    local_forward_m = float(local_goal[0])
+    local_lateral_m = float(local_goal[1])
+    if local_forward_m < -0.02:
+        return False
+    return (
+        local_forward_m <= max(
+            float(protected_prefix_m),
+            _STRAIGHT_HOLD_EARLY_RECENTER_FORWARD_M,
+        )
+        and abs(local_lateral_m) >= _STRAIGHT_HOLD_EARLY_RECENTER_LATERAL_M
+    )
+
+
+def _arc_index_at_distance(polyline_xy: np.ndarray, *, distance_m: float) -> int:
+    if polyline_xy.shape[0] < 2:
+        return 0
+    seg_lens = np.linalg.norm(np.diff(polyline_xy, axis=0), axis=1)
+    cum = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    idx = int(np.searchsorted(cum, max(0.0, float(distance_m)), side="left"))
+    return max(1, min(idx, polyline_xy.shape[0] - 1))
 
 
 def _select_bridge_goal_idx(
@@ -569,6 +853,30 @@ def _select_bridge_goal_idx(
     idx = int(np.searchsorted(cum, target_arc_m, side="left"))
     idx = max(1, min(idx, route_corridor_xy.shape[0] - 1))
     return idx
+
+
+def _truncate_polyline_prefix(polyline_xy: np.ndarray, *, max_arc_m: float) -> np.ndarray:
+    if polyline_xy.shape[0] < 2 or max_arc_m <= 0.0:
+        return np.array(polyline_xy, copy=True)
+    out: list[np.ndarray] = [np.asarray(polyline_xy[0], dtype=float)]
+    accumulated_m = 0.0
+    for idx in range(1, polyline_xy.shape[0]):
+        prev = np.asarray(polyline_xy[idx - 1], dtype=float)
+        curr = np.asarray(polyline_xy[idx], dtype=float)
+        seg = curr - prev
+        seg_len_m = float(np.linalg.norm(seg))
+        if seg_len_m <= 1e-9:
+            continue
+        if accumulated_m + seg_len_m >= float(max_arc_m):
+            remain_m = max(0.0, float(max_arc_m) - accumulated_m)
+            alpha = remain_m / seg_len_m
+            out.append(prev + alpha * seg)
+            break
+        out.append(curr)
+        accumulated_m += seg_len_m
+    if len(out) == 1:
+        out.append(np.asarray(polyline_xy[1], dtype=float))
+    return np.asarray(out, dtype=float)
 
 
 def _sample_cubic_connector(
@@ -618,3 +926,37 @@ def _heading_with_fallback(polyline_xy: np.ndarray, idx: int, fallback: float) -
 
 def _wrap_angle(angle_rad: float) -> float:
     return math.atan2(math.sin(float(angle_rad)), math.cos(float(angle_rad)))
+
+
+def _world_to_local(delta_xy: np.ndarray, *, yaw_rad: float) -> np.ndarray:
+    cos_y = math.cos(-float(yaw_rad))
+    sin_y = math.sin(-float(yaw_rad))
+    return np.array(
+        [
+            cos_y * float(delta_xy[0]) - sin_y * float(delta_xy[1]),
+            sin_y * float(delta_xy[0]) + cos_y * float(delta_xy[1]),
+        ],
+        dtype=float,
+    )
+
+
+def _local_to_world(local_xy: np.ndarray, *, origin_xy: np.ndarray, yaw_rad: float) -> np.ndarray:
+    cos_y = math.cos(float(yaw_rad))
+    sin_y = math.sin(float(yaw_rad))
+    return np.array(
+        [
+            float(origin_xy[0]) + cos_y * float(local_xy[0]) - sin_y * float(local_xy[1]),
+            float(origin_xy[1]) + sin_y * float(local_xy[0]) + cos_y * float(local_xy[1]),
+        ],
+        dtype=float,
+    )
+
+
+def _smoothstep(alpha: float) -> float:
+    x = max(0.0, min(1.0, float(alpha)))
+    return (3.0 * x * x) - (2.0 * x * x * x)
+
+
+def _straight_hold_prefix_yaw(*, current_yaw_rad: float, route_yaw_rad: float) -> float:
+    _ = current_yaw_rad
+    return float(route_yaw_rad)

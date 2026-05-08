@@ -27,6 +27,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+_LATERAL_RELOCALIZATION_BLOCKED_CONTROL_MODES = frozenset({
+    "ROUTE_TRACKING",
+    "MANEUVER_CONTROL",
+})
+
 
 @dataclass(frozen=True)
 class LaneObservation:
@@ -56,8 +61,36 @@ class LaneObservation:
     curve_hint: str = "STRAIGHT"
     camera_yaw_hint_rad: float | None = None
     camera_yaw_hint_confidence: float = 0.0
+    measurement_mode: str = "none"
+    direct_error_valid: bool = False
+    control_policy_mode: str | None = None
+    planner_priority_active: bool = False
     blind_mode: str | None = None
     debug: dict[str, Any] = field(default_factory=dict)
+
+
+def lane_observation_supports_lateral_relocalization(
+    observation: LaneObservation | None,
+    *,
+    min_quality: float = 0.8,
+) -> bool:
+    """Return True when a lane observation is safe for lateral pose recentering."""
+    if observation is None:
+        return False
+    if not bool(observation.direct_error_valid):
+        return False
+    if str(observation.measurement_mode or "none") != "two_line":
+        return False
+    if len(tuple(observation.detected_sides or ())) != 2:
+        return False
+    if float(observation.quality or 0.0) < float(min_quality):
+        return False
+    if str(observation.control_policy_mode or "") in _LATERAL_RELOCALIZATION_BLOCKED_CONTROL_MODES:
+        return False
+    return (
+        observation.direct_error_m is not None
+        or observation.lateral_offset_m is not None
+    )
 
 
 @dataclass(frozen=True)

@@ -5,6 +5,10 @@ from pathlib import Path
 import numpy as np
 
 from src.dashboard.gui.config import settings
+from src.dashboard.gui.widgets._map_path_overlay import (
+    extract_control_path_points,
+    extract_nav_route_preview_points,
+)
 from src.dashboard.gui.widgets._map_click_routing import resolve_click_destination_lanelet
 from src.routing.lanelet.lanelet_map import Lanelet, LaneletMap
 
@@ -80,3 +84,43 @@ def test_default_track_map_dir_uses_backend_track_map_dir(monkeypatch) -> None:
     monkeypatch.setattr(settings, "TRACK_MAP_DIR", expected)
 
     assert settings.default_track_map_dir() == expected
+
+
+def test_extract_nav_route_preview_points_reads_route_preview_payload() -> None:
+    payload = {
+        "route_points": [
+            {"x": 1.0, "y": 2.0},
+            {"x": 3.0, "y": 4.0},
+        ]
+    }
+
+    assert extract_nav_route_preview_points(payload) == [(1.0, 2.0), (3.0, 4.0)]
+
+
+def test_extract_control_path_points_reads_behavior_output_target_path() -> None:
+    payload = {
+        "valid": True,
+        "target_path": [
+            [1.0, 2.0, 0.0],
+            [3.0, 4.0, 0.2],
+            [5.0, 6.0, 0.4],
+        ],
+    }
+
+    assert extract_control_path_points(payload) == [
+        (1.0, 2.0),
+        (3.0, 4.0),
+        (5.0, 6.0),
+    ]
+
+
+def test_extract_control_path_points_hides_invalid_behavior_path() -> None:
+    payload = {
+        "valid": False,
+        "target_path": [
+            [1.0, 2.0, 0.0],
+            [3.0, 4.0, 0.2],
+        ],
+    }
+
+    assert extract_control_path_points(payload) == []

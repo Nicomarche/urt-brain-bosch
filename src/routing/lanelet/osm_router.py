@@ -323,6 +323,48 @@ class OsmRouteGraph:
         path.reverse()
         return path
 
+    def _point_distance_to_lanelet(self, lanelet_id: str, x: float, y: float) -> float | None:
+        lanelet = self.lanelet_map.get_lanelet(str(lanelet_id))
+        if lanelet is None or lanelet.centerline.shape[0] == 0:
+            return None
+        arc_m, _lat_m = lanelet.project_arclength(float(x), float(y))
+        point = _point_at_arclength(lanelet.centerline, arc_m)
+        return float(math.hypot(float(x) - float(point[0]), float(y) - float(point[1])))
+
+    def _nearest_reachable_lanelet_to_point(
+        self,
+        start_id: str,
+        x: float,
+        y: float,
+        *,
+        exclude_ids: Iterable[str] = (),
+        max_candidates: int = 16,
+        max_distance_m: float = 1.50,
+    ) -> str | None:
+        start_id = str(start_id)
+        if start_id not in self.lanelet_map.lanelet_ids:
+            return None
+
+        excluded = {str(item) for item in exclude_ids if str(item)}
+        candidates: list[tuple[float, str]] = []
+        for lanelet_id in self.lanelet_map.lanelet_ids:
+            candidate_id = str(lanelet_id)
+            if candidate_id == start_id or candidate_id in excluded:
+                continue
+            distance_m = self._point_distance_to_lanelet(candidate_id, float(x), float(y))
+            if distance_m is None or distance_m > float(max_distance_m):
+                continue
+            candidates.append((float(distance_m), candidate_id))
+
+        for _distance_m, candidate_id in sorted(candidates, key=lambda item: (item[0], _lanelet_sort_key(item[1])))[:max_candidates]:
+            lanelet_ids = self.shortest_path(start_id, candidate_id)
+            if lanelet_ids:
+                return candidate_id
+            lanelet_ids = self.reference_path_between(start_id, candidate_id)
+            if lanelet_ids:
+                return candidate_id
+        return None
+
     def reference_path_between(self, start_id: str, dest_id: str) -> list[str]:
         ref_ids = list(self.reference_node_ids)
         if not ref_ids:
@@ -343,12 +385,34 @@ class OsmRouteGraph:
         lanelet_ids = self.shortest_path(start_id, dest_id)
         if not lanelet_ids:
             lanelet_ids = self.reference_path_between(start_id, dest_id)
+        route_source = "go_to"
+        if (
+            not lanelet_ids
+            and isinstance(dest_spec, dict)
+            and "x" in dest_spec
+            and "y" in dest_spec
+        ):
+            try:
+                fallback_dest_id = self._nearest_reachable_lanelet_to_point(
+                    start_id,
+                    float(dest_spec["x"]),
+                    float(dest_spec["y"]),
+                    exclude_ids=(dest_id,),
+                )
+            except (TypeError, ValueError):
+                fallback_dest_id = None
+            if fallback_dest_id is not None:
+                lanelet_ids = self.shortest_path(start_id, fallback_dest_id)
+                if not lanelet_ids:
+                    lanelet_ids = self.reference_path_between(start_id, fallback_dest_id)
+                if lanelet_ids:
+                    route_source = "go_to_reachable_fallback"
         if not lanelet_ids:
             return self._empty_route(source="go_to")
         return self.build_dense_path(
             lanelet_ids,
             closed_loop=False,
-            source="go_to",
+            source=route_source,
             start_pose_xy=self._extract_pose_xy(start_spec),
         )
 

@@ -27,8 +27,10 @@ from src.core.messaging.allMessages import NavigationCommand, NavigationStatus
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
-_ROUTE_LANELET_OVERRIDE_ERROR_M = 0.25
-_ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M = 0.08
+_ROUTE_LANELET_OVERRIDE_ERROR_M = 0.60
+_ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M = 0.10
+_ROUTE_LANELET_OVERRIDE_CONFIRM_TICKS = 3
+_ROUTE_LANELET_PROMOTION_MAX_ERROR_M = 0.20
 
 
 def _summarize_nav_command(command: dict | None) -> dict:
@@ -65,6 +67,13 @@ def _summarize_nav_command(command: dict | None) -> dict:
                 preview.append(row)
         summary["destinations_preview"] = preview
     return summary
+
+
+def _max_present_float(*values: float | None) -> float:
+    present = [float(item) for item in values if item is not None]
+    if not present:
+        return 0.0
+    return max(present)
 
 
 class threadNavigationPlanner(ThreadWithStop):
@@ -116,6 +125,12 @@ class threadNavigationPlanner(ThreadWithStop):
         self._last_node_id: object = None
         # Tracking del lanelet (para futura hysteresis si se necesita).
         self._last_lanelet_id: str | None = None
+        self._last_lanelet_resolution_diag: dict[str, float | str] = {
+            "lanelet_source": "none",
+            "route_alignment_error_m": 0.0,
+        }
+        self._route_override_candidate_id: str | None = None
+        self._route_override_candidate_hits: int = 0
         # Auto-lap (sim/demo): si nadie manda NavigationCommand, el thread
         # reactiva el loop de lanelets OSM usando la pose actual como
         # punto de arranque, así el coche da vueltas en loop. Se desactiva
@@ -194,15 +209,26 @@ class threadNavigationPlanner(ThreadWithStop):
         pose_lanelet_id: str | None = None
         pose_lanelet_error_m: float | None = None
         pose_lanelet_source: str | None = None
+        pose_is_predecessor_of_route = False
+        route_is_predecessor_of_pose = False
+        shared_tail: tuple[str, ...] = ()
+        route_tail_ids: tuple[str, ...] = ()
+        override_blocked_reason: str | None = None
 
         route_lanelet_id, route_next_lanelets, route_lanelet_source, route_lanelet_error_m = (
             self._resolve_lanelet_from_active_route(path_update)
         )
         route_lanelet_pose_error_m: float | None = None
+        route_alignment_error_m: float = float(path_update.map_match_error_m or 0.0)
         if route_lanelet_id is not None:
             current_lanelet_id = route_lanelet_id
             next_lanelet_ids = route_next_lanelets
             lanelet_source = route_lanelet_source
+            route_tail_ids = self._route_tail_from_lanelet(
+                route_lanelet_id,
+                route_next_lanelets,
+                route_lanelet_id,
+            )
 
         # Priorizamos la pose fused real. Cuando el matcher se queda pegado a
         # un tramo viejo, usar `matched_x/y` vuelve a meter al BehaviorPlanner
@@ -250,6 +276,11 @@ class threadNavigationPlanner(ThreadWithStop):
                 # Para UI y planning queremos que `current_lanelet_id` siga
                 # representando el carril que pisa el ego, usando la cadena de
                 # ruta sólo como hint de lo que viene después.
+                route_alignment_error_m = _max_present_float(
+                    float(path_update.map_match_error_m or 0.0),
+                    route_lanelet_pose_error_m,
+                    pose_lanelet_error_m,
+                )
                 if (
                     pose_lanelet_id is not None
                     and route_lanelet_id is not None
@@ -263,11 +294,17 @@ class threadNavigationPlanner(ThreadWithStop):
                     route_is_predecessor_of_pose = pose_lanelet_id in route_successors
                     route_close_to_pose = (
                         route_lanelet_pose_error_m is None
-                        or route_lanelet_pose_error_m <= 0.45
+                        or route_lanelet_pose_error_m <= _ROUTE_LANELET_PROMOTION_MAX_ERROR_M
                     )
-                    pose_close_to_lanelet = pose_lanelet_error_m <= 0.45
+                    pose_close_to_lanelet = (
+                        pose_lanelet_error_m <= _ROUTE_LANELET_PROMOTION_MAX_ERROR_M
+                    )
 
-                    if pose_is_predecessor_of_route and pose_close_to_lanelet and route_close_to_pose:
+                    if not (pose_close_to_lanelet and route_close_to_pose):
+                        if current_lanelet_id == route_lanelet_id and route_lanelet_id is not None:
+                            lanelet_source = f"{route_lanelet_source}_degraded"
+                        override_blocked_reason = "alignment_error_exceeds_promotion_threshold"
+                    elif pose_is_predecessor_of_route:
                         hinted_tail = [str(route_lanelet_id)]
                         hinted_tail.extend(
                             str(item)
@@ -291,6 +328,9 @@ class threadNavigationPlanner(ThreadWithStop):
                             current_lanelet_id = pose_lanelet_id
                             next_lanelet_ids = shared_tail
                             lanelet_source = "fused_pose_shared_successor_hold"
+                    if current_lanelet_id == pose_lanelet_id:
+                        self._route_override_candidate_id = None
+                        self._route_override_candidate_hits = 0
                 route_override_metric_m = max(
                     float(path_update.map_match_error_m or 0.0),
                     float(route_lanelet_pose_error_m or 0.0),
@@ -304,9 +344,41 @@ class threadNavigationPlanner(ThreadWithStop):
                     and (pose_lanelet_error_m + _ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M)
                     < route_override_metric_m
                 ):
-                    current_lanelet_id = pose_lanelet_id
-                    next_lanelet_ids = self._future_lanelet_hints(current_lanelet_id, path_update)
-                    lanelet_source = "fused_pose_override"
+                    candidate_is_route_relative = bool(
+                        (pose_lanelet_id in route_tail_ids)
+                        or pose_is_predecessor_of_route
+                        or route_is_predecessor_of_pose
+                        or shared_tail
+                    )
+                    if (
+                        bool(path_update.route_active)
+                        and route_lanelet_id is not None
+                        and not candidate_is_route_relative
+                    ):
+                        override_blocked_reason = "candidate_outside_route_tail"
+                        self._route_override_candidate_id = None
+                        self._route_override_candidate_hits = 0
+                    else:
+                        prev_candidate_id = getattr(self, "_route_override_candidate_id", None)
+                        prev_candidate_hits = int(
+                            getattr(self, "_route_override_candidate_hits", 0) or 0
+                        )
+                        if prev_candidate_id == pose_lanelet_id:
+                            candidate_hits = prev_candidate_hits + 1
+                        else:
+                            candidate_hits = 1
+                        self._route_override_candidate_id = pose_lanelet_id
+                        self._route_override_candidate_hits = candidate_hits
+                        if candidate_hits >= _ROUTE_LANELET_OVERRIDE_CONFIRM_TICKS:
+                            current_lanelet_id = pose_lanelet_id
+                            next_lanelet_ids = self._future_lanelet_hints(current_lanelet_id, path_update)
+                            lanelet_source = "fused_pose_override"
+                            override_blocked_reason = None
+                        else:
+                            override_blocked_reason = "awaiting_override_confirmation"
+                else:
+                    self._route_override_candidate_id = None
+                    self._route_override_candidate_hits = 0
             if current_lanelet_id is None:
                 current_lanelet_id = self._last_lanelet_id
                 lanelet_source = "sticky_last" if current_lanelet_id else "none"
@@ -318,10 +390,15 @@ class threadNavigationPlanner(ThreadWithStop):
                     distance_m=6.0,
                 ) or ()
             self._last_lanelet_id = current_lanelet_id
+            self._last_lanelet_resolution_diag = {
+                "lanelet_source": str(lanelet_source or "none"),
+                "route_alignment_error_m": float(route_alignment_error_m),
+            }
             live_log(
                 "nav_planner",
                 event="lanelet_resolution",
                 lanelet_source=lanelet_source,
+                route_alignment_error_m=float(route_alignment_error_m),
                 current_lanelet_id=current_lanelet_id,
                 next_lanelet_ids=list(next_lanelet_ids or ()),
                 fused_x=float(self._last_pose.x),
@@ -341,6 +418,11 @@ class threadNavigationPlanner(ThreadWithStop):
                     else None
                 ),
                 route_lanelet_pose_error_m=route_lanelet_pose_error_m,
+                route_tail_lanelet_ids=list(route_tail_ids or ()),
+                override_blocked_reason=override_blocked_reason,
+                route_override_candidate_hits=int(
+                    getattr(self, "_route_override_candidate_hits", 0) or 0
+                ),
                 route_id=path_update.route_id,
                 route_active=bool(path_update.route_active),
                 matched_idx=int(path_update.matched_idx or 0),
@@ -352,6 +434,10 @@ class threadNavigationPlanner(ThreadWithStop):
             # No queremos romper el ciclo del planner por una query de mapa.
             # Si falla, dejamos current_lanelet_id en None y LaneKeep cae
             # en fallback como antes (estado pre-fix).
+            self._last_lanelet_resolution_diag = {
+                "lanelet_source": str(lanelet_source or "none"),
+                "route_alignment_error_m": float(route_alignment_error_m),
+            }
             if self.logging is not None:
                 self.logging.exception("lanelet_map query failed")
         return current_lanelet_id, next_lanelet_ids, regulatory_ahead
@@ -564,6 +650,7 @@ class threadNavigationPlanner(ThreadWithStop):
         )
 
         route_context = self._build_route_context(path_update, time.time())
+        lanelet_diag = dict(getattr(self, "_last_lanelet_resolution_diag", {}) or {})
         self.route_context_buffer.write(route_context, timestamp=route_context.timestamp)
         if self.tracking_state is not None and hasattr(self.tracking_state, "update_from_route_context"):
             self.tracking_state.update_from_route_context(route_context)
@@ -572,6 +659,8 @@ class threadNavigationPlanner(ThreadWithStop):
             "nav_planner", event="route_update",
             route_id=route_context.route_id,
             route_source=route_context.route_source,
+            lanelet_source=str(lanelet_diag.get("lanelet_source", "none") or "none"),
+            route_alignment_error_m=float(lanelet_diag.get("route_alignment_error_m", 0.0) or 0.0),
             current_node_id=route_context.current_node_id,
             upcoming_node_id=route_context.upcoming_node_id,
             current_lanelet_id=route_context.current_lanelet_id,
@@ -620,6 +709,10 @@ class threadNavigationPlanner(ThreadWithStop):
                 {
                     "current_lanelet_id": route_context.current_lanelet_id,
                     "next_lanelet_ids": list(route_context.next_lanelet_ids or ()),
+                    "lanelet_source": str(lanelet_diag.get("lanelet_source", "none") or "none"),
+                    "route_alignment_error_m": float(
+                        lanelet_diag.get("route_alignment_error_m", 0.0) or 0.0
+                    ),
                     "regulatory_ahead": [
                         {
                             "id": reg.element_id,

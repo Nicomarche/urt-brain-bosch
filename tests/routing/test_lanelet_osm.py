@@ -135,6 +135,50 @@ _LOCAL_XY_OPPOSITE_OSM = """<?xml version='1.0' encoding='UTF-8'?>
 """
 
 
+_LOCAL_XY_UNREACHABLE_DEST_FALLBACK_OSM = """<?xml version='1.0' encoding='UTF-8'?>
+<osm version="0.6" generator="pytest">
+  <node id="1" lat="0.0" lon="0.0"><tag k="local_x" v="1.0" /><tag k="local_y" v="2.0" /></node>
+  <node id="2" lat="0.0" lon="0.0"><tag k="local_x" v="2.0" /><tag k="local_y" v="2.0" /></node>
+  <node id="3" lat="0.0" lon="0.0"><tag k="local_x" v="1.0" /><tag k="local_y" v="1.0" /></node>
+  <node id="4" lat="0.0" lon="0.0"><tag k="local_x" v="2.0" /><tag k="local_y" v="1.0" /></node>
+  <node id="5" lat="0.0" lon="0.0"><tag k="local_x" v="3.0" /><tag k="local_y" v="2.0" /></node>
+  <node id="6" lat="0.0" lon="0.0"><tag k="local_x" v="3.0" /><tag k="local_y" v="1.0" /></node>
+  <node id="7" lat="0.0" lon="0.0"><tag k="local_x" v="2.1" /><tag k="local_y" v="1.8" /></node>
+  <node id="8" lat="0.0" lon="0.0"><tag k="local_x" v="3.1" /><tag k="local_y" v="1.8" /></node>
+  <node id="9" lat="0.0" lon="0.0"><tag k="local_x" v="2.1" /><tag k="local_y" v="1.4" /></node>
+  <node id="10" lat="0.0" lon="0.0"><tag k="local_x" v="3.1" /><tag k="local_y" v="1.4" /></node>
+
+  <way id="10"><nd ref="1"/><nd ref="2"/></way>
+  <way id="20"><nd ref="3"/><nd ref="4"/></way>
+  <way id="11"><nd ref="2"/><nd ref="5"/></way>
+  <way id="21"><nd ref="4"/><nd ref="6"/></way>
+  <way id="30"><nd ref="7"/><nd ref="8"/></way>
+  <way id="40"><nd ref="9"/><nd ref="10"/></way>
+
+  <relation id="100">
+    <member type="way" ref="10" role="left"/>
+    <member type="way" ref="20" role="right"/>
+    <tag k="type" v="lanelet"/>
+    <tag k="subtype" v="road"/>
+  </relation>
+
+  <relation id="200">
+    <member type="way" ref="11" role="left"/>
+    <member type="way" ref="21" role="right"/>
+    <tag k="type" v="lanelet"/>
+    <tag k="subtype" v="road"/>
+  </relation>
+
+  <relation id="300">
+    <member type="way" ref="30" role="left"/>
+    <member type="way" ref="40" role="right"/>
+    <tag k="type" v="lanelet"/>
+    <tag k="subtype" v="road"/>
+  </relation>
+</osm>
+"""
+
+
 def test_load_lanelet2_osm_builds_lanelets_and_topology(tmp_path: Path) -> None:
     osm_path = tmp_path / "mini_lanelet.osm"
     osm_path.write_text(_MINI_LANELET_OSM, encoding="utf-8")
@@ -240,6 +284,22 @@ def test_path_manager_preserves_explicit_lanelet_id_for_direct_xy_commands(tmp_p
     assert manager.active_route.node_ids[-1] == "200"
 
 
+def test_router_falls_back_to_nearest_reachable_lanelet_when_explicit_destination_is_disconnected(
+    tmp_path: Path,
+) -> None:
+    osm_path = tmp_path / "unreachable_dest_fallback.osm"
+    osm_path.write_text(_LOCAL_XY_UNREACHABLE_DEST_FALLBACK_OSM, encoding="utf-8")
+
+    router = OsmRouteGraph(str(osm_path), step_m=0.10, start_lanelet_id="100")
+    route = router.go_to(
+        {"x": 1.2, "y": 1.5, "yaw_rad": 0.0},
+        {"x": 2.6, "y": 1.6, "lanelet_id": "300"},
+    )
+
+    assert route.source == "go_to_reachable_fallback"
+    assert route.node_ids == ["100", "200"]
+
+
 def test_load_lanelet2_osm_exposes_map_metadata_from_osm_bounds(tmp_path: Path) -> None:
     osm_path = tmp_path / "local_xy_lanelet.osm"
     osm_path.write_text(_LOCAL_XY_LANELET_OSM, encoding="utf-8")
@@ -248,7 +308,7 @@ def test_load_lanelet2_osm_exposes_map_metadata_from_osm_bounds(tmp_path: Path) 
     metadata = lanelet_map.get_map_metadata()
 
     assert metadata["source"] == "lanelet2_osm"
-    assert metadata["y_axis_inverted"] is True
+    assert metadata["y_axis_inverted"] is False
     assert metadata["world_bounds"]["x_min"] == 1.0
     assert metadata["world_bounds"]["x_max"] == 2.0
     assert metadata["world_bounds"]["y_min"] == 1.0
@@ -265,6 +325,27 @@ def test_repo_sim_map_uses_contiguous_successors_for_reference_loop() -> None:
     assert lanelet_map.successors_of("52") == ("1945",)
     assert lanelet_map.successors_of("1765") == ("443",)
     assert "186" in lanelet_map.successors_of("1945")
+    assert "1887" in lanelet_map.successors_of("2202")
+    assert "84" in lanelet_map.successors_of("1887")
+    assert "2201" in lanelet_map.predecessors_of("1887")
 
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
     assert router.reference_node_ids[:4] == ["9", "22", "33", "1945"]
+
+
+def test_repo_sim_map_can_route_to_lanelet_1887_without_fallback() -> None:
+    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
+
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
+    lanelet = router.lanelet_map.get_lanelet("1887")
+    assert lanelet is not None
+    mid = lanelet.centerline[lanelet.centerline.shape[0] // 2]
+
+    route = router.go_to(
+        {"lanelet_id": "22"},
+        {"x": float(mid[0]), "y": float(mid[1]), "lanelet_id": "1887"},
+    )
+
+    assert route.source == "go_to"
+    assert route.node_ids
+    assert route.node_ids[-1] == "1887"

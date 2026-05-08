@@ -1314,6 +1314,10 @@ Args:
         self._recent_two_line_straight_until = 0.0
         self._last_camera_yaw_hint_rad = None
         self._last_camera_yaw_hint_confidence = 0.0
+        self._last_two_line_reference_y = 0
+        self._last_two_line_ref_px_per_cm = 0.0
+        self._last_two_line_reference_monotonic = 0.0
+        self._last_two_line_reference_sequence = 0
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -4354,6 +4358,13 @@ Args:
             return None   # target_y fuera del segmento → no extrapolar
         return x1 + t * (x2 - x1)
 
+    def _set_direct_error_debug(self, debug_info, *, measurement_mode, valid, reason):
+        if not isinstance(debug_info, dict):
+            return
+        debug_info['measurement_mode'] = str(measurement_mode)
+        debug_info['direct_error_valid'] = bool(valid)
+        debug_info['direct_error_reason'] = str(reason)
+
     def _compute_sl_physical_error(self, side, real_ref_x, img_w, px_per_cm, debug_info=None):
         """Physical direct_error_m for single-line mode with safety margin.
 
@@ -4369,6 +4380,12 @@ Args:
         Returns None if the inputs are invalid.
         """
         if px_per_cm < 0.5 or real_ref_x is None or real_ref_x <= 0.0:
+            self._set_direct_error_debug(
+                debug_info,
+                measurement_mode='single_line',
+                valid=False,
+                reason='invalid_single_line_reference',
+            )
             return None
 
         _lw_cm      = float(self.lane_width_cm)
@@ -4424,6 +4441,27 @@ Args:
             debug_info['sl_is_outer_line']   = is_outer
             debug_info['sl_offtrack_cm']     = round(_offtrack_cm, 2)
 
+        geometry_invalid = (
+            D_left_cm < -1.0
+            or D_right_cm < -1.0
+            or D_left_cm > (_lw_cm + _safety_cm)
+            or D_right_cm > (_lw_cm + _safety_cm)
+        )
+        if geometry_invalid:
+            self._set_direct_error_debug(
+                debug_info,
+                measurement_mode='single_line',
+                valid=False,
+                reason='impossible_lane_geometry',
+            )
+            return None
+
+        self._set_direct_error_debug(
+            debug_info,
+            measurement_mode='single_line',
+            valid=True,
+            reason='single_line_physical',
+        )
         return direct_error_m
 
     def _get_single_line_physical_direct_error(
@@ -4436,25 +4474,49 @@ Args:
     ):
         """Resolve single-line physical direct_error_m at the shared reference_y."""
         local_mask_guidance = local_mask_guidance if isinstance(local_mask_guidance, dict) else {}
-        side_key = 'left_x' if side == 'left' else 'right_x'
         _std_ref_y = int(getattr(self, '_last_two_line_reference_y', 0) or 0)
         _sl_ppc = float(getattr(self, '_last_two_line_ref_px_per_cm', 0.0) or 0.0)
-        if _std_ref_y > 0 and _sl_ppc > 0.5 and mask_guidance_line is not None:
-            _sl_ref_x = self._interp_line_x_at_y(mask_guidance_line, _std_ref_y)
-            # A nearly-horizontal line can project outside the image at the shared
-            # reference_y; fall back to the native single-line sample to avoid spikes.
-            if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
-                if isinstance(debug_info, dict):
-                    _sl_ppc = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-                else:
-                    _sl_ppc = 0.0
-                _sl_ref_x = float(local_mask_guidance.get(side_key, 0.0) or 0.0)
-        else:
-            if isinstance(debug_info, dict):
-                _sl_ppc = float(debug_info.get('single_line_px_per_cm', 0.0) or 0.0)
-            else:
-                _sl_ppc = 0.0
-            _sl_ref_x = float(local_mask_guidance.get(side_key, 0.0) or 0.0)
+        ref_age_s = max(
+            0.0,
+            time.monotonic() - float(getattr(self, '_last_two_line_reference_monotonic', 0.0) or 0.0),
+        )
+        ref_age_frames = max(
+            0,
+            int(getattr(self, '_last_processed_sequence', 0) or 0)
+            - int(getattr(self, '_last_two_line_reference_sequence', 0) or 0),
+        )
+        if isinstance(debug_info, dict):
+            debug_info['sl_reference_age_s'] = round(ref_age_s, 4)
+            debug_info['sl_reference_age_frames'] = int(ref_age_frames)
+
+        has_fresh_two_line_reference = (
+            _std_ref_y > 0
+            and _sl_ppc > 0.5
+            and mask_guidance_line is not None
+            and ref_age_s <= 0.35
+            and ref_age_frames <= 3
+        )
+        if not has_fresh_two_line_reference:
+            reason = 'stale_two_line_reference'
+            if _std_ref_y <= 0 or _sl_ppc <= 0.5 or mask_guidance_line is None:
+                reason = 'missing_two_line_reference'
+            self._set_direct_error_debug(
+                debug_info,
+                measurement_mode='single_line',
+                valid=False,
+                reason=reason,
+            )
+            return None
+
+        _sl_ref_x = self._interp_line_x_at_y(mask_guidance_line, _std_ref_y)
+        if _sl_ref_x is None or not (1.0 <= _sl_ref_x <= float(img_w) - 1.0):
+            self._set_direct_error_debug(
+                debug_info,
+                measurement_mode='single_line',
+                valid=False,
+                reason='shared_reference_out_of_segment',
+            )
+            return None
         return self._compute_sl_physical_error(
             side, _sl_ref_x, img_w, _sl_ppc, debug_info
         )
@@ -8781,6 +8843,40 @@ Much faster and better for curves than blind sliding window."""
         if self.visual_candidate_buffer is not None and candidate is not None:
             self.visual_candidate_buffer.write(candidate, timestamp=float(candidate.timestamp))
         if self.visual_state_buffer is not None:
+            frame_trace = dict(self._last_frame_trace or {})
+            frame_debug = dict(frame_trace.get("debug") or {})
+            control_policy_mode = getattr(self, "_control_policy_mode", None)
+            planner_priority_active = bool(getattr(self, "_planner_priority_active", False))
+            frame_debug["control_policy_mode"] = control_policy_mode
+            frame_debug["planner_priority_active"] = planner_priority_active
+            frame_debug["planner_priority"] = planner_priority_active
+            measurement_mode = str(frame_debug.get("measurement_mode", "") or "")
+            if measurement_mode not in {"two_line", "single_line", "route_tracking", "blind", "none"}:
+                blind_mode = str(frame_debug.get("blind_control_mode", "") or "")
+                if blind_mode == "route_tracking":
+                    measurement_mode = "route_tracking"
+                elif blind_mode:
+                    measurement_mode = "blind"
+                else:
+                    measurement_mode = "none"
+                frame_debug["measurement_mode"] = measurement_mode
+            if (
+                measurement_mode == "single_line"
+                and (
+                    control_policy_mode in {"ROUTE_TRACKING", "MANEUVER_CONTROL"}
+                    or planner_priority_active
+                )
+            ):
+                frame_debug["direct_error_valid"] = False
+                frame_debug["direct_error_reason"] = "policy_blocked"
+            elif "direct_error_valid" not in frame_debug:
+                frame_debug["direct_error_valid"] = bool(
+                    measurement_mode == "two_line"
+                    and frame_debug.get("two_line_direct_error_m") is not None
+                )
+            if not frame_debug.get("direct_error_valid", False):
+                frame_debug.setdefault("direct_error_reason", "no_lateral_measurement")
+            frame_trace["debug"] = frame_debug
             snapshot = VisualStateSnapshot(
                 timestamp=time.time(),
                 frame_sequence=int(frame_sequence or 0),
@@ -8790,7 +8886,7 @@ Much faster and better for curves than blind sliding window."""
                 heading_error_rad=float(getattr(self, "_heading_error", 0.0) or 0.0),
                 camera_yaw_hint_rad=self._last_camera_yaw_hint_rad,
                 camera_yaw_hint_confidence=float(self._last_camera_yaw_hint_confidence or 0.0),
-                frame_trace=dict(self._last_frame_trace or {}),
+                frame_trace=frame_trace,
                 local_lane_payload=dict(self._build_local_lane_payload_log() or {}),
                 stopline_debug=dict(getattr(self, "_last_stopline_visual_debug", None) or {}),
                 candidate=candidate,
@@ -10084,6 +10180,7 @@ Much faster and better for curves than blind sliding window."""
                 debug_info['kalman_age'] = self._kalman_age_frames
 
             if len(detected_sides) >= 2:
+                debug_info['measurement_mode'] = 'two_line'
                 self.consecutive_single_left = 0
                 self.consecutive_single_right = 0
                 self.frames_without_line = 0
@@ -10142,6 +10239,10 @@ Much faster and better for curves than blind sliding window."""
                     # Single-line mode must use the SAME reference_y so that left_x/right_x
                     # positions and px_per_cm correspond to the same point in the image.
                     self._last_two_line_ref_px_per_cm = _ref_lw_px / max(1e-3, _lw_cm)
+                    self._last_two_line_reference_monotonic = time.monotonic()
+                    self._last_two_line_reference_sequence = int(
+                        getattr(self, '_last_processed_sequence', 0) or 0
+                    )
                     _two_line_ref_y = local_mask_guidance.get('reference_y')
                     if _two_line_ref_y is not None:
                         self._last_two_line_reference_y = int(_two_line_ref_y)
@@ -10226,6 +10327,20 @@ Much faster and better for curves than blind sliding window."""
                             )
                         else:
                             debug_info['tracking_camera_correction_blocked'] = 'delegated_pose_estimator'
+                    if direct_error_m is not None:
+                        self._set_direct_error_debug(
+                            debug_info,
+                            measurement_mode='two_line',
+                            valid=True,
+                            reason='two_line_physical',
+                        )
+                    elif 'direct_error_valid' not in debug_info:
+                        self._set_direct_error_debug(
+                            debug_info,
+                            measurement_mode='two_line',
+                            valid=False,
+                            reason='two_line_direct_error_unavailable',
+                        )
                     _two_line_heading = 0.0 if direct_error_m is not None else heading
                     steering_angle = self._compute_lateral_control(
                         error, _two_line_heading, speed_val, curve_reference=curve_reference,
@@ -10243,6 +10358,7 @@ Much faster and better for curves than blind sliding window."""
                 steering_angle = sum(self.steer_history) / len(self.steer_history)
                 steering_angle = max(-self.max_steering, min(self.max_steering, steering_angle))
             elif 'left' in detected_sides:
+                debug_info['measurement_mode'] = 'single_line'
                 self.consecutive_single_left += 1
                 self.consecutive_single_right = 0
                 self.last_seen_side = "left"
@@ -10265,6 +10381,20 @@ Much faster and better for curves than blind sliding window."""
                         local_mask_guidance,
                         img_w,
                         debug_info=debug_info,
+                    )
+                elif transversal_recovery_active:
+                    self._set_direct_error_debug(
+                        debug_info,
+                        measurement_mode='single_line',
+                        valid=False,
+                        reason='transversal_recovery',
+                    )
+                else:
+                    self._set_direct_error_debug(
+                        debug_info,
+                        measurement_mode='single_line',
+                        valid=False,
+                        reason=f'non_physical_mode:{single_line_mode or "unknown"}',
                     )
 
                 if (
@@ -10368,6 +10498,7 @@ Much faster and better for curves than blind sliding window."""
                         debug_info['single_line_transition_blend'] = transition_blend
                 self.frames_without_line = 0
             elif 'right' in detected_sides:
+                debug_info['measurement_mode'] = 'single_line'
                 self.consecutive_single_right += 1
                 self.consecutive_single_left = 0
                 self.last_seen_side = "right"
@@ -10390,6 +10521,20 @@ Much faster and better for curves than blind sliding window."""
                         local_mask_guidance,
                         img_w,
                         debug_info=debug_info,
+                    )
+                elif transversal_recovery_active:
+                    self._set_direct_error_debug(
+                        debug_info,
+                        measurement_mode='single_line',
+                        valid=False,
+                        reason='transversal_recovery',
+                    )
+                else:
+                    self._set_direct_error_debug(
+                        debug_info,
+                        measurement_mode='single_line',
+                        valid=False,
+                        reason=f'non_physical_mode:{single_line_mode or "unknown"}',
                     )
 
                 if (

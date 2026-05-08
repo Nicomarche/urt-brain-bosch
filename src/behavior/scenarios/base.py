@@ -22,6 +22,8 @@ from src.behavior.context import PlanningContext
 from src.behavior.trajectory_builder import build_target_path, build_target_path_from_route
 from src.core.types.behavior import BehaviorOutput, ScenarioName
 
+_ROUTE_WAYPOINT_REALIGN_ERROR_M = 0.20
+
 
 @dataclass
 class HysteresisGate:
@@ -98,8 +100,14 @@ class BaseScenario(ABC):
         """
         notes = dict(notes or {})
         route_waypoints = list(ctx.route.route_waypoints or [])
-        if route_waypoints:
-            target_path = build_target_path_from_route(
+        realign_to_lanelet = (
+            bool(route_waypoints)
+            and float(ctx.route.map_match_error_m or 0.0) > _ROUTE_WAYPOINT_REALIGN_ERROR_M
+            and ctx.lanelet_map is not None
+            and bool(ctx.route.current_lanelet_id)
+        )
+        if route_waypoints and not realign_to_lanelet:
+            target_path, route_bridge_meta = build_target_path_from_route(
                 route_waypoints=route_waypoints,
                 matched_idx=int(ctx.route.matched_idx or 0),
                 start_xy=(ctx.pose.fused_pose.x, ctx.pose.fused_pose.y),
@@ -111,8 +119,12 @@ class BaseScenario(ABC):
                 target_speed_mps=target_speed_mps,
                 horizon_n=ctx.horizon_n,
                 dt=ctx.dt,
+                return_metadata=True,
             )
             notes.setdefault("path_source", "route_waypoints")
+            for key in ("bridge_mode", "protected_prefix_m", "merge_start_idx", "merge_end_idx"):
+                if route_bridge_meta.get(key) is not None:
+                    notes[key] = route_bridge_meta[key]
         elif ctx.lanelet_map is not None and ctx.route.current_lanelet_id:
             target_path = build_target_path(
                 lanelet_map=ctx.lanelet_map,
@@ -124,9 +136,13 @@ class BaseScenario(ABC):
                 next_lanelet_hint_ids=ctx.route.next_lanelet_ids,
             )
             notes.setdefault("path_source", "lanelet_centerline")
+            if realign_to_lanelet:
+                notes["route_alignment_fallback"] = True
+                notes["route_alignment_error_m"] = float(ctx.route.map_match_error_m or 0.0)
         else:
             return self._fallback_plan(ctx, reason="no_lanelet_map_or_id")
         speed_profile = np.full(ctx.horizon_n, float(target_speed_mps), dtype=float)
+        stop_required = False
 
         return BehaviorOutput(
             timestamp=ctx.now_s,
@@ -135,7 +151,7 @@ class BaseScenario(ABC):
             speed_profile=speed_profile,
             scenario_name=scenario_name,
             valid=True,
-            stop_required=False,
+            stop_required=stop_required,
             notes=notes,
         )
 

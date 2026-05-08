@@ -162,6 +162,7 @@ class SocketIOClient(QObject):
     cars_signal = pyqtSignal(object)             # list[dict]
     semaphores_signal = pyqtSignal(object)       # list[dict]
     navigation_status_signal = pyqtSignal(object)
+    behavior_output_signal = pyqtSignal(object)   # dict: target_path, speed_profile, notes
     motor_command_signal = pyqtSignal(object)     # dict: steering_deg, speed_mps, valid, source, reason
     gps_fix_signal = pyqtSignal(object)           # dict: world_x, world_y, timestamp
     camera_frame_signal = pyqtSignal(QImage)     # decoded JPEG/PNG → QImage
@@ -428,6 +429,10 @@ class SocketIOClient(QObject):
         @self._sio.on(ev.EVT_NAVIGATION_STATUS)
         def _on_nav_status(data):  # noqa: ANN001
             self.navigation_status_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_BEHAVIOR_OUTPUT)
+        def _on_behavior_output(data):  # noqa: ANN001
+            self.behavior_output_signal.emit(_unwrap_payload(data))
 
         # ---- Camera ----
         # Preferred (binary JPEG): payload is raw bytes.

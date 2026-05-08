@@ -150,6 +150,10 @@ else
     export LD_LIBRARY_PATH="${ACADOS_SOURCE_DIR}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
+export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"
+export URT_EXPECTED_MPC_BACKEND="${URT_EXPECTED_MPC_BACKEND:-acados}"
+export URT_PYTHON_BIN="$PYTHON_BIN"
+
 # macOS + --monitor: if no brew/gz interpreter was chosen, we still need a venv
 # (Homebrew Python is PEP-668; system ``python3`` has no PyQt5).
 if [[ "$PLATFORM" == "Darwin" && "$MODE" == "monitor" && "$PYTHON_BIN" == "python3" ]]; then
@@ -175,6 +179,7 @@ fi
 if [[ "${SKIP_ACADOS_CHECK:-0}" != "1" ]]; then
     bash "$SCRIPT_DIR/scripts/ensure_acados.sh" "$PYTHON_BIN" "$ACADOS_SOURCE_DIR"
 fi
+export URT_ACADOS_CHECK_PASSED=1
 
 # ---- Backend-only (Jetson, or --no-gui on Mac) -----------------------------
 if [[ "$MODE" == "no-gui" ]] || [[ "$PLATFORM" != "Darwin" ]]; then

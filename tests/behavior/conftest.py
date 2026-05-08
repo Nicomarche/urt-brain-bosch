@@ -155,6 +155,7 @@ def make_context(
     matched_idx: int = 0,
     target_idx: int = 0,
     matched_pose: tuple[float, float, float] | None = None,
+    map_match_error_m: float = 0.0,
 ) -> PlanningContext:
     """Factory para PlanningContext con defaults razonables."""
     pose = PoseEstimate(
@@ -176,6 +177,7 @@ def make_context(
         maneuver_type=maneuver_type,
         matched_idx=int(matched_idx),
         target_idx=int(target_idx),
+        map_match_error_m=float(map_match_error_m),
         matched_pose=Pose2D(
             x=float((matched_pose or (pose_x, pose_y, pose_yaw))[0]),
             y=float((matched_pose or (pose_x, pose_y, pose_yaw))[1]),

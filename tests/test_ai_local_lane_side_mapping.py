@@ -35,9 +35,17 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.detector.lane_width_cm = 35.0
         self.detector.line_width_cm = 2.0
         self.detector.car_width = 19.0
+        self.detector.lane_safety_margin_cm = 5.0
         self.detector.camera_to_front_axle = 0.0
         self.detector._last_local_ai_lane_width_px = None
         self.detector._last_px_per_cm = None
+        self.detector._last_good_steering = 0.0
+        self.detector._curve_state = "STRAIGHT"
+        self.detector._last_processed_sequence = 0
+        self.detector._last_two_line_reference_y = 0
+        self.detector._last_two_line_ref_px_per_cm = 0.0
+        self.detector._last_two_line_reference_monotonic = 0.0
+        self.detector._last_two_line_reference_sequence = 0
         self.detector.show_debug = False
         self.detector._smooth_detected_line = lambda line, side: line
 
@@ -244,6 +252,45 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
 
         self.assertTrue(is_noisy)
         self.assertTrue(reason.startswith("error_jump("))
+
+    def test_compute_single_line_physical_error_rejects_impossible_lane_geometry(self):
+        debug_info = {}
+        px_per_cm = 309.75 / self.detector.lane_width_cm
+
+        direct_error_m = self.detector._compute_sl_physical_error(
+            "right",
+            243.56,
+            640,
+            px_per_cm,
+            debug_info,
+        )
+
+        self.assertIsNone(direct_error_m)
+        self.assertFalse(debug_info["direct_error_valid"])
+        self.assertEqual(debug_info["direct_error_reason"], "impossible_lane_geometry")
+        self.assertAlmostEqual(debug_info["sl_D_left_cm"], 43.64, places=2)
+        self.assertAlmostEqual(debug_info["sl_D_right_cm"], -8.64, places=2)
+
+    def test_single_line_physical_error_rejects_stale_two_line_reference(self):
+        self.detector._last_two_line_reference_y = 75
+        self.detector._last_two_line_ref_px_per_cm = 8.0
+        self.detector._last_two_line_reference_monotonic = time.monotonic() - 0.50
+        self.detector._last_two_line_reference_sequence = 3
+        self.detector._last_processed_sequence = 10
+        debug_info = {}
+        mask_guidance_line = np.array([[250, 95, 230, 55]], dtype=np.int32)
+
+        direct_error_m = self.detector._get_single_line_physical_direct_error(
+            "left",
+            mask_guidance_line,
+            {},
+            640,
+            debug_info=debug_info,
+        )
+
+        self.assertIsNone(direct_error_m)
+        self.assertFalse(debug_info["direct_error_valid"])
+        self.assertEqual(debug_info["direct_error_reason"], "stale_two_line_reference")
 
     def test_build_local_mask_guidance_single_line_uses_conservative_center_after_streak(self):
         self.detector.consecutive_single_right = 4

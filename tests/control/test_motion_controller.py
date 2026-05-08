@@ -20,7 +20,8 @@ import math
 import numpy as np
 import pytest
 
-from src.control.motion_controller import MotionController
+import src.control.motion_controller as motion_controller_mod
+from src.control.motion_controller import MotionController, PurePursuitSolver
 from src.core.types.behavior import BehaviorOutput, ScenarioName
 from src.core.types.control import MotorCommand
 from src.core.types.pose import Pose2D, PoseEstimate
@@ -64,6 +65,20 @@ class _FakeSolver:
     @property
     def debug(self) -> dict:
         return dict(self._debug)
+
+
+class _CaptureSolver(_FakeSolver):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.last_x_current = None
+        self.last_state_refs = None
+        self.last_input_refs = None
+
+    def compute(self, x_current, state_refs, input_refs, **kwargs):
+        self.last_x_current = np.asarray(x_current, dtype=np.float64).copy()
+        self.last_state_refs = np.asarray(state_refs, dtype=np.float64).copy()
+        self.last_input_refs = np.asarray(input_refs, dtype=np.float64).copy()
+        return super().compute(x_current, state_refs, input_refs, **kwargs)
 
 
 def _bo(
@@ -163,6 +178,23 @@ def test_happy_path_returns_solver_values() -> None:
     assert cmd.steering_deg == pytest.approx(-3.5)
 
 
+def test_compute_out_logs_backend_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, dict]] = []
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.25, -3.5))))
+    monkeypatch.setattr(
+        motion_controller_mod,
+        "live_log",
+        lambda thread, **payload: events.append((thread, payload)),
+    )
+
+    cmd = mc.compute(_bo(), _pose())
+
+    assert cmd.valid is True
+    compute_out = [payload for thread, payload in events if thread == "mpc" and payload.get("event") == "compute_out"]
+    assert compute_out
+    assert compute_out[-1]["backend"] == "fakesolver"
+
+
 def test_negative_speed_clamped_to_zero() -> None:
     """BFMC no usa reverse — el controller fuerza velocidad >= 0."""
     mc = MotionController(solver=_FakeSolver(result=(-0.20, 1.0)))
@@ -188,6 +220,74 @@ def test_solver_speed_is_capped_to_current_planner_request() -> None:
     assert cmd.speed_mps == pytest.approx(0.10)
 
 
+def test_motion_controller_converts_osm_frame_before_calling_solver() -> None:
+    solver = _CaptureSolver(result=(0.10, 4.0))
+    mc = _disable_rate_limits(MotionController(solver=solver))
+    pose = PoseEstimate(fused_pose=Pose2D(x=4.0120, y=5.9004, yaw=0.0))
+    behavior_output = BehaviorOutput(
+        timestamp=0.0,
+        dt=0.05,
+        target_path=np.array(
+            [
+                [4.0120, 5.9004, 0.0],
+                [4.5017, 5.9004, 0.0],
+                [4.9900, 5.8987, -0.0091],
+                [5.4764, 5.8942, -0.0099],
+                [5.9424, 5.8896, -0.0099],
+                [6.3785, 5.8225, -0.3901],
+            ],
+            dtype=np.float64,
+        ),
+        speed_profile=np.full(5, 0.10),
+        scenario_name=ScenarioName.INTERSECTION.value,
+        valid=True,
+    )
+
+    cmd = mc.compute(behavior_output, pose)
+
+    assert cmd.valid is True
+    assert solver.last_x_current is not None
+    assert solver.last_state_refs is not None
+    assert solver.last_x_current.tolist() == pytest.approx([4.0120, -5.9004, 0.0])
+    assert solver.last_state_refs[0].tolist() == pytest.approx([4.0120, -5.9004, 0.0])
+    assert solver.last_state_refs[-1].tolist() == pytest.approx([6.3785, -5.8225, 0.3901])
+
+
+def test_visual_left_route_in_osm_frame_produces_positive_left_steer() -> None:
+    solver = PurePursuitSolver(
+        horizon_n=5,
+        min_lookahead_m=0.90,
+        lookahead_gain_s=0.0,
+        max_steering_deg=25.0,
+        output_deadband_deg=0.0,
+    )
+    mc = _disable_rate_limits(MotionController(solver=solver))
+    pose = PoseEstimate(fused_pose=Pose2D(x=4.0120, y=5.9004, yaw=0.0))
+    behavior_output = BehaviorOutput(
+        timestamp=0.0,
+        dt=0.05,
+        target_path=np.array(
+            [
+                [4.0120, 5.9004, 0.0],
+                [4.2500, 5.9004, 0.0],
+                [4.5000, 5.9004, 0.0],
+                [4.7600, 5.8600, -0.1600],
+                [4.9800, 5.7600, -0.4200],
+                [5.1600, 5.5800, -0.9000],
+            ],
+            dtype=np.float64,
+        ),
+        speed_profile=np.full(5, 0.10),
+        scenario_name=ScenarioName.INTERSECTION.value,
+        valid=True,
+    )
+
+    cmd = mc.compute(behavior_output, pose)
+
+    assert cmd.valid is True
+    assert cmd.steering_deg > 0.0
+
+
 def test_speed_rate_limit_only_applies_when_accelerating() -> None:
     """Si el solver acelera fuerte, el controller sube gradual."""
     mc = MotionController(solver=_FakeSolver(result=(0.30, 0.0)))
@@ -200,6 +300,79 @@ def test_reset_propagates_to_solver() -> None:
     mc = MotionController(solver=fake)
     mc.reset()
     assert fake.reset_calls == 1
+
+
+def test_motion_controller_logs_backend_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, dict]] = []
+
+    class _ReadyAcados:
+        def __init__(self, *_, **__):
+            self.ready = True
+            self.load_error = None
+            self._N = 20
+
+        def update_weights(self, **_kwargs):
+            return None
+
+        def update_bounds(self, **_kwargs):
+            return None
+
+        def reset(self):
+            return None
+
+        @property
+        def N(self) -> int:
+            return self._N
+
+        @property
+        def debug(self) -> dict:
+            return {"solver": "acados"}
+
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "FORCE_PURE_PURSUIT", False, raising=False)
+    monkeypatch.setattr(motion_controller_mod, "AcadosMPC", _ReadyAcados)
+    monkeypatch.setattr(
+        motion_controller_mod,
+        "live_log",
+        lambda thread, **payload: events.append((thread, payload)),
+    )
+
+    mc = MotionController()
+    assert mc.ready is True
+    assert mc.horizon == 20
+    assert events
+    assert events[0][0] == "mpc"
+    assert events[0][1]["event"] == "backend_selected"
+    assert events[0][1]["backend"] == "acados"
+    assert events[0][1]["acados_ready"] is True
+
+
+def test_motion_controller_requires_acados_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _UnavailableAcados:
+        def __init__(self, *_, **__):
+            self.ready = False
+            self.load_error = "mock acados unavailable"
+            self._N = 0
+
+        @property
+        def N(self) -> int:
+            return self._N
+
+        @property
+        def debug(self) -> dict:
+            return {}
+
+        def reset(self):
+            return None
+
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "FORCE_PURE_PURSUIT", False, raising=False)
+    monkeypatch.setattr(motion_controller_mod, "AcadosMPC", _UnavailableAcados)
+
+    with pytest.raises(motion_controller_mod.AcadosBackendUnavailableError, match="Acados is required"):
+        MotionController()
 
 
 # ---------- PurePursuitSolver (fallback usado en sim/dev sin acados) ------
@@ -266,14 +439,10 @@ def test_pure_pursuit_right_curve_yields_negative_steering() -> None:
     assert delta < -1.0, f"expected negative steering, got {delta}"
 
 
-def test_motion_controller_falls_back_when_acados_unavailable() -> None:
-    """Sin solver inyectado y sin AcadosMPC listo, se usa PurePursuitSolver.
+def test_motion_controller_can_force_pure_pursuit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import config as cfg
 
-    Este test ata el contrato Phase-6: el sim/dev (sin acados instalado
-    ni código C generado) DEBE seguir pudiendo cerrar el lazo de control.
-    Si esto se rompe, el dispatcher emite speed=0 indefinidamente y se
-    pierde la verificación end-to-end en Gazebo.
-    """
+    monkeypatch.setattr(cfg, "FORCE_PURE_PURSUIT", True, raising=False)
     mc = MotionController(fallback_horizon_n=20)
     assert mc.ready is True
     assert isinstance(mc._solver, PurePursuitSolver)

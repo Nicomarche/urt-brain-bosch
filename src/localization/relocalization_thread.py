@@ -37,6 +37,7 @@ from src.localization.dead_reckoning import DeadReckoning
 from src.routing.lanelet.attributes import ATTR_NAMES, ATTR_STOPLINE
 from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.routing.route_planner import PathManager
+from src.utils.live_log import live_log
 
 try:
     import config as cfg
@@ -64,8 +65,12 @@ try:
     # Keep the default at 1.0 so the measured steering is trusted directly.
     _DR_SPEED_SCALE    = float(getattr(cfg, "TRACKING_DR_SPEED_SCALE", 1.0) or 1.0)
     _STEER_GAIN_DR     = getattr(cfg, "TRACKING_STEER_GAIN_DR", 1.0)
-    # Tracking now keeps the steering sign aligned with the actuator feedback so
-    # the same convention flows through controller, telemetry, and DR.
+    # Convención interna del brain/localization:
+    #   math steer > 0 => izquierda.
+    # El wire legacy del proyecto publica:
+    #   raw steer  > 0 => derecha.
+    # `_STEER_SIGN_DR` queda como override de compatibilidad ADEMÁS de esa
+    # inversión fija; en la configuración normal debe quedarse en +1.0.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
     # Sign applied to raw IMU yaw before EKF fusion.
     # +1.0 for sim (sim_bridge right-turn → yaw increases, matches the OSM tangent convention).
@@ -756,7 +761,7 @@ class threadTracking(ThreadWithStop):
         self._sign_sub = messageHandlerSubscriber(
             queuesList, SignDetected, "lastOnly", subscribe=True
         )
-        self._last_steer_rad = 0.0     # latest steering angle in radians (math convention)
+        self._last_steer_rad = 0.0     # latest steering angle in radians (+ = left)
         self._steer_filtered_rad = 0.0 # lag-filtered steer angle used by DR
         self._yaw_ekf_p = _YAW_EKF_P_INIT  # EKF heading covariance (rad²)
         # Location sender → dashboard map display
@@ -825,6 +830,9 @@ class threadTracking(ThreadWithStop):
         self._log_every = max(1, int(_LOOP_HZ // 5))  # log 5 times/s
         self._last_steer_feedback_rad = 0.0
         self._last_steer_feedback_t = None
+        self._last_steer_feedback_raw = None
+        self._last_steer_cmd_raw = None
+        self._last_logged_steer_snapshot = None
 
         # ── Tracking debug log ──────────────────────────────────────────────
         self._debug_log_enabled = _DEBUG_LOG
@@ -1141,11 +1149,52 @@ class threadTracking(ThreadWithStop):
     @staticmethod
     def _parse_steer_rad(raw_value) -> float | None:
         try:
-            # Raw steering follows project convention (positive = right).
-            # Convert here to mathematical bicycle-model convention.
-            return math.radians(float(raw_value) / 10.0) * float(_STEER_SIGN_DR)
+            # Raw steering follows the legacy wire convention:
+            #   +deg = wheels to the right.
+            # Convert here to the controller/ISO convention used across the
+            # planner and MotionController:
+            #   +rad = left turn, -rad = right turn.
+            wire_to_math_sign = -1.0
+            return (
+                math.radians(float(raw_value) / 10.0)
+                * wire_to_math_sign
+                * float(_STEER_SIGN_DR)
+            )
         except (TypeError, ValueError):
             return None
+
+    def _maybe_log_steer_conversion(
+        self,
+        *,
+        source: str,
+        raw_steer_x10,
+        math_steer_rad: float,
+        feedback_fresh: bool,
+    ) -> None:
+        raw_key = None if raw_steer_x10 is None else str(raw_steer_x10)
+        snapshot = (
+            str(source),
+            raw_key,
+            round(float(math_steer_rad), 6),
+            bool(feedback_fresh),
+        )
+        if snapshot == getattr(self, "_last_logged_steer_snapshot", None):
+            return
+        self._last_logged_steer_snapshot = snapshot
+        try:
+            raw_value = float(raw_steer_x10) if raw_steer_x10 is not None else None
+        except (TypeError, ValueError):
+            raw_value = None
+        live_log(
+            "pose_estimator",
+            event="steer_conversion",
+            source=str(source),
+            raw_steer_x10=raw_value,
+            math_steer_rad=float(math_steer_rad),
+            math_steer_deg=float(math.degrees(float(math_steer_rad))),
+            wire_to_math_sign=float(-1.0 * _STEER_SIGN_DR),
+            feedback_fresh=bool(feedback_fresh),
+        )
 
     def _resolve_speed_mps(self, now: float) -> float:
         current_state_message = str(
@@ -1230,17 +1279,38 @@ class threadTracking(ThreadWithStop):
             if parsed_feedback is not None:
                 self._last_steer_feedback_rad = float(parsed_feedback)
                 self._last_steer_feedback_t = now
+                self._last_steer_feedback_raw = steer_feedback_raw
 
         steer_raw = self._steer_sub.receive()
         if steer_raw is not None:
             parsed_cmd = self._parse_steer_rad(steer_raw)
             if parsed_cmd is not None:
                 self._last_steer_rad = float(parsed_cmd)
+                self._last_steer_cmd_raw = steer_raw
 
+        feedback_fresh = False
         if self._last_steer_feedback_t is not None:
             if (now - self._last_steer_feedback_t) <= float(_STEER_FEEDBACK_TIMEOUT_S):
-                return float(self._last_steer_feedback_rad)
-        return float(self._last_steer_rad)
+                feedback_fresh = True
+                selected_rad = float(self._last_steer_feedback_rad)
+                selected_source = "feedback"
+                selected_raw = self._last_steer_feedback_raw
+                self._maybe_log_steer_conversion(
+                    source=selected_source,
+                    raw_steer_x10=selected_raw,
+                    math_steer_rad=selected_rad,
+                    feedback_fresh=feedback_fresh,
+                )
+                return selected_rad
+
+        selected_rad = float(self._last_steer_rad)
+        self._maybe_log_steer_conversion(
+            source="command_fallback",
+            raw_steer_x10=self._last_steer_cmd_raw,
+            math_steer_rad=selected_rad,
+            feedback_fresh=feedback_fresh,
+        )
+        return selected_rad
 
     # ------------------------------------------------------------------
     def thread_work(self):

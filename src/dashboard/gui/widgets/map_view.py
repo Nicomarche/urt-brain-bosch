@@ -43,6 +43,10 @@ from PyQt5.QtWidgets import (
 from ..client import events as ev
 from ..client.socketio_client import SocketIOClient
 from ..config import persistence, settings
+from ._map_path_overlay import (
+    extract_control_path_points,
+    extract_nav_route_preview_points,
+)
 from ._map_click_routing import resolve_click_destination_lanelet
 from ._pannable_view import PannableZoomableView
 from src.routing.lanelet.attributes import (
@@ -341,6 +345,23 @@ class MapData:
         return QRectF(min_x, min_y, max(10.0, max_x - min_x), max(10.0, max_y - min_y))
 
 
+def _build_world_path(
+    points: list[tuple[float, float]],
+    *,
+    world_to_pixel,
+) -> QPainterPath:
+    if len(points) < 2:
+        return QPainterPath()
+    path = QPainterPath()
+    first_x_m, first_y_m = points[0]
+    first_px, first_py = world_to_pixel(first_x_m, first_y_m)
+    path.moveTo(first_px, first_py)
+    for x_m, y_m in points[1:]:
+        px, py = world_to_pixel(x_m, y_m)
+        path.lineTo(px, py)
+    return path
+
+
 # ----------------------------------------------------------------------
 # Custom QGraphicsScene that emits world coordinates on click.
 # ----------------------------------------------------------------------
@@ -526,6 +547,7 @@ class MapView(QWidget):
         self._client.cars_signal.connect(self._on_cars)
         self._client.semaphores_signal.connect(self._on_semaphores)
         self._client.navigation_status_signal.connect(self._on_nav_status)
+        self._client.behavior_output_signal.connect(self._on_behavior_output)
         self._client.state_change_signal.connect(self._on_state_change)
         self._client.gps_fix_signal.connect(self._on_gps_fix)
         self._mode = ev.MODE_STOP
@@ -589,9 +611,13 @@ class MapView(QWidget):
         self._cars_items: list[QGraphicsItem] = []
         self._semaphore_items: list[QGraphicsItem] = []
         self._nav_path = QGraphicsPathItem()
-        self._nav_path.setPen(QPen(QColor("#5cb85c"), 3, Qt.SolidLine))
+        self._nav_path.setPen(QPen(QColor("#7db5ff"), 2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin))
         self._nav_path.setZValue(50)
         self._scene.addItem(self._nav_path)
+        self._control_path = QGraphicsPathItem()
+        self._control_path.setPen(QPen(QColor("#2ed47a"), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        self._control_path.setZValue(51)
+        self._scene.addItem(self._control_path)
         self._apply_lanelet_highlights(
             current_lanelet_id=self._active_current_lanelet_id,
             next_lanelet_ids=self._active_next_lanelet_ids,
@@ -835,6 +861,7 @@ class MapView(QWidget):
         else:
             self._active_current_lanelet_id = None
             self._active_next_lanelet_ids = ()
+            self._control_path.setPath(QPainterPath())
         self._apply_lanelet_highlights(
             current_lanelet_id=self._active_current_lanelet_id,
             next_lanelet_ids=self._active_next_lanelet_ids,
@@ -845,27 +872,22 @@ class MapView(QWidget):
             self._nav_path.setPath(QPainterPath())
             return
 
-        path_pts = payload.get("path") or payload.get("waypoints") or payload.get("route_points")
-        if not isinstance(path_pts, list) or len(path_pts) < 2:
+        route_preview_points = extract_nav_route_preview_points(payload)
+        if len(route_preview_points) < 2:
             self._nav_path.setPath(QPainterPath())
             return
-        qp = QPainterPath()
-        first = True
-        for p in path_pts:
-            try:
-                if isinstance(p, dict):
-                    x_m, y_m = float(p["x"]), float(p["y"])
-                else:
-                    x_m, y_m = float(p[0]), float(p[1])
-            except (KeyError, ValueError, TypeError, IndexError):
-                continue
-            px, py = self._data.world_to_pixel(x_m, y_m)
-            if first:
-                qp.moveTo(px, py)
-                first = False
-            else:
-                qp.lineTo(px, py)
-        self._nav_path.setPath(qp)
+        self._nav_path.setPath(
+            _build_world_path(route_preview_points, world_to_pixel=self._data.world_to_pixel)
+        )
+
+    def _on_behavior_output(self, payload) -> None:
+        control_path_points = extract_control_path_points(payload)
+        if len(control_path_points) < 2:
+            self._control_path.setPath(QPainterPath())
+            return
+        self._control_path.setPath(
+            _build_world_path(control_path_points, world_to_pixel=self._data.world_to_pixel)
+        )
 
     def _on_state_change(self, mode: str) -> None:
         if mode:
@@ -989,4 +1011,5 @@ class MapView(QWidget):
             next_lanelet_ids=(),
         )
         self._nav_path.setPath(QPainterPath())
+        self._control_path.setPath(QPainterPath())
         self._location_label.setText("Route cleared")

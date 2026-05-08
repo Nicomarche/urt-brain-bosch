@@ -9,8 +9,10 @@
 # la calidad de la estimación.
 #
 # Convención de unidades:
-#   - x, y           : metros, marco local ENU (East-North-Up).
-#   - yaw / yaw_rad  : radianes, 0 hacia +x, sentido CCW.
+#   - x, y           : metros, marco local del mapa Lanelet/OSM.
+#                      En este proyecto se preserva la orientación visual del
+#                      dashboard/simulador, así que `y` crece hacia abajo.
+#   - yaw / yaw_rad  : radianes, 0 hacia +x, sentido horario (CW) en ese frame.
 #   - speed_mps      : m/s; positivo hacia adelante del vehículo.
 #   - steer_rad      : radianes; el ángulo de las ruedas, no del volante.
 #   - timestamp      : segundos UNIX (time.time()), no monotonic.

@@ -34,11 +34,45 @@ class LaneObserverTests(unittest.TestCase):
         lane_observation = observer._build_lane_observation(snapshot)
 
         self.assertEqual(lane_observation.detected_sides, ("left", "right"))
+        self.assertEqual(lane_observation.measurement_mode, "two_line")
+        self.assertTrue(lane_observation.direct_error_valid)
         self.assertAlmostEqual(lane_observation.direct_error_m, 0.04, places=4)
         self.assertAlmostEqual(lane_observation.heading_error_rad, 0.12, places=4)
         self.assertEqual(lane_observation.curve_hint, "IN_CURVE")
         self.assertAlmostEqual(lane_observation.camera_yaw_hint_confidence, 0.85, places=4)
         self.assertGreater(lane_observation.quality, 0.9)
+
+    def test_build_lane_observation_blocks_single_line_direct_error_in_route_tracking(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=12.0,
+            detection_mode="ai_local",
+            curve_state="STRAIGHT",
+            heading_error_rad=-0.08,
+            local_lane_payload={
+                "lane_side_point_counts": {"left": 4, "right": 0},
+            },
+            frame_trace={
+                "debug": {
+                    "measurement_mode": "single_line",
+                    "sl_direct_error_m": -0.4928,
+                    "direct_error_valid": False,
+                    "direct_error_reason": "policy_blocked",
+                    "control_policy_mode": "ROUTE_TRACKING",
+                    "planner_priority_active": True,
+                }
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertEqual(lane_observation.detected_sides, ("left",))
+        self.assertEqual(lane_observation.measurement_mode, "single_line")
+        self.assertFalse(lane_observation.direct_error_valid)
+        self.assertIsNone(lane_observation.direct_error_m)
+        self.assertEqual(lane_observation.control_policy_mode, "ROUTE_TRACKING")
+        self.assertTrue(lane_observation.planner_priority_active)
+        self.assertAlmostEqual(lane_observation.debug["raw_direct_error_m"], -0.4928, places=4)
 
     def test_build_stopline_observation_keeps_pass_event_payload(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)

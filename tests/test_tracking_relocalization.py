@@ -3,6 +3,8 @@ import time
 import types
 import unittest
 
+from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
+from src.localization.dead_reckoning import DeadReckoning
 from src.localization.relocalization_thread import threadTracking
 
 
@@ -61,13 +63,39 @@ class TrackingRelocalizationTests(unittest.TestCase):
         tracker._last_steer_feedback_rad = 0.0
         tracker._last_steer_feedback_t = None
         tracker._last_steer_rad = 0.0
+        tracker._last_steer_feedback_raw = None
+        tracker._last_steer_cmd_raw = None
+        tracker._last_logged_steer_snapshot = None
 
         steer_rad = tracker._resolve_steer_rad(now=5.0)
 
-        # El test valida que el feedback (250 → 25°) gana sobre el command
-        # (100 → 10°). El SIGNO depende de `TRACKING_STEER_SIGN_DR` (config)
-        # — comparamos magnitud para no acoplar a la convención de modo.
-        self.assertAlmostEqual(abs(steer_rad), math.radians(25.0), places=6)
+        # CurrentSteer raw sigue el wire legacy (+ = derecha); internamente
+        # localization debe usar convención matemática (+ = izquierda).
+        self.assertAlmostEqual(steer_rad, -math.radians(25.0), places=6)
+
+    def test_steering_round_trip_matches_mathematical_convention(self):
+        for steering_deg in (10.0, -10.0):
+            with self.subTest(steering_deg=steering_deg):
+                wire_x10 = threadMotorCommandDispatcher._steer_deg_to_wire_x10(steering_deg)
+                parsed = threadTracking._parse_steer_rad(str(wire_x10))
+                self.assertIsNotNone(parsed)
+                self.assertAlmostEqual(parsed, math.radians(steering_deg), places=6)
+
+    def test_dead_reckoning_positive_left_steer_decreases_osm_yaw(self):
+        dr = DeadReckoning(0.0, 0.0, 0.0)
+
+        dr.update(
+            speed_mps=0.20,
+            yaw_rad=0.0,
+            dt=0.10,
+            steer_rad=math.radians(12.0),
+            wheelbase_m=0.26,
+        )
+
+        x, y, yaw = dr.get_state()
+        self.assertGreater(x, 0.0)
+        self.assertLess(y, 0.0)
+        self.assertLess(yaw, 0.0)
 
     def _make_lane_reloc_tracker(self, dr_y=0.10, speed=0.20):
         tracker = threadTracking.__new__(threadTracking)

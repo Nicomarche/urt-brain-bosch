@@ -31,6 +31,9 @@ log()  { echo -e "${_W}[acados]${_0} ${_G}$*${_0}"; }
 warn() { echo -e "${_W}[acados]${_0} ${_Y}$*${_0}"; }
 err()  { echo -e "${_W}[acados]${_0} ${_R}$*${_0}" >&2; }
 
+log "Using python: $PYTHON_BIN"
+log "ACADOS install dir: $ACADOS_INSTALL_DIR"
+
 # ── Extensión de shared lib según plataforma ──────────────────────────────────
 if [[ "$PLATFORM" == "Darwin" ]]; then
     LIB_EXT="dylib"
@@ -201,6 +204,8 @@ log "Verificando que AcadosMPC carga correctamente…"
 if _solver_loads; then
     log "✓ AcadosMPC listo — instalación completa en $ACADOS_INSTALL_DIR"
 else
-    err "AcadosMPC no cargó después de la instalación. Revisá los logs."
+    err "AcadosMPC no cargó después de la instalación."
+    err "python=$PYTHON_BIN acados_install=$ACADOS_INSTALL_DIR solver_json=$SOLVER_JSON"
+    err "Probá arrancar con ./run.sh para usar el entorno soportado."
     exit 1
 fi

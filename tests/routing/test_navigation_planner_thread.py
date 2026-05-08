@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.core.types.pose import Pose2D
 from src.routing.lanelet.attributes import ATTR_NORMAL
@@ -41,6 +42,46 @@ def _merge_lanelet_map():
                 "route_start": ["merge"],
                 "merge": ["shared"],
                 "shared": ["tail"],
+            },
+        ),
+        edge_lengths={},
+        edge_ids={},
+        reference_node_ids=[],
+        reference_path=None,
+        ordered_nodes=list(nodes.values()),
+        waypoints=np.empty((0, 3)),
+        wp_node_attrs=np.empty(0, dtype=int),
+        semantics=SimpleNamespace(
+            loaded=False,
+            controls=[],
+            intersections=[],
+            crosswalks=[],
+            parking_spots=[],
+        ),
+        map_metadata={},
+    )
+    return from_track_graph(graph, step_m=0.05)
+
+
+def _offroute_override_lanelet_map():
+    nodes = {
+        "route_a": TrackNode("route_a", -1.0, 0.0),
+        "route_b": TrackNode("route_b", 0.0, 0.0),
+        "route_c": TrackNode("route_c", 1.0, 0.0),
+        "off_a": TrackNode("off_a", -1.0, 0.25),
+        "off_b": TrackNode("off_b", 0.0, 0.25),
+        "off_c": TrackNode("off_c", 1.0, 0.25),
+    }
+    graph = SimpleNamespace(
+        step_m=0.05,
+        nodes=nodes,
+        adj=defaultdict(
+            list,
+            {
+                "route_a": ["route_b"],
+                "route_b": ["route_c"],
+                "off_a": ["off_b"],
+                "off_b": ["off_c"],
             },
         ),
         edge_lengths={},
@@ -139,7 +180,7 @@ def test_resolve_lanelet_context_holds_pose_lanelet_when_route_and_pose_share_su
     thread = _make_thread(
         lanelet_map=lanelet_map,
         route_lanelet_ids=["route_start->merge", "merge->shared", "shared->tail"],
-        pose=Pose2D(x=-0.6, y=0.12, yaw=pose_yaw),
+        pose=Pose2D(x=-0.6, y=0.05, yaw=pose_yaw),
     )
     path_update = _make_path_update(
         matched_x=-0.6,
@@ -180,3 +221,59 @@ def test_resolve_lanelet_context_keeps_predecessor_pose_lanelet_before_route_lan
 
     assert current_lanelet_id == "pose_start->merge"
     assert next_lanelet_ids[0] == "merge->shared"
+
+
+def test_resolve_lanelet_context_keeps_route_lanelet_when_alignment_is_degraded() -> None:
+    lanelet_map = _merge_lanelet_map()
+    pose_yaw = -math.atan2(0.2, 1.0)
+    thread = _make_thread(
+        lanelet_map=lanelet_map,
+        route_lanelet_ids=["merge->shared", "shared->tail"],
+        pose=Pose2D(x=-0.15, y=0.30, yaw=pose_yaw),
+    )
+    path_update = _make_path_update(
+        matched_x=0.2,
+        matched_y=0.0,
+        matched_yaw=0.0,
+        matched_idx=0,
+        target_idx=1,
+        current_node_id="merge->shared",
+        upcoming_node_id="shared->tail",
+        map_match_error_m=0.30,
+    )
+
+    current_lanelet_id, next_lanelet_ids, _regulatory = thread._resolve_lanelet_context(path_update)
+
+    assert current_lanelet_id == "merge->shared"
+    assert next_lanelet_ids == ("shared->tail",)
+    assert thread._last_lanelet_resolution_diag["lanelet_source"] == "route_matched_degraded"
+    assert thread._last_lanelet_resolution_diag["route_alignment_error_m"] == pytest.approx(
+        0.30,
+        abs=1e-6,
+    )
+
+
+def test_resolve_lanelet_context_does_not_override_to_lanelet_outside_active_route_tail() -> None:
+    lanelet_map = _offroute_override_lanelet_map()
+    thread = _make_thread(
+        lanelet_map=lanelet_map,
+        route_lanelet_ids=["route_a->route_b", "route_b->route_c"],
+        pose=Pose2D(x=-0.55, y=0.24, yaw=0.0),
+    )
+    path_update = _make_path_update(
+        matched_x=-0.55,
+        matched_y=0.0,
+        matched_yaw=0.0,
+        matched_idx=0,
+        target_idx=1,
+        current_node_id="route_a->route_b",
+        upcoming_node_id="route_b->route_c",
+        map_match_error_m=0.75,
+    )
+
+    for _ in range(4):
+        current_lanelet_id, next_lanelet_ids, _regulatory = thread._resolve_lanelet_context(path_update)
+
+    assert current_lanelet_id == "route_a->route_b"
+    assert next_lanelet_ids == ("route_b->route_c",)
+    assert getattr(thread, "_route_override_candidate_hits", 0) == 0

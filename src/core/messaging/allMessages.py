@@ -407,7 +407,7 @@ class NavigationStatus(Enum):
     Queue = "General"
     Owner = "threadTracking"
     msgID = 2
-    msgType = "dict"  # route state, current/upcoming node, maneuver, route preview
+    msgType = "dict"  # route state, current/upcoming node, maneuver, route preview, lanelet diagnostics
 
 ################################# From Behavior Planner ##################################
 # BehaviorOutput es la única fuente de verdad de velocidad y referencia de path:

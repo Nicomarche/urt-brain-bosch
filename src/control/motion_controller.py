@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import math
 import os
+import sys
 import time
 from typing import Tuple
 
@@ -58,6 +59,11 @@ from src.utils.live_log import live_log
 
 _SOLVER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c_generated_code")
 _JSON_FILE = os.path.join(_SOLVER_DIR, "acados_ocp_bfmc_bicycle.json")
+
+
+def _solver_lib_path() -> str:
+    ext = "dylib" if sys.platform == "darwin" else "so"
+    return os.path.join(_SOLVER_DIR, f"libacados_ocp_solver_bfmc_bicycle.{ext}")
 
 try:
     from acados_template import AcadosOcpSolver
@@ -73,6 +79,38 @@ def _wrap_angle(a: float) -> float:
     while a < -math.pi:
         a += 2.0 * math.pi
     return a
+
+
+def _osm_pose_to_controller_frame(x: float, y: float, yaw: float) -> np.ndarray:
+    """Convert the OSM/map frame to the controller's standard ENU/CCW frame.
+
+    The route planner and dashboard use the Lanelet/OSM geometry as-is:
+    `x` grows to the right, `y` grows downward on screen, and headings
+    therefore increase clockwise. The bicycle model inside the controller
+    assumes the standard robotics frame instead: `x` forward/right,
+    `y` upward, yaw positive CCW, and `+delta = left`.
+
+    Mirroring the `y` axis reconciles both worlds:
+      controller_x   = osm_x
+      controller_y   = -osm_y
+      controller_yaw = -osm_yaw
+    """
+
+    return np.array(
+        [float(x), -float(y), _wrap_angle(-float(yaw))],
+        dtype=np.float64,
+    )
+
+
+def _osm_states_to_controller_frame(states: np.ndarray) -> np.ndarray:
+    """Vectorized version of `_osm_pose_to_controller_frame()` for paths."""
+
+    arr = np.asarray(states, dtype=np.float64).copy()
+    if arr.ndim != 2 or arr.shape[1] < 3:
+        return arr
+    arr[:, 1] *= -1.0
+    arr[:, 2] = np.array([_wrap_angle(-float(yaw)) for yaw in arr[:, 2]], dtype=np.float64)
+    return arr
 
 
 # ---------------------------------------------------------------------------
@@ -108,13 +146,16 @@ class AcadosMPC:
         self._solver: AcadosOcpSolver | None = None
         self._N: int = 0
         self.ready = False
+        self.load_error: str | None = None
         self._last_debug: dict = {}
         self._prev_v = 0.0
         self._prev_delta = 0.0
 
         if not _ACADOS_AVAILABLE:
+            self.load_error = "acados_template import failed"
             return
         if not os.path.isfile(_JSON_FILE):
+            self.load_error = f"solver json missing: {_JSON_FILE}"
             return
 
         try:
@@ -123,8 +164,9 @@ class AcadosMPC:
             self._N = (self._solver.N if hasattr(self._solver, "N")
                        else self._solver.acados_ocp.dims.N)
             self.ready = True
-        except Exception:
+        except Exception as exc:
             self._solver = None
+            self.load_error = f"{type(exc).__name__}: {exc}"
 
     # ------------------------------------------------------------------
     def compute(
@@ -201,6 +243,7 @@ class AcadosMPC:
             delta_deg = 0.0
 
         self._last_debug = {
+            "solver": "acados",
             "solver_status": int(status),
             "v_opt_mps": round(v_opt, 4),
             "delta_opt_deg": round(delta_deg, 3),
@@ -455,6 +498,46 @@ class PurePursuitSolver:
         return dict(self._last_debug)
 
 
+class AcadosBackendUnavailableError(RuntimeError):
+    """Señala que Acados era obligatorio pero no pudo cargarse."""
+
+
+def _backend_name_from_solver(solver) -> str:
+    class_name = solver.__class__.__name__.lstrip("_").lower()
+    if isinstance(solver, PurePursuitSolver):
+        return "pure_pursuit"
+    if isinstance(solver, AcadosMPC):
+        return "acados"
+    return class_name
+
+
+def _backend_context(*, backend: str, acados_ready: bool, acados_error: str | None = None) -> dict[str, object]:
+    return {
+        "backend": str(backend),
+        "python": os.path.realpath(sys.executable),
+        "launcher": str(os.environ.get("URT_LAUNCHER", "direct") or "direct"),
+        "expected_backend": str(os.environ.get("URT_EXPECTED_MPC_BACKEND", "") or ""),
+        "acados_ready": bool(acados_ready),
+        "acados_error": str(acados_error) if acados_error else None,
+        "json_file": _JSON_FILE,
+        "solver_lib": _solver_lib_path(),
+        "acados_source_dir": os.environ.get("ACADOS_SOURCE_DIR"),
+    }
+
+
+def _format_acados_required_error(acados: AcadosMPC) -> str:
+    return (
+        "Acados is required for MotionController but could not be loaded. "
+        f"python={os.path.realpath(sys.executable)} "
+        f"json={_JSON_FILE} "
+        f"solver_lib={_solver_lib_path()} "
+        f"acados_source_dir={os.environ.get('ACADOS_SOURCE_DIR') or '<unset>'} "
+        f"launcher={os.environ.get('URT_LAUNCHER', 'direct')} "
+        f"details={acados.load_error or 'unknown error'}. "
+        "Start the stack with ./run.sh or set FORCE_PURE_PURSUIT=True explicitly."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Capa de contrato. ÚNICO punto que produce MotorCommand.
 # ---------------------------------------------------------------------------
@@ -497,9 +580,16 @@ class MotionController(IMotionController):
         output_deadband_deg: float = 0.5,
         fallback_horizon_n: int = 20,
     ) -> None:
+        self._backend_name = "unknown"
+        self._backend_context: dict[str, object] = {}
         if solver is not None:
             # Solver inyectado — el caller sabe lo que hace (tests).
             self._solver = solver
+            self._backend_name = _backend_name_from_solver(solver)
+            self._backend_context = _backend_context(
+                backend=self._backend_name,
+                acados_ready=bool(getattr(solver, "ready", False)),
+            )
         else:
             # `FORCE_PURE_PURSUIT` (config) salta Acados y usa PP siempre. Útil
             # cuando el solver Acados pide reversa al overshoot un waypoint y
@@ -515,16 +605,16 @@ class MotionController(IMotionController):
                 _force_pp = False
 
             # Construcción por defecto: probamos AcadosMPC primero. Si no
-            # logra cargar (sin acados_template, sin código C generado),
-            # caemos a PurePursuitSolver para que el lazo de control
-            # funcione igual en sim/dev. La diferencia es solo de calidad
-            # de tracking — la geometría del bicycle model es la misma.
+            # logra cargar y NO se pidió explícitamente pure-pursuit,
+            # abortamos el arranque. Queremos que usar un backend distinto
+            # de Acados sea una decisión consciente, no un fallback silencioso.
             acados = None if _force_pp else AcadosMPC(
                 max_steering_deg=max_steering_deg,
                 output_deadband_deg=output_deadband_deg,
             )
             if acados is not None and acados.ready:
                 self._solver = acados
+                self._backend_name = "acados"
                 # Aplica pesos desde config en runtime — el .so compilado tiene
                 # los defaults de generate_solver() horneados (e.g. steer_cost=0).
                 # Mismo patrón que threadLineFollowing usa para el path legacy.
@@ -566,36 +656,55 @@ class MotionController(IMotionController):
                     )
                 except Exception:
                     pass
+                self._backend_context = _backend_context(
+                    backend="acados",
+                    acados_ready=True,
+                    acados_error=acados.load_error,
+                )
             else:
-                # Aviso una sola vez al construir — facilita ver en stdout
-                # "estoy en modo fallback" sin tener que abrir el dashboard.
                 if _force_pp:
                     print(
                         "\033[1;97m[ MotionController ] :\033[0m "
                         "\033[1;94mINFO\033[0m - FORCE_PURE_PURSUIT=True → "
                         "skipping Acados, using PurePursuitSolver."
                     )
+                    try:
+                        import config as _cfg
+                        _lookahead_gain = float(
+                            getattr(_cfg, "BEHAVIOR_LOOKAHEAD_GAIN_S", 1.5)
+                        )
+                    except Exception:
+                        _lookahead_gain = 1.5
+                    self._solver = PurePursuitSolver(
+                        horizon_n=fallback_horizon_n,
+                        lookahead_gain_s=_lookahead_gain,
+                        max_steering_deg=max_steering_deg,
+                        output_deadband_deg=output_deadband_deg,
+                    )
+                    self._backend_name = "pure_pursuit"
+                    self._backend_context = _backend_context(
+                        backend="pure_pursuit",
+                        acados_ready=False,
+                        acados_error=(acados.load_error if acados is not None else None),
+                    )
                 else:
                     print(
                         "\033[1;97m[ MotionController ] :\033[0m "
-                        "\033[1;93mWARNING\033[0m - AcadosMPC not ready "
-                        "(acados_template missing or c_generated_code/ absent). "
-                        "Falling back to PurePursuitSolver — "
-                        "fine for sim/dev, REGENERATE acados for race deploy."
+                        "\033[1;91mERROR\033[0m - AcadosMPC not ready "
+                        "(missing Python bindings, runtime libs, or generated solver). "
+                        "Acados is required unless FORCE_PURE_PURSUIT=True."
                     )
-                try:
-                    import config as _cfg
-                    _lookahead_gain = float(
-                        getattr(_cfg, "BEHAVIOR_LOOKAHEAD_GAIN_S", 1.5)
+                    self._backend_name = "acados"
+                    self._backend_context = _backend_context(
+                        backend="acados",
+                        acados_ready=False,
+                        acados_error=(acados.load_error if acados is not None else None),
                     )
-                except Exception:
-                    _lookahead_gain = 1.5
-                self._solver = PurePursuitSolver(
-                    horizon_n=fallback_horizon_n,
-                    lookahead_gain_s=_lookahead_gain,
-                    max_steering_deg=max_steering_deg,
-                    output_deadband_deg=output_deadband_deg,
-                )
+                    live_log("mpc", event="backend_selected", **self._backend_context)
+                    raise AcadosBackendUnavailableError(
+                        _format_acados_required_error(acados if acados is not None else AcadosMPC())
+                    )
+        live_log("mpc", event="backend_selected", **self._backend_context)
         self.max_steering_deg = float(max_steering_deg)
 
         # Rate limiters de steering y velocidad — independientes del solver.
@@ -668,6 +777,7 @@ class MotionController(IMotionController):
             valid=bool(behavior_output.valid),
             stop_req=bool(behavior_output.stop_required),
             scenario=behavior_output.scenario_name,
+            backend=self._backend_name,
             sp0=sp0_for_log,
             notes_reason=notes_reason,
             pose_x=float(pose.fused_pose.x) if pose else None,
@@ -693,7 +803,7 @@ class MotionController(IMotionController):
             )
         if not behavior_output.valid:
             reason = f"behavior_invalid/{notes_reason}" if notes_reason else "behavior_invalid"
-            return self._invalid(reason)
+            return self._invalid(reason, backend=self._backend_name)
 
         # 2. Stop request: el scenario o el overlay decidieron frenar.
         #    Devolvemos un MotorCommand explícito de stop — el dispatcher
@@ -706,13 +816,16 @@ class MotionController(IMotionController):
                 valid=True,
                 source="motion_controller",
                 reason="stop_required",
-                debug={"scenario": behavior_output.scenario_name},
+                debug={
+                    "scenario": behavior_output.scenario_name,
+                    "backend": self._backend_name,
+                },
             )
 
         # 3. Solver listo? Si no, no hay forma de calcular un δ — el
         #    safety_gate aguas abajo se hará cargo.
         if not self._solver.ready:
-            return self._invalid("mpc_solver_not_ready")
+            return self._invalid("mpc_solver_not_ready", backend=self._backend_name)
 
         # 4. Construir arrays de referencia. target_path es (N+1, 3) y
         #    speed_profile es (N,). El solver espera input_refs (N, 2)
@@ -723,27 +836,33 @@ class MotionController(IMotionController):
 
         n = int(speed_profile.shape[0])
         if state_refs.shape != (n + 1, 3):
-            return self._invalid("dimension_mismatch_target_path")
+            return self._invalid("dimension_mismatch_target_path", backend=self._backend_name)
         if n != self._solver.N:
-            return self._invalid("horizon_mismatch")
+            return self._invalid("horizon_mismatch", backend=self._backend_name)
 
         input_refs = np.zeros((n, 2), dtype=np.float64)
         input_refs[:, 0] = speed_profile  # v_ref
         # input_refs[:, 1] = 0  # delta_ref (steering ref siempre 0)
 
-        x_current = np.array(
-            [pose.fused_pose.x, pose.fused_pose.y, pose.fused_pose.yaw],
-            dtype=np.float64,
+        # The planner publishes the path in the OSM/map frame (y-down, yaw CW+),
+        # while the bicycle model in Acados/PurePursuit expects the standard
+        # ENU/CCW convention with `+delta = left`. Mirror Y here so both the
+        # solver state and the reference corridor live in the same handedness.
+        x_current = _osm_pose_to_controller_frame(
+            pose.fused_pose.x,
+            pose.fused_pose.y,
+            pose.fused_pose.yaw,
         )
+        state_refs_solver = _osm_states_to_controller_frame(state_refs)
 
         # 5. Llamar al solver. Si devuelve None, el OCP no resolvió.
         result = self._solver.compute(
             x_current=x_current,
-            state_refs=state_refs,
+            state_refs=state_refs_solver,
             input_refs=input_refs,
         )
         if result is None:
-            return self._invalid("mpc_solver_failure")
+            return self._invalid("mpc_solver_failure", backend=self._backend_name)
 
         v_opt, delta_deg = result
 
@@ -751,7 +870,7 @@ class MotionController(IMotionController):
         #    defensivo: cualquier NaN/inf por solver inestable se atrapa
         #    acá y se traduce a inválido (mejor parar que mover absurdo).
         if not (math.isfinite(v_opt) and math.isfinite(delta_deg)):
-            return self._invalid("mpc_nonfinite_output")
+            return self._invalid("mpc_nonfinite_output", backend=self._backend_name)
 
         requested_speed_mps = max(0.0, float(speed_profile[0]))
 
@@ -787,6 +906,11 @@ class MotionController(IMotionController):
             min(self._prev_steer_deg + max_steer_step, steering_deg),
         )
         self._prev_steer_deg = steering_deg
+        solver_debug = (
+            dict(self._solver.debug)
+            if hasattr(self._solver, "debug")
+            else {}
+        )
 
         if _should_log:
             _log.getLogger(__name__).info(
@@ -803,6 +927,8 @@ class MotionController(IMotionController):
             delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
             scenario=behavior_output.scenario_name,
             requested_speed_mps=float(requested_speed_mps),
+            backend=self._backend_name,
+            **solver_debug,
         )
 
         return MotorCommand(
@@ -812,7 +938,7 @@ class MotionController(IMotionController):
             valid=True,
             source="motion_controller",
             reason="",
-            debug=self._solver.debug,
+            debug=solver_debug,
         )
 
     def reset(self) -> None:
@@ -824,12 +950,13 @@ class MotionController(IMotionController):
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _invalid(reason: str) -> MotorCommand:
+    def _invalid(reason: str, *, backend: str = "unknown") -> MotorCommand:
         """Comando inválido con razón. El dispatcher invocará el safety_gate."""
         live_log(
             "mpc", event="compute_out",
             valid=False, reason=reason,
             speed_mps=0.0, steering_deg=0.0,
+            backend=backend,
         )
         return MotorCommand(
             timestamp=time.time(),
@@ -838,6 +965,7 @@ class MotionController(IMotionController):
             valid=False,
             source="motion_controller",
             reason=reason,
+            debug={"backend": backend},
         )
 
     @property

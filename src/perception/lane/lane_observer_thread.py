@@ -83,6 +83,55 @@ class threadLaneObserver(ThreadWithStop):
         return float(error_m) if error_m is not None else None
 
     @staticmethod
+    def _measurement_mode(
+        snapshot: VisualStateSnapshot,
+        detected_sides: tuple[str, ...],
+        blind_mode: str | None,
+    ) -> str:
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        debug_mode = str(debug.get("measurement_mode", "") or "")
+        if debug_mode in {"two_line", "single_line", "route_tracking", "blind", "none"}:
+            return debug_mode
+        if len(detected_sides) >= 2:
+            return "two_line"
+        if len(detected_sides) == 1:
+            return "single_line"
+        if blind_mode == "route_tracking":
+            return "route_tracking"
+        if blind_mode:
+            return "blind"
+        return "none"
+
+    @staticmethod
+    def _control_policy_mode(snapshot: VisualStateSnapshot) -> str | None:
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        value = debug.get("control_policy_mode")
+        return str(value) if value else None
+
+    @staticmethod
+    def _planner_priority_active(snapshot: VisualStateSnapshot) -> bool:
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        if "planner_priority_active" in debug:
+            return bool(debug.get("planner_priority_active"))
+        return bool(debug.get("planner_priority"))
+
+    @staticmethod
+    def _direct_error_valid(
+        snapshot: VisualStateSnapshot,
+        *,
+        measurement_mode: str,
+        direct_error_m: float | None,
+    ) -> bool:
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        if "direct_error_valid" in debug:
+            return bool(debug.get("direct_error_valid"))
+        return measurement_mode == "two_line" and direct_error_m is not None
+
+    @staticmethod
     def _quality_from_sides(detected_sides: tuple[str, ...], blind_mode: str | None) -> float:
         if blind_mode == "route_tracking":
             return 0.1
@@ -101,7 +150,16 @@ class threadLaneObserver(ThreadWithStop):
         if isinstance(debug, dict):
             blind_mode = debug.get("blind_control_mode")
         detected_sides = self._detected_sides(snapshot)
-        direct_error_m = self._direct_error_m(snapshot)
+        raw_direct_error_m = self._direct_error_m(snapshot)
+        measurement_mode = self._measurement_mode(snapshot, detected_sides, blind_mode)
+        direct_error_valid = self._direct_error_valid(
+            snapshot,
+            measurement_mode=measurement_mode,
+            direct_error_m=raw_direct_error_m,
+        )
+        direct_error_m = raw_direct_error_m if direct_error_valid else None
+        observation_debug = dict(debug)
+        observation_debug["raw_direct_error_m"] = raw_direct_error_m
         return LaneObservation(
             timestamp=float(snapshot.timestamp),
             source_mode=str(snapshot.detection_mode or "unknown"),
@@ -114,8 +172,12 @@ class threadLaneObserver(ThreadWithStop):
             curve_hint=str(snapshot.curve_state or "STRAIGHT"),
             camera_yaw_hint_rad=snapshot.camera_yaw_hint_rad,
             camera_yaw_hint_confidence=float(snapshot.camera_yaw_hint_confidence or 0.0),
+            measurement_mode=measurement_mode,
+            direct_error_valid=direct_error_valid,
+            control_policy_mode=self._control_policy_mode(snapshot),
+            planner_priority_active=self._planner_priority_active(snapshot),
             blind_mode=str(blind_mode) if blind_mode else None,
-            debug=dict(debug),
+            debug=observation_debug,
         )
 
     def _build_stopline_observation(self, snapshot: VisualStateSnapshot) -> StoplineObservation:
@@ -167,6 +229,10 @@ class threadLaneObserver(ThreadWithStop):
             blind_mode=lane_observation.blind_mode,
             source_mode=lane_observation.source_mode,
             lane_width_px=lane_observation.lane_width_px,
+            measurement_mode=lane_observation.measurement_mode,
+            direct_error_valid=bool(lane_observation.direct_error_valid),
+            control_policy_mode=lane_observation.control_policy_mode,
+            planner_priority_active=bool(lane_observation.planner_priority_active),
         )
 
         if stopline_observation.visible or stopline_observation.pass_event is not None:

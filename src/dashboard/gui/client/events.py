@@ -55,6 +55,7 @@ EVT_LOCATION = "Location"
 EVT_CARS = "Cars"
 EVT_SEMAPHORES = "Semaphores"
 EVT_NAVIGATION_STATUS = "NavigationStatus"
+EVT_BEHAVIOR_OUTPUT = "BehaviorOutputMsg"
 EVT_CAMERA_BASE64 = "serialCamera"           # legacy: base64 PNG (JSON envelope)
 EVT_CAMERA_BIN = "serialCamera_bin"          # NEW: raw JPEG bytes (preferred)
 EVT_LINE_FOLLOWING_DEBUG = "LineFollowingDebug"

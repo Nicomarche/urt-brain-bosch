@@ -298,26 +298,109 @@ def test_path_stays_on_pose_lanelet_before_entering_shared_successor() -> None:
     assert path[1, 1] > 0.05
 
 
-def test_route_target_path_builds_connector_back_to_active_route() -> None:
-    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
-    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
-    route = router.go_to("9", {"lanelet_id": "186"})
-
-    pose = (-7.576, 0.08, 2.614154320252818)
-    path = build_target_path_from_route(
-        route_waypoints=route.waypoints,
-        matched_idx=17,
+def test_route_target_path_builds_straight_hold_prefix_before_rejoining_route() -> None:
+    route = np.array([[0.10 * idx, 0.0, 0.0] for idx in range(30)], dtype=float)
+    pose = (0.0, 0.03, 0.05)
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=1,
         start_xy=pose[:2],
         start_yaw_rad=pose[2],
-        matched_xy=(-7.576107733854858, -0.06902891050058743),
-        target_speed_mps=0.4,
+        matched_xy=(0.1, 0.0),
+        target_speed_mps=0.1,
         horizon_n=20,
         dt=0.05,
+        return_metadata=True,
     )
 
     assert path.shape[0] >= 6
     assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
     assert path[0, 1] == pytest.approx(pose[1], abs=1e-6)
-    assert path[1, 1] > path[0, 1] - 0.01
+    assert bridge_meta["bridge_mode"] == "straight_hold"
+    assert bridge_meta["protected_prefix_m"] == pytest.approx(0.45, abs=1e-6)
+    assert path[1, 1] <= path[0, 1] + 0.01
+    assert path[2, 1] <= path[1, 1] + 0.01
+    assert path[6, 1] < path[5, 1]
+    assert path[-1, 1] <= 0.001
+
+
+def test_route_target_path_keeps_straight_prefix_when_small_gap_would_snap_to_route() -> None:
+    route = np.array([[0.10 * idx, 0.0, 0.0] for idx in range(30)], dtype=float)
+    pose = (0.05, 0.015, 0.05)
+    matched_xy = (0.1, 0.0)
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=1,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=matched_xy,
+        target_speed_mps=1.0,
+        horizon_n=20,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "straight_hold"
+    assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
+    assert path[0, 1] == pytest.approx(pose[1], abs=1e-6)
+    assert path[1, 0] > path[0, 0] + 0.03
+    assert path[1, 1] >= pose[1] - 0.003
+    assert path[2, 1] >= pose[1] - 0.003
+    assert path[8, 1] < path[6, 1]
+
+
+def test_route_target_path_does_not_insert_backward_micro_segment_at_matched_join() -> None:
+    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
+    route = router.go_to("50", {"lanelet_id": "75"})
+
+    pose = (4.117731554685099, 5.900499982449048, -1.224637025133419e-06)
+    matched_xy = (4.117731554685099, 5.90045)
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route.waypoints,
+        matched_idx=1,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=matched_xy,
+        target_speed_mps=0.1,
+        horizon_n=20,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "matched_route_only"
+    assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
+    assert path[1, 0] > path[0, 0]
+    assert path[2, 0] > path[1, 0]
+    assert np.max(np.abs(path[:6, 1] - path[0, 1])) < 1e-3
+    assert abs(path[1, 2]) < 0.05
+
+
+def test_route_target_path_uses_local_recenter_without_dragging_future_turn_branch() -> None:
+    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
+    route = router.go_to(
+        {"x": 4.0125, "y": 5.9005, "yaw_rad": 0.0},
+        {"lanelet_id": "75", "x": 6.72, "y": 4.066},
+    )
+
+    pose = (4.492239130919617, 5.952497235675633, 0.2097604743164211)
+    matched_xy = tuple(route.waypoints[5][:2])
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route.waypoints,
+        matched_idx=5,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=matched_xy,
+        target_speed_mps=0.1,
+        horizon_n=20,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "connector"
+    assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
+    assert path[0, 1] == pytest.approx(pose[1], abs=1e-6)
     assert path[3, 1] < path[1, 1]
-    assert path[-1, 1] < 0.0
+    assert path[5, 1] < path[3, 1]
+    assert path[-1, 1] > 5.88
