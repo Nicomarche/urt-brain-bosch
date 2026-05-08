@@ -1,17 +1,13 @@
 # src/routing/
 #
-# Mapa HD + planificación de ruta global. Toma el GraphML de pista BFMC
+# Mapa HD + planificación de ruta global. Toma el OSM lanelet2 de pista BFMC
 # y la pose actual, y produce un `RouteContext` con waypoints + lanelet
 # activo + elementos regulatorios próximos.
 #
 # Sub-paquetes y módulos:
 #
-#   lanelet/                       — capa "Lanelet HD map" estilo Autoware
-#                                     (envuelve el GraphML existente).
-#       from_graphml.py            Parser GraphML → `TrackGraph` (hoy es
-#                                   también el grafo de ruteo; en Fase 3
-#                                   se separa de la capa Lanelet).
-#       semantics.py               `track_semantics.json` loader.
+#   lanelet/                       — capa "Lanelet HD map" estilo Autoware.
+#       osm_router.py              Route handler OSM-only y path denso.
 #       lanelet_map.py             (Fase 3) `LaneletMap` consultable:
 #                                   `at_pose()`, `successors_of()`,
 #                                   `regulatory_within()`.

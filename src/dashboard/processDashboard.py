@@ -37,6 +37,7 @@ import inspect
 import eventlet
 import os
 import time
+import base64
 
 from flask import Flask, request
 from flask_socketio import SocketIO
@@ -46,10 +47,11 @@ from enum import Enum
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.templates.workerprocess import WorkerProcess
-from src.core.messaging.allMessages import Semaphores, StateChange
+from src.core.messaging.allMessages import Localisation, Semaphores, StateChange
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.transitionTable import TransitionTable
 from src.statemachine.systemMode import SystemMode
+from src.utils.live_log import live_log
 from src.dashboard.components.calibration import Calibration
 from src.dashboard.components.ip_manger import IpManager
 
@@ -76,61 +78,61 @@ class processDashboard(WorkerProcess):
         # ip replacement
         IpManager.replace_ip_in_file()
 
-        # state machine
-        self.stateMachine = StateMachine.get_instance()
-
-        # direct StateChange sender: bypasses the Manager proxy (which breaks under
-        # eventlet monkey-patching).  Used as primary path for driving mode changes.
         self.stateChangeSender = messageHandlerSender(queueList, StateChange)
-
-        # local state tracker so we can validate transitions without the Manager
         self._current_mode = SystemMode.DEFAULT
 
-        # message handling
         self.messages = {}
         self.sendMessages = {}
         self.messagesAndVals = {}
 
-        # hardware monitoring
         self.memoryUsage = 0
         self.cpuCoreUsage = 0
         self.cpuTemperature = 0
 
-
-        # heartbeat
         self.heartbeat_last_sent = time.time()
         self.heartbeat_retries = 0
         self.heartbeat_max_retries = 3
-        self.heartbeat_time_between_heartbeats = 20 # seconds
-        self.heartbeat_time_between_retries = 5 # seconds # put a higher value if the connection is not stable (e.g. 5 seconds)
+        self.heartbeat_time_between_heartbeats = 20
+        self.heartbeat_time_between_retries = 5
         self.heartbeat_received = False
 
-        # session management
         self.sessionActive = False
         self.activeUser = None
-
-        # serial connection state
         self.serialConnected = False
-
-        # configuration
         self.table_state_file = self._get_table_state_path()
 
-        # setup flask and socketio
-        self.app = Flask(__name__)
-        self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='eventlet')
-        CORS(self.app, supports_credentials=True)
+        # Flask, SocketIO, Calibration, and websocket handlers are NOT created here
+        # because threading.Lock inside Flask/SocketIO is not picklable — spawn mode
+        # serialises this object before sending it to the child process.
+        # _init_flask_server() is called at the start of run() instead.
+        self.app = None
+        self.socketio = None
+        self.calibration = None
+        self.stateMachine = None
 
-        # calibration
-        self.calibration = Calibration(self.queueList, self.socketio)
-
-        # initialize message handling
         self._initialize_messages()
-        self._setup_websocket_handlers()
-        # NOTE: _start_background_tasks() is called from run() (after fork),
-        # NOT here, to avoid green-thread/eventlet issues across fork boundaries.
 
         super(processDashboard, self).__init__(self.queueList, ready_event)
     
+
+    def _init_flask_server(self):
+        """Create Flask/SocketIO in the child process (post-spawn/fork).
+
+        Flask and SocketIO contain threading.Lock objects that are not picklable,
+        so they cannot be created in __init__ when using spawn mode.
+        """
+        IpManager.replace_ip_in_file()
+        try:
+            self.stateMachine = StateMachine.get_instance()
+        except RuntimeError:
+            # Spawn mode: StateMachine class state is not inherited by the child.
+            # handle_driving_mode() already handles self.stateMachine being None.
+            self.stateMachine = None
+        self.app = Flask(__name__)
+        self.socketio = SocketIO(self.app, cors_allowed_origins="*", async_mode='eventlet')
+        CORS(self.app, supports_credentials=True)
+        self.calibration = Calibration(self.queueList, self.socketio)
+        self._setup_websocket_handlers()
 
     def _get_table_state_path(self):
         """Get the path for table state file."""
@@ -165,6 +167,71 @@ class processDashboard(WorkerProcess):
         self.socketio.on_event('message', self.handle_message)
         self.socketio.on_event('save', self.handle_save_table_state)
         self.socketio.on_event('load', self.handle_load_table_state)
+
+    @staticmethod
+    def _is_ego_location_payload(payload):
+        if not isinstance(payload, dict):
+            return False
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            source = str(meta.get("source") or "").strip().lower()
+            if source.startswith("ego_pose"):
+                return True
+        # Backward compatibility: before the dashboard-specific tagging landed,
+        # internal ego poses had x/y/yaw but no locsys/traffic `id`.
+        return payload.get("id") is None and "x" in payload and "y" in payload
+
+    @staticmethod
+    def _location_payload_to_car(payload):
+        if not isinstance(payload, dict):
+            return None
+        try:
+            x = float(payload.get("x", payload.get("world_x", payload.get("posA"))))
+            y = float(payload.get("y", payload.get("world_y", payload.get("posB"))))
+        except (TypeError, ValueError):
+            return None
+        car = {"x": x, "y": y}
+        if payload.get("id") is not None:
+            car["id"] = payload.get("id")
+        if payload.get("yaw") is not None:
+            car["yaw"] = payload.get("yaw")
+        return car
+
+    @staticmethod
+    def _summarize_navigation_command(payload):
+        if not isinstance(payload, dict):
+            return {"type": "invalid"}
+        summary = {
+            "mode": str(payload.get("mode", "") or "").lower() or "direct_xy",
+        }
+        if payload.get("lanelet_id") is not None:
+            summary["lanelet_id"] = str(payload.get("lanelet_id"))
+        if payload.get("x") is not None and payload.get("y") is not None:
+            try:
+                summary["x"] = round(float(payload["x"]), 3)
+                summary["y"] = round(float(payload["y"]), 3)
+            except (TypeError, ValueError):
+                pass
+        destinations = list(payload.get("destinations", []) or [])
+        if destinations:
+            summary["destination_count"] = len(destinations)
+            preview = []
+            for item in destinations[:4]:
+                if not isinstance(item, dict):
+                    continue
+                row = {}
+                if item.get("lanelet_id") is not None:
+                    row["lanelet_id"] = str(item.get("lanelet_id"))
+                if item.get("x") is not None and item.get("y") is not None:
+                    try:
+                        row["x"] = round(float(item["x"]), 3)
+                        row["y"] = round(float(item["y"]), 3)
+                    except (TypeError, ValueError):
+                        pass
+                if row:
+                    preview.append(row)
+            summary["destinations_preview"] = preview
+        return summary
     
     
     def _start_background_tasks(self):
@@ -213,6 +280,8 @@ class processDashboard(WorkerProcess):
     # ===================================== RUN ==========================================
     def run(self):
         """Apply the initializing method."""
+        self._init_flask_server()
+
         # Register connect handler: enables the KL-switch button on the frontend as
         # soon as any client connects.
         @self.socketio.on('connect')
@@ -243,6 +312,14 @@ class processDashboard(WorkerProcess):
 
         subscriber = messageHandlerSubscriber(self.queueList, Semaphores, "fifo", True)
         self.messages["Semaphores"] = {"obj": subscriber}
+
+        # Receive GPS fixes published by threadLocSys on the Localisation channel.
+        # We add a dedicated subscriber (separate from the sender already created
+        # above) so the dashboard can forward them to the frontend as "GpsFix".
+        # Filtering by meta.source happens in send_continuous_messages().
+        self._gps_fix_subscriber = messageHandlerSubscriber(
+            self.queueList, Localisation, "lastOnly", True
+        )
 
 
     def get_name_and_vals(self):
@@ -291,6 +368,26 @@ class processDashboard(WorkerProcess):
                     print(
                         f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m"
                         f" - Received Klem \033[94m{dataDict.get('Value')}\033[0m from \033[94m{socketId}\033[0m"
+                    )
+                # Log explícito del carril manual (Speed/Steer/Brake) para
+                # que el operador vea el message llegando al brain. Si el
+                # GUI emitió `[ DrivingModel ] EMIT CMD_SPEED` pero ESTA
+                # línea no aparece, el message se perdió en SocketIO o el
+                # `sessionActive`/`activeUser` lo rechazó arriba.
+                if dataName in ("SpeedMotor", "SteerMotor", "Brake"):
+                    is_registered = dataName in self.sendMessages
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mRECV\033[0m"
+                        f" {dataName}={dataDict.get('Value')!r}"
+                        f" registered={is_registered}"
+                    )
+                if dataName == "NavigationCommand":
+                    live_log(
+                        "dashboard", event="navigation_command_received",
+                        command=self._summarize_navigation_command(dataDict.get("Value")),
+                        dashboard_mode=getattr(self._current_mode, "name", str(self._current_mode)),
+                        socket_id=socketId,
+                        session_active=bool(self.sessionActive),
                     )
                 self.send_message_to_brain(dataName, dataDict)
                 # When the kl-switch component loads it sends Klem="0" before it
@@ -353,6 +450,12 @@ class processDashboard(WorkerProcess):
         # Send via direct queue (works even when Manager proxy is broken)
         try:
             self.stateChangeSender.send(mode_name)
+            live_log(
+                "dashboard", event="state_change_request",
+                from_mode=getattr(self._current_mode, "name", str(self._current_mode)),
+                to_mode=mode_name,
+                source="dashboard_handle_driving_mode",
+            )
             print(
                 f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m"
                 f" - Mode \033[1;94m{mode_name}\033[0m sent to brain"
@@ -521,6 +624,39 @@ class processDashboard(WorkerProcess):
                     except (KeyError, Exception):
                         pass
 
+                # ── Camera fast-path ─────────────────────────────────────────
+                # The brain encodes JPEG → base64 (string) in threadCamera.py
+                # and ships it through the IPC queue. The Angular legacy
+                # frontend consumes the base64 string via `serialCamera`, but
+                # base64 inflates payload by ~33% AND forces a JSON pass.
+                #
+                # The new PyQt5 GUI prefers `serialCamera_bin` — raw JPEG
+                # bytes pushed directly as a SocketIO binary frame. We emit
+                # both: legacy clients keep working, new clients save CPU and
+                # bandwidth on the Jetson (the stream is the dominant load).
+                if msg == "serialCamera" and isinstance(resp, str):
+                    try:
+                        jpg_bytes = base64.b64decode(resp)
+                        self.socketio.emit("serialCamera_bin", jpg_bytes)
+                    except Exception as exc:
+                        # If decoding fails, fall through and at least emit
+                        # the legacy text frame so something still shows.
+                        if self.debugging:
+                            self.logger.warning(
+                                f"serialCamera_bin decode failed: {exc}")
+                    self.socketio.emit(msg, {"value": resp})
+                    continue
+
+                if msg == "Location" and isinstance(resp, dict):
+                    safe_resp = self._make_json_safe(resp)
+                    if self._is_ego_location_payload(safe_resp):
+                        self.socketio.emit(msg, {"value": safe_resp})
+                    else:
+                        car_payload = self._location_payload_to_car(safe_resp)
+                        if car_payload is not None:
+                            self.socketio.emit("Cars", {"value": [car_payload]})
+                    continue
+
                 safe_resp = self._make_json_safe(resp)
                 self.socketio.emit(msg, {"value": safe_resp})
                 if self.debugging:
@@ -530,6 +666,19 @@ class processDashboard(WorkerProcess):
                     f"\033[1;97m[ Dashboard ] :\033[0m \033[1;91mERROR\033[0m"
                     f" - Failed to forward \033[94m{msg}\033[0m ({e})"
                 )
+
+        # Forward GPS fixes from threadLocSys to the frontend as "GpsFix".
+        # We read the dedicated subscriber (separate from the Localisation sender)
+        # and only emit when the message comes from the GPS hardware.
+        try:
+            gps_payload = self._gps_fix_subscriber.receive()
+            if (
+                isinstance(gps_payload, dict)
+                and gps_payload.get("meta", {}).get("source") == "gps_localisation"
+            ):
+                self.socketio.emit("GpsFix", {"value": gps_payload})
+        except Exception:
+            pass
 
         eventlet.spawn_after(0.15, self.send_continuous_messages)  # 150ms (~7Hz) — balance entre CPU y fluidez del stream
 

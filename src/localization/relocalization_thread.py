@@ -2,8 +2,8 @@
 threadTracking — GPS-free dead-reckoning + waypoint navigation thread.
 
 Runs at ~50 Hz inside processCamera.  Receives CurrentSpeed and ImuData from
-the serial handler, integrates position with DeadReckoning, follows waypoints
-from TrackGraph, and publishes navigation state via TrackingState (in-process
+the serial handler, integrates position with DeadReckoning, follows OSM lanelet
+centerlines, and publishes navigation state via TrackingState (in-process
 shared object) and Location messages to the dashboard.
 
 TrackingState is intentionally NOT a multiprocessing.Value — the tracking
@@ -34,13 +34,14 @@ from src.core.messaging.allMessages import (
 )
 
 from src.localization.dead_reckoning import DeadReckoning
-from src.routing.lanelet.from_graphml import ATTR_STOPLINE, TrackGraph
+from src.routing.lanelet.attributes import ATTR_NAMES, ATTR_STOPLINE
+from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.routing.route_planner import PathManager
 
 try:
     import config as cfg
-    _GRAPHML_PATH = getattr(cfg, "TRACKING_GRAPHML", "Track GraphML File.graphml")
-    _SEMANTICS_PATH = getattr(cfg, "TRACKING_SEMANTICS", "track_semantics.json")
+    _OSM_PATH = getattr(cfg, "TRACKING_LANELET2_OSM", "lanelet2_map.osm")
+    _START_LANELET_ID = getattr(cfg, "TRACKING_START_LANELET_ID", None)
     _STEP_M = getattr(cfg, "TRACKING_WAYPOINT_STEP_M", 0.05)
     _ADVANCE_DIST = getattr(cfg, "TRACKING_ADVANCE_DIST_M", 0.15)
     _INTERSECTION_LOOKAHEAD = getattr(cfg, "TRACKING_INTERSECTION_LOOKAHEAD_M", 0.40)
@@ -66,6 +67,12 @@ try:
     # Tracking now keeps the steering sign aligned with the actuator feedback so
     # the same convention flows through controller, telemetry, and DR.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
+    # Sign applied to raw IMU yaw before EKF fusion.
+    # +1.0 for sim (sim_bridge right-turn → yaw increases, matches the OSM tangent convention).
+    # -1.0 for real hardware (BNO055 CCW-positive = right-turn → yaw decreases).
+    _IMU_YAW_SIGN      = float(getattr(cfg, "TRACKING_IMU_YAW_SIGN", -1.0) or -1.0)
+    # True when running against sim_bridge (MOTOR_OUTPUT="zmq").
+    _IS_SIM            = getattr(cfg, "MOTOR_OUTPUT", "") == "zmq"
     # First-order lag filter on the steer angle fed to dead reckoning.
     # Models the servo actuator delay (time for wheels to reach commanded angle).
     # 1.0 = instant (no lag), 0.0 = never responds. Good starting value: 0.5–0.8.
@@ -151,8 +158,8 @@ try:
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
     )
 except Exception:
-    _GRAPHML_PATH = "Track GraphML File.graphml"
-    _SEMANTICS_PATH = "track_semantics.json"
+    _OSM_PATH = "lanelet2_map.osm"
+    _START_LANELET_ID = None
     _STEP_M = 0.05
     _ADVANCE_DIST = 0.15
     _INTERSECTION_LOOKAHEAD = 0.40
@@ -168,6 +175,8 @@ except Exception:
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
+    _IMU_YAW_SIGN      = -1.0   # fallback: real hardware (CCW-positive IMU)
+    _IS_SIM            = False
     _STEER_LAG_ALPHA   = 1.0
     _YAW_EKF_Q          = 1e-4
     _YAW_EKF_R_STRAIGHT = 0.005
@@ -226,10 +235,6 @@ _IMU_STEER_INHIBIT_DEG = 0.0
 _MAX_INTEGRATION_DT = 0.15
 
 # Attribute name → human label for the log
-_ATTR_NAMES = {0: "normal", 1: "crosswalk", 2: "intersection", 3: "oneway",
-               4: "hw_left", 5: "hw_right", 6: "roundabout", 7: "stopline",
-               8: "dotted", 9: "dotted_xwalk", 11: "intersection_exit"}
-
 # How many dense waypoints correspond to the intersection lookahead distance
 _LOOKAHEAD_PTS = max(2, int(_INTERSECTION_LOOKAHEAD / _STEP_M))
 
@@ -248,9 +253,9 @@ class TrackingState:
         path_psi         Path tangent angle at the current waypoint (radians).
         speed_mps        Last received forward speed.
         wp_idx           Current waypoint index in the dense spline array.
-        waypoint_mode_active  True when the car should use graph waypoints
+        waypoint_mode_active  True when the car should use map waypoints
                                instead of visual lane detection (precision zones).
-        node_attr        GraphML attribute of the current waypoint region.
+        node_attr        Lanelet/map attribute of the current waypoint region.
     """
 
     def __init__(self):
@@ -758,36 +763,29 @@ class threadTracking(ThreadWithStop):
         self._loc_sender = messageHandlerSender(queuesList, Location)
         self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
 
-        # Load the track graph
-        graphml_path = _GRAPHML_PATH
-        if not os.path.isabs(graphml_path):
-            # Resolve relative to workspace root: src/hardware/tracking/ → 3 levels up
+        # Load the OSM route handler.
+        osm_path = _OSM_PATH
+        if not os.path.isabs(osm_path):
+            # Resolve relative to workspace root (src/localization/* → 2 levels up).
             _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.join(_here, "..", "..", "..")
-            graphml_path = os.path.normpath(os.path.join(_root, graphml_path))
+            _root = os.path.join(_here, "..", "..")
+            osm_path = os.path.normpath(os.path.join(_root, osm_path))
 
         self._graph = None
         self._dr = None
         self._path_manager = None
         self._start_yaw_rad = 0.0   # path tangent at start — used as yaw fallback
         try:
-            semantics_path = _SEMANTICS_PATH
-            if not os.path.isabs(semantics_path):
-                _here = os.path.dirname(os.path.abspath(__file__))
-                _root = os.path.join(_here, "..", "..", "..")
-                semantics_path = os.path.normpath(os.path.join(_root, semantics_path))
-            preferred_editor_save = os.path.join(os.path.dirname(semantics_path), "Track Editor Save.json")
-            if os.path.exists(preferred_editor_save):
-                semantics_path = preferred_editor_save
-            elif not os.path.exists(semantics_path):
-                alt_name = os.path.join(os.path.dirname(semantics_path), "Track Semantics.json")
-                semantics_path = alt_name if os.path.exists(alt_name) else None
-
-            self._graph = TrackGraph(graphml_path, step_m=_STEP_M, semantics_path=semantics_path)
+            self._graph = OsmRouteGraph(
+                osm_path,
+                step_m=_STEP_M,
+                start_lanelet_id=_START_LANELET_ID,
+            )
             self._path_manager = PathManager(self._graph)
             x0, y0, yaw0 = self._graph.get_start_pose()
             self._dr = DeadReckoning(x0, y0, yaw0)
-            self._start_yaw_rad = yaw0  # remember so IMU can be seeded from this
+            # The DR frame starts directly on the OSM centerline tangent.
+            self._start_yaw_rad = yaw0
             # Share DR reference so threadLineFollowing can push lateral corrections
             tracking_state._dr = self._dr
             if debugging:
@@ -809,11 +807,10 @@ class threadTracking(ThreadWithStop):
         # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
         self._last_yaw_rad = self._start_yaw_rad
         self._imu_received = False  # True once at least one real IMU message arrives
-        # Yaw offset to align IMU reference frame with the GraphML map frame.
-        # Computed on the first IMU message: offset = start_yaw_map - first_imu_yaw_raw
-        # This compensates for the IMU having an arbitrary reference direction
-        # (e.g. wherever the Nucleo was powered on), so that yaw_corrected = 0°
-        # when the car faces the track-start tangent direction.
+        # Yaw offset to align IMU reference frame with the OSM map frame.
+        # Computed on the first IMU message: offset = _start_yaw_rad - first_imu_yaw_raw
+        # Both sim and real: _start_yaw_rad = OSM start tangent (car is already there).
+        # In sim, _send_sim_relocalize teleports the car to that heading before the first tick.
         self._yaw_offset = 0.0
         self._yaw_offset_calibrated = False
         self._last_raw_speed = None   # raw value from message queue (for log)
@@ -834,7 +831,7 @@ class threadTracking(ThreadWithStop):
         self._debug_log_path = None
         if _DEBUG_LOG:
             _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.normpath(os.path.join(_here, "..", "..", ".."))
+            _root = os.path.normpath(os.path.join(_here, "..", ".."))
             _log_dir = os.path.join(_root, "temp")
             os.makedirs(_log_dir, exist_ok=True)
             self._debug_log_path = os.path.join(_log_dir, "tracking_debug.txt")
@@ -1271,12 +1268,16 @@ class threadTracking(ThreadWithStop):
                 _prev_imu_t = self._last_imu_t          # save before overwrite
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
-                yaw_raw_rad = -math.radians(yaw_deg)
+                # _IMU_YAW_SIGN normalises the raw yaw to the OSM CW-from-east
+                # convention used by the dead reckoning:
+                #   +1.0 (sim_bridge, feedback_yaw_sign=1.0): right turn → yaw_deg grows → keep sign
+                #   -1.0 (real BNO055, CCW-positive): right turn → yaw_deg shrinks → negate
+                yaw_raw_rad = _IMU_YAW_SIGN * math.radians(yaw_deg)
 
                 if not self._yaw_offset_calibrated:
                     # First IMU message: compute frame-alignment offset so that
                     # yaw_imu = yaw_raw_rad + _yaw_offset maps IMU readings to
-                    # the GraphML map frame.  _last_yaw_rad is already seeded
+                    # the OSM map frame.  _last_yaw_rad is already seeded
                     # from the track-start tangent in __init__; do not overwrite.
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
@@ -1583,12 +1584,27 @@ class threadTracking(ThreadWithStop):
             except Exception:
                 pass
 
-        # ---- Publish Location to dashboard (convert m → normalised dashboard coords)
-        # Dashboard MapComponent maps (0..20.67) → (0..100%) width,
-        # (0..13.76) → (0..100%) height, so we send raw metres and let the
-        # dashboard scale.  Y is inverted because SVG y=0 is at the top.
+        # ---- Publish Location to dashboard
+        # IMPORTANT: the dashboard cursor must follow the fused physical pose of
+        # the car, not the map-matched pose snapped to the route centerline.
+        # When we publish `matched_x/y/yaw` here, the cursor can appear on the
+        # wrong side of the road or with the wrong heading whenever route
+        # matching latches onto a stale/opposite lanelet. Keep the matched pose
+        # as debug metadata only; the main x/y/yaw shown to the user must be the
+        # fused pose that also feeds the controller.
         try:
-            self._loc_sender.send({"x": round(matched_x, 4), "y": round(matched_y, 4)})
+            self._loc_sender.send({
+                "x": round(raw_x, 4),
+                "y": round(raw_y, 4),
+                "yaw": round(math.degrees(raw_yaw), 2),
+                "matched_x": round(matched_x, 4),
+                "matched_y": round(matched_y, 4),
+                "matched_yaw": round(math.degrees(matched_yaw), 2),
+                "meta": {
+                    "source": "ego_pose_relocalization",
+                    "frame": "osm_map",
+                },
+            })
         except Exception:
             pass
 

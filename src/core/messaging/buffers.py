@@ -23,6 +23,15 @@ class LatestFrameBuffer:
         self.sequence = 0
         self.lock = threading.Lock()
 
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['lock']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.lock = threading.Lock()
+
     def write(self, frame) -> None:
         if frame is None:
             return
@@ -47,6 +56,15 @@ class LatestValueBuffer:
         self._timestamp = 0.0
         self._sequence = 0
         self._copy_on_write = bool(copy_on_write)
+        self._lock = threading.Lock()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state['_lock']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
         self._lock = threading.Lock()
 
     def write(self, value: Any, *, timestamp: float | None = None) -> BufferedValue:

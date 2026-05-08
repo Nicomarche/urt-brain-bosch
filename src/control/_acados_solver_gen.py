@@ -98,12 +98,12 @@ def create_bicycle_model(
 # ---------------------------------------------------------------------------
 
 def generate_solver(
-    N: int = 30,
+    N: int = 40,
     T: float = 0.05,
     wheelbase: float = 0.258,
     l_r: float = 0.103,
     v_min: float = -0.5,
-    v_max: float = 0.5,
+    v_max: float = 0.10,
     delta_min: float = -0.436,
     delta_max: float = 0.436,
     x_cost: float = 2.0,
@@ -133,7 +133,7 @@ def generate_solver(
     ny_e = 3    # [x, y, psi]
     n_params = 2  # [v_prev, delta_prev]
 
-    ocp.dims.N = N
+    ocp.solver_options.N_horizon = N
     ocp.solver_options.tf = float(N * T)
 
     # --- Cost (nonlinear least-squares) ---
@@ -173,7 +173,7 @@ def generate_solver(
     ocp.solver_options.nlp_solver_type = "SQP_RTI"
     ocp.solver_options.print_level = 0
 
-    ocp.code_export_directory = output_dir
+    ocp.code_gen_opts.code_export_directory = output_dir
 
     json_path = os.path.join(output_dir, "acados_ocp_bfmc_bicycle.json")
 
@@ -200,11 +200,11 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate Acados MPC solver for BFMC bicycle model.",
     )
-    parser.add_argument("--N", type=int, default=30, help="Prediction horizon steps (default 30)")
+    parser.add_argument("--N", type=int, default=40, help="Prediction horizon steps (default 40)")
     parser.add_argument("--T", type=float, default=0.05, help="Time step in seconds (default 0.05)")
     parser.add_argument("--wheelbase", type=float, default=0.258, help="Wheelbase in metres (default 0.258)")
     parser.add_argument("--l_r", type=float, default=0.103, help="Rear axle to CG in metres (default 0.103)")
-    parser.add_argument("--v_max", type=float, default=0.5, help="Max velocity m/s (default 0.5)")
+    parser.add_argument("--v_max", type=float, default=0.10, help="Max velocity m/s (default 0.10)")
     parser.add_argument("--delta_max_deg", type=float, default=25.0, help="Max steering degrees (default 25)")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory for C code")
     args = parser.parse_args()

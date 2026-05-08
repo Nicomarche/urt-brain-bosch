@@ -124,8 +124,29 @@ class ManeuverManager:
     def _request_parking_mode(self, current_mode: str) -> None:
         if current_mode != "auto" or self.state_change_sender is None:
             return
+        # Test/debug toggle: durante runs automatizados no queremos que un
+        # parking sign visto por el detector cambie el state_machine —
+        # eso corta los tests de lane following después de pocos segundos.
+        # Set URT_DISABLE_AUTO_PARKING=1 (run_test.sh lo setea) para
+        # ignorar el sign de parking pero seguir respetando otros signs
+        # (stop, traffic light, crosswalk).
+        import os
+        if os.environ.get("URT_DISABLE_AUTO_PARKING", "0") == "1":
+            try:
+                from src.utils.live_log import live_log
+                live_log("maneuver_manager", event="parking_request_ignored",
+                         reason="URT_DISABLE_AUTO_PARKING=1")
+            except Exception:
+                pass
+            return
         try:
             self.state_change_sender.send("PARKING")
+            try:
+                from src.utils.live_log import live_log
+                live_log("maneuver_manager", event="parking_request_sent",
+                         current_mode=current_mode)
+            except Exception:
+                pass
         except Exception:
             pass
 

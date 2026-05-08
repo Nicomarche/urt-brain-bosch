@@ -28,9 +28,15 @@ class IpManager:
 
 
     @staticmethod
-    def replace_ip_in_file(file_path="./src/dashboard/frontend/src/app/webSocket/web-socket.service.ts"):
+    def replace_ip_in_file(file_path="./legacy/dashboard-frontend/src/app/webSocket/web-socket.service.ts"):
         """Replace the IP address in the specified file if it differs from the current IP.
-        
+
+        The Angular dashboard was moved to `legacy/` (see legacy/README.md). This
+        helper is kept so users that still serve the legacy UI via
+        `services/angular-autostart` can have the IP auto-updated. If the file
+        does not exist (i.e. the legacy frontend was deleted), the function
+        prints a warning and exits cleanly — it never raises.
+
         Args:
             file_path (str): The path to the file to replace the IP address in.
         """

@@ -112,21 +112,70 @@ class LaneletKDTreeIndex:
         x: float,
         y: float,
         max_distance_m: float | None = None,
+        yaw_rad: float | None = None,
+        max_yaw_diff_rad: float = math.pi / 2.0,
     ) -> str | None:
         """Devuelve el lanelet_id del punto de centerline más cercano.
 
         - `max_distance_m`: si se especifica y la distancia al punto más
-          cercano la excede, devuelve None. Útil para detectar "ego está
-          fuera del mapa".
+          cercano la excede, devuelve None.
+        - `yaw_rad`: si se pasa, descarta candidatos cuyo heading local
+          difiera del yaw del ego en más de `max_yaw_diff_rad`. Eso evita
+          el bug clásico donde dos lanelets antiparalelos (mismo carril
+          en direcciones opuestas) están a la misma distancia y el
+          KDTree elige al "del otro sentido", llevando al auto a girar
+          en U y volverse atrás.
         """
         if self._tree is None:
             return None
-        dist, idx = self._tree.query([float(x), float(y)], k=1)
-        if math.isinf(float(dist)) or idx >= len(self._lanelet_ids):
+        if yaw_rad is None:
+            dist, idx = self._tree.query([float(x), float(y)], k=1)
+            if math.isinf(float(dist)) or idx >= len(self._lanelet_ids):
+                return None
+            if max_distance_m is not None and float(dist) > float(max_distance_m):
+                return None
+            return self._lanelet_ids[int(idx)]
+
+        # Versión con filtro de yaw: pedimos los K puntos más cercanos y
+        # filtramos por dirección compatible.
+        K = min(20, self._points.shape[0])
+        if K == 0:
             return None
-        if max_distance_m is not None and float(dist) > float(max_distance_m):
-            return None
-        return self._lanelet_ids[int(idx)]
+        dists, idxs = self._tree.query([float(x), float(y)], k=K)
+        if not hasattr(dists, "__len__"):
+            dists = [dists]
+            idxs = [idxs]
+        for d, i in zip(dists, idxs):
+            if math.isinf(float(d)) or i >= len(self._lanelet_ids):
+                continue
+            if max_distance_m is not None and float(d) > float(max_distance_m):
+                continue
+            # Heading local del centerline en ese punto: vector entre
+            # `points[i]` y `points[i+1]` (o `i-1` si es el último).
+            i = int(i)
+            lid = self._lanelet_ids[i]
+            # Buscar siguiente o anterior punto del MISMO lanelet para
+            # estimar el heading.
+            n = self._points.shape[0]
+            heading = None
+            if i + 1 < n and self._lanelet_ids[i + 1] == lid:
+                dxy = self._points[i + 1] - self._points[i]
+                heading = math.atan2(float(dxy[1]), float(dxy[0]))
+            elif i - 1 >= 0 and self._lanelet_ids[i - 1] == lid:
+                dxy = self._points[i] - self._points[i - 1]
+                heading = math.atan2(float(dxy[1]), float(dxy[0]))
+            if heading is None:
+                # Lanelet de un solo punto: aceptarlo (no podemos
+                # discriminar por heading).
+                return lid
+            yaw_diff = heading - float(yaw_rad)
+            while yaw_diff > math.pi:
+                yaw_diff -= 2.0 * math.pi
+            while yaw_diff < -math.pi:
+                yaw_diff += 2.0 * math.pi
+            if abs(yaw_diff) <= float(max_yaw_diff_rad):
+                return lid
+        return None
 
     def query_distance(self, x: float, y: float) -> float:
         """Distancia al punto de centerline más cercano (m).

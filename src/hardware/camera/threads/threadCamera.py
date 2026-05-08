@@ -28,7 +28,6 @@
 
 import cv2
 import threading
-import base64
 import time
 import numpy as np
 
@@ -40,7 +39,6 @@ except ImportError:
 
 from src.core.messaging.allMessages import (
     mainCamera,
-    serialCamera,
     Recording,
     Record,
     Brightness,
@@ -74,7 +72,7 @@ class threadCamera(ThreadWithStop):
 
     # ================================ INIT ===============================================
     def __init__(self, queuesList, logger, debugger, show_preview=False,
-                 frame_buffer=None, publish_serial_stream=True,
+                 frame_buffer=None,
                  camera_type="picamera", usb_device=0, usb_resolution=(640, 480),
                  jetson_sensor_id=0, jetson_capture_resolution=(1920, 1080),
                  jetson_output_resolution=(960, 720), jetson_framerate=30,
@@ -89,7 +87,6 @@ class threadCamera(ThreadWithStop):
         self.recording = False
         self.show_preview = show_preview
         self.frame_buffer = frame_buffer
-        self.publish_serial_stream = bool(publish_serial_stream)
         self.camera_type = camera_type
         self.usb_device = usb_device
         self.usb_resolution = usb_resolution
@@ -135,7 +132,6 @@ class threadCamera(ThreadWithStop):
 
         self.recordingSender = messageHandlerSender(self.queuesList, Recording)
         self.mainCameraSender = messageHandlerSender(self.queuesList, mainCamera)
-        self.serialCameraSender = messageHandlerSender(self.queuesList, serialCamera)
 
         self.subscribe()
         self._init_camera()
@@ -189,7 +185,7 @@ class threadCamera(ThreadWithStop):
 
         try:
             need_main_frame = self.recording or self.show_preview
-            if self.camera_type in ("usb", "jetson"):
+            if self.camera_type in ("usb", "jetson", "zmq"):
                 mainRequest, serialRequest = self._capture_usb(need_main_frame)
             else:
                 mainRequest, serialRequest = self._capture_picamera(need_main_frame)
@@ -207,24 +203,11 @@ class threadCamera(ThreadWithStop):
             if self.recording == True and mainRequest is not None:
                 self.video_writer.write(mainRequest) # type: ignore
 
-            # Show preview window if enabled
-            if self.show_preview:
-                preview_source = mainRequest if mainRequest is not None else serialRequest
-                preview_frame = cv2.resize(preview_source, (1024, 540))  # type: ignore
-                cv2.imshow("Camera Preview", preview_frame)  # type: ignore
-                cv2.waitKey(1)  # type: ignore
-
-            if self.publish_serial_stream:
-                # Keep the dashboard stream compatible, but do not encode frames that
-                # are only needed by local control threads.
-                encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
-                _, serialEncodedImg = cv2.imencode(".jpg", serialRequest, encode_params) # type: ignore
-                serialEncodedImageData = base64.b64encode(serialEncodedImg).decode("utf-8") # type: ignore
-
-                if self._blocker.is_set():
-                    return
-
-                self.serialCameraSender.send(serialEncodedImageData)
+            # Phase 6: este thread ya no publica `serialCamera`. El productor
+            # único de ese canal pasó a ser `threadLocalPerception`, que envía
+            # el frame YA ANOTADO (carriles + cajas de señales). Acá nos
+            # quedamos sólo con captura → frame_buffer (entrada de inferencia)
+            # y mainCamera (grabación a disco).
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
@@ -398,12 +381,14 @@ class threadCamera(ThreadWithStop):
 
     # ================================ INIT CAMERA ========================================
     def _init_camera(self):
-        """Initialize the camera. Supports jetson (GStreamer/nvarguscamerasrc), picamera2 (CSI) and USB (OpenCV VideoCapture)."""
+        """Initialize the camera. Supports jetson (GStreamer/nvarguscamerasrc), picamera2 (CSI), USB (OpenCV VideoCapture), and zmq (sim_bridge)."""
 
         if self.camera_type == "usb":
             self._init_usb_camera()
         elif self.camera_type == "jetson":
             self._init_jetson_camera()
+        elif self.camera_type == "zmq":
+            self._init_zmq_camera()
         else:
             self._init_picamera()
 
@@ -594,6 +579,69 @@ class threadCamera(ThreadWithStop):
             print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - Failed to initialize USB camera: {e}")
             self.camera = None
 
+    def _init_zmq_camera(self):
+        """Subscribe to JPEG frames from sim_bridge over ZMQ. Frames flow through the
+        same _usb_latest_frame pipeline used by USB/Jetson, so _capture_usb() works as-is."""
+        try:
+            import zmq
+            from config import ZMQ_CAMERA_ENDPOINT, ZMQ_CAMERA_TOPIC
+        except ImportError as e:
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - "
+                  f"ZMQ camera unavailable ({e}). Install: pip install pyzmq")
+            self.camera = None
+            return
+
+        try:
+            self._zmq_ctx = zmq.Context.instance()
+            self._zmq_sock = self._zmq_ctx.socket(zmq.SUB)
+            self._zmq_sock.setsockopt(zmq.RCVHWM, 2)
+            self._zmq_sock.setsockopt(zmq.CONFLATE, 0)
+            self._zmq_sock.connect(ZMQ_CAMERA_ENDPOINT)
+            self._zmq_sock.setsockopt(zmq.SUBSCRIBE, ZMQ_CAMERA_TOPIC)
+
+            self.camera = "zmq"
+            self._usb_latest_frame = None
+            self._usb_frame_lock = threading.Lock()
+            self._usb_new_frame = threading.Event()
+            self._usb_reader_running = True
+            self._usb_reader_thread = threading.Thread(target=self._zmq_reader_loop, daemon=True)
+            self._usb_reader_thread.start()
+
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;92mINFO\033[0m - "
+                  f"ZMQ camera subscribed at {ZMQ_CAMERA_ENDPOINT} (topic={ZMQ_CAMERA_TOPIC!r})")
+        except Exception as e:
+            print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;91mERROR\033[0m - "
+                  f"Failed to initialize ZMQ camera: {e}")
+            self.camera = None
+
+    def _zmq_reader_loop(self):
+        """Background reader: pull JPEG frames from the sim_bridge PUB and decode."""
+        import zmq
+        poller = zmq.Poller()
+        poller.register(self._zmq_sock, zmq.POLLIN)
+        while self._usb_reader_running:
+            try:
+                socks = dict(poller.poll(timeout=200))
+                if self._zmq_sock not in socks:
+                    continue
+                parts = self._zmq_sock.recv_multipart(flags=zmq.NOBLOCK)
+                if len(parts) < 2:
+                    continue
+                payload = parts[1]
+                buf = np.frombuffer(payload, dtype=np.uint8)
+                frame = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # type: ignore
+                if frame is None:
+                    continue
+                with self._usb_frame_lock:
+                    self._usb_latest_frame = frame
+                self._usb_new_frame.set()
+            except zmq.Again:
+                continue
+            except Exception as e:
+                print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mWARNING\033[0m - "
+                      f"ZMQ frame decode error: {e}")
+                time.sleep(0.05)
+
     def _jetson_reader_loop(self):
         """Background reader loop for Jetson GStreamer/appsink."""
         while self._usb_reader_running and self.camera is not None:
@@ -637,10 +685,17 @@ class threadCamera(ThreadWithStop):
                 if hasattr(self, '_usb_reader_thread'):
                     self._usb_reader_thread.join(timeout=2)
                 self.camera.release()
+            elif self.camera_type == "zmq":
+                self._usb_reader_running = False
+                if hasattr(self, '_usb_reader_thread'):
+                    self._usb_reader_thread.join(timeout=2)
+                if hasattr(self, '_zmq_sock'):
+                    self._zmq_sock.close(linger=0)
             else:
                 self.camera.stop()
-        if self.show_preview:
-            cv2.destroyAllWindows()  # type: ignore
+        # Local imshow preview was removed (see _capture_and_publish above);
+        # nothing to destroy here. ``show_preview`` is kept on the instance
+        # in case any external caller still sets it, but it is now inert.
         super(threadCamera, self).stop()
 
     # =============================== CONFIG ==============================================

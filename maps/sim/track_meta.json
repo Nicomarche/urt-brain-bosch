@@ -1,0 +1,10 @@
+{
+  "metersPerPixel": 0.010348,
+  "imgW": 2000,
+  "imgH": 1333,
+  "coordinate_origin": "bottom_left",
+  "y_axis_inverted": false,
+  "source_svg": "track.svg",
+  "source_svg_viewbox_mm": [20696, 13786],
+  "notes": "Pista oficial BFMC. SVG rasterizado a 2000px de ancho con rsvg-convert. metersPerPixel = 20.696m / 2000px. y_axis_inverted=false para que el dashboard renderice con la misma orientación visual del simulador usando el mismo frame geométrico del OSM."
+}

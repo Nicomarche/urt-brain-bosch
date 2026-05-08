@@ -1,4 +1,11 @@
 docs/build/
+
+# Run logs (brain.jsonl etc.; large and machine-local)
+temp/logs/
+
+# Legacy Angular build cache (do not commit)
+legacy/dashboard-frontend/.angular/
+
 .DS_Store
 .vscode/
 __pycache__

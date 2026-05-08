@@ -14,7 +14,7 @@ from __future__ import annotations
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.core.types.behavior import BehaviorOutput, ScenarioName
-from src.routing.lanelet.from_graphml import (
+from src.routing.lanelet.attributes import (
     ATTR_HIGHWAY_LEFT,
     ATTR_HIGHWAY_RIGHT,
 )

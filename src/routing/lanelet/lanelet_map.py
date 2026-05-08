@@ -6,7 +6,7 @@
 # `lanelet2` porque no compilan en Jetson Nano.
 #
 # ¿Qué resuelve?
-#   El `TrackGraph` nativo da edges + nodes + atributos. El planner de
+#   El backend OSM da lanelets + regulatory elements. El planner de
 #   comportamiento necesita queries más ricos:
 #     - "¿en qué lanelet estoy?"  → at_pose(x, y)
 #     - "¿qué viene después?"    → successors_of(lanelet_id)
@@ -14,50 +14,34 @@
 #                                  → regulatory_within(lanelet_id, distance_m)
 #
 #   El `BehaviorPlanner` consume estas tres APIs y compone su decisión.
-#   Si mañana cambiamos el formato del mapa (ej. lanelet2 OSM), basta con
-#   reemplazar `from_track_graph()` por otro constructor; el contrato
-#   `LaneletMap` se mantiene.
+#   El contrato `LaneletMap` se mantiene aunque cambie el backend de ruta.
 #
 # Convenciones:
-#   - `Lanelet.lanelet_id` se construye como `"{src_node_id}->{tgt_node_id}"`
-#     desde el GraphML. Permite reconstrucción inversa para debug.
-#   - Las centerlines están en el mismo frame que el GraphML (metros, ENU).
-#     `from_track_graph()` densifica con `step_m` para que `at_pose` tenga
-#     resolución sub-metro.
-#   - Los `RegulatoryElement` se derivan de DOS fuentes:
-#       1. Atributos de nodo (ATTR_STOPLINE, ATTR_CROSSWALK, ATTR_INTERSECTION)
-#       2. Records de `track_semantics.json` (controls/intersections/...)
-#     Si una stopline aparece en ambos, se prefiere el record de semantics
-#     porque trae `control_type` y `data` adicionales.
+#   - `Lanelet.lanelet_id` coincide con el ID de relation del OSM.
+#   - Las centerlines están en el mismo frame que el OSM (metros).
 #
 # Pitfall conocido — tramos highway:
-#   El GraphML BFMC tiene UNA sola línea por tramo highway con atributo
-#   `ATTR_HIGHWAY_LEFT` (4) o `ATTR_HIGHWAY_RIGHT` (5). El plan original
-#   habla de generar lanelets desplazadas con `_LANE_HALF_WIDTH_M`; en
-#   esta implementación no las desplazamos lateralmente — el atributo
-#   queda en `Lanelet.attribute` para que el `BehaviorPlanner` aplique
-#   semántica de carril (ej. "estoy en HIGHWAY_LEFT, no cambies a
-#   HIGHWAY_RIGHT salvo por permiso explícito"). Si la pista BFMC 2026
-#   pide carriles geométricamente separados, se agrega el offset acá
-#   sin tocar el contrato público.
+#   Si el OSM exporta UNA sola línea por tramo highway con atributo
+#   `ATTR_HIGHWAY_LEFT/RIGHT`, el atributo queda en `Lanelet.attribute`
+#   para que el `BehaviorPlanner` aplique semántica de carril sin
+#   duplicar geometría artificialmente.
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from src.core.types.routing import RegulatoryElement
-from src.routing.lanelet.from_graphml import (
+from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
     ATTR_INTERSECTION,
     ATTR_STOPLINE,
 )
 
 if TYPE_CHECKING:
-    from src.routing.lanelet.from_graphml import TrackGraph
     from src.routing.lanelet.queries import LaneletKDTreeIndex
 
 
@@ -76,13 +60,13 @@ _NODE_ATTR_TO_REGULATOR_KIND: dict[int, str] = {
 class Lanelet:
     """Segmento de carril consultable. Equivalente liviano a `lanelet2::Lanelet`.
 
-    Una lanelet representa el arco entre dos nodos del GraphML
-    (eje dirigido). Su `centerline` está densificada para que las
+    Una lanelet representa un segmento dirigido de carril. Su `centerline`
+    está densificada para que las
     queries espaciales (`at_pose`) tengan resolución < 1 m.
 
     Invariantes:
       - `centerline.shape == (N, 2)` con N >= 2 y todos los puntos en
-        coordenadas planares ENU (mismas que el GraphML).
+        coordenadas planares ENU del mapa activo.
       - `length_m == longitud arco de centerline`. Cacheado para evitar
         recomputarlo en cada query.
       - `successor_ids` y `predecessor_ids` son tuplas (frozen) para que
@@ -91,7 +75,7 @@ class Lanelet:
       - `regulatory_element_ids` referencia al diccionario global de
         regulators del `LaneletMap` (no copia el objeto). Permite que
         múltiples lanelets compartan un mismo stopline.
-      - `attribute` es el código entero del GraphML (ATTR_*). Se conserva
+      - `attribute` es el código entero del mapa (ATTR_*). Se conserva
         crudo — la traducción semántica vive en el consumidor.
 
     Diseño: frozen por la misma razón que `RegulatoryElement` —
@@ -170,14 +154,14 @@ class LaneletMap:
       - Listar regulators "ahead" desde una lanelet en una distancia dada.
 
     NO responsabilidades (delegadas):
-      - Construcción a partir del GraphML — la hace `from_track_graph()`
-        (factory en este módulo).
+      - Construcción a partir de backends legacy — la hace `from_track_graph()`
+        (factory de compatibilidad en este módulo).
       - Indexado espacial — lo hace `LaneletKDTreeIndex` en `queries.py`.
       - Routing global / Dijkstra — lo hace `route_planner.py`.
 
     El `BehaviorPlanner` consume `LaneletMap` por la interfaz pública
     de abajo. NO depende de `from_track_graph` ni de detalles del
-    formato GraphML.
+    backend histórico.
     """
 
     def __init__(
@@ -185,10 +169,13 @@ class LaneletMap:
         lanelets: dict[str, Lanelet],
         regulators: dict[str, RegulatoryElement],
         kdtree_index: "LaneletKDTreeIndex | None",
+        *,
+        map_metadata: dict | None = None,
     ) -> None:
         self._lanelets: dict[str, Lanelet] = dict(lanelets)
         self._regulators: dict[str, RegulatoryElement] = dict(regulators)
         self._kdtree: "LaneletKDTreeIndex | None" = kdtree_index
+        self._map_metadata: dict = dict(map_metadata or {})
 
     # --------------------------------------------------------------
     # Catálogo
@@ -204,6 +191,9 @@ class LaneletMap:
     def regulator_ids(self) -> tuple[str, ...]:
         return tuple(self._regulators.keys())
 
+    def get_map_metadata(self) -> dict:
+        return dict(self._map_metadata)
+
     def get_lanelet(self, lanelet_id: str) -> Lanelet | None:
         return self._lanelets.get(lanelet_id)
 
@@ -213,19 +203,33 @@ class LaneletMap:
     # --------------------------------------------------------------
     # Queries espaciales
     # --------------------------------------------------------------
-    def at_pose(self, x: float, y: float, max_distance_m: float | None = None) -> str | None:
+    def at_pose(
+        self,
+        x: float,
+        y: float,
+        max_distance_m: float | None = None,
+        yaw_rad: float | None = None,
+        max_yaw_diff_rad: float = 1.5707963267948966,  # π/2
+    ) -> str | None:
         """Devuelve la lanelet más cercana al punto (x, y).
 
         - `max_distance_m`: si se especifica y la nearest lanelet está más
           lejos, devuelve None (vehículo fuera del mapa). Útil para que el
           BehaviorPlanner detecte "estoy fuera de pista" y pida fallback.
-        - Implementación: el `KDTreeIndex` resuelve el punto-más-cercano
-          en O(log N) sobre TODOS los puntos de centerline; el `Lanelet`
-          asociado al hit es el ganador.
+        - `yaw_rad`: heading actual del ego. Si se pasa, descarta lanelets
+          cuyo centerline apunte en dirección opuesta (>π/2 de diferencia).
+          Sin este filtro, en zonas con dos lanelets antiparalelos (un
+          mismo carril en sentidos opuestos), el KDTree puede elegir el
+          equivocado y mandar al auto girar en U.
         """
         if self._kdtree is None:
             return None
-        return self._kdtree.query_lanelet(x, y, max_distance_m=max_distance_m)
+        return self._kdtree.query_lanelet(
+            x, y,
+            max_distance_m=max_distance_m,
+            yaw_rad=yaw_rad,
+            max_yaw_diff_rad=max_yaw_diff_rad,
+        )
 
     # --------------------------------------------------------------
     # Queries topológicas
@@ -313,7 +317,7 @@ class LaneletMap:
 
 
 # ---------------------------------------------------------------------
-# Factory: TrackGraph → LaneletMap
+# Factory legacy: backend histórico → LaneletMap
 # ---------------------------------------------------------------------
 
 
@@ -339,13 +343,8 @@ def _densify_segment(
     return np.stack([xs, ys], axis=1)
 
 
-def _build_regulators_from_semantics(track_graph: "TrackGraph") -> dict[str, RegulatoryElement]:
-    """Carga RegulatoryElements desde `track_semantics.json`.
-
-    El loader actual (`TrackSemantics`) ya parsea controls/intersections/
-    crosswalks/parking_spots. Acá los convertimos al tipo público.
-    Cada record genera un RegulatoryElement anclado a su `anchor_node_id`.
-    """
+def _build_regulators_from_semantics(track_graph: Any) -> dict[str, RegulatoryElement]:
+    """Carga RegulatoryElements desde un backend histórico con semántica externa."""
     result: dict[str, RegulatoryElement] = {}
     semantics = track_graph.semantics
     if not semantics.loaded:
@@ -433,14 +432,14 @@ def _build_regulators_from_semantics(track_graph: "TrackGraph") -> dict[str, Reg
     return result
 
 
-def _build_implicit_regulators(track_graph: "TrackGraph") -> dict[str, RegulatoryElement]:
+def _build_implicit_regulators(track_graph: Any) -> dict[str, RegulatoryElement]:
     """Genera RegulatoryElements implícitos a partir de atributos de nodo.
 
-    Algunos atributos del GraphML implican regulatory elements aunque no
-    estén en `track_semantics.json` (ej. ATTR_STOPLINE en un nodo no
+    Algunos atributos implícitos requieren regulatory elements aunque no
+    estén en una semántica externa (ej. ATTR_STOPLINE en un nodo no
     asociado a un control explícito). Acá los emitimos con IDs
     sintéticos `attr-{kind}-{node_id}` para que el LaneletMap quede
-    auto-suficiente sin depender exclusivamente de semantics.json.
+    auto-suficiente.
     """
     result: dict[str, RegulatoryElement] = {}
     for node_id, node in track_graph.nodes.items():
@@ -459,10 +458,10 @@ def _build_implicit_regulators(track_graph: "TrackGraph") -> dict[str, Regulator
     return result
 
 
-def from_track_graph(track_graph: "TrackGraph", step_m: float = 0.20) -> LaneletMap:
-    """Factory: construye `LaneletMap` desde un `TrackGraph` cargado.
+def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
+    """Factory legacy: construye `LaneletMap` desde un backend histórico.
 
-    Cada edge dirigido del GraphML se convierte en una `Lanelet` con:
+    Cada edge dirigido del backend legacy se convierte en una `Lanelet` con:
       - `lanelet_id = "{src}->{tgt}"`
       - `centerline` densificada a paso `step_m` entre los dos nodos
       - `attribute` = atributo del nodo destino (la regla de BFMC es que
@@ -475,7 +474,7 @@ def from_track_graph(track_graph: "TrackGraph", step_m: float = 0.20) -> Lanelet
     de centerline para que `at_pose` resuelva en O(log N).
 
     Args:
-      track_graph: Instancia de `TrackGraph` ya cargada.
+      track_graph: Backend legado con nodes/edges/semantics.
       step_m: Paso de densificación de centerlines (m). Default 0.20 m
         balancea memoria (≈5 puntos por edge típico de 1 m) y resolución
         (`at_pose` resuelve dentro de 10 cm).

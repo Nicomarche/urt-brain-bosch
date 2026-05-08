@@ -155,11 +155,26 @@ class threadGateway(ThreadWithStop):
             )
 
         if message_key in self.messageApproved:
-            for element in self.sendingList[Owner][Id]:
-                # We send a dictionary that contain the type of the message and message
-                self.sendingList[Owner][Id][element].send(
-                    {"Type": Type, "value": Value, "id": Id, "Owner": Owner}
-                )
+            # Snapshot de claves para poder mutar sendingList durante la iteración
+            # (removemos pipes rotos in-place).
+            broken = []
+            for element in list(self.sendingList[Owner][Id].keys()):
+                try:
+                    # We send a dictionary that contain the type of the message and message
+                    self.sendingList[Owner][Id][element].send(
+                        {"Type": Type, "value": Value, "id": Id, "Owner": Owner}
+                    )
+                except BrokenPipeError:
+                    # El recv-end del subscriber se cerró (spawn mode, proceso
+                    # terminado, o doble-registro desde el proceso padre).
+                    # Lo removemos para no volver a fallar en mensajes futuros,
+                    # y continuamos con el resto de los subscribers.
+                    broken.append(element)
+                    self.logger.warning(
+                        f"[ Gateway ] BrokenPipe → removing subscriber "
+                        f"'{element}' (Owner={Owner}, msgID={Id})"
+                    )
+                    continue
                 if message_key == self._klem_key:
                     print(
                         f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
@@ -167,6 +182,11 @@ class threadGateway(ThreadWithStop):
                     )
                 if self.debugging:
                     self.logger.warning(message)
+            for element in broken:
+                try:
+                    del self.sendingList[Owner][Id][element]
+                except KeyError:
+                    pass
         elif message_key == self._klem_key:
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;93mWARNING\033[0m"

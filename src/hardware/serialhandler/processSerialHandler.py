@@ -39,6 +39,7 @@ from threading import Lock
 from src.templates.workerprocess import WorkerProcess
 from src.hardware.serialhandler.threads.filehandler import FileHandler
 from src.hardware.serialhandler.threads.threadRead import threadRead
+from src.hardware.serialhandler.threads.threadSimFeedback import threadSimFeedback
 from src.hardware.serialhandler.threads.threadWrite import threadWrite
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
@@ -72,6 +73,12 @@ class processSerialHandler(WorkerProcess):
         self.serialLock = Lock()
         self.reconnecting = False
 
+        try:
+            from config import MOTOR_OUTPUT
+            self.motor_output = MOTOR_OUTPUT
+        except ImportError:
+            self.motor_output = "serial"
+
         self._init_subscribers()
         self._init_senders()
 
@@ -79,6 +86,24 @@ class processSerialHandler(WorkerProcess):
         self.historyFile = FileHandler(logFile)
 
         super(processSerialHandler, self).__init__(self.queuesList, ready_event)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # threading.Lock and serial.Serial are not picklable (needed for spawn).
+        # serialCon is always None at startup and gets opened in run().
+        state.pop('serialLock', None)
+        state.pop('serialCon', None)
+        state.pop('historyFile', None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        from threading import Lock
+        self.serialLock = Lock()
+        self.serialCon = None
+        logFile = "temp/serial_history.log"
+        from src.hardware.serialhandler.threads.filehandler import FileHandler
+        self.historyFile = FileHandler(logFile)
 
     def _init_subscribers(self):
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
@@ -99,6 +124,12 @@ class processSerialHandler(WorkerProcess):
 
     def _try_serial_connection(self):
         """Try to connect to the serial device."""
+        if self.motor_output == "zmq":
+            # Sim mode: no Nucleo. Pretend connected so dashboard/threads behave normally.
+            self.serialCon = None
+            self.serialConnected = True
+            self.serialDevice = "zmq://sim_bridge"
+            return
         with self.serialLock:
             try:
                 # clean up existing connection safely
@@ -176,6 +207,8 @@ class processSerialHandler(WorkerProcess):
 
     def _handle_serial_disconnection(self):
         """Handle serial disconnection by pausing threads and starting reconnection."""
+        if self.motor_output == "zmq":
+            return
 
         with self.serialLock:
             # check if already handling disconnection
@@ -199,7 +232,7 @@ class processSerialHandler(WorkerProcess):
         """Apply the initializing methods and start the threads."""
         self._try_serial_connection()
 
-        if not self.serialConnected:
+        if not self.serialConnected and self.motor_output != "zmq":
             print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - No serial connection found")
             threading.Timer(1, self._try_reconnect).start()
 
@@ -247,10 +280,38 @@ class processSerialHandler(WorkerProcess):
 
     # ===================================== INIT TH =================================
     def _init_threads(self):
-        """Initializes the read and the write thread."""
+        """Initializes the read and the write thread.
+
+        On hardware (``motor_output == "serial"``) only the read+write pair
+        is needed — the Nucleo provides the encoder/IMU stream that fills
+        ``CurrentSpeed`` / ``CurrentSteer`` / ``ImuData``.
+
+        In simulator mode (``motor_output == "zmq"``) there is no Nucleo,
+        so we additionally spawn ``threadSimFeedback`` which subscribes to
+        the bridge's synthetic feedback PUB and re-emits the same IPC
+        messages. ``threadRead`` is kept around (it no-ops because
+        ``serialCon`` is None) so the rest of the pipeline that just
+        expects "serial process running" stays happy — and so the
+        ``EnableButton`` heartbeat from ``threadRead.queue_sending``
+        keeps firing.
+        """
         readTh = threadRead(self, self.historyFile, self.queuesList, self.logger, self.debugging)
         writeTh = threadWrite(self, self.historyFile, self.queuesList, self.logger, self.debugging, self.example)
         self.threads.extend([readTh, writeTh])
+
+        if self.motor_output == "zmq":
+            simFeedbackTh = threadSimFeedback(self.queuesList, self.logger, self.debugging)
+            self.threads.append(simFeedbackTh)
+
+        try:
+            from config import GPS_ENABLED
+        except ImportError:
+            GPS_ENABLED = False
+
+        if GPS_ENABLED:
+            from src.hardware.gps.threadLocSys import threadLocSys
+            gpsTh = threadLocSys(self.queuesList, self.logger, self.debugging)
+            self.threads.append(gpsTh)
 
 
 # =================================== EXAMPLE =========================================

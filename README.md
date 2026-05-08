@@ -96,21 +96,42 @@ python server.py
 
 ## Usage
 
-```bash
-# Terminal 1: Start the brain
-python main.py
+The recommended entry point is `run.sh`, which auto-selects mode by platform:
 
-# Terminal 2: Angular dashboard
-cd src/dashboard/frontend
+```bash
+# Mac (development): launches brain in sim mode + PyQt5 GUI on localhost
+./run.sh
+
+# Mac (monitor): GUI only, connects to a remote car
+./run.sh --monitor 192.168.1.99
+
+# Jetson (production): brain only, headless
+./run.sh
+```
+
+The PyQt5 GUI (`src/dashboard/gui/`) provides:
+
+* Map view with the car's live position, GraphML nodes and active route
+* Map editor (GraphML + SVG + semantics) — single source of truth, JSON-persisted
+* Camera stream with lane / sign / mask overlays
+* Manual control (joystick + keyboard wasd / spacebar)
+* Switching between modes (Manual / Legacy / Auto / Stop / Parking)
+* PWM calibration wizard
+* Telemetry (battery, CPU, memory, temperature, speed/steer chart)
+* Live console logs
+* Persistent JSON configuration (`config/*.json`) versioned with the repo
+
+### Legacy Angular dashboard
+
+The original web dashboard has been moved to `legacy/dashboard-frontend/`. It still
+works against the same SocketIO backend on `:5005`:
+
+```bash
+cd legacy/dashboard-frontend
 npm start
 ```
 
-The web dashboard allows:
-
-* Switching between modes (Manual / Auto / Stop)
-* Manual control of speed and steering
-* Camera stream visualization
-* Live configuration of line-following parameters
+See [`legacy/README.md`](legacy/README.md) for migration status.
 
 ## Configuration
 

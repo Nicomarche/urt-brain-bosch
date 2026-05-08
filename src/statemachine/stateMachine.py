@@ -35,6 +35,7 @@ from src.statemachine.systemMode import SystemMode
 from src.statemachine.transitionTable import TransitionTable
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.allMessages import StateChange
+from src.utils.live_log import live_log
 
 class StateMachine:
     """
@@ -91,7 +92,7 @@ class StateMachine:
         cls._process_lock = cls._manager.Lock()
         
         # initialize shared state
-        cls._shared_state['mode'] = SystemMode.DEFAULT
+        cls._shared_state['mode'] = SystemMode.STOP
         cls._queueList = queueList
         cls._initialized = True
         
@@ -143,6 +144,13 @@ class StateMachine:
             
             print(f"\033[1;97m[ State Machine ] :\033[0m \033[1;92mINFO\033[0m - Mode changed from \033[1;94m{current_mode.name}\033[0m to \033[1;94m{mode['next_mode'].name}\033[0m")
 
+            live_log(
+                "state_machine", event="state_change",
+                from_mode=current_mode.name,
+                to_mode=mode['next_mode'].name,
+                action=str(action),
+            )
+
             # send state change notification
             self._send_state_change(mode['next_mode'])
             return True
@@ -171,6 +179,10 @@ class StateMachine:
                 sender = messageHandlerSender(cls._queueList, StateChange)
                 sender.send(mode.name)
                 print(f"\033[1;97m[ State Machine ] :\033[0m \033[1;92mINFO\033[0m - Starting in \033[1;94m{mode.name}\033[0m mode")
+                live_log(
+                    "state_machine", event="starting_mode",
+                    mode=mode.name,
+                )
             except Exception as e:
                 print(f"\033[1;97m[ State Machine ] :\033[0m \033[1;93mWARNING\033[0m - Failed to send starting mode: {e}")
 

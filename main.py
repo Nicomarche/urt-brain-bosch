@@ -39,11 +39,15 @@
 # Para ejecutar:
 #       chmod +x setup.sh
 #       ./setup.sh
-#       cd src/dashboard/frontend
+#       cd legacy/dashboard-frontend     # (legacy Angular UI, opcional)
 #       npm start
 #       (CTRL+C cuando arranque la UI)
 #       cd ../..
 #       python3 main.py
+#
+# Recomendado: usar la nueva GUI PyQt5
+#       ./run.sh                          # Mac dev (sim) o Jetson (servidor)
+#       ./run.sh --monitor <IP>           # Solo GUI conectada al auto remoto
 #
 # Copyright (c) 2019, Bosch Engineering Center Cluj and BFMC organizers
 # All rights reserved. (BSD-3 — texto original abajo)
@@ -66,10 +70,33 @@ import sys
 import time
 import os
 import psutil
+import multiprocessing as mp
 
-# Pin to CPU cores 0–3
-available_cores = list(range(psutil.cpu_count()))
-psutil.Process(os.getpid()).cpu_affinity(available_cores)
+# macOS Apple Silicon: default 'spawn' breaks several closures and pickling,
+# and many libs (cv2, picamera2 stubs, etc.) re-import on each child. Use fork
+# to match Jetson/Linux behavior. Suppress Objective-C fork-safety warnings.
+if sys.platform == "darwin":
+    # spawn: each child gets a fresh Python interpreter — no stale libomp/OpenMP
+    # thread state inherited from the parent.  This is the only reliable fix for
+    # EXC_BAD_ACCESS in __kmp_suspend_initialize_thread on Apple Silicon when
+    # torch + numpy/OpenBLAS each bundle their own libomp.dylib.
+    # Jetson/Linux keeps the default (fork) because Linux fork + exec is safe and
+    # the Tegra runtime doesn't ship duplicate libomp builds.
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+    # Limit OpenMP/BLAS thread pools in every spawned child — the env vars are
+    # inherited by child processes through the OS environment.
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+
+# Pin to CPU cores 0–3 (Linux-only; psutil.cpu_affinity not available on macOS).
+if hasattr(psutil.Process(os.getpid()), "cpu_affinity"):
+    available_cores = list(range(psutil.cpu_count()))
+    psutil.Process(os.getpid()).cpu_affinity(available_cores)
 
 sys.path.append(".")
 from multiprocessing import Queue, Event
@@ -100,6 +127,7 @@ from config import (
     PICAMERA_HDR_ENABLED, PICAMERA_HDR_ALWAYS_ON, PICAMERA_HDR_GLARE_THRESHOLD,
     JETSON_SENSOR_ID, JETSON_CAPTURE_RESOLUTION, JETSON_OUTPUT_RESOLUTION,
     JETSON_FRAMERATE, JETSON_FLIP_METHOD,
+    AUTO_STATE_RUN_IN_SIM,
 )
 
 # ------ New component imports starts here ------#
@@ -165,6 +193,14 @@ def main():
     stateChangeSubscriber = messageHandlerSubscriber(queueList, StateChange, "lastOnly", True)
     StateMachine.initialize_shared_state(queueList)
 
+    # Exponer los proxies del Manager en queueList para que los subprocesos
+    # (dispatcher, etc.) puedan leer el estado directamente sin depender
+    # del gateway pipe (que puede romperse en spawn mode en macOS).
+    # DictProxy y LockProxy son serializables y se pasan via pickle al
+    # subprocess durante el spawn.
+    queueList["__sm_state__"] = StateMachine._shared_state
+    queueList["__sm_lock__"] = StateMachine._process_lock
+
     # Initializing gateway
     processGatewayInstance = processGateway(queueList, logger)
     processGatewayInstance.start()
@@ -191,7 +227,7 @@ def main():
                                           picamera_hdr_enabled=PICAMERA_HDR_ENABLED,
                                           picamera_hdr_always_on=PICAMERA_HDR_ALWAYS_ON,
                                           picamera_hdr_glare_threshold=PICAMERA_HDR_GLARE_THRESHOLD,
-                                          publish_serial_stream=STREAM_CAMERA_TO_DASHBOARD,
+                                          stream_to_dashboard=STREAM_CAMERA_TO_DASHBOARD,
                                           enable_sign_detection=ENABLE_SIGN_DETECTION,
                                           sign_detection_actions=SIGN_DETECTION_ACTIONS,
                                           sign_min_confidence=SIGN_MIN_CONFIDENCE,
@@ -232,11 +268,24 @@ def main():
     blocker = Event()
     try:
         # wait for all events to be set
+        # Timeout de 60 s por evento: si algún proceso tarda más de un minuto
+        # en iniciar (ej. carga de modelo ONNX lenta), continuamos igual
+        # para que el dispatcher entre en AUTO. El proceso tardío eventualmente
+        # se pone al día y empieza a funcionar.
         for event in allEvents:
-            event.wait()
+            event.wait(timeout=60.0)
 
         # apply starting mode
         StateMachine.initialize_starting_mode()
+
+        # En sim, arrancamos directo en AUTO para no tener que clickear el
+        # botón del dashboard en cada restart. Espera 2 s para que todos los
+        # subscribers (dispatcher, threadWrite, etc.) ya hayan arrancado y
+        # registrado sus listeners antes del primer StateChange.
+        if AUTO_STATE_RUN_IN_SIM:
+            time.sleep(2.0)
+            sm = StateMachine.get_instance()
+            sm.request_mode("dashboard_auto_button")
 
         time.sleep(10)
         print(BigPrint.C4_BOMB.value)

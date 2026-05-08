@@ -99,8 +99,16 @@ class ThreadWithStop(Thread):
             self.state_change_handler()
             
             # do the actual work
-            self.thread_work()
-            
+            try:
+                self.thread_work()
+            except Exception as _exc:
+                import traceback as _tb
+                print(
+                    f"\033[1;91m[ ThreadWithStop ] EXCEPTION in {self.__class__.__name__}.thread_work():\033[0m "
+                    f"{_exc}"
+                )
+                _tb.print_exc()
+
             # respect the pause duration if not paused
             if self._pause_event.is_set():
                 self._blocker.wait(self._pause)

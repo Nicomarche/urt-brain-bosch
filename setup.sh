@@ -23,15 +23,20 @@ sudo npm i -g npm@10.8.2 @angular/cli@20.1.4
 # --- Python deps (GLOBAL) ---------------------------------------------------
 sudo pip3 install -r requirements.txt
 
-# --- Frontend deps/build ----------------------------------------------------
-pushd src/dashboard/frontend >/dev/null
+# --- Frontend deps/build (legacy Angular UI, opcional) ----------------------
+# La UI principal es ahora PyQt5 (src/dashboard/gui/). Este bloque solo
+# instala el Angular legacy si la carpeta sigue presente, para usuarios
+# que aún levantan el dashboard con `services/angular-autostart`.
+if [ -d legacy/dashboard-frontend ]; then
+  pushd legacy/dashboard-frontend >/dev/null
 
-if [ -f package-lock.json ]; then
-  npm ci
-else
-  npm install
+  if [ -f package-lock.json ]; then
+    npm ci
+  else
+    npm install
+  fi
+
+  popd >/dev/null
 fi
-
-popd >/dev/null
 
 echo "Install complete."

@@ -209,7 +209,7 @@ class NavigationCommand(Enum):
     Queue = "General"
     Owner = "Dashboard"
     msgID = 23
-    msgType = "dict"  # {"mode": str, "destinations": list}
+    msgType = "dict"  # {"x": float, "y": float} or {"mode": "clear"|"reset"|"go_to"...}
 
 class Localisation(Enum):
     Queue = "General"
@@ -442,6 +442,13 @@ class TrackedObjectsMsg(Enum):
     #                             "x": float, "y": float, "vx": float, "vy": float,
     #                             "confidence": float, "age_frames": int}, ...]}
     msgType = "dict"
+
+################################# Sim control (sim mode only) ##################################
+class SimRelocalize(Enum):
+    Queue = "General"
+    Owner = "threadPoseEstimator"
+    msgID = 1
+    msgType = "dict"  # {"world_x": float, "world_y": float, "yaw_rad": float, "z"?: float} (legacy: gz_*)
 
 ################################# From MotionController + Dispatcher ##################################
 # MotorCommandMsg: snapshot del comando que el dispatcher acaba de despachar

@@ -26,7 +26,7 @@ import math
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.core.types.behavior import BehaviorOutput, ScenarioName
-from src.routing.lanelet.from_graphml import (
+from src.routing.lanelet.attributes import (
     ATTR_INTERSECTION,
     ATTR_INTERSECTION_EXIT,
     ATTR_STOPLINE,
@@ -73,12 +73,24 @@ class Intersection(BaseScenario):
 
         # Histeresis simple: salimos sólo cuando dejamos de estar EN
         # intersección Y no hay otra inminente.
+        prev = self._was_active
         if self._was_active:
             if not is_in_intersection and not approaching:
                 self._was_active = False
         else:
             self._was_active = active_now
 
+        if self._was_active != prev or self._was_active:
+            import logging as _log
+            _log.getLogger(__name__).info(
+                "[ Intersection ] is_active=%s attr_now=%d lanelet=%r "
+                "in_inter=%s approaching=%s",
+                self._was_active,
+                attr_now,
+                ctx.route.current_lanelet_id,
+                is_in_intersection,
+                approaching,
+            )
         return self._was_active
 
     def plan(self, ctx: PlanningContext) -> BehaviorOutput:

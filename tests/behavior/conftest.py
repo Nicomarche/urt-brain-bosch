@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -18,42 +20,60 @@ from src.behavior.context import PlanningContext
 from src.core.types.perception import LaneObservation, StoplineObservation, TrackedObject
 from src.core.types.pose import Pose2D, PoseEstimate
 from src.core.types.routing import RegulatoryElement, RouteContext
-from src.routing.lanelet.from_graphml import (
+from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
     ATTR_HIGHWAY_LEFT,
     ATTR_INTERSECTION,
     ATTR_NORMAL,
     ATTR_ROUNDABOUT,
     ATTR_STOPLINE,
-    TrackGraph,
-    TrackNode,
 )
 from src.routing.lanelet.lanelet_map import from_track_graph
-from src.routing.lanelet.semantics import TrackSemantics
 
 
-def _build_track_graph(node_specs: list[tuple[str, float, float, int]]) -> TrackGraph:
-    """Construye un TrackGraph mínimo en memoria desde una lista de
-    (node_id, x, y, attribute). Los edges van consecutivos (1->2->3...).
+@dataclass(frozen=True)
+class TrackNode:
+    node_id: str
+    x: float
+    y: float
+    attribute: int = ATTR_NORMAL
+    is_start: bool = False
+
+
+def _build_track_graph(node_specs: list[tuple[str, float, float, int]]):
+    """Construye un backend mínimo en memoria compatible con `from_track_graph`.
+
+    La topología es una cadena simple (1->2->3...). Sólo poblamos los campos
+    que consume la factory legacy de LaneletMap.
     """
-    g = TrackGraph.__new__(TrackGraph)
-    g.step_m = 0.10
-    g.nodes = {
+    return SimpleNamespace(
+        step_m=0.10,
+        nodes={
         nid: TrackNode(nid, x, y, attr, False) for (nid, x, y, attr) in node_specs
-    }
-    g.adj = defaultdict(list)
-    for i in range(len(node_specs) - 1):
-        g.adj[node_specs[i][0]].append(node_specs[i + 1][0])
-    g.edge_lengths = {}
-    g.edge_ids = {}
-    g.reference_node_ids = []
-    g.reference_path = None
-    g.ordered_nodes = list(g.nodes.values())
-    g.waypoints = np.empty((0, 3))
-    g.wp_node_attrs = np.empty(0, dtype=int)
-    g.semantics = TrackSemantics(None)
-    g.map_metadata = {}
-    return g
+        },
+        adj=defaultdict(
+            list,
+            {
+                node_specs[i][0]: [node_specs[i + 1][0]]
+                for i in range(len(node_specs) - 1)
+            },
+        ),
+        edge_lengths={},
+        edge_ids={},
+        reference_node_ids=[],
+        reference_path=None,
+        ordered_nodes=[],
+        waypoints=np.empty((0, 3)),
+        wp_node_attrs=np.empty(0, dtype=int),
+        semantics=SimpleNamespace(
+            loaded=False,
+            controls=[],
+            intersections=[],
+            crosswalks=[],
+            parking_spots=[],
+        ),
+        map_metadata={},
+    )
 
 
 @pytest.fixture
@@ -122,6 +142,8 @@ def make_context(
     current_lanelet_id: str | None = None,
     next_lanelet_ids: tuple[str, ...] = (),
     lanelet_map=None,
+    route_waypoints: list[list[float]] | tuple[tuple[float, float, float], ...] = (),
+    route_points: list[dict[str, float]] | tuple[dict[str, float], ...] = (),
     regulatory_ahead: tuple[RegulatoryElement, ...] = (),
     tracked_objects: tuple[TrackedObject, ...] = (),
     sign_hints: tuple[dict, ...] = (),
@@ -130,6 +152,9 @@ def make_context(
     horizon_n: int = 10,
     dt: float = 0.05,
     maneuver_type: str = "none",
+    matched_idx: int = 0,
+    target_idx: int = 0,
+    matched_pose: tuple[float, float, float] | None = None,
 ) -> PlanningContext:
     """Factory para PlanningContext con defaults razonables."""
     pose = PoseEstimate(
@@ -143,10 +168,19 @@ def make_context(
     route = RouteContext(
         timestamp=0.0,
         route_active=current_lanelet_id is not None,
+        route_points=list(route_points or []),
+        route_waypoints=[list(item) for item in (route_waypoints or ())],
         current_lanelet_id=current_lanelet_id,
         next_lanelet_ids=next_lanelet_ids,
         regulatory_ahead=regulatory_ahead,
         maneuver_type=maneuver_type,
+        matched_idx=int(matched_idx),
+        target_idx=int(target_idx),
+        matched_pose=Pose2D(
+            x=float((matched_pose or (pose_x, pose_y, pose_yaw))[0]),
+            y=float((matched_pose or (pose_x, pose_y, pose_yaw))[1]),
+            yaw=float((matched_pose or (pose_x, pose_y, pose_yaw))[2]),
+        ),
     )
     return PlanningContext(
         now_s=0.0,

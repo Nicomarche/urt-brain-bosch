@@ -48,6 +48,7 @@ from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.control import MotorCommand
 from src.templates.threadwithstop import ThreadWithStop
+from src.utils.live_log import live_log
 
 
 class threadMotorCommandDispatcher(ThreadWithStop):
@@ -87,8 +88,33 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         # se respeta al operador.
         self._current_state: str = "DEFAULT"
 
+        # Fallback directo al StateMachine shared state (Manager proxy).
+        # Está disponible cuando main.py inyecta los proxies en queuesList
+        # (claves "__sm_state__" y "__sm_lock__"). Cubre el caso de
+        # BrokenPipeError en el gateway en spawn mode — si el pipe falla,
+        # este path sigue dando el estado real sin depender del gateway.
+        self._sm_state = queuesList.get("__sm_state__")
+        self._sm_lock = queuesList.get("__sm_lock__")
+
         # Diagnóstico — última decisión publicada (para el dashboard).
         self._last_dispatched: MotorCommand | None = None
+
+        # Una vez que el IPC entrega su primer StateChange, el Manager proxy
+        # no debe volver a pisarlo (el proxy es stale en spawn mode: eventlet
+        # en processDashboard rompe la conexión al Manager, por lo que el proxy
+        # queda congelado en "STOP" mientras el IPC sí entrega "AUTO").
+        self._ipc_mode_received: bool = False
+
+        # Stats para log periódico. Imprime un resumen cada N segundos para
+        # que cualquier regresión (fallback continuo, state stuck en DEFAULT,
+        # etc.) sea visible sin tener que abrir el dashboard. NO afecta al
+        # path crítico — es puramente informativo.
+        self._stats_period_s = 2.0
+        self._stats_last_t = time.time()
+        self._stats_count = 0
+        self._stats_last_reason = ""
+        self._stats_last_speed = 0.0
+        self._stats_last_steer = 0.0
 
     # ----------------------------------------------------------------
     def thread_work(self) -> None:
@@ -113,6 +139,33 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         )
         self._last_dispatched = cmd
 
+        # Live JSONL: cada decisión del SafetyGate. Si state != AUTO, igual
+        # logueamos para ver por qué el dispatcher no manda nada (típico:
+        # el operador olvidó clickear AUTO).
+        now_t = time.time()
+        live_log(
+            "dispatcher", event="dispatch_decision",
+            state=self._current_state,
+            cmd_valid=bool(cmd.valid),
+            cmd_source=getattr(cmd, "source", None),
+            cmd_reason=str(getattr(cmd, "reason", "")),
+            speed_mps=float(cmd.speed_mps),
+            steering_deg=float(cmd.steering_deg),
+            behavior_age_s=(now_t - behavior_ts) if behavior_ts else None,
+            pose_age_s=(now_t - pose_ts) if pose_ts else None,
+            dispatched=(self._current_state in {"AUTO", "PARKING"}),
+            had_motor_cmd=isinstance(motor_cmd, MotorCommand),
+        )
+
+        # Acumulación para el log periódico. Se hace ANTES del state-gate
+        # para que el log siga emitiéndose con state=DEFAULT/MANUAL — útil
+        # cuando el operador está debug-eando sin estar todavía en AUTO.
+        self._stats_count += 1
+        self._stats_last_reason = str(cmd.reason)
+        self._stats_last_speed = float(cmd.speed_mps)
+        self._stats_last_steer = float(cmd.steering_deg)
+        self._maybe_log_stats()
+
         # Snapshot al dashboard (telemetría — no path crítico).
         try:
             self._motorCmdMsgSender.send(self._serialize(cmd))
@@ -128,10 +181,55 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._send(cmd)
 
     # ----------------------------------------------------------------
+    def _maybe_log_stats(self) -> None:
+        """Imprime un resumen cada `_stats_period_s` segundos.
+
+        Salida típica con todo OK:
+            [ Dispatcher ] state=AUTO rate=49.8Hz speed=+0.50m/s steer=+0.0° reason=passthrough
+
+        Salida típica con LaneKeep en fallback (current_lanelet_id=None):
+            [ Dispatcher ] state=AUTO rate=49.8Hz speed=+0.00m/s steer=+0.0° reason=motor_command_invalid
+
+        Salida típica con state-gate cerrado:
+            [ Dispatcher ] state=DEFAULT rate=49.8Hz speed=+0.00m/s steer=+0.0° reason=no_motor_command
+        """
+        now = time.time()
+        dt = now - self._stats_last_t
+        if dt < self._stats_period_s:
+            return
+        rate = self._stats_count / dt if dt > 0 else 0.0
+        # Color según si vamos a despachar realmente (state operativo y
+        # speed!=0). Rojo = bloqueado por state, amarillo = state OK pero
+        # gate metió fallback, verde = pipeline produciendo movimiento.
+        if self._current_state not in {"AUTO", "PARKING"}:
+            color = "\033[1;91m"  # rojo
+        elif abs(self._stats_last_speed) < 1e-3:
+            color = "\033[1;93m"  # amarillo
+        else:
+            color = "\033[1;92m"  # verde
+        msg = (
+            f"[ Dispatcher ] state={self._current_state} "
+            f"rate={rate:.1f}Hz "
+            f"speed={self._stats_last_speed:+.2f}m/s "
+            f"steer={self._stats_last_steer:+.1f}deg "
+            f"reason={self._stats_last_reason}"
+        )
+        # Usamos logging en vez de print() — en subprocesos spawn de macOS,
+        # print() puede quedar en el buffer del proceso hijo sin aparecer en
+        # el log. logging.getLogger() escribe a stderr que sí es unbuffered.
+        import logging as _logging
+        _logging.getLogger().info(msg)
+        self._stats_last_t = now
+        self._stats_count = 0
+
+    # ----------------------------------------------------------------
     def _send(self, cmd: MotorCommand) -> None:
         """Convierte unidades y publica a las colas Critical."""
-        # Steering: grados → décimas de grado (formato firmware).
-        steer_value = int(round(float(cmd.steering_deg) * 10.0))
+        # `MotorCommand` sigue ISO 8855: +deg = ruedas a la izquierda.
+        # El wire legacy `SteerMotor` que consumen Nucleo/sim_bridge usa
+        # la convención histórica del proyecto: +deg = ruedas a la derecha.
+        # La inversión de signo vive acá para aislar el transporte del MPC.
+        steer_value = self._steer_deg_to_wire_x10(cmd.steering_deg)
         self._steerMotorSender.send(str(steer_value))
 
         # Speed: m/s → cm/s × 10 (firmware espera décimas de cm/s).
@@ -139,11 +237,38 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._speedMotorSender.send(str(speed_cms_x10))
 
     # ----------------------------------------------------------------
+    @staticmethod
+    def _steer_deg_to_wire_x10(steering_deg: float) -> int:
+        """Traduce `+izquierda` (MPC) a `+derecha` (wire legacy)."""
+        return int(round(-float(steering_deg) * 10.0))
+
+    # ----------------------------------------------------------------
     def _consume_state_change(self) -> None:
-        msg = self._stateChangeSubscriber.receive()
-        if msg is None:
-            return
-        self._current_state = str(msg or "").strip().upper() or "DEFAULT"
+        # Primario: IPC StateChange — la única fuente confiable para cambios
+        # iniciados desde el dashboard. El Manager proxy NO se actualiza en
+        # processDashboard porque eventlet rompe la conexión al Manager bajo
+        # spawn mode en macOS (el proxy queda congelado en "STOP").
+        try:
+            msg = self._stateChangeSubscriber.receive()
+            if msg is not None:
+                self._current_state = str(msg).upper()
+                self._ipc_mode_received = True
+                return
+        except Exception:
+            pass
+
+        # Secundario (solo antes del primer IPC): Manager proxy como fuente de
+        # arranque. Cubre el caso en que el sistema arrancó en un estado distinto
+        # de DEFAULT antes de que el IPC llegara (ej. AUTO_STATE_RUN_IN_SIM).
+        # En cuanto llega el primer mensaje IPC, esta rama queda inactiva para
+        # siempre — evita que el proxy stale sobre-escriba el estado real.
+        if not self._ipc_mode_received and self._sm_state is not None:
+            try:
+                mode = self._sm_state.get("mode", None)
+                if mode is not None:
+                    self._current_state = mode.name.upper()
+            except Exception:
+                pass
 
     # ----------------------------------------------------------------
     @staticmethod

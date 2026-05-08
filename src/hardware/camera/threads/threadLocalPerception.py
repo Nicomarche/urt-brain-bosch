@@ -1,3 +1,4 @@
+import base64
 import math
 import time
 
@@ -16,6 +17,7 @@ from src.core.messaging.allMessages import (
     LineFollowingStatus,
     LocalLanePerception,
     LocalPerceptionStatus,
+    serialCamera,
     SignDetected,
     SignDetectionStatus,
     StateChange,
@@ -29,10 +31,10 @@ class threadLocalPerception(ThreadWithStop):
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  local_lane_buffer=None,
-                 show_debug=False, debug_windows=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
-                 action_cooldown=15.0):
+                 action_cooldown=15.0,
+                 stream_to_dashboard=True):
         # Phase 6: `sign_action_event` y `steer_override_event` se borraron
         # del constructor cuando `signActions.py` desapareció. Ya no había
         # ningún consumidor con efecto real (las ramas en threadLineFollowing
@@ -48,8 +50,6 @@ class threadLocalPerception(ThreadWithStop):
         self.debugger = debugger
         self.frame_buffer = frame_buffer
         self.local_lane_buffer = local_lane_buffer
-        self.show_debug = show_debug
-        self.debug_windows = debug_windows or {}
 
         self.enable_sign_detection = enable_sign_detection
         self.enable_actions = enable_actions
@@ -68,6 +68,16 @@ class threadLocalPerception(ThreadWithStop):
         self.local_ai_imgsz = int(getattr(config, "LOCAL_AI_IMGSZ", 416))
         self.local_ai_device = str(getattr(config, "LOCAL_AI_DEVICE", "auto"))
 
+        # Dashboard preview: este thread es el ÚNICO productor de `serialCamera`
+        # tras Phase 6. Publica el frame ya anotado (carriles + señales) que el
+        # motor genera en `_draw_debug_views`. `threadCamera` se quedó solo con
+        # captura → frame_buffer → grabación. La flag `stream_to_dashboard`
+        # respeta `URT_STREAM_CAMERA=0` para correr headless en competencia.
+        self.stream_to_dashboard = bool(stream_to_dashboard)
+        self._dashboard_publish_interval = 1.0 / 10.0  # ~10 Hz, mismo orden que el legacy serialCamera
+        self._last_dashboard_publish_time = 0.0
+        self._dashboard_jpeg_quality = 70  # mismo nivel que threadCamera para mantener tamaño/CPU equivalentes
+
         self.last_infer_time = 0.0
         self.last_status_time = 0.0
         self.fps_timer = time.time()
@@ -77,8 +87,6 @@ class threadLocalPerception(ThreadWithStop):
         self.last_sign_name = ""
         self._last_result = None
         self._last_frame_sequence = 0
-        self._preview_interval = 1.0 / 25.0
-        self._last_preview_time = 0.0
         self._lf_curve_state = "STRAIGHT"
         self._lf_curve_state_frames = 0
         self._lf_steering_deg = 0.0
@@ -109,6 +117,7 @@ class threadLocalPerception(ThreadWithStop):
         self.signDetectedSender = messageHandlerSender(self.queuesList, SignDetected)
         self.signStatusSender = messageHandlerSender(self.queuesList, SignDetectionStatus)
         self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
+        self.serialCameraSender = messageHandlerSender(self.queuesList, serialCamera)
 
         self.engine = self._build_engine()
         print(
@@ -124,19 +133,6 @@ class threadLocalPerception(ThreadWithStop):
             imgsz=self.local_ai_imgsz,
             device=self.local_ai_device,
         )
-
-    def _is_window_enabled(self, window_key):
-        return self.show_debug and self.debug_windows.get(window_key, False)
-
-    def _should_build_debug(self, now):
-        if not self.show_debug:
-            return False
-        if not any(
-            self._is_window_enabled(window_key)
-            for window_key in ("ai_local_overlay", "ai_local_masks", "ai_local_signs")
-        ):
-            return False
-        return (now - self._last_preview_time) >= self._preview_interval
 
     def state_change_handler(self):
         message = self.stateChangeSubscriber.receive()
@@ -275,6 +271,18 @@ class threadLocalPerception(ThreadWithStop):
     def _enter_parking_mode(self):
         """Send a StateChange PARKING when in AUTO mode to start the parking sequence."""
         if self._current_mode != "auto":
+            return
+        # Test toggle: deshabilita el "walk_area→PARKING" durante runs
+        # automatizados de lane following. Set URT_DISABLE_AUTO_PARKING=1
+        # (run_test.sh lo setea por default).
+        import os
+        if os.environ.get("URT_DISABLE_AUTO_PARKING", "0") == "1":
+            try:
+                from src.utils.live_log import live_log
+                live_log("local_perception", event="parking_request_ignored",
+                         reason="URT_DISABLE_AUTO_PARKING=1", source="walk_area_crossed")
+            except Exception:
+                pass
             return
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA→PARKING\033[0m - "
@@ -516,33 +524,60 @@ class threadLocalPerception(ThreadWithStop):
         )
         return frame
 
-    def _show_debug_windows(self, result, now):
-        if not self.show_debug or not result:
+    def _publish_dashboard_frame(self, result, frame, now):
+        """Publica el frame que ve el `CameraView` del dashboard.
+
+        Contrato (single source of truth de Phase 6):
+          - ESTE método es el único productor del canal `serialCamera`.
+            `threadCamera` ya no publica ahí: se quedó sólo con captura
+            (frame_buffer / mainCamera).
+          - Si el motor produjo un overlay (carriles + máscaras + cajas de
+            señales en `result["lane_debug"]["overlay"]`), publicamos eso.
+          - Si no (modelo no cargado, error, primer tick antes de inferir),
+            publicamos el frame raw como fallback — evita pantalla negra.
+
+        Wire format: JPEG → base64-string. Lo decodifica `processDashboard`
+        a bytes y lo emite como `serialCamera_bin` por SocketIO. Mantenemos
+        base64 (en vez de bytes crudos) para no tocar el fast-path existente
+        en `processDashboard.send_continuous_messages`.
+
+        Rate-limit: ~10 Hz. La inferencia corre a ~10 Hz (LOCAL_AI_INTERVAL),
+        así que en la práctica publicamos un frame por inferencia.
+        """
+        if not self.stream_to_dashboard:
+            return
+        if (now - self._last_dashboard_publish_time) < self._dashboard_publish_interval:
             return
 
-        lane_debug = result.get("lane_debug", {})
-        rendered = False
-        if self._is_window_enabled("ai_local_overlay"):
-            overlay = lane_debug.get("overlay")
-            if overlay is not None:
-                overlay = self._annotate_debug_frame(overlay, result)
-                cv2.imshow("AI Local - Overlay", overlay)
-                rendered = True
-        if self._is_window_enabled("ai_local_masks"):
-            masks = lane_debug.get("masks")
-            if masks is not None:
-                masks = self._annotate_debug_frame(masks, result)
-                cv2.imshow("AI Local - Masks", masks)
-                rendered = True
-        if self._is_window_enabled("ai_local_signs"):
-            signs = lane_debug.get("signs")
-            if signs is not None:
-                signs = self._annotate_debug_frame(signs, result)
-                cv2.imshow("AI Local - Signs", signs)
-                rendered = True
-        if rendered:
-            cv2.waitKey(1)
-            self._last_preview_time = now
+        overlay = None
+        if isinstance(result, dict):
+            lane_debug = result.get("lane_debug")
+            if isinstance(lane_debug, dict):
+                overlay = lane_debug.get("overlay")
+
+        # `overlay` puede no existir (modelo no listo) o ser un ndarray vacío.
+        # En ambos casos caemos al frame raw, que ya tenemos a mano del tick
+        # actual de `thread_work`.
+        img = overlay if overlay is not None else frame
+        if img is None:
+            return
+
+        try:
+            ok, encoded = cv2.imencode(
+                ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self._dashboard_jpeg_quality]
+            )
+            if not ok:
+                return
+            b64_data = base64.b64encode(encoded).decode("utf-8")
+            self.serialCameraSender.send(b64_data)
+            self._last_dashboard_publish_time = now
+        except Exception as exc:
+            # Nunca dejar que un error de encoding mate el thread: la
+            # inferencia/pub de control debe seguir aunque el preview falle.
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m"
+                f" - dashboard frame publish failed: {exc}"
+            )
 
     def _build_local_lane_payload(self, result, frame_timestamp, frame_sequence):
         result_timestamp = time.time()
@@ -610,8 +645,11 @@ class threadLocalPerception(ThreadWithStop):
         self._last_frame_sequence = frame_sequence
 
         try:
-            build_debug = self._should_build_debug(now)
-            result = self.engine.infer(frame, build_debug=build_debug)
+            # build_debug=True siempre: el `CameraView` del dashboard consume el
+            # frame anotado que sale de `_draw_debug_views`. El costo extra
+            # (~1-2 ms de cv2.polylines / addWeighted / rectangle) es despreciable
+            # frente a los ~30-80 ms de la inferencia YOLO.
+            result = self.engine.infer(frame, build_debug=True)
             self._last_result = result
             self._last_frame_shape = frame.shape[:2] if frame is not None else None
             self.frame_counter += 1
@@ -638,15 +676,9 @@ class threadLocalPerception(ThreadWithStop):
             self._handle_walk_area(detections, now)
             self._publish_sign(detections, now, img_shape=self._last_frame_shape)
             self._publish_status(result, now)
-            if build_debug:
-                self._show_debug_windows(result, now)
+            self._publish_dashboard_frame(result, frame, now)
         except Exception as e:
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
     def stop(self):
-        for name in ("AI Local - Overlay", "AI Local - Masks", "AI Local - Signs"):
-            try:
-                cv2.destroyWindow(name)
-            except Exception:
-                pass
         super(threadLocalPerception, self).stop()

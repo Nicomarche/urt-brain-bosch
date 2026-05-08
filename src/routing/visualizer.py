@@ -3,25 +3,17 @@ trackVisualizer — real-time OpenCV map window.
 
 Runs at ~10 Hz in its own thread.  Reads the latest TrackingState snapshot
 and draws:
-  • Track image background (from Track Editor Save.json + JPG)
+  • Track image background (SVG via cairosvg, or raster PNG/JPG fallback)
   • Track spline path
-  • Nodes coloured by attribute:
-      NORMAL        → green
-      STOPLINE      → red
-      INTERSECTION  → blue
-      HIGHWAY_LEFT  → yellow
-      HIGHWAY_RIGHT → orange
-      CROSSWALK     → magenta
+  • Nodes coloured by attribute
   • Current target waypoint (cyan circle)
   • Raw car pose (scaled rectangle with Ackermann wheels, body heading)
   • Map-matched pose as a reference marker when it differs from the raw pose
-
-If bg_image_path / track_json_path are not provided, falls back to a plain
-black canvas with auto-scaled coordinates.
 """
 
 import json
 import math
+import os
 import threading
 import time
 import warnings
@@ -35,8 +27,7 @@ except ImportError:
     _CV2_OK = False
     warnings.warn("[trackVisualizer] cv2 not available — visualizer disabled")
 
-from src.routing.lanelet.from_graphml import (
-    TrackGraph,
+from src.routing.lanelet.attributes import (
     ATTR_NORMAL, ATTR_CROSSWALK, ATTR_INTERSECTION, ATTR_ONEWAY,
     ATTR_HIGHWAY_LEFT, ATTR_HIGHWAY_RIGHT, ATTR_ROUNDABOUT, ATTR_STOPLINE,
 )
@@ -71,7 +62,7 @@ class TrackVisualizer(threading.Thread):
     """OpenCV visualisation thread.
 
     Args:
-        graph:           TrackGraph instance (for static geometry).
+        graph:           OSM route handler instance (for static geometry).
         window_name:     cv2 window title.
         canvas_size:     Window size in pixels (square).
         bg_image_path:   Path to the track photo (JPG/PNG).
@@ -79,19 +70,25 @@ class TrackVisualizer(threading.Thread):
                          metersPerPixel, imgW, imgH).
     """
 
-    def __init__(self, graph: TrackGraph,
+    def __init__(self, graph,
                  window_name: str = "Track Navigation",
                  canvas_size: int = _CANVAS_SIZE,
                  bg_image_path: str = None,
-                 track_json_path: str = None):
+                 track_json_path: str = None,
+                 bg_svg_path: str = None):
         super().__init__(daemon=True)
-        self._graph        = graph
-        self._window_name  = window_name
-        self._canvas_size  = canvas_size
-        self._stop_event   = threading.Event()
-        self._state_lock   = threading.Lock()
-        self._state        = None
-        self._base_canvas  = None
+        self._graph         = graph
+        self._window_name   = window_name
+        self._canvas_size   = canvas_size
+        self._stop_event    = threading.Event()
+        self._state_lock    = threading.Lock()
+        self._state         = None
+        self._base_canvas   = None
+        # Latest rendered composite (set by _draw_frame). The PyQt5 GUI
+        # ignores this and renders its own scene from SocketIO events; we
+        # keep the field for any in-process consumer that prefers the
+        # numpy canvas (debug scripts, future MapVisualization sender).
+        self._latest_canvas = None
 
         # Image-mode coordinate params (set in _prerender if image loads OK)
         self._use_image_coords  = False
@@ -107,7 +104,7 @@ class TrackVisualizer(threading.Thread):
         self._ox     = 0.0
         self._y_min  = 0.0
 
-        self._prerender(bg_image_path, track_json_path)
+        self._prerender(bg_image_path, track_json_path, bg_svg_path)
 
     # ------------------------------------------------------------------
     # Public API
@@ -117,6 +114,15 @@ class TrackVisualizer(threading.Thread):
         with self._state_lock:
             self._state = state_snapshot
 
+    def get_latest_canvas(self):
+        """Return the most recently rendered composite (or None).
+
+        The canvas is a BGR ``np.ndarray`` of shape ``(canvas_size,
+        canvas_size, 3)``. Callers should treat it as read-only; it may
+        be replaced concurrently by the render loop.
+        """
+        return self._latest_canvas
+
     def stop(self) -> None:
         self._stop_event.set()
 
@@ -124,20 +130,32 @@ class TrackVisualizer(threading.Thread):
     # Thread main loop
     # ------------------------------------------------------------------
     def run(self) -> None:
+        """Background loop.
+
+        Originally this opened an OpenCV window and rendered the live
+        track + car overlay at ~25 FPS. The window is gone — the unified
+        PyQt5 GUI's ``map_view`` consumes the same data over SocketIO and
+        renders a richer, interactive scene.
+
+        We keep the thread alive (callers ``.start()`` it unconditionally)
+        but it just produces canvases into ``_latest_canvas`` so any
+        in-process consumer that wants the rendered frame can fetch it
+        via ``get_latest_canvas()``. If nobody asks, no CPU is spent past
+        the slow tick.
+        """
         if not _CV2_OK:
             return
-        cv2.namedWindow(self._window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self._window_name, self._canvas_size, self._canvas_size)
-        interval = 1.0 / _FPS
+        # Slow tick — only useful if get_latest_canvas() is being polled.
+        # Without an active consumer, we'd just be heating the Jetson.
+        interval = 1.0 / max(1.0, _FPS / 5.0)  # 5 FPS, conservative
         while not self._stop_event.is_set():
             t0 = time.monotonic()
-            self._draw_frame()
+            try:
+                self._draw_frame()
+            except Exception as exc:  # pragma: no cover - best effort
+                print(f"[TrackVisualizer] draw error: {exc}")
             elapsed = time.monotonic() - t0
-            wait = max(1, int((interval - elapsed) * 1000))
-            key = cv2.waitKey(wait)
-            if key == ord("q"):
-                break
-        cv2.destroyWindow(self._window_name)
+            time.sleep(max(0.0, interval - elapsed))
 
     # ------------------------------------------------------------------
     # Coordinate conversion
@@ -157,9 +175,54 @@ class TrackVisualizer(threading.Thread):
             return px, py
 
     # ------------------------------------------------------------------
+    # Background image loader
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _load_background_image(bg_image_path: str | None,
+                               bg_svg_path: str | None,
+                               target_width_px: int | None) -> "np.ndarray | None":
+        """Load the background image. Order of preference:
+        1. SVG via cairosvg (vector source of truth, scales perfectly).
+        2. Raster (PNG/JPG) at bg_image_path.
+        3. Raster adjacent to the SVG (track.svg → track.png/.jpg).
+        Returns a BGR ndarray or None if nothing loaded.
+        """
+        # Try SVG first if cairosvg is available — keeps the vector workflow.
+        if bg_svg_path and os.path.exists(bg_svg_path):
+            try:
+                import cairosvg  # type: ignore
+                png_bytes = cairosvg.svg2png(url=bg_svg_path,
+                                             output_width=target_width_px)
+                arr = np.frombuffer(png_bytes, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                if img is not None:
+                    return img
+            except ImportError:
+                pass  # cairosvg not installed → fall through to raster path
+            except Exception as e:
+                print(f"[TrackVisualizer] cairosvg rasterisation failed: {e}")
+
+        if bg_image_path and os.path.exists(bg_image_path):
+            img = cv2.imread(bg_image_path)
+            if img is not None:
+                return img
+
+        # Last-chance: try a raster sitting next to the SVG.
+        if bg_svg_path:
+            stem = os.path.splitext(bg_svg_path)[0]
+            for ext in (".png", ".jpg", ".jpeg"):
+                candidate = stem + ext
+                if os.path.exists(candidate):
+                    img = cv2.imread(candidate)
+                    if img is not None:
+                        return img
+        return None
+
+    # ------------------------------------------------------------------
     # Pre-render (static background)
     # ------------------------------------------------------------------
-    def _prerender(self, bg_image_path=None, track_json_path=None) -> None:
+    def _prerender(self, bg_image_path=None, track_json_path=None,
+                   bg_svg_path=None) -> None:
         """Build the static background canvas with image + edges + nodes."""
         if not _CV2_OK:
             return
@@ -169,14 +232,15 @@ class TrackVisualizer(threading.Thread):
 
         # ── Attempt image background ──────────────────────────────────────────
         bg = None
-        if bg_image_path and track_json_path:
+        if track_json_path and os.path.exists(track_json_path):
             try:
                 with open(track_json_path) as f:
                     jdata = json.load(f)
                 mpp  = jdata.get('metersPerPixel')
                 imgW = jdata.get('imgW')
                 imgH = jdata.get('imgH')
-                raw  = cv2.imread(bg_image_path)
+                raw  = self._load_background_image(bg_image_path, bg_svg_path,
+                                                   target_width_px=imgW)
                 if raw is not None and mpp and imgW and imgH:
                     # Scale image to fit canvas preserving aspect ratio
                     s     = min(canvas_size / imgW, canvas_size / imgH)
@@ -197,7 +261,8 @@ class TrackVisualizer(threading.Thread):
                     self._img_scale  = s
                     self._img_offset_x = off_x
                     self._img_offset_y = off_y
-                    print(f"[TrackVisualizer] Background loaded: {bg_image_path} "
+                    src = bg_svg_path or bg_image_path or "<unknown>"
+                    print(f"[TrackVisualizer] Background loaded: {src} "
                           f"({imgW}×{imgH}px, {mpp:.6f} m/px)")
             except Exception as e:
                 print(f"[TrackVisualizer] Warning — background not loaded: {e}")
@@ -326,8 +391,9 @@ class TrackVisualizer(threading.Thread):
             # ── Car geometry ──────────────────────────────────────────────────
             # (x, y) is the rear-axle centre in world metres (DR reference pt).
             # fwd = car-forward unit vector, lat = car-left unit vector.
-            cos_y = math.cos(yaw)
-            sin_y = math.sin(yaw)
+            draw_yaw = yaw
+            cos_y = math.cos(draw_yaw)
+            sin_y = math.sin(draw_yaw)
             fwd = (cos_y,  sin_y)
             lat = (-sin_y, cos_y)
 
@@ -392,10 +458,10 @@ class TrackVisualizer(threading.Thread):
                 fl_steer, fr_steer = steer_outer, steer_inner
 
             for whl_wx, whl_wy, whl_angle in [
-                (fl_wx, fl_wy, yaw + fl_steer),
-                (fr_wx, fr_wy, yaw + fr_steer),
-                (rl_wx, rl_wy, yaw),
-                (rr_wx, rr_wy, yaw),
+                (fl_wx, fl_wy, draw_yaw + fl_steer),
+                (fr_wx, fr_wy, draw_yaw + fr_steer),
+                (rl_wx, rl_wy, draw_yaw),
+                (rr_wx, rr_wy, draw_yaw),
             ]:
                 corners = self._wheel_corners(whl_wx, whl_wy, whl_angle)
                 whl_pts = np.array(corners, dtype=np.int32)
@@ -419,6 +485,7 @@ class TrackVisualizer(threading.Thread):
             next_semantic = state.get("next_semantic_label") or state.get("next_semantic_type") or "none"
             relocalization_mode = state.get("relocalization_mode", "map_match")
             match_gap_m = math.hypot(float(raw_x) - float(matched_x), float(raw_y) - float(matched_y))
+            display_yaw_deg = math.degrees(math.atan2(math.sin(draw_yaw), math.cos(draw_yaw)))
 
             matched_px = self._world_to_px(matched_x, matched_y)
             cv2.circle(canvas, matched_px, 5, (0, 215, 255), 1)
@@ -428,7 +495,8 @@ class TrackVisualizer(threading.Thread):
                 cv2.line(canvas, raw_px, matched_px, (0, 215, 255), 1)
 
             cv2.putText(canvas,
-                        f"pos x={x:.2f}m  y={y:.2f}m  yaw={math.degrees(yaw):.0f}°"
+                        f"pos x={x:.2f}m  y={y:.2f}m  yaw_vis={display_yaw_deg:.0f}°"
+                        f"  raw={math.degrees(yaw):.0f}°"
                         f"  steer={math.degrees(steer_rad):+.0f}°  [dr x={raw_x:.2f} y={raw_y:.2f}]",
                         (10, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
             cv2.putText(canvas,
@@ -454,4 +522,7 @@ class TrackVisualizer(threading.Thread):
                         f"semantic={next_semantic}  reloc={relocalization_mode}",
                         (10, 122), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (220, 220, 220), 1)
 
-        cv2.imshow(self._window_name, canvas)
+        # Stash the rendered canvas for in-process consumers (no imshow).
+        # The PyQt5 GUI does its own rendering; this is just a fallback for
+        # anyone that wants the raw composite image as a numpy array.
+        self._latest_canvas = canvas

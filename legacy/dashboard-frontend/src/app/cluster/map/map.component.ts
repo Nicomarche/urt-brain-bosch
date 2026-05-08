@@ -27,7 +27,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import { CommonModule } from '@angular/common';
-import { Component, ElementRef, Input, ViewChild } from '@angular/core';
+import { Component, ElementRef, ViewChild } from '@angular/core';
 import { Subscription } from 'rxjs';
 
 import { WebSocketService } from '../../webSocket/web-socket.service';
@@ -87,28 +87,27 @@ interface SemaphoreMarker {
   styleUrl: './map.component.css'
 })
 export class MapComponent {
-  public trackWidthMeters = 20.67;
-  public trackHeightMeters = 13.76;
-  public mapImageSrc = '/assets/TrackPreview.jpg';
-  public mapAspectRatio = '3036 / 2580';
-  public mapImageWidthPx = 3036;
-  public mapImageHeightPx = 2580;
-  public pixelsPerMeter = 0;
-  public metersPerPixel = 0;
-
-  @Input() cursorRotation: number = 0;
+  public trackWidthMeters = 20.696;
+  public trackHeightMeters = 13.793884;
+  public mapImageSrc = '/assets/Track.svg';
+  public mapAspectRatio = '2000 / 1333';
+  public mapImageWidthPx = 2000;
+  public mapImageHeightPx = 1333;
+  public pixelsPerMeter = 96.637031;
+  public metersPerPixel = 0.010348;
 
   @ViewChild('imageContainer') imageContainerRef!: ElementRef<HTMLElement>;
 
   private mapX: number = 0;
   private mapY: number = 0;
+  private mapYawDeg: number = 0;
   private worldBounds: MapBounds = {
     xMin: 0,
     xMax: this.trackWidthMeters,
     yMin: 0,
     yMax: this.trackHeightMeters,
   };
-  private yAxisInverted = true;
+  private yAxisInverted = false;
 
   public semaphores: Map<number, Semaphore> = new Map<number, Semaphore>();
   public semaphoreMarkers: SemaphoreMarker[] = [];
@@ -150,6 +149,8 @@ export class MapComponent {
         });
         this.mapX = point.x;
         this.mapY = point.y;
+        const yawDeg = Number(message?.value?.yaw ?? 0);
+        this.mapYawDeg = Number.isFinite(yawDeg) ? yawDeg : 0;
         this.hasLocation = true;
       },
     );
@@ -355,16 +356,20 @@ export class MapComponent {
         yMax,
       };
     }
-    this.yAxisInverted = Boolean(mapMetadata.y_axis_inverted ?? true);
-    const imageWidthPx = Number(mapMetadata.image_width_px ?? this.mapImageWidthPx);
-    const imageHeightPx = Number(mapMetadata.image_height_px ?? this.mapImageHeightPx);
+    this.yAxisInverted = Boolean(mapMetadata.y_axis_inverted ?? this.yAxisInverted);
+    const imageWidthPx = Number(
+      mapMetadata.image_width_px ?? mapMetadata.imgW ?? this.mapImageWidthPx,
+    );
+    const imageHeightPx = Number(
+      mapMetadata.image_height_px ?? mapMetadata.imgH ?? this.mapImageHeightPx,
+    );
     if (imageWidthPx > 0 && imageHeightPx > 0) {
       this.mapImageWidthPx = imageWidthPx;
       this.mapImageHeightPx = imageHeightPx;
       this.mapAspectRatio = `${imageWidthPx} / ${imageHeightPx}`;
     }
-    const ppm = Number(mapMetadata.pixels_per_meter ?? 0);
-    const mpp = Number(mapMetadata.meters_per_pixel ?? 0);
+    const ppm = Number(mapMetadata.pixels_per_meter ?? mapMetadata.pixelsPerMeter ?? 0);
+    const mpp = Number(mapMetadata.meters_per_pixel ?? mapMetadata.metersPerPixel ?? 0);
     this.pixelsPerMeter = Number.isFinite(ppm) && ppm > 0 ? ppm : 0;
     this.metersPerPixel = Number.isFinite(mpp) && mpp > 0 ? mpp : 0;
   }
@@ -463,7 +468,8 @@ export class MapComponent {
   }
 
   public get mapPoseTransform(): string {
-    return `translate(${this.mapX} ${this.mapY}) rotate(${this.cursorRotation} 0 0)`;
+    const headingRotationDeg = 90 + (this.yAxisInverted ? -this.mapYawDeg : this.mapYawDeg);
+    return `translate(${this.mapX} ${this.mapY}) rotate(${headingRotationDeg.toFixed(2)} 0 0)`;
   }
 
   public get mapScaleSummary(): string {

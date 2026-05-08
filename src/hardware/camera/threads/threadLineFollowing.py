@@ -10,6 +10,7 @@ import time
 import math
 import json
 import os
+import sys
 from collections import deque
 from enum import Enum
 
@@ -1268,6 +1269,33 @@ Args:
         self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
         self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
 
+        # Preview backend: the legacy mode opened cv2.imshow windows from
+        # this worker (which crashes on macOS forks and is useless on the
+        # headless Jetson) or published frames over a ZMQ pub socket so a
+        # separate ``view_debug.py`` process could render them.
+        #
+        # Now that the unified PyQt5 GUI subscribes to ``LineFollowingDebug``
+        # over SocketIO and renders the same overlay (see
+        # ``debugStreamSender.send(b64_data)`` later in this class), the
+        # local windows are redundant. We keep the ZMQ pub as an *opt-in*
+        # path (``URT_PREVIEW_BACKEND=zmq``) for advanced multi-stage
+        # debugging where the dashboard's single-image view isn't enough,
+        # but the default is "no local windows".
+        self._preview_zmq_pub = None
+        _preview_backend = os.environ.get("URT_PREVIEW_BACKEND", "off")
+        if _preview_backend == "zmq":
+            try:
+                import zmq as _zmq
+                _ep = os.environ.get("URT_PREVIEW_ENDPOINT", "tcp://*:5577")
+                self._preview_zmq_pub = _zmq.Context.instance().socket(_zmq.PUB)
+                self._preview_zmq_pub.bind(_ep)
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - "
+                      f"preview backend=zmq → {_ep} (run view_debug.py to see windows)")
+            except Exception as _exc:
+                print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWARN\033[0m - "
+                      f"preview zmq unavailable ({_exc}); local previews disabled")
+                self._preview_zmq_pub = None
+
         # GPS-free tracking state (injected by processCamera after init)
         self._tracking_state = None
         self._maneuver_manager = ManeuverManager(
@@ -2394,10 +2422,10 @@ Args:
             # Only trigger when the reference has been meaningfully learned
             # (|ref| > 5°) to avoid false positives during initialisation.
             _ref_learned = abs(math.degrees(_transversal_ref_rad)) > 5.0
-            # Only trigger transversal recovery when the graphml path confirms a real
+            # Only trigger transversal recovery when the route path confirms a real
             # curve.  On a straight section a perpendicular line is a stop-line marker,
             # not a curve-exit wall — applying the 20° heading bias there would wrongly
-            # steer the car into the turn.  path_kappa from DeadReckoning / TrackGraph
+            # steer the car into the turn.  path_kappa from DeadReckoning / route planner
             # is low (≈0.11) on straight segments and high (>0.5) inside tight turns.
             _tracking_state = getattr(self, '_tracking_state', None)
             _graph_kappa = abs(float(getattr(_tracking_state, 'path_kappa', 0.0))) \
@@ -4740,16 +4768,35 @@ Args:
         self._preview_refresh_pending = False
 
     def _show_preview_window(self, name, image):
-        """Render a preview window only when the refresh budget allows it."""
+        """Render a preview window only when the refresh budget allows it.
+
+        With the unified GUI in place we never call ``cv2.imshow`` from
+        this worker. The two remaining sinks are:
+
+        * ZMQ pub (opt-in via URT_PREVIEW_BACKEND=zmq) — for an external
+          ``view_debug.py``-style viewer.
+        * The dashboard's ``LineFollowingDebug`` event (handled separately
+          via ``debugStreamSender``) — what the PyQt5 panel consumes.
+
+        If neither is configured, the call is a no-op — no X11 window
+        opens, the loop stays headless.
+        """
         if image is None or not self.show_debug or not self._preview_frame_due:
             return
-        cv2.imshow(name, image)
-        self._preview_refresh_pending = True
+        if self._preview_zmq_pub is not None:
+            ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            if ok:
+                self._preview_zmq_pub.send_multipart([name.encode("utf-8"), buf.tobytes()])
+            self._preview_refresh_pending = True
 
     def _flush_preview_windows(self):
-        """Flush pending preview updates with a single waitKey."""
+        """Flush pending preview updates.
+
+        Used to call ``cv2.waitKey(1)`` to actually paint the imshow
+        windows; with imshow gone, we just bookkeep the timestamp so the
+        rate-limiter in ``_begin_preview_cycle`` keeps working.
+        """
         if self._preview_refresh_pending:
-            cv2.waitKey(1)
             self._last_preview_time = time.time()
         self._preview_refresh_pending = False
         self._preview_frame_due = False
@@ -11391,7 +11438,11 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
 
     def stop(self):
-        """Stop the thread and cleanup."""
-        if self.show_debug:
-            cv2.destroyAllWindows()
+        """Stop the thread and cleanup.
+
+        The legacy ``cv2.destroyAllWindows()`` call is no longer needed —
+        ``_show_preview_window`` no longer opens any local windows. The
+        ZMQ socket (if any) is GC'd when the worker dies; we don't tear
+        it down explicitly to avoid blocking on slow subscribers.
+        """
         super(threadLineFollowing, self).stop()

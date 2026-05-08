@@ -32,17 +32,12 @@ class RegulatoryElement:
     """Elemento regulatorio del HD map — stopline, crosswalk, yield, etc.
 
     Inspirado en `lanelet2::RegulatoryElement` de Autoware. En BFMC los
-    regulatory elements se derivan de:
-      - Atributos de nodo del GraphML (`ATTR_STOPLINE=7`,
-        `ATTR_CROSSWALK=1`, `ATTR_INTERSECTION=2`).
-      - Records de `track_semantics.json` (controls, intersections,
-        crosswalks).
+    regulatory elements se derivan de etiquetas y relaciones del OSM lanelet.
 
     Invariantes:
       - `kind ∈ {"stopline", "crosswalk", "intersection", "yield",
         "speed_limit", "parking", "highway_zone", "roundabout"}`.
-      - `position_xy` está en el mismo frame que las lanelets (ENU del
-        mapa BFMC, coincide con coordenadas del GraphML).
+      - `position_xy` está en el mismo frame que las lanelets del OSM.
       - `data` es un dict libre con datos específicos del tipo
         (ej. para "speed_limit", `{"speed_mps": 0.6}`; para
         "crosswalk", `{"width_m": 1.5}`).
@@ -89,6 +84,7 @@ class RouteContext:
     route_active: bool = False
     route_id: str | None = None
     route_points: list[dict[str, float]] = field(default_factory=list)
+    route_waypoints: list[list[float]] = field(default_factory=list)
     destination_node_id: str | None = None
     destination_label: str | None = None
     route_queue: list[dict[str, Any]] = field(default_factory=list)

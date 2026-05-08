@@ -47,10 +47,12 @@ from src.core.messaging.allMessages import (
     SerialConnectionState,
     ControlCalib,
     IsAlive,
-    RequestSteerLimits
+    RequestSteerLimits,
+    SimRelocalize,
 )
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.utils.live_log import live_log
 
 
 class threadWrite(ThreadWithStop):
@@ -93,6 +95,14 @@ class threadWrite(ThreadWithStop):
         self.last_blocked_reason = None
         self._last_status_snapshot = None
         self._last_status_send_time = 0.0
+        self._last_continuous_motion_send_monotonic = 0.0
+        self._auto_kl_run_in_sim = False
+        # En ZMQ sim el bridge espera comandos refrescados con cierta
+        # frecuencia; si dejamos de reenviar porque speed/steer quedaron
+        # constantes, el auto termina frenándose aunque el planner siga en
+        # AUTO. Reemitimos el último par válido a ~20 Hz mientras el motor
+        # esté habilitado.
+        self._continuous_motion_keepalive_s = 0.05
 
         # error rate limiting
         self.last_error_time = None
@@ -100,6 +110,7 @@ class threadWrite(ThreadWithStop):
 
         self._init_senders()
         self._init_subscribers()
+        self._init_motor_output()
         self.load_config("init")
 
         if example:
@@ -122,15 +133,104 @@ class threadWrite(ThreadWithStop):
         self.controlCalibSubscriber = messageHandlerSubscriber(self.queuesList, ControlCalib, "lastOnly", True)
         self.isAliveSubscriber = messageHandlerSubscriber(self.queuesList, IsAlive, "lastOnly", True)
         self.requestSteerLimitsSubscriber = messageHandlerSubscriber(self.queuesList, RequestSteerLimits, "lastOnly", True)
+        self.simRelocalizeSubscriber = messageHandlerSubscriber(self.queuesList, SimRelocalize, "lastOnly", True)
         
     def _init_senders(self):
         self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
         self.actuatorStatusSender = messageHandlerSender(self.queuesList, ActuatorCommandStatus)
 
+    def _init_motor_output(self):
+        """Pick motor backend based on config.MOTOR_OUTPUT ('serial' | 'zmq').
+        ZMQ mode binds a PUB socket and short-circuits send_to_serial(); the
+        Nucleo/serial path is never touched and the sim_bridge subscribes."""
+        try:
+            from config import MOTOR_OUTPUT
+        except ImportError:
+            MOTOR_OUTPUT = "serial"
+        self.motor_output = MOTOR_OUTPUT
+        self._zmq_sock = None
+        if self.motor_output != "zmq":
+            return
+
+        try:
+            import zmq
+            from config import ZMQ_MOTOR_ENDPOINT, ZMQ_MOTOR_TOPIC
+        except ImportError as e:
+            print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                  f" - MOTOR_OUTPUT='zmq' but pyzmq missing ({e}). Falling back to serial.")
+            self.motor_output = "serial"
+            return
+
+        try:
+            self._zmq_motor_topic = ZMQ_MOTOR_TOPIC
+            self._zmq_ctx = zmq.Context.instance()
+            self._zmq_sock = self._zmq_ctx.socket(zmq.PUB)
+            # The bridge binds the cmd SUB socket (it's the long-running endpoint).
+            # The brain — which is the transient publisher — connects to it. With both
+            # binding, neither receives anything because PUB↔SUB needs one bind + one
+            # connect to form the pair.
+            self._zmq_sock.connect(ZMQ_MOTOR_ENDPOINT)
+            time.sleep(0.2)  # give the connection a chance to attach before first send
+            print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
+                  f" - Motor output → ZMQ {ZMQ_MOTOR_ENDPOINT} (topic={ZMQ_MOTOR_TOPIC!r})")
+        except Exception as e:
+            print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                  f" - Failed to connect ZMQ motor socket: {e}")
+            self.motor_output = "serial"
+            self._zmq_sock = None
+            return
+
+        # ── Auto-engage KL en sim ──────────────────────────────────────────
+        # En el auto físico, KL es la llave de contacto: KL=0 (off) /
+        # KL=15 (electrónica on) / KL=30 (motor encendido). El brain bloquea
+        # SpeedMotor/SteerMotor hasta que el operador la lleva a 30 desde
+        # el dashboard — es la red de seguridad que evita arranques
+        # accidentales con gente cerca del auto.
+        #
+        # En sim no hay actuador físico que proteger — la "llave" es solo
+        # un slider en una UI. Forzarla cada vez que arrancás `run_sim.sh`
+        # es fricción sin beneficio. Activable/desactivable por config para
+        # quien quiera testear la máquina de estados de KL en sim.
+        try:
+            from config import AUTO_KL_RUN_IN_SIM
+        except ImportError:
+            AUTO_KL_RUN_IN_SIM = True  # default: convenience-on en sim
+        self._auto_kl_run_in_sim = bool(AUTO_KL_RUN_IN_SIM and self.motor_output == "zmq")
+        if self._auto_kl_run_in_sim:
+            self.running = True
+            self.engineEnabled = True
+            self.currentKlemMode = 30
+            self.last_blocked_reason = None
+            print(
+                "\033[1;97m[ Serial Handler ] :\033[0m "
+                "\033[1;92mINFO\033[0m - SIM auto-engaged "
+                "\033[94mKL=30\033[0m (engineEnabled=True). Override desde "
+                "el dashboard si necesitás testear el state machine de KL."
+            )
+
     # ==================================== SENDING =======================================
 
     def send_to_serial(self, msg):
         action = msg.get("action")
+        if self.motor_output == "zmq" and self._zmq_sock is not None:
+            try:
+                payload = json.dumps(msg).encode("utf-8")
+                self._zmq_sock.send_multipart([self._zmq_motor_topic, payload])
+                self.last_blocked_reason = None
+                live_log(
+                    "zmq_motor", event="motor_cmd_sent",
+                    action=str(action),
+                    speed=msg.get("speed"),
+                    steer=msg.get("steer") if "steer" in msg else msg.get("steerAngle"),
+                    cmd_time=msg.get("time"),
+                )
+                return True, json.dumps(msg)
+            except Exception as e:
+                if self._should_send_error():
+                    print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                          f" - ZMQ send failed for {action}: {e}")
+                self.last_blocked_reason = "zmq_send_failed"
+                return False, None
         command_msg = self.messageConverter.get_command(**msg)
         if command_msg != "error":
             try:
@@ -264,6 +364,25 @@ class threadWrite(ThreadWithStop):
             self.logger.info(
                 f"Continuous command sent: speed={int(speed_x10)} steer={int(steer_x10)}"
             )
+        if speed_sent and steer_sent:
+            self._last_continuous_motion_send_monotonic = time.monotonic()
+
+        # Visibilidad sin --debugger: imprimimos solo cuando el par
+        # (speed, steer) cambia respecto al último despachado. Así
+        # el operador VE el carril manual flowing (CMD_SPEED del dashboard
+        # → IPC → este punto → firmware/ZMQ) sin floodear stdout durante
+        # el ramp de steer (50 ms ticks). Esto NO confunde con el log del
+        # `[ Dispatcher ]`, que muestra el output de MotionController y
+        # NUNCA escribe motors en MANUAL.
+        pair = (int(speed_x10), int(steer_x10))
+        if pair != getattr(self, "_last_motion_log_pair", None):
+            tag = "\033[1;92mSENT\033[0m" if (speed_sent and steer_sent) else "\033[1;91mBLOCK\033[0m"
+            print(
+                f"\033[1;97m[ Serial Handler ] :\033[0m {tag} "
+                f"speed={pair[0]} steer={pair[1]} "
+                f"(KL={self.currentKlemMode}, engineEnabled={self.engineEnabled})"
+            )
+            self._last_motion_log_pair = pair
 
         return speed_sent and steer_sent
 
@@ -317,13 +436,37 @@ class threadWrite(ThreadWithStop):
         try:
             klRecv = self.klSubscriber.receive()
             if klRecv is not None:
+                kl_value = str(klRecv)
+                live_log(
+                    "zmq_motor" if self.motor_output == "zmq" else "serial_writer",
+                    event="klem_received",
+                    value=kl_value,
+                    engine_enabled=bool(self.engineEnabled),
+                    current_klem_mode=int(self.currentKlemMode),
+                    auto_kl_run_in_sim=bool(self._auto_kl_run_in_sim),
+                )
                 print(
                     f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
-                    f" - threadWrite received Klem \033[94m{klRecv}\033[0m"
+                    f" - threadWrite received Klem \033[94m{kl_value}\033[0m"
                 )
                 if self.debugger:
-                    self.logger.info(klRecv)
-                if klRecv == "30":
+                    self.logger.info(kl_value)
+                if self._auto_kl_run_in_sim and kl_value in {"0", "15"}:
+                    print(
+                        "\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m"
+                        f" - Ignoring KL=\033[94m{kl_value}\033[0m because "
+                        "AUTO_KL_RUN_IN_SIM keeps the simulated motor enabled"
+                    )
+                    live_log(
+                        "zmq_motor",
+                        event="klem_ignored",
+                        value=kl_value,
+                        reason="auto_kl_run_in_sim",
+                        engine_enabled=bool(self.engineEnabled),
+                        current_klem_mode=int(self.currentKlemMode),
+                    )
+                    self._publish_actuator_status(force=True)
+                elif kl_value == "30":
                     self.running = True
                     self.engineEnabled = True
                     self.currentKlemMode = 30
@@ -335,7 +478,7 @@ class threadWrite(ThreadWithStop):
                         self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
                     else:
                         self._publish_actuator_status(force=True)
-                elif klRecv == "15":
+                elif kl_value == "15":
                     self.running = True
                     self.engineEnabled = False
                     self.currentKlemMode = 15
@@ -344,7 +487,7 @@ class threadWrite(ThreadWithStop):
                     self.send_to_serial(command)
                     self.load_config("sensors")
                     self._publish_actuator_status(force=True)
-                elif klRecv == "0":
+                elif kl_value == "0":
                     self.running = False
                     self.engineEnabled = False
                     self.currentKlemMode = 0
@@ -367,6 +510,10 @@ class threadWrite(ThreadWithStop):
                 command = {"action": "steerLimits", "request": 0}
                 self.send_to_serial(command)
 
+            simRelocalizeRecv = self.simRelocalizeSubscriber.receive()
+            if simRelocalizeRecv is not None and self.motor_output == "zmq":
+                self.send_to_serial({"action": "set_pose", **simRelocalizeRecv})
+
             if self.running:
                 brakeRecv = self.brakeSubscriber.receive()
                 speedRecv = self.speedMotorSubscriber.receive()
@@ -377,12 +524,28 @@ class threadWrite(ThreadWithStop):
                     self.last_speed_ts = time.time()
                     if self.debugger:
                         self.logger.info(f"Speed cached: {speedRecv} -> {self.last_speed_cmd}")
+                    # Log siempre (sin --debugger): si esta línea aparece
+                    # pero `[ Serial Handler ] SENT speed=…` no, el dispatch
+                    # quedó gated (engineEnabled=False, brake activo, etc.).
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRECV\033[0m"
+                        f" SpeedMotor={speedRecv!r} cached={self.last_speed_cmd}"
+                    )
 
                 if steerRecv is not None:
                     self.last_steer_cmd = int(float(steerRecv))
                     self.last_steer_ts = time.time()
                     if self.debugger:
                         self.logger.info(f"Steer cached: {steerRecv} -> {self.last_steer_cmd}")
+                    # Rate-limited: la rampa de steer (50ms) emitiría
+                    # cada tick. Solo logueamos si el cached value cambió.
+                    last_logged = getattr(self, "_last_logged_steer", None)
+                    if self.last_steer_cmd != last_logged:
+                        print(
+                            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRECV\033[0m"
+                            f" SteerMotor={steerRecv!r} cached={self.last_steer_cmd}"
+                        )
+                        self._last_logged_steer = self.last_steer_cmd
 
                 if brakeRecv is not None:
                     if self.debugger:
@@ -405,8 +568,16 @@ class threadWrite(ThreadWithStop):
                 speed_or_steer_updated = speedRecv is not None or steerRecv is not None
                 if speed_or_steer_updated and brakeRecv is None:
                     if self.engineEnabled:
-                        if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
-                            self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
+                        # En manual el dashboard manda eventos por eje: ↑/↓
+                        # solo emite SpeedMotor, ←/→ solo emite SteerMotor.
+                        # Antes exigíamos que AMBOS estuvieran cacheados para
+                        # despachar — eso dejaba "↑ sin tocar steer" sin
+                        # comando, así que el auto no arrancaba. Defaulteamos
+                        # el eje no tocado a 0 (= centro / sin movimiento)
+                        # apenas tengamos el otro.
+                        speed_to_send = self.last_speed_cmd if self.last_speed_cmd is not None else 0
+                        steer_to_send = self.last_steer_cmd if self.last_steer_cmd is not None else 0
+                        self._handle_continuous_motion_command(speed_to_send, steer_to_send)
                     else:
                         self.last_blocked_reason = "klem_not_30"
                         self._record_motion_command(
@@ -490,8 +661,25 @@ class threadWrite(ThreadWithStop):
                             force=True,
                         )
 
+                should_refresh_continuous_motion = (
+                    self.motor_output == "zmq"
+                    and self.engineEnabled
+                    and brakeRecv is None
+                    and controlRecv is None
+                    and controlCalibRecv is None
+                    and speedRecv is None
+                    and steerRecv is None
+                    and (self.last_speed_cmd is not None or self.last_steer_cmd is not None)
+                    and (time.monotonic() - self._last_continuous_motion_send_monotonic)
+                    >= float(self._continuous_motion_keepalive_s)
+                )
+                if should_refresh_continuous_motion:
+                    speed_to_send = self.last_speed_cmd if self.last_speed_cmd is not None else 0
+                    steer_to_send = self.last_steer_cmd if self.last_steer_cmd is not None else 0
+                    self._handle_continuous_motion_command(speed_to_send, steer_to_send)
+
                 instantRecv = self.instantSubscriber.receive()
-                if instantRecv is not None: 
+                if instantRecv is not None:
                     if self.debugger:
                         self.logger.info(instantRecv) 
                     command = {"action": "instant", "activate": int(instantRecv)}
@@ -534,6 +722,12 @@ class threadWrite(ThreadWithStop):
         self.exampleFlag = False
         command = {"action": "kl", "mode": 0}
         self.send_to_serial(command)
+        if self._zmq_sock is not None:
+            try:
+                self._zmq_sock.close(linger=100)
+            except Exception:
+                pass
+            self._zmq_sock = None
         super(threadWrite, self).stop()
 
     # ================================== EXAMPLE =========================================

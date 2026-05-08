@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.routing.lanelet.from_graphml import (
+from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
     ATTR_HIGHWAY_LEFT,
     ATTR_HIGHWAY_RIGHT,
@@ -15,10 +15,100 @@ from src.routing.lanelet.from_graphml import (
     ATTR_ONEWAY,
     ATTR_ROUNDABOUT,
     ATTR_STOPLINE,
-    RoutePath,
-    TrackGraph,
     WAYPOINT_MODE_ATTRS,
 )
+from src.routing.lanelet.route_path import RoutePath
+from src.utils.live_log import live_log
+
+_MAP_MATCH_RECOVERY_ERROR_M = 0.75
+_MAP_MATCH_RECOVERY_MIN_IMPROVEMENT_M = 0.20
+_MAP_MATCH_RECOVERY_WINDOW_MULT = 6
+_MAP_MATCH_GLOBAL_RECOVERY_ERROR_M = 0.60
+_MAP_MATCH_GLOBAL_MIN_IMPROVEMENT_M = 0.15
+
+
+def _preview_waypoints(waypoints, limit: int = 3) -> list[list[float]]:
+    out: list[list[float]] = []
+    if waypoints is None:
+        return out
+    try:
+        for pt in waypoints[:limit]:
+            out.append([
+                round(float(pt[0]), 3),
+                round(float(pt[1]), 3),
+                round(float(pt[2]), 4),
+            ])
+    except Exception:
+        return []
+    return out
+
+
+def _serialize_waypoints(waypoints) -> list[list[float]]:
+    out: list[list[float]] = []
+    if waypoints is None:
+        return out
+    try:
+        arr = np.asarray(waypoints, dtype=float)
+    except Exception:
+        return out
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] < 2:
+        return out
+    for pt in arr:
+        yaw = float(pt[2]) if arr.shape[1] >= 3 else 0.0
+        out.append([float(pt[0]), float(pt[1]), yaw])
+    return out
+
+
+def _preview_ids(values, limit: int = 6) -> list[str]:
+    if not values:
+        return []
+    return [
+        str(item)
+        for item in list(values)[:limit]
+        if str(item)
+    ]
+
+
+def _preview_destinations(specs, limit: int = 4) -> list[dict]:
+    preview: list[dict] = []
+    for spec in list(specs or [])[:limit]:
+        if not isinstance(spec, dict):
+            continue
+        item: dict[str, object] = {}
+        if spec.get("lanelet_id") is not None:
+            item["lanelet_id"] = str(spec.get("lanelet_id"))
+        if spec.get("id") is not None:
+            item["id"] = str(spec.get("id"))
+        if spec.get("x") is not None and spec.get("y") is not None:
+            try:
+                item["x"] = round(float(spec["x"]), 3)
+                item["y"] = round(float(spec["y"]), 3)
+            except (TypeError, ValueError):
+                pass
+        if item:
+            preview.append(item)
+    return preview
+
+
+def _summarize_command(command: dict | None) -> dict:
+    if not isinstance(command, dict):
+        return {"type": "invalid"}
+    summary: dict[str, object] = {
+        "mode": str(command.get("mode", "") or "").lower() or "direct_xy",
+    }
+    if command.get("lanelet_id") is not None:
+        summary["lanelet_id"] = str(command.get("lanelet_id"))
+    if command.get("x") is not None and command.get("y") is not None:
+        try:
+            summary["x"] = round(float(command["x"]), 3)
+            summary["y"] = round(float(command["y"]), 3)
+        except (TypeError, ValueError):
+            pass
+    destinations = list(command.get("destinations", []) or [])
+    if destinations:
+        summary["destination_count"] = len(destinations)
+        summary["destinations_preview"] = _preview_destinations(destinations)
+    return summary
 
 
 @dataclass
@@ -26,6 +116,7 @@ class PathUpdate:
     route_active: bool
     route_id: str | None
     route_points: list[dict[str, float]]
+    route_waypoints: list[list[float]]
     destination_node_id: str | None
     destination_label: str | None
     route_queue: list[dict]
@@ -66,20 +157,20 @@ class PathUpdate:
 class PathManager:
     """Maintains the active navigation route and control targets."""
 
-    def __init__(self, graph: TrackGraph):
+    def __init__(self, graph):
         self.graph = graph
         self.active_route: RoutePath | None = None
         self.route_active = False
         self.route_completed = False
         self.destination_node_id: str | None = None
-        self.destination_node_ids: list[str] = []
+        self.destination_specs: list[dict[str, float] | dict] = []
         self.route_id: str | None = None
         self.replans = 0
         self._route_counter = 0
         self.matched_idx = 0
         self.target_idx = 0
 
-        self.reset_route()
+        self._clear_active_route()
 
     # ------------------------------------------------------------------
     # Route selection
@@ -92,28 +183,60 @@ class PathManager:
         if not isinstance(current_pose, dict):
             return self.graph.get_start_node_id()
         try:
-            return {"x": float(current_pose["x"]), "y": float(current_pose["y"])}
+            spec = {"x": float(current_pose["x"]), "y": float(current_pose["y"])}
+            yaw_rad = current_pose.get("yaw_rad", current_pose.get("yaw"))
+            if yaw_rad is not None:
+                spec["yaw_rad"] = float(yaw_rad)
+            return spec
         except (KeyError, TypeError, ValueError):
             return self.graph.get_start_node_id()
 
     def _activate_route(
         self,
         route: RoutePath,
-        destination_node_ids: list[str] | None,
+        destination_specs: list[dict] | None,
         route_id: str,
     ) -> bool:
         if route is None or route.waypoints.size == 0:
+            live_log(
+                "route_planner", event="route_activation_failed",
+                route_id=route_id,
+                reason="empty_route",
+                destination_specs=_preview_destinations(destination_specs),
+            )
             return False
         route.route_id = route_id
         self.active_route = route
         self.route_id = route_id
         self.route_active = True
         self.route_completed = False
-        self.destination_node_ids = list(destination_node_ids or [])
-        self.destination_node_id = self.destination_node_ids[-1] if self.destination_node_ids else None
+        self.destination_specs = list(destination_specs or [])
+        self.destination_node_id = route.node_ids[-1] if route.node_ids else None
         self.matched_idx = 0
         self.target_idx = 0
+        live_log(
+            "route_planner", event="route_activated",
+            route_id=route_id,
+            route_source=str(getattr(route, "source", "unknown") or "unknown"),
+            closed_loop=bool(getattr(route, "closed_loop", False)),
+            destination_node_id=self.destination_node_id,
+            destination_specs=_preview_destinations(self.destination_specs),
+            waypoint_count=int(len(route.waypoints)),
+            node_count=int(len(getattr(route, "node_ids", []) or [])),
+            node_ids_preview=_preview_ids(getattr(route, "node_ids", []) or []),
+            waypoint_preview=_preview_waypoints(route.waypoints),
+        )
         return True
+
+    def _clear_active_route(self) -> None:
+        self.active_route = None
+        self.route_active = False
+        self.route_completed = False
+        self.destination_specs = []
+        self.destination_node_id = None
+        self.route_id = None
+        self.matched_idx = 0
+        self.target_idx = 0
 
     def reset_route(self, current_pose: dict | None = None) -> bool:
         ref_ids = list(self.graph.reference_node_ids)
@@ -122,16 +245,16 @@ class PathManager:
             ref_ids = ref_ids[:-1]
             closed_loop = True
         if not ref_ids:
-            self.active_route = None
-            self.route_active = False
-            self.route_completed = False
+            self._clear_active_route()
             return False
 
         if current_pose:
             try:
+                yaw_rad = current_pose.get("yaw_rad", current_pose.get("yaw"))
                 start_node_id = self.graph.find_nearest_node(
                     float(current_pose["x"]),
                     float(current_pose["y"]),
+                    yaw_rad=float(yaw_rad) if yaw_rad is not None else None,
                     candidate_ids=ref_ids,
                 )
             except (KeyError, TypeError, ValueError):
@@ -149,65 +272,155 @@ class PathManager:
 
         if closed_loop and ref_ids[0] != ref_ids[-1]:
             ref_ids = ref_ids + [ref_ids[0]]
+        start_pose_xy = None
+        if isinstance(current_pose, dict):
+            try:
+                start_pose_xy = (float(current_pose["x"]), float(current_pose["y"]))
+            except (KeyError, TypeError, ValueError):
+                start_pose_xy = None
         route = self.graph.build_dense_path(
             ref_ids,
             closed_loop=closed_loop,
             route_id=self._next_route_id("reference"),
             source="reference",
+            start_pose_xy=start_pose_xy,
         )
-        return self._activate_route(route, [ref_ids[-1]], route.route_id or self._next_route_id("reference"))
+        return self._activate_route(
+            route,
+            [route.destination_point() or {"x": float(route.waypoints[-1][0]), "y": float(route.waypoints[-1][1])}],
+            route.route_id or self._next_route_id("reference"),
+        )
 
     def set_route(self, destination, current_pose: dict | None = None) -> bool:
         start_spec = self._pose_to_start_spec(current_pose)
-        dest_id = self.graph.resolve_node_id(destination)
-        if dest_id is None:
-            return False
-        route = self.graph.go_to(start_spec, dest_id)
+        route = self.graph.go_to(start_spec, destination)
         route_id = self._next_route_id("route")
-        return self._activate_route(route, [dest_id], route_id)
+        return self._activate_route(route, [self._normalize_destination_spec(destination)], route_id)
 
     def set_route_queue(self, destinations, current_pose: dict | None = None) -> bool:
         start_spec = self._pose_to_start_spec(current_pose)
-        dest_ids = []
+        dest_specs = []
         for spec in destinations or []:
-            node_id = self.graph.resolve_node_id(spec)
-            if node_id is not None:
-                dest_ids.append(node_id)
-        if not dest_ids:
+            normalized = self._normalize_destination_spec(spec)
+            if normalized is not None:
+                dest_specs.append(normalized)
+        if not dest_specs:
             return False
-        route = self.graph.go_to_multiple(start_spec, dest_ids)
+        route = self.graph.go_to_multiple(start_spec, dest_specs)
         route_id = self._next_route_id("route")
-        return self._activate_route(route, dest_ids, route_id)
+        return self._activate_route(route, dest_specs, route_id)
+
+    def clear_route(self) -> bool:
+        had_route = self.active_route is not None or self.route_active or bool(self.destination_specs)
+        prev_route_id = self.route_id
+        prev_destination_node_id = self.destination_node_id
+        prev_destination_specs = list(self.destination_specs or [])
+        self._clear_active_route()
+        if had_route:
+            live_log(
+                "route_planner", event="route_cleared",
+                route_id=prev_route_id,
+                destination_node_id=prev_destination_node_id,
+                destination_specs=_preview_destinations(prev_destination_specs),
+            )
+        return had_route
 
     def handle_command(self, command: dict | None, current_pose: dict | None = None) -> bool:
         if not isinstance(command, dict):
             return False
-        mode = str(command.get("mode", "") or "").lower()
-        destinations = list(command.get("destinations", []) or [])
-        if mode == "reset":
+        live_log(
+            "route_planner", event="command_received",
+            command=_summarize_command(command),
+            current_pose=_preview_destinations([current_pose] if isinstance(current_pose, dict) else []),
+            had_active_route=bool(self.route_active),
+            route_id=self.route_id,
+        )
+        if "x" in command and "y" in command and "mode" not in command:
             self.replans += 1
-            return self.reset_route(current_pose=current_pose)
-        if mode == "go_to":
-            if not destinations:
-                return False
-            self.replans += 1
-            return self.set_route(destinations[0], current_pose=current_pose)
-        if mode == "go_to_multiple":
-            self.replans += 1
-            return self.set_route_queue(destinations, current_pose=current_pose)
-        return False
+            handled = self.set_route(command, current_pose=current_pose)
+        else:
+            mode = str(command.get("mode", "") or "").lower()
+            destinations = list(command.get("destinations", []) or [])
+            if mode in {"clear", "cancel"}:
+                handled = self.clear_route()
+            elif mode == "reset":
+                self.replans += 1
+                handled = self.reset_route(current_pose=current_pose)
+            elif mode == "go_to":
+                if not destinations and "x" in command and "y" in command:
+                    destinations = [{"x": command.get("x"), "y": command.get("y")}]
+                if not destinations:
+                    handled = False
+                else:
+                    self.replans += 1
+                    handled = self.set_route(destinations[0], current_pose=current_pose)
+            elif mode == "go_to_multiple":
+                self.replans += 1
+                handled = self.set_route_queue(destinations, current_pose=current_pose)
+            else:
+                handled = False
+        live_log(
+            "route_planner", event="command_result",
+            command=_summarize_command(command),
+            handled=bool(handled),
+            route_active=bool(self.route_active),
+            route_id=self.route_id,
+            route_completed=bool(self.route_completed),
+            destination_node_id=self.destination_node_id,
+            replans=int(self.replans),
+        )
+        return handled
 
-    def _describe_destination(self, node_id: str | None) -> dict | None:
-        return self.graph.describe_destination(node_id)
+    @staticmethod
+    def _normalize_destination_spec(spec) -> dict | None:
+        if spec is None:
+            return None
+        if isinstance(spec, dict):
+            if "x" in spec and "y" in spec:
+                try:
+                    normalized = {"x": float(spec["x"]), "y": float(spec["y"])}
+                except (TypeError, ValueError):
+                    return None
+                lanelet_id = spec.get("lanelet_id") or spec.get("id")
+                if lanelet_id is not None:
+                    normalized["lanelet_id"] = str(lanelet_id)
+                return normalized
+            lanelet_id = spec.get("lanelet_id") or spec.get("id")
+            if lanelet_id is not None:
+                return {"lanelet_id": str(lanelet_id)}
+            return None
+        return None
+
+    def _describe_destination(self, spec) -> dict | None:
+        return self.graph.describe_destination(spec)
 
     def _route_queue_payload(self) -> list[dict]:
         payload = []
-        for node_id in self.destination_node_ids:
-            info = self._describe_destination(node_id)
+        for spec in self.destination_specs:
+            info = self._describe_destination(spec)
+            if info is None and isinstance(spec, dict) and "x" in spec and "y" in spec:
+                info = {
+                    "id": "point",
+                    "label": "Point goal",
+                    "x": round(float(spec["x"]), 4),
+                    "y": round(float(spec["y"]), 4),
+                }
             if info is None:
-                info = {"id": str(node_id), "label": f"Node {node_id}", "node_id": str(node_id)}
+                continue
             payload.append(info)
         return payload
+
+    def _current_destination_spec(self):
+        return self.destination_specs[-1] if self.destination_specs else None
+
+    @property
+    def destination_point(self) -> dict[str, float] | None:
+        current = self._current_destination_spec()
+        if isinstance(current, dict) and "x" in current and "y" in current:
+            return {"x": float(current["x"]), "y": float(current["y"])}
+        if self.active_route is not None:
+            return self.active_route.destination_point()
+        return None
 
     # ------------------------------------------------------------------
     # Route geometry utilities
@@ -246,6 +459,7 @@ class PathManager:
         search_window: int,
         distance_weight: float,
         heading_weight: float,
+        continuity_weight_scale: float = 1.0,
     ) -> dict:
         n = len(route.waypoints)
         if n == 0:
@@ -268,7 +482,10 @@ class PathManager:
 
         center = self._clamp_idx(route, int(search_center))
         window = max(1, int(search_window))
-        continuity_weight = max(0.05, 0.25 * float(distance_weight))
+        continuity_weight = (
+            max(0.05, 0.25 * float(distance_weight))
+            * max(0.0, float(continuity_weight_scale))
+        )
         if route.closed_loop:
             seg_idxs = [(center + off) % n for off in range(-window, window + 1)]
         else:
@@ -596,8 +813,9 @@ class PathManager:
                 route_active=False,
                 route_id=self.route_id,
                 route_points=[],
+                route_waypoints=[],
                 destination_node_id=self.destination_node_id,
-                destination_label=(self._describe_destination(self.destination_node_id) or {}).get("label"),
+                destination_label=(self._describe_destination(self._current_destination_spec()) or {}).get("label"),
                 route_queue=self._route_queue_payload(),
                 current_node_id=None,
                 current_node_attr=ATTR_NORMAL,
@@ -633,6 +851,8 @@ class PathManager:
                 available_destinations=self.graph.get_available_destinations(),
             )
 
+        prev_matched_idx = int(self.matched_idx)
+        prev_target_idx = int(self.target_idx)
         # Advance the search centre by the raw position's forward projection along
         # the current path direction.  When the DR position has drifted ahead of the
         # last matched waypoint (common in single-line curve mode where camera
@@ -662,11 +882,68 @@ class PathManager:
             distance_weight=distance_weight,
             heading_weight=heading_weight,
         )
+        local_match = dict(map_match)
+        local_error_m = float(local_match.get("map_match_error_m", 0.0))
+        map_match_error_m = local_error_m
+        recovery_error_m: float | None = None
+        recovery_matched_idx: int | None = None
+        global_error_m: float | None = None
+        global_matched_idx: int | None = None
+        match_source = "local_window"
+        # Recovery mode: si el matcher local queda pegado a un tramo viejo y la
+        # pose real ya avanzó mucho por el loop, la continuidad local impide
+        # saltar a los waypoints correctos. En ese caso abrimos una búsqueda más
+        # amplia SOLO hacia adelante sobre la misma ruta y aceptamos el salto
+        # únicamente si reduce el error de forma clara.
+        if map_match_error_m > _MAP_MATCH_RECOVERY_ERROR_M:
+            recovery_half_window = max(
+                int(search_window),
+                int(search_window) * _MAP_MATCH_RECOVERY_WINDOW_MULT,
+            )
+            recovery_center = self._clamp_idx(route, self.matched_idx + recovery_half_window)
+            recovery_match = self._project_pose_to_route(
+                route,
+                x,
+                y,
+                yaw,
+                search_center=recovery_center,
+                search_window=recovery_half_window,
+                distance_weight=distance_weight,
+                heading_weight=heading_weight,
+            )
+            recovery_error_m = float(recovery_match.get("map_match_error_m", map_match_error_m))
+            recovery_matched_idx = int(recovery_match.get("matched_idx", self.matched_idx))
+            if recovery_error_m + _MAP_MATCH_RECOVERY_MIN_IMPROVEMENT_M < map_match_error_m:
+                map_match = recovery_match
+                map_match_error_m = recovery_error_m
+                match_source = "forward_recovery"
+        # Full-route recovery: si incluso la búsqueda amplia hacia adelante
+        # sigue lejos, soltamos por completo la penalización de continuidad y
+        # buscamos el mejor segmento sobre TODA la ruta activa. Esto corta el
+        # caso donde el matcher local queda pegado en un loop cercano pero el
+        # ego físico ya está sobre otro tramo que pasa cerca del mismo lugar.
+        if map_match_error_m > _MAP_MATCH_GLOBAL_RECOVERY_ERROR_M:
+            global_match = self._project_pose_to_route(
+                route,
+                x,
+                y,
+                yaw,
+                search_center=0,
+                search_window=max(1, len(route.waypoints)),
+                distance_weight=distance_weight,
+                heading_weight=heading_weight,
+                continuity_weight_scale=0.0,
+            )
+            global_error_m = float(global_match.get("map_match_error_m", map_match_error_m))
+            global_matched_idx = int(global_match.get("matched_idx", self.matched_idx))
+            if global_error_m + _MAP_MATCH_GLOBAL_MIN_IMPROVEMENT_M < map_match_error_m:
+                map_match = global_match
+                map_match_error_m = global_error_m
+                match_source = "global_recovery"
         matched_idx = int(map_match.get("matched_idx", self.matched_idx))
         matched_x = float(map_match.get("matched_x", x))
         matched_y = float(map_match.get("matched_y", y))
         matched_yaw = float(map_match.get("path_psi", yaw))
-        map_match_error_m = float(map_match.get("map_match_error_m", 0.0))
         self.matched_idx = self._clamp_idx(route, matched_idx)
 
         lookahead_m = min(
@@ -709,12 +986,53 @@ class PathManager:
             self.route_completed = True
             self.route_active = False
 
-        destination_info = self._describe_destination(self.destination_node_id)
+        destination_info = self._describe_destination(self._current_destination_spec())
+
+        live_log(
+            "route_planner", event="tracking_update",
+            route_id=self.route_id,
+            route_active=bool(self.route_active),
+            route_source=str(getattr(route, "source", "unknown") or "unknown"),
+            prev_matched_idx=prev_matched_idx,
+            prev_target_idx=prev_target_idx,
+            matched_idx=int(self.matched_idx),
+            target_idx=int(self.target_idx),
+            match_source=match_source,
+            local_error_m=local_error_m,
+            recovery_error_m=recovery_error_m,
+            global_error_m=global_error_m,
+            local_matched_idx=int(local_match.get("matched_idx", prev_matched_idx)),
+            recovery_matched_idx=recovery_matched_idx,
+            global_matched_idx=global_matched_idx,
+            along_path_m=float(_along_path_m),
+            forward_pts=int(_forward_pts),
+            search_center=int(_search_center),
+            lookahead_m=float(lookahead_m),
+            waypoint_mode_active=bool(in_precision_zone),
+            current_node_id=current_node_id,
+            upcoming_node_id=upcoming_node_id,
+            current_attr=int(current_attr),
+            upcoming_attr=int(upcoming_attr),
+            matched_x=matched_x,
+            matched_y=matched_y,
+            matched_yaw=matched_yaw,
+            map_match_error_m=map_match_error_m,
+            tracking_error_m=float(error_m),
+            heading_rad=float(heading_rad),
+            remaining_distance_m=float(remaining_distance_m),
+            route_progress=float(route_progress),
+            route_completed=bool(self.route_completed),
+            next_semantic_type=semantic_context["next_semantic_type"],
+            next_semantic_distance_m=semantic_context["next_semantic_distance_m"],
+            expected_control_type=semantic_context["expected_control_type"],
+            destination_node_id=self.destination_node_id,
+        )
 
         return PathUpdate(
             route_active=self.route_active,
             route_id=self.route_id,
             route_points=self._current_route_preview(),
+            route_waypoints=_serialize_waypoints(route.waypoints),
             destination_node_id=self.destination_node_id,
             destination_label=(destination_info or {}).get("label"),
             route_queue=self._route_queue_payload(),
@@ -817,17 +1135,13 @@ class PathManager:
         return {
             "route_active": bool(update.route_active),
             "route_id": update.route_id,
-            "destination": update.destination_node_id,
-            "destination_node_id": update.destination_node_id,
+            "destination": update.destination_point,
+            "destination_point": update.destination_point,
+            "destination_lanelet_id": update.destination_node_id,
             "destination_label": update.destination_label,
             "queue": list(update.route_queue),
             "route_queue": list(update.route_queue),
-            "destination_point": update.destination_point,
-            "current_node": update.current_node_id,
-            "current_node_id": update.current_node_id,
             "current_node_attr": int(update.current_node_attr),
-            "upcoming_node": update.upcoming_node_id,
-            "upcoming_node_id": update.upcoming_node_id,
             "upcoming_node_attr": int(update.upcoming_node_attr),
             "maneuver_type": update.maneuver_type,
             "next_semantic_id": update.next_semantic_id,
@@ -845,6 +1159,4 @@ class PathManager:
             "route_source": update.route_source,
             "waypoint_mode_active": bool(update.waypoint_mode_active),
             "map_metadata": dict(update.map_metadata),
-            "map_nodes": self.graph.get_map_nodes(),
-            "available_destinations": list(update.available_destinations),
         }

@@ -68,7 +68,20 @@ class LocalPerceptionEngine:
         self._warned_fallback_labels = False
 
         try:
+            # En macOS, numpy (OpenBLAS libomp) y onnxruntime (o torch MKL libomp)
+            # comparten el mismo proceso pero cada uno inicializa su propia copia
+            # del runtime OpenMP. Sin KMP_DUPLICATE_LIB_OK, el segundo init cuelga
+            # indefinidamente en el mutex de KMP → warmup nunca termina → camera_ready
+            # nunca se setea → brain atascado en "PLEASE WAIT".
+            # Debe setearse ANTES de importar ultralytics/torch para que tome efecto.
+            os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
             from ultralytics import YOLO
+            import torch
+            # Prevent LLVM libomp from spinning up a thread pool in the forked child.
+            # env vars (OMP_NUM_THREADS, KMP_BLOCKTIME) are set by main.py/run.sh, but
+            # torch.set_num_threads() is the ATen-level guarantee regardless of env state.
+            torch.set_num_threads(1)
+            torch.set_grad_enabled(False)
         except ImportError:
             self.init_error = "ultralytics no instalado"
             print(
@@ -86,21 +99,58 @@ class LocalPerceptionEngine:
             )
             return
 
-        model_ext = os.path.splitext(model_full_path)[1].lower()
-        self.device = self._resolve_device(self.requested_device, model_ext)
-        self._sync_engine_imgsz(model_full_path, model_ext)
+        def _try_load(path):
+            ext = os.path.splitext(path)[1].lower()
+            dev = self._resolve_device(self.requested_device, ext)
+            self._sync_engine_imgsz(path, ext)
+            # TensorRT engines sometimes lack task metadata; force segment.
+            m = YOLO(path, task="segment")
+            if getattr(m, "task", None) != "segment":
+                m.task = "segment"
+            if dev != "cpu" and ext in (".pt", ".pth"):
+                m.to(dev)
+            return m, dev
 
+        def _build_fallback_candidates(primary_path):
+            model_dir = os.path.dirname(primary_path)
+            fallbacks = [
+                "Best weights_reentrenado.onnx",
+                "best.pt",
+                "best.onnx",
+            ]
+            return [
+                os.path.join(model_dir, name)
+                for name in fallbacks
+                if os.path.join(model_dir, name) != primary_path
+                and os.path.isfile(os.path.join(model_dir, name))
+            ]
+
+        loaded_path = None
         try:
-            # Engines TensorRT a veces no conservan metadata de task.
-            # Forzamos segment para evitar fallback a detect (sin mascaras).
-            self.model = YOLO(model_full_path, task="segment")
-            if getattr(self.model, "task", None) != "segment":
-                self.model.task = "segment"
-            if self.device != "cpu" and model_ext in (".pt", ".pth"):
-                self.model.to(self.device)
+            self.model, self.device = _try_load(model_full_path)
+            loaded_path = model_full_path
+        except Exception as e:
+            self.init_error = str(e)
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - "
+                f"Fallo cargando modelo: {e}"
+            )
+            for candidate in _build_fallback_candidates(model_full_path):
+                try:
+                    self.model, self.device = _try_load(candidate)
+                    loaded_path = candidate
+                    self.init_error = None
+                    break
+                except Exception as fe:
+                    print(
+                        f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWARNING\033[0m - "
+                        f"Fallback {os.path.basename(candidate)} fallo: {fe}"
+                    )
+
+        if loaded_path is not None:
             self.labels = getattr(self.model, "names", {})
             self.model_ready = True
-            print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Modelo: {model_full_path}")
+            print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Modelo: {loaded_path}")
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Device: {self.device}")
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Input: {self.imgsz}x{self.imgsz} conf={self.min_confidence}")
             print(
@@ -108,15 +158,16 @@ class LocalPerceptionEngine:
                 f"NMS iou={self.nms_iou} max_det={self.max_detections} sign_conf={self.sign_min_confidence}"
             )
             self._warn_if_fallback_labels()
-            self._warmup()
-        except Exception as e:
+            # Warmup en background para no bloquear _init_threads (y por ende
+            # camera_ready.set()). CPU inference puede tardar 30-60 s la primera
+            # vez; si bloqueara aquí, el brain se quedaría pegado en "PLEASE WAIT"
+            # hasta que el warmup termine.  El daemon=True garantiza que el thread
+            # muere junto al proceso padre sin necesitar join.
+            _wt = threading.Thread(target=self._warmup, daemon=True)
+            _wt.start()
+        else:
             self.model_ready = False
-            self.init_error = str(e)
             self.model = None
-            print(
-                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - "
-                f"Fallo cargando modelo: {e}"
-            )
 
     @staticmethod
     def _normalize(name):

@@ -17,7 +17,7 @@ from dataclasses import replace
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.core.types.behavior import BehaviorOutput, ScenarioName
-from src.routing.lanelet.from_graphml import ATTR_ROUNDABOUT
+from src.routing.lanelet.attributes import ATTR_ROUNDABOUT
 
 
 _ROUNDABOUT_SPEED_MPS = 0.35

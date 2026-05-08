@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.behavior.context import PlanningContext
-from src.behavior.trajectory_builder import build_target_path
+from src.behavior.trajectory_builder import build_target_path, build_target_path_from_route
 from src.core.types.behavior import BehaviorOutput, ScenarioName
 
 
@@ -86,27 +86,46 @@ class BaseScenario(ABC):
         scenario_name: str,
         notes: dict | None = None,
     ) -> BehaviorOutput:
-        """Construye un plan que sigue la lanelet actual a velocidad constante.
+        """Construye un plan a velocidad constante siguiendo la ruta activa.
 
         Los detalles que comparten todos los scenarios "siga el lane":
-          - Resolver lanelet actual desde `ctx.route.current_lanelet_id`
-            (poblado por el RoutePlanner cuando hay LaneletMap).
-          - Si no hay LaneletMap o no hay lanelet — fallback inválido.
-          - Llamar a `build_target_path` para resolver Frenet.
+          - Si el RoutePlanner ya publicó la ruta densa activa
+            (`ctx.route.route_waypoints`), seguir ESE corredor.
+          - Si no hay ruta densa, caer al lanelet local
+            (`ctx.route.current_lanelet_id`) como fallback legacy.
+          - Si no hay ninguna de las dos referencias, devolver fallback inválido.
           - speed_profile uniforme.
         """
-        if ctx.lanelet_map is None or not ctx.route.current_lanelet_id:
+        notes = dict(notes or {})
+        route_waypoints = list(ctx.route.route_waypoints or [])
+        if route_waypoints:
+            target_path = build_target_path_from_route(
+                route_waypoints=route_waypoints,
+                matched_idx=int(ctx.route.matched_idx or 0),
+                start_xy=(ctx.pose.fused_pose.x, ctx.pose.fused_pose.y),
+                start_yaw_rad=float(ctx.pose.fused_pose.yaw),
+                matched_xy=(
+                    float(ctx.route.matched_pose.x),
+                    float(ctx.route.matched_pose.y),
+                ),
+                target_speed_mps=target_speed_mps,
+                horizon_n=ctx.horizon_n,
+                dt=ctx.dt,
+            )
+            notes.setdefault("path_source", "route_waypoints")
+        elif ctx.lanelet_map is not None and ctx.route.current_lanelet_id:
+            target_path = build_target_path(
+                lanelet_map=ctx.lanelet_map,
+                start_lanelet_id=ctx.route.current_lanelet_id,
+                start_xy=(ctx.pose.fused_pose.x, ctx.pose.fused_pose.y),
+                target_speed_mps=target_speed_mps,
+                horizon_n=ctx.horizon_n,
+                dt=ctx.dt,
+                next_lanelet_hint_ids=ctx.route.next_lanelet_ids,
+            )
+            notes.setdefault("path_source", "lanelet_centerline")
+        else:
             return self._fallback_plan(ctx, reason="no_lanelet_map_or_id")
-
-        target_path = build_target_path(
-            lanelet_map=ctx.lanelet_map,
-            start_lanelet_id=ctx.route.current_lanelet_id,
-            start_xy=(ctx.pose.fused_pose.x, ctx.pose.fused_pose.y),
-            target_speed_mps=target_speed_mps,
-            horizon_n=ctx.horizon_n,
-            dt=ctx.dt,
-            next_lanelet_hint_ids=ctx.route.next_lanelet_ids,
-        )
         speed_profile = np.full(ctx.horizon_n, float(target_speed_mps), dtype=float)
 
         return BehaviorOutput(
@@ -117,7 +136,7 @@ class BaseScenario(ABC):
             scenario_name=scenario_name,
             valid=True,
             stop_required=False,
-            notes=notes or {},
+            notes=notes,
         )
 
     def _fallback_plan(self, ctx: PlanningContext, reason: str) -> BehaviorOutput:

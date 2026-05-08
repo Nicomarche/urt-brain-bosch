@@ -30,6 +30,12 @@ class LaneKeep(BaseScenario):
         return True
 
     def plan(self, ctx: PlanningContext) -> BehaviorOutput:
+        import logging as _log
+        _log.getLogger(__name__).debug(
+            "[ LaneKeep ] plan: nominal=%.3f lanelet=%r",
+            ctx.nominal_speed_mps,
+            ctx.route.current_lanelet_id,
+        )
         return self._build_constant_speed_plan(
             ctx=ctx,
             target_speed_mps=ctx.nominal_speed_mps,

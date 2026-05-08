@@ -4,6 +4,7 @@ import time
 
 from src.core.types import LaneObservation, StoplineObservation, VisualStateSnapshot
 from src.templates.threadwithstop import ThreadWithStop
+from src.utils.live_log import live_log
 
 
 class threadLaneObserver(ThreadWithStop):
@@ -152,3 +153,30 @@ class threadLaneObserver(ThreadWithStop):
             stopline_observation,
             timestamp=stopline_observation.timestamp or time.time(),
         )
+
+        live_log(
+            "lane_observer", event="lane_obs",
+            offset_m=lane_observation.lateral_offset_m,
+            direct_error_m=lane_observation.direct_error_m,
+            heading_error_rad=float(lane_observation.heading_error_rad or 0.0),
+            camera_yaw_hint_rad=lane_observation.camera_yaw_hint_rad,
+            camera_yaw_hint_confidence=float(lane_observation.camera_yaw_hint_confidence or 0.0),
+            quality=float(lane_observation.quality or 0.0),
+            sides=list(lane_observation.detected_sides or ()),
+            curve_hint=lane_observation.curve_hint,
+            blind_mode=lane_observation.blind_mode,
+            source_mode=lane_observation.source_mode,
+            lane_width_px=lane_observation.lane_width_px,
+        )
+
+        if stopline_observation.visible or stopline_observation.pass_event is not None:
+            live_log(
+                "lane_observer", event="stopline_obs",
+                visible=bool(stopline_observation.visible),
+                stable=bool(stopline_observation.stable),
+                distance_m=stopline_observation.distance_m,
+                confidence=float(stopline_observation.confidence or 0.0),
+                expected_node_id=stopline_observation.expected_node_id,
+                pass_event=bool(stopline_observation.pass_event is not None),
+                source=stopline_observation.source,
+            )

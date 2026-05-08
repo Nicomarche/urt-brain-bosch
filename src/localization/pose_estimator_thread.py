@@ -6,12 +6,14 @@ import time
 from types import SimpleNamespace
 
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
+from src.utils.live_log import live_log
 from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
     _CAMERA_LATERAL_CORRECTION_GAIN,
     _CAMERA_LATERAL_CORRECTION_MAX_M,
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M,
     _IMU_STEER_INHIBIT_DEG,
+    _IMU_YAW_SIGN,
     _MAX_INTEGRATION_DT,
     _MAX_PHYSICAL_YAW_RATE_RADS,
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S,
@@ -33,6 +35,7 @@ from src.localization.relocalization_thread import (
 )
 from src.core.messaging.allMessages import Localisation
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 
 class threadPoseEstimator(threadTracking):
@@ -56,8 +59,42 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
         self._last_camera_lateral_correction_monotonic = 0.0
+        self._last_absolute_yaw_fix_monotonic = 0.0
+        self._last_absolute_yaw_fix_source = None
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
+        )
+        self._send_sim_relocalize()
+
+    def _has_fresh_absolute_yaw_fix(self, now: float, freshness_s: float = 0.50) -> bool:
+        return (
+            self._last_absolute_yaw_fix_monotonic > 0.0
+            and (now - self._last_absolute_yaw_fix_monotonic) < float(freshness_s)
+        )
+
+    def _send_sim_relocalize(self) -> None:
+        """In sim mode, teleport the Gazebo car to the OSM start pose at startup."""
+        try:
+            from config import (
+                MOTOR_OUTPUT,
+                GZ_SPAWN_Z,
+            )
+        except ImportError:
+            return
+        if MOTOR_OUTPUT != "zmq" or self._graph is None:
+            return
+        from src.core.messaging.allMessages import SimRelocalize
+        x0, y0, yaw0 = self._graph.get_start_pose()
+        messageHandlerSender(self.queuesList, SimRelocalize).send({
+            "world_x": float(x0),
+            "world_y": float(y0),
+            "yaw_rad": float(yaw0),
+            "z": float(GZ_SPAWN_Z),
+        })
+        print(
+            f"\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - SIM: reubicar auto → osm_map ({float(x0):.3f}, {float(y0):.3f})"
+            f" yaw={math.degrees(float(yaw0)):.1f}°"
         )
 
     @staticmethod
@@ -85,8 +122,29 @@ class threadPoseEstimator(threadTracking):
             path_heading_change_rad=route_context.path_heading_change_rad,
         )
 
-    def _apply_camera_yaw_hint(self, raw_yaw: float, lane_observation: LaneObservation | None) -> float:
+    def _apply_camera_yaw_hint(
+        self,
+        now: float,
+        raw_yaw: float,
+        lane_observation: LaneObservation | None,
+    ) -> float:
         if lane_observation is None:
+            return 0.0
+        # Si acabamos de recibir una fijación absoluta con yaw explícito
+        # (sim bridge / GPS), priorizamos esa orientación durante una pequeña
+        # ventana. La cámara da una buena tangente de carril, pero en curvas o
+        # con un solo borde visible puede sesgar 10–20° el heading y desalinear
+        # el auto del simulador aunque el fix absoluto sea correcto.
+        if self._has_fresh_absolute_yaw_fix(now):
+            return 0.0
+        # Con poca velocidad, el hint de cámara tiende a reflejar el borde
+        # visible o el último frame "usable" y puede rotar el auto aunque la
+        # pose absoluta esté quieta. También exigimos una calidad similar a la
+        # del lane relocalization lateral para no aplicar yaw sobre fallback
+        # visual débil.
+        if abs(float(self._last_speed or 0.0)) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
+            return 0.0
+        if float(lane_observation.quality or 0.0) < 0.35:
             return 0.0
         cam_yaw = lane_observation.camera_yaw_hint_rad
         cam_conf = float(lane_observation.camera_yaw_hint_confidence or 0.0)
@@ -127,9 +185,21 @@ class threadPoseEstimator(threadTracking):
             measurement = lane_observation.lateral_offset_m
         if measurement is None:
             return raw_x, raw_y, raw_yaw, 0.0, False
-        if float(lane_observation.quality or 0.0) < 0.35:
+        quality = float(lane_observation.quality or 0.0)
+        if quality < 0.35:
             return raw_x, raw_y, raw_yaw, 0.0, False
 
+        # NOTA: probamos modo CONFIDENT (snap rápido cuando quality≥0.7)
+        # y empeoraba el tracking — el lane visual, cuando hay desalineamiento
+        # textura↔mapa, metía la pose al carril visual a costa del centerline
+        # OSM. Con el frame OSM unificado, el centerline debería coincidir con
+        # el carril visual, así que el lane visual solo tiene que reforzar la
+        # pose. Pero los saltos de 5cm/tick eran demasiado abruptos.
+        # Mantener solo el modo cautious (controlado por GAIN/MAX/STEP/COOLDOWN
+        # de config) parece el mejor compromiso por ahora.
+
+        # Modo CAUTIOUS (single-side visible, quality 0.35–0.7): la medida
+        # es ruidosa, aplicamos correcciones lentas con cooldown como antes.
         if (now - self._last_camera_lateral_correction_monotonic) < float(
             _CAMERA_LATERAL_CORRECTION_COOLDOWN_S
         ):
@@ -242,6 +312,9 @@ class threadPoseEstimator(threadTracking):
         self._dr.reset(float(x), float(y), float(yaw))
         self._last_yaw_rad = float(yaw)
         self._yaw_ekf_p = _YAW_EKF_P_INIT
+        if payload.get("yaw_rad") is not None or payload.get("yaw_deg") is not None:
+            self._last_absolute_yaw_fix_monotonic = time.monotonic()
+            self._last_absolute_yaw_fix_source = str(meta.get("source") or payload.get("source") or "gps_localisation")
         if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
             self.tracking_state.set_lane_measurement_state(False, 0.0)
 
@@ -269,15 +342,25 @@ class threadPoseEstimator(threadTracking):
         relocalization_source: str,
         relocalization_error_m: float,
         route_context: RouteContext | None,
+        wall_timestamp: float | None = None,
     ) -> PoseEstimate:
+        # ``now`` is monotonic and used internally for *age* deltas (must be
+        # consistent with the rest of this thread's monotonic counters).
+        # ``wall_timestamp`` is wall-clock (``time.time()``) and used for the
+        # *published* PoseEstimate.timestamp — that field crosses the thread
+        # boundary into safety_gate / motor_command_dispatcher, both of which
+        # compute ``time.time() - timestamp`` and would otherwise see an
+        # ``age ≈ 1.78e9 s`` (wall - monotonic) and trigger a permanent
+        # ``pose_stale`` fallback. See safety_gate.py:135.
         map_match_error_m = float(route_context.map_match_error_m or 0.0) if route_context is not None else 0.5
         route_conf = max(0.0, min(1.0, 1.0 - (map_match_error_m / 0.5)))
         lane_bonus = 0.2 if lane_measurement_reliable else 0.0
         localization_confidence = max(0.0, min(1.0, route_conf + lane_bonus))
         speed_feedback_age_s = (now - self._last_speed_t) if self._last_speed_t is not None else None
         speed_command_age_s = (now - self._last_cmd_speed_t) if self._last_cmd_speed_t is not None else None
+        published_ts = float(wall_timestamp) if wall_timestamp is not None else time.time()
         return PoseEstimate(
-            timestamp=float(now),
+            timestamp=published_ts,
             raw_pose=raw_pose,
             fused_pose=fused_pose,
             speed_mps=float(self._last_speed or 0.0),
@@ -298,6 +381,14 @@ class threadPoseEstimator(threadTracking):
 
     def thread_work(self):
         now = time.monotonic()
+        # Wall-clock companion: we keep ``now`` in monotonic land for all
+        # internal age/cooldown deltas (resilient to NTP step changes), but
+        # we capture the wall clock once per tick to stamp PoseEstimate so
+        # other threads (safety_gate, dispatcher) — which compare against
+        # ``time.time()`` — read a sane age. Single sample per tick keeps
+        # the timestamp consistent across all downstream re-stamps in the
+        # same iteration.
+        wall_now = time.time()
         dt = now - self._last_t
         self._last_t = now
         self._consume_state_change()
@@ -312,11 +403,11 @@ class threadPoseEstimator(threadTracking):
                 prev_imu_t = self._last_imu_t
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
-                yaw_raw_rad = -math.radians(yaw_deg)
+                yaw_raw_rad = _IMU_YAW_SIGN * math.radians(yaw_deg)
                 if not self._yaw_offset_calibrated:
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
-                else:
+                elif not self._has_fresh_absolute_yaw_fix(now):
                     # EKF correction: fuse IMU absolute heading with kinematic prediction.
                     # R scales with steer²: large steer → servo EMI biases magnetometer
                     # → kinematic model trusted more. Smooth transition, no hard cutoff.
@@ -386,7 +477,7 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized = False
             stopline_match = None
         else:
-            yaw_correction_rad = self._apply_camera_yaw_hint(raw_yaw, lane_observation)
+            yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, lane_observation)
             if abs(yaw_correction_rad) > 1e-9:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
 
@@ -453,10 +544,29 @@ class threadPoseEstimator(threadTracking):
             relocalization_source=relocalization_source,
             relocalization_error_m=relocalization_error_m,
             route_context=route_context,
+            wall_timestamp=wall_now,
         )
         self.pose_estimate_buffer.write(pose_estimate, timestamp=pose_estimate.timestamp)
         if self.tracking_state is not None and hasattr(self.tracking_state, "update_from_pose_estimate"):
             self.tracking_state.update_from_pose_estimate(pose_estimate)
+
+        live_log(
+            "pose_estimator", event="pose_published",
+            fused_x=float(fused_pose.x), fused_y=float(fused_pose.y),
+            fused_yaw_rad=float(fused_pose.yaw),
+            raw_x=float(raw_pose.x), raw_y=float(raw_pose.y),
+            raw_yaw_rad=float(raw_pose.yaw),
+            speed_mps=float(pose_estimate.speed_mps),
+            steer_rad=float(pose_estimate.steer_rad),
+            reloc_mode=relocalization_mode,
+            reloc_source=relocalization_source,
+            reloc_error_m=float(relocalization_error_m or 0.0),
+            lane_correction_m=float(lane_relocalization_m or 0.0),
+            lane_reliable=bool(lane_measurement_reliable),
+            raw_lateral_error_m=float(raw_lateral_error_m or 0.0),
+            imu_received=bool(getattr(self, "_imu_received", False)),
+            ts_pose=float(pose_estimate.timestamp),
+        )
 
         # Debug log (same file as parent, same format — only minimal fields available here)
         self._frame_idx += 1

@@ -3,6 +3,12 @@ Configuracion general del proyecto URT Brain.
 Modifica estos valores para cambiar el comportamiento del auto.
 """
 
+import os as _os, sys as _sys
+# Sim mode: defaults ON for macOS (no Jetson HW), OFF for Linux. Override with
+# URT_SIM_MODE=1/0. Used downstream to flip CAMERA_TYPE, MOTOR_OUTPUT, and
+# disable cv2 GUI windows that crash with the headless pip-installed OpenCV.
+_SIM_MODE = _os.environ.get("URT_SIM_MODE", "1" if _sys.platform == "darwin" else "0") == "1"
+
 # ===================== PHYSICAL DIMENSIONS =====================
 # Lane and road geometry (BFMC spec)
 LANE_WIDTH_CM = 35.0           # carril: distancia entre bordes interiores de líneas
@@ -274,7 +280,7 @@ ACADOS_MPC_T = 0.05
 
 # Velocidad de referencia por defecto [m/s].  El MPC optimiza alrededor de
 # este valor.  En competencia ajustar según la zona (highway vs curva).
-ACADOS_MPC_V_REF = 0.35
+ACADOS_MPC_V_REF = 0.10
 
 # Modelo del vehículo.
 ACADOS_MPC_WHEELBASE = 0.258      # distancia entre ejes [m]
@@ -282,7 +288,7 @@ ACADOS_MPC_L_R = 0.103            # eje trasero a CG [m]
 ACADOS_MPC_L_F = 0.155            # eje delantero a CG [m]
 
 # Límites de control.
-ACADOS_MPC_V_MAX = 0.50           # velocidad máxima [m/s]
+ACADOS_MPC_V_MAX = 0.10           # velocidad máxima [m/s] en AUTO = 10 cm/s
 ACADOS_MPC_V_MIN = -0.50          # velocidad mínima [m/s] (reversa)
 ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
 
@@ -294,8 +300,8 @@ ACADOS_MPC_X_COST = 2.0
 ACADOS_MPC_Y_COST = 2.0
 ACADOS_MPC_YAW_COST = 0.5
 ACADOS_MPC_V_COST = 1.0
-ACADOS_MPC_STEER_COST = 0.0
-ACADOS_MPC_DELTA_V_COST = 1.5
+ACADOS_MPC_STEER_COST = 0.3   # >0 evita bang-bang ±25°; era 0.0 (solver ignoraba ángulo absoluto)
+ACADOS_MPC_DELTA_V_COST = 4.0   # sube rampa de arranque; era 1.5 (llegaba a v_ref demasiado rápido)
 ACADOS_MPC_DELTA_STEER_COST = 0.75
 
 # Zona muerta de salida del MPC completo [°].
@@ -306,12 +312,36 @@ ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.5
 USE_ACADOS_SPEED = False
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GPS-FREE TRACKING (dead reckoning + GraphML waypoints)
+# GPS-FREE TRACKING (dead reckoning + OSM lanelet centerlines)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Path to the GraphML track file.  Relative to the workspace root.
-TRACKING_GRAPHML = "Track GraphML File.graphml"
-TRACKING_SEMANTICS = "track_semantics.json"
+# Track assets switch by platform: maps/sim/ for the Mac+simulator scenario,
+# maps/jetson/ for the real BFMC car. Override the sub-directory with
+# URT_TRACK_MAP_DIR=<absolute_or_relative_path> when testing alternative maps.
+_DEFAULT_TRACK_MAP_DIR = "maps/sim" if _SIM_MODE else "maps/jetson"
+TRACK_MAP_DIR = _os.environ.get("URT_TRACK_MAP_DIR", _DEFAULT_TRACK_MAP_DIR)
+
+def _default_lanelet2_osm_path(track_map_dir: str) -> str:
+    candidates = ("lanelet2_map.osm",)
+    for name in candidates:
+        candidate = _os.path.join(track_map_dir, name)
+        if _os.path.exists(candidate):
+            return candidate
+    return _os.path.join(track_map_dir, candidates[0])
+
+TRACKING_LANELET2_OSM = _os.environ.get(
+    "URT_TRACKING_LANELET2_OSM",
+    _default_lanelet2_osm_path(TRACK_MAP_DIR),
+)
+TRACKING_START_LANELET_ID = _os.environ.get("URT_TRACKING_START_LANELET_ID")
+TRACKING_META_JSON = _os.path.join(TRACK_MAP_DIR, "track_meta.json")
+# Background for the OpenCV visualizer. Prefers the SVG (vector source of
+# truth); falls back to PNG/JPG with the same basename if cairosvg is not
+# available at runtime. See src/routing/visualizer.py:_load_background.
+TRACKING_BG_SVG    = _os.path.join(TRACK_MAP_DIR, "track.svg")
+TRACKING_BG_RASTER = _os.path.join(
+    TRACK_MAP_DIR, "track.png" if _SIM_MODE else "track.jpg"
+)
 
 # Spline interpolation step (metres).  Smaller → denser waypoints, more CPU.
 TRACKING_WAYPOINT_STEP_M = 0.05
@@ -341,7 +371,48 @@ TRACKING_STEER_GAIN_DR = 1.0
 # Steering sign used by tracking dead reckoning.
 # El pipeline nuevo mantiene la misma convención que publican control y Nucleo
 # para no tener una inversión escondida entre pose, planner y dashboard.
+#
+# NOTA (sim): probé `=-1` en sim para invertir el sentido de rotación del
+# DR kinemático y alinearlo con el frame OSM (sim_bridge integra `ω=+v·tan(δ)/WB`
+# que crece en right turn, opuesto a CW-desde-este). El experimento confirmó
+# alineación perfecta de yaw vs ground truth (mm_match_error p90=0.083m,
+# pose_drift mean=0.107m), PERO rompió el motor publishing path: dispatcher
+# emite motion_controller cmds pero zmq_motor stops at ~5s. Hay un guard
+# downstream (probable safety_gate o CurrentSteer feedback loop) que recibe
+# steer con signo invertido y rechaza. Pendiente: tracear cuál guard es y
+# decidir si fixear el guard o aplicar la negación más arriba (motion
+# controller output) en lugar del DR input.
 TRACKING_STEER_SIGN_DR = 1.0
+
+# Signo del yaw IMU antes de sumarlo al offset de calibración.
+#
+#   Real hardware (BNO055): el firmware Nucleo envía yaw CCW-positivo
+#   (convención right-hand rule), así que un giro a la derecha produce
+#   yaw_deg < 0 → necesitamos _IMU_YAW_SIGN = -1 para que yaw_raw_rad
+#   sea positivo (= crece hacia el sur en el frame OSM, que es el +π/2 de la
+#   trayectoria CW-desde-el-este que usa el dead reckoning).
+#
+#   Sim (sim_bridge feedback_yaw_sign=1.0): el simulador integra
+#   ω = +v·tan(δ)/WB, por lo que un giro a la derecha hace crecer
+#   yaw_deg → la negación del hardware daría el signo incorrecto.
+#   Con _IMU_YAW_SIGN = +1 la señal del sim coincide con la convención
+#   del dead reckoning sin invertir.
+TRACKING_IMU_YAW_SIGN = 1.0 if _SIM_MODE else -1.0
+
+# DEPRECATED: el yaw de sim ya llega en `brain_map` desde `sim_bridge`, así que
+# no hace falta una corrección extra en el brain. Se conserva en config sólo
+# para compatibilidad con checkouts viejos.
+SIM_IMU_YAW_OFFSET_DEG = 0.0
+
+# Forzar PurePursuit en lugar de AcadosMPC. Acados resuelve un OCP cartesiano
+# que pide reversa cuando el target_path queda detrás del coche (ej. después
+# de un overshoot al salir de una curva). Con `v_min_runtime=-0.05` el solver
+# satura ahí y el speed se clamp a 0 → coche detenido. PurePursuit no tiene
+# este modo de falla: siempre genera steer hacia el goal a la velocidad del
+# behavior_planner, así que el coche se autoalinea. En real hardware con
+# pista calibrada Acados anda mejor — dejar False allí.
+FORCE_PURE_PURSUIT = False
+
 # Filtro de lag del actuador de dirección para el dead reckoning.
 # Modela el delay entre el comando de steering y la posición real de las ruedas.
 # 1.0 = instantáneo (sin filtro), 0.0 = ruedas nunca responden.
@@ -401,6 +472,39 @@ EKF_LANDMARK_R_M = 0.30
 EKF_GPS_MAX_AGE_S = 0.5
 
 # ============================================================================
+# BFMC LOCSYS GPS
+# ============================================================================
+# Protocolo de competencia: el coche conecta al TrafficCommunicationServer
+# (TCP:5000) para obtener la IP del locsys device, luego conecta al locsys
+# device (TCP:4691) y recibe {"x": float, "y": float}\n a 1 Hz.
+#
+# En simulación: sim_bridge expone el servidor locsys en localhost:4691
+# y usa el ground truth de Gazebo transformado al frame del mapa OSM.
+#
+# El cliente (threadLocSys) envía el fix como Localisation IPC con
+# world_x/world_y (coordenadas OSM directas, sin conversión de imagen).
+
+LOCSYS_PORT          = 4691
+LOCSYS_HOST_COMP     = "192.168.50.11"  # IP locsys device en competencia BFMC
+TRAFFIC_COMM_HOST    = "192.168.1.1"    # TrafficCommunicationServer en competencia
+TRAFFIC_COMM_PORT    = 5000
+LOCSYS_DEVICE_ID     = 1               # ID del coche en la red BFMC (1–4)
+
+SIM_LOCSYS_HOST      = "localhost"
+SIM_LOCSYS_PORT      = 4691
+
+GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
+GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
+
+# DEPRECATED: el bridge nativo ahora hace toda la conversión `brain_map ↔ gz`
+# vía `sim_bridge_frames.json`. El brain ya no debería usar estos offsets para
+# teleport ni para logging; quedan sólo como referencia de migración.
+GZ_OFFSET_X   = 2.984
+GZ_OFFSET_Y   = -0.596
+GZ_LATERAL_OFFSET_M = 1.09
+GZ_SPAWN_Z    = 0.002   # altura de spawn del coche sobre el plano
+
+# ============================================================================
 # BEHAVIOR PLANNER (Phase 4 — Autoware-inspired single source of truth)
 # ============================================================================
 # El BehaviorPlanner es la ÚNICA fuente de verdad de velocidad: ningún otro
@@ -410,20 +514,55 @@ EKF_GPS_MAX_AGE_S = 0.5
 # Tasa nominal: 20 Hz (dt = 0.05 s). El MPC corre al mismo dt, así que el
 # tamaño del horizonte se mide en steps de 50 ms.
 BEHAVIOR_DT_S = 0.05
-BEHAVIOR_HORIZON_N = 20
+BEHAVIOR_HORIZON_N = 40  # must match N_horizon in c_generated_code/acados_ocp_bfmc_bicycle.json
+                         # 40 × 0.05 = 2.0s preview (era 30=1.5s) — alineado con urt-ref
 
 # Velocidad nominal de lane_keep "limpio" (sin signs, sin regulators).
-# 0.50 m/s = ~5 cm/step, conservador para BFMC.
-BEHAVIOR_NOMINAL_SPEED_MPS = 0.50
+BEHAVIOR_NOMINAL_SPEED_MPS = 0.10   # 10 cm/s en AUTO.
+                                    # El planner sigue siendo la fuente única
+                                    # de verdad: este es el target base para
+                                    # lane_keep cuando no hay overlays/scenarios.
 
 # Hard cap absoluto. Aplicado por velocity_overlay al final, ningún
-# scenario puede emitir velocidades por encima. Para la primera prueba
-# en taller (V3), bajar a 0.5 m/s antes de pista.
-BEHAVIOR_MAX_SPEED_MPS = 1.00
+# scenario puede emitir velocidades por encima.
+BEHAVIOR_MAX_SPEED_MPS = 0.10       # cap absoluto de AUTO = 10 cm/s
+
+# Aceleración máxima del ramp de velocidad en el BehaviorPlanner [m/s²].
+# 0.25 m/s² → llega a 0.15 m/s en ~0.6 s (12 ticks a 20 Hz).
+BEHAVIOR_ACCEL_MPS2 = 0.25
+
+# Rate limiter de velocidad en el output del MotionController [m/s²].
+# Garantiza arranque gradual independientemente del solver.
+# 0.25 m/s² → 0→0.15 m/s en ~0.6 s (12 ticks).
+BEHAVIOR_MAX_SPEED_RATE_MPS2 = 0.25
+
+# Velocidad máxima de cambio del ángulo de steering [°/s].
+# A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~8 ticks (0.4 s).
+# Bajar si el auto sigue oscilando; subir si es demasiado lento en curvas.
+BEHAVIOR_MAX_STEER_RATE_DEG_S = 60.0
+
+# Lookahead gain del PurePursuitSolver (fallback sin acados) [s].
+# L_d = max(min_lookahead, LOOKAHEAD_GAIN * v). Con v=0.50 m/s y gain=1.5:
+# L_d = 0.75 m → más suave que 0.30 m del gain=0.6 original.
+BEHAVIOR_LOOKAHEAD_GAIN_S = 1.5
 
 # Tasa de actualización del thread (s). Con pause=0.05 corremos a ~20 Hz,
 # emparejando dt del MPC.
 BEHAVIOR_THREAD_PAUSE_S = 0.05
+
+# ----------------------------------------------------------------------------
+# Auto-lap mode (sim/demo): el coche da vueltas siguiendo el loop de lanelets
+# OSM cuando NADIE le mandó un destino. Para operación normal conviene dejarlo
+# apagado así AUTO sin ruta = auto detenido hasta recibir una misión.
+#
+# Implementación: navigation_planner_thread llama `reset_route(current_pose)`
+# del PathManager una vez que hay pose válida. PathManager.reset_route ya rota
+# `reference_node_ids` para empezar por la lanelet más cercana y cierra el loop.
+# ----------------------------------------------------------------------------
+AUTO_LAP_MODE = False
+# Cada cuánto reintentamos `reset_route` mientras todavía no hay ruta activa
+# (solo aplica antes de que el primer reset_route exitoso). En segundos.
+AUTO_LAP_RETRY_PERIOD_S = 1.0
 
 # Camera-based lateral correction applied to dead reckoning when both lane lines
 # are visible and the physical lane error is reliable.
@@ -435,7 +574,7 @@ TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
 TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
 
-# Corrección visual adicional hacia la ruta GraphML. En la arquitectura nueva
+# Corrección visual adicional hacia la ruta OSM/Lanelet. En la arquitectura nueva
 # esta corrección forma parte del pose estimator y queda activa por defecto.
 TRACKING_VISUAL_LANE_RELOCALIZATION_ENABLED = True
 TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN = 0.15
@@ -502,7 +641,8 @@ TRACKING_MAP_MATCH_HEADING_W = 0.35
 TRACKING_SEMANTIC_MATCH_WINDOW_S = 1.0
 
 # Set True to open the OpenCV "Track Navigation" debug window.
-TRACKING_SHOW_WINDOW = True
+# Override with URT_SHOW_PREVIEW=0 if cv2 windows crash (macOS forked child issue).
+TRACKING_SHOW_WINDOW = _os.environ.get("URT_SHOW_PREVIEW", "1") == "1"
 
 # TRACKING_DEBUG_LOG: True = escribe temp/tracking_debug.log con posición DR,
 # velocidad, yaw, waypoint actual, errores de tracking, etc.
@@ -581,8 +721,12 @@ CURVE_INNER_LINE_HARD_ESCAPE_MIN_ERROR_M = 0.09
 SINGLE_LINE_BLEND_FRAMES = 2
 
 # ======================== CAMERA ========================
-# Tipo de camara: "jetson" (CSI via GStreamer) | "picamera" (CSI via picamera2, RPi only) | "usb" (USB webcam)
-CAMERA_TYPE = "jetson"
+# Tipo de camara:
+#   "jetson"   — CSI Jetson via GStreamer/nvarguscamerasrc (produccion en Jetson Nano/Orin)
+#   "picamera" — CSI Raspberry Pi via picamera2 (RPi only)
+#   "usb"      — USB webcam via OpenCV VideoCapture
+#   "zmq"      — frames JPEG entregados por sim_bridge (modo simulador, ver seccion SIMULATOR)
+CAMERA_TYPE = "zmq" if _SIM_MODE else "jetson"
 
 # Configuracion USB (solo aplica si CAMERA_TYPE = "usb")
 # Device: numero de indice (0, 2, 4...) o path ("/dev/video0")
@@ -610,15 +754,24 @@ PICAMERA_HDR_ALWAYS_ON = False
 # Ejemplo 0.04 = 4% de pixeles saturados.
 PICAMERA_HDR_GLARE_THRESHOLD = 0.04
 
-# Transmitir video de la camara al dashboard web (consume CPU por JPEG encode + base64).
-# False = no envia video al browser (ahorra CPU), True = stream en vivo en la web
-STREAM_CAMERA_TO_DASHBOARD = False
+# Transmitir video de la cámara al dashboard (PyQt5 GUI o Angular legacy).
+#
+# Costos: JPEG encode (~70% calidad, ~50KB/frame) y emisión SocketIO binaria.
+# Tras la migración a `serialCamera_bin` (bytes JPEG en vez de PNG base64) el
+# costo es ~5-10x menor que en la era Angular, así que el default queda en
+# True: el GUI PyQt5 lo necesita o no muestra nada en el panel "Driving".
+#
+# Para correr el auto en competencia totalmente headless (sin operador
+# conectado), poner `URT_STREAM_CAMERA=0` antes de lanzar `./run.sh` —
+# el thread de cámara dejará de encodear JPEG y `processDashboard` no
+# se suscribirá al canal `serialCamera`.
+STREAM_CAMERA_TO_DASHBOARD = _os.environ.get("URT_STREAM_CAMERA", "1") == "1"
 
 # ===================== DEBUG WINDOWS =====================
 # Ventanas de OpenCV para debug visual (requieren monitor/display conectado).
 # SHOW_CAMERA_PREVIEW actua como master switch: si es False, ninguna ventana se abre.
 # Si es True, puedes elegir cuales abrir individualmente con DEBUG_WINDOWS.
-SHOW_CAMERA_PREVIEW = True
+SHOW_CAMERA_PREVIEW = _os.environ.get("URT_SHOW_PREVIEW", "1") == "1"  # off if URT_SHOW_PREVIEW=0
 
 # Ventanas individuales de debug (solo aplican si SHOW_CAMERA_PREVIEW = True)
 DEBUG_WINDOWS = {
@@ -724,13 +877,17 @@ SIGN_STOP_TURN_DURATION    = 21   # Segundos para completar el arco de 90° — 
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
-# En Jetson Nano debe usar el engine TensorRT generado en esta misma placa.
-# Para generar el engine desde el ONNX reentrenado, ejecutar:
-#   cd models/lane_segmentation && python build_trt.py
-LOCAL_AI_MODEL_PATH = "models/lane_segmentation/Best_weights_reentrenado_416px.engine"
+# best.pt funciona en CPU/MPS/CUDA (dev en Mac, Jetson con GPU).
+# Para producción TensorRT en Jetson Nano:
+#   export URT_LOCAL_AI_MODEL_PATH=models/lane_segmentation/Best_weights_reentrenado_416px.engine
+#   cd models/lane_segmentation && python build_trt.py  # genera el engine en la misma placa
+LOCAL_AI_MODEL_PATH = _os.environ.get(
+    "URT_LOCAL_AI_MODEL_PATH",
+    "models/lane_segmentation/Best weights_reentrenado.onnx"
+)
 LOCAL_AI_MIN_CONFIDENCE = 0.35
 LOCAL_AI_IMGSZ = 416
-LOCAL_AI_DEVICE = "auto"  # "auto" | "cuda" | "cpu" | "mps"
+LOCAL_AI_DEVICE = "cpu" if _SIM_MODE else "auto"  # ONNX+MPS en Mac no retorna mask proto
 # 0.04s ~= 25 FPS objetivo (permite sostener >=24 FPS si hardware acompana).
 LOCAL_AI_INTERVAL = 0.04
 LOCAL_AI_MAX_RESULT_AGE = 0.35
@@ -837,3 +994,44 @@ LOCAL_AI_SIGN_CLASS_MAP = {
 WALK_AREA_STOP_DURATION = 3.0   # seconds to wait after pedestrians clear
 WALK_AREA_COOLDOWN      = 10.0  # seconds before a new walk_area stop can trigger
 WALK_AREA_MIN_BOX_AREA  = 0.04  # min bbox area (normalized) to trigger stop — filters far detections
+
+# ===================== SIMULATOR (ZMQ BRIDGE) =====================
+# Activar el modo simulador setea CAMERA_TYPE="zmq" arriba (lee frames del bridge)
+# y MOTOR_OUTPUT="zmq" abajo (publica comandos al bridge en vez de a serial).
+# El bridge corre en /Users/luciogarcia/urt-simulator/sim_bridge.py.
+ZMQ_CAMERA_ENDPOINT = "tcp://localhost:5575"
+ZMQ_CAMERA_TOPIC    = b"frame"
+
+# Salida de comandos motor:
+#   "serial" — UART al Nucleo STM32 (produccion, default Jetson)
+#   "zmq"    — publish JSON al sim_bridge en ZMQ_MOTOR_ENDPOINT (modo simulador)
+MOTOR_OUTPUT        = "zmq" if _SIM_MODE else "serial"
+ZMQ_MOTOR_ENDPOINT  = "tcp://localhost:5576"
+ZMQ_MOTOR_TOPIC     = b"cmd"
+
+# Feedback IMU + encoder sintético del sim_bridge (modo "zmq" únicamente).
+# El sim_bridge integra el modelo bicicleta del comando que ya está enviando
+# a Gazebo y publica yaw/speed/steer en este endpoint a 50 Hz, imitando el
+# stream que el `threadRead` lee del Nucleo via UART en hardware real.
+# `threadSimFeedback` (sólo se levanta cuando MOTOR_OUTPUT == "zmq") consume
+# este canal y mete los mensajes en las mismas IPC queues (CurrentSpeed,
+# CurrentSteer, ImuData) que usa el resto del cerebro — así el SafetyGate
+# tiene la pose fresca que necesita para salir del fallback (0,0).
+ZMQ_FEEDBACK_ENDPOINT = "tcp://localhost:5577"
+ZMQ_FEEDBACK_TOPIC    = b"feedback"
+
+# En el auto físico KL es la llave de contacto: el operador la lleva a 30
+# (motor encendido) DESDE el dashboard antes de soltar comandos al motor —
+# es la red de seguridad que evita arranques accidentales con gente cerca.
+# En sim no hay actuador físico que proteger; forzar el slider cada vez
+# es solo fricción. Cuando esto está en True (default en sim), threadWrite
+# arranca con `engineEnabled=True / KL=30` y obedece SpeedMotor/SteerMotor
+# desde el primer tick. Poner en False si necesitás testear la máquina de
+# estados de KL en sim.
+AUTO_KL_RUN_IN_SIM = bool(_SIM_MODE)
+
+# AUTO_STATE_RUN_IN_SIM: si True, el brain pide automáticamente el modo AUTO al
+# state machine ~2 s después del arranque. Equivalente a que el usuario clickee
+# el botón AUTO en el dashboard desde el primer momento. Poner en False si
+# querés arrancar en DEFAULT y usar el dashboard para disparar manualmente.
+AUTO_STATE_RUN_IN_SIM = False  # arrancar siempre en STOP; el operador activa AUTO desde el dashboard

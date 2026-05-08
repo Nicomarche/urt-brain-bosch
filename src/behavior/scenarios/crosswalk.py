@@ -18,7 +18,7 @@ from dataclasses import replace
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.core.types.behavior import BehaviorOutput, ScenarioName
-from src.routing.lanelet.from_graphml import ATTR_CROSSWALK
+from src.routing.lanelet.attributes import ATTR_CROSSWALK
 
 
 _CROSSWALK_ENTER_RANGE_M = 4.0

@@ -54,6 +54,7 @@ from src.core.interfaces.controller import IMotionController
 from src.core.types.behavior import BehaviorOutput
 from src.core.types.control import MotorCommand
 from src.core.types.pose import PoseEstimate
+from src.utils.live_log import live_log
 
 _SOLVER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c_generated_code")
 _JSON_FILE = os.path.join(_SOLVER_DIR, "acados_ocp_bfmc_bicycle.json")
@@ -117,8 +118,10 @@ class AcadosMPC:
             return
 
         try:
-            self._solver = AcadosOcpSolver(None, json_file=_JSON_FILE)
-            self._N = self._solver.acados_ocp.dims.N
+            self._solver = AcadosOcpSolver(None, json_file=_JSON_FILE, generate=False, build=False)
+            # acados ≥ 0.5.x: .acados_ocp is None when loading from JSON
+            self._N = (self._solver.N if hasattr(self._solver, "N")
+                       else self._solver.acados_ocp.dims.N)
             self.ready = True
         except Exception:
             self._solver = None
@@ -239,7 +242,7 @@ class AcadosMPC:
     def update_bounds(
         self,
         v_min: float = -0.5,
-        v_max: float = 0.5,
+        v_max: float = 0.10,
         delta_min_rad: float = -0.436,
         delta_max_rad: float = 0.436,
     ) -> None:
@@ -261,6 +264,191 @@ class AcadosMPC:
     @property
     def N(self) -> int:
         return self._N
+
+    @property
+    def debug(self) -> dict:
+        return dict(self._last_debug)
+
+
+# ---------------------------------------------------------------------------
+# Fallback solver: pure-pursuit puro-Python (sin Acados, sin dependencias
+# nativas). Se activa cuando `acados_template` no está instalado o el código
+# C generado todavía no se cocinó (típico en máquinas de dev/sim).
+#
+# Por qué pure-pursuit y no, p. ej., Stanley o un MPC scipy:
+#   - BFMC corre a 0.5–1.5 m/s sobre curvaturas suaves; el sesgo geométrico
+#     de pure-pursuit es despreciable a esas velocidades.
+#   - 0 dependencias externas (solo `numpy`, ya importado).
+#   - ~50 líneas de código auditables.
+#
+# Geometría (modelo bicicleta, eje trasero como referencia):
+#
+#       ┌──── L_d ────┐
+#       │  (lookahead) │
+#       │              ●  goal
+#       │           ╱
+#       │         ╱  α  (ángulo entre heading del auto y el goal)
+#       ●────────  ─ ─ ─ → heading
+#      car
+#
+#   δ = atan( 2 · L_wb · sin(α) / L_d )
+#
+#   donde L_wb = wheelbase, L_d = norma del vector car→goal.
+# ---------------------------------------------------------------------------
+_FALLBACK_WHEELBASE_M = 0.260   # debe coincidir con localization/dead_reckoning.py
+
+
+class PurePursuitSolver:
+    """Solver geométrico de fallback con la misma interfaz que `AcadosMPC`.
+
+    No resuelve ningún OCP — calcula δ con pure-pursuit puro y devuelve
+    `v_ref` directo del speed_profile (sin optimización temporal). Pensado
+    para sim/dev sin acados; suficiente para verificar el lazo de control
+    y para corridas a baja velocidad.
+
+    El `N` se expone como propiedad mutable porque, a diferencia de Acados
+    (donde el horizonte es fijo en build-time), pure-pursuit no depende
+    del horizonte: es una decisión local. Reportamos `N` en el valor que
+    el `BehaviorPlanner` esté usando para que `MotionController` no
+    rechace los arrays con `horizon_mismatch`.
+
+    Parameters
+    ----------
+    horizon_n : int
+        Horizonte que `BehaviorPlanner` produce (debe coincidir con
+        `BEHAVIOR_HORIZON_N` del config). Solo se usa para satisfacer
+        el chequeo de dimensión aguas arriba.
+    wheelbase_m : float
+        Entre-eje del vehículo. Default = 0.260 m (BFMC).
+    min_lookahead_m : float
+        Lookahead mínimo cuando la velocidad es ≈ 0 — evita pure-pursuit
+        degenerado cerca del primer punto del path.
+    lookahead_gain_s : float
+        Factor de tiempo: `L_d = max(min_lookahead_m, gain * v)`. Más alto
+        = trayectoria más suave, peor tracking en curvas cerradas.
+    max_steering_deg : float
+        Cota mecánica del actuador.
+    output_deadband_deg : float
+        Si `|δ| < deadband` ⇒ se devuelve 0 (evita jitter del actuador).
+    """
+
+    def __init__(
+        self,
+        horizon_n: int = 20,
+        *,
+        wheelbase_m: float = _FALLBACK_WHEELBASE_M,
+        min_lookahead_m: float = 0.30,
+        lookahead_gain_s: float = 0.6,
+        max_steering_deg: float = 25.0,
+        output_deadband_deg: float = 0.5,
+    ) -> None:
+        self._N = int(horizon_n)
+        self._L_wb = float(wheelbase_m)
+        self._min_lookahead = float(min_lookahead_m)
+        self._lookahead_gain = float(lookahead_gain_s)
+        self.max_steering_deg = float(max_steering_deg)
+        self.output_deadband_deg = float(output_deadband_deg)
+        self.ready = True
+        self._last_debug: dict = {}
+
+    # ------------------------------------------------------------------
+    def compute(
+        self,
+        x_current: np.ndarray,
+        state_refs: np.ndarray,
+        input_refs: np.ndarray,
+        v_prev: float | None = None,
+        delta_prev: float | None = None,
+    ) -> Tuple[float, float] | None:
+        x0 = np.asarray(x_current, dtype=np.float64).ravel()[:3]
+        sr = np.asarray(state_refs, dtype=np.float64)
+        ir = np.asarray(input_refs, dtype=np.float64)
+        if sr.ndim != 2 or sr.shape[1] < 2 or sr.shape[0] < 2:
+            return None
+        if ir.ndim != 2 or ir.shape[1] < 1 or ir.shape[0] < 1:
+            return None
+
+        # 1. v_ref directo del primer stage del speed_profile. Pure-pursuit
+        #    no optimiza velocidad — se confía en el planner.
+        v_ref = float(ir[0, 0])
+
+        # 2. Distancia objetivo: crece con la velocidad para suavizar
+        #    el tracking a medida que el auto va más rápido.
+        L_d = max(self._min_lookahead, self._lookahead_gain * abs(v_ref))
+
+        # 3. Punto más cercano al auto sobre el path: el primer índice
+        #    cuya distancia acumulada desde x0 supere `L_d`. Si ningún
+        #    punto cumple, usamos el último (fin del path).
+        cx, cy = float(x0[0]), float(x0[1])
+        dx = sr[:, 0] - cx
+        dy = sr[:, 1] - cy
+        dists = np.hypot(dx, dy)
+        # Empieza buscando desde el closest-point para evitar elegir un
+        # waypoint detrás del auto cuando el path se curva sobre sí mismo.
+        i_closest = int(np.argmin(dists))
+        i_goal = i_closest
+        for i in range(i_closest, len(dists)):
+            if dists[i] >= L_d:
+                i_goal = i
+                break
+        else:
+            i_goal = len(dists) - 1
+
+        gx = float(sr[i_goal, 0])
+        gy = float(sr[i_goal, 1])
+        # 4. α = ángulo entre heading del auto y el vector car→goal.
+        #    Importante: lo medimos en el frame del auto para que sin θ
+        #    sea positivo cuando el goal está a la izquierda.
+        yaw = float(x0[2])
+        # Vector car→goal en frame mundo:
+        wx = gx - cx
+        wy = gy - cy
+        # Rotamos al frame del auto (yaw inverso):
+        cos_y, sin_y = math.cos(-yaw), math.sin(-yaw)
+        local_x = cos_y * wx - sin_y * wy
+        local_y = sin_y * wx + cos_y * wy
+        L_actual = math.hypot(local_x, local_y)
+        if L_actual < 1e-3:
+            # Goal sobre el auto — sin información de dirección. Mantén δ.
+            return v_ref, 0.0
+        alpha = math.atan2(local_y, local_x)
+
+        # 5. Ley de pure-pursuit: δ = atan(2·L_wb·sin(α) / L_d).
+        delta_rad = math.atan2(2.0 * self._L_wb * math.sin(alpha), L_actual)
+        delta_deg = math.degrees(delta_rad)
+
+        # 6. Clamp + deadband — mismas reglas que AcadosMPC.
+        delta_deg = max(-self.max_steering_deg, min(self.max_steering_deg, delta_deg))
+        if abs(delta_deg) < self.output_deadband_deg:
+            delta_deg = 0.0
+
+        self._last_debug = {
+            "solver": "pure_pursuit",
+            "v_ref_mps": round(v_ref, 4),
+            "delta_opt_deg": round(delta_deg, 3),
+            "lookahead_m": round(L_actual, 3),
+            "alpha_deg": round(math.degrees(alpha), 2),
+            "i_closest": int(i_closest),
+            "i_goal": int(i_goal),
+            "x0": [round(float(c), 4) for c in x0],
+            "goal": [round(gx, 4), round(gy, 4)],
+        }
+        return v_ref, delta_deg
+
+    # ------------------------------------------------------------------
+    def reset(self) -> None:
+        self._last_debug = {}
+
+    @property
+    def N(self) -> int:
+        return self._N
+
+    @N.setter
+    def N(self, value: int) -> None:
+        # Permite que el caller adapte el horizonte al del planner sin
+        # tener que reconstruir el solver. AcadosMPC no expone esto
+        # porque su N está horneado en el .json generado.
+        self._N = int(value)
 
     @property
     def debug(self) -> dict:
@@ -303,16 +491,130 @@ class MotionController(IMotionController):
 
     def __init__(
         self,
-        solver: AcadosMPC | None = None,
+        solver: "AcadosMPC | PurePursuitSolver | None" = None,
         *,
         max_steering_deg: float = 25.0,
         output_deadband_deg: float = 0.5,
+        fallback_horizon_n: int = 20,
     ) -> None:
-        self._solver = solver if solver is not None else AcadosMPC(
-            max_steering_deg=max_steering_deg,
-            output_deadband_deg=output_deadband_deg,
-        )
+        if solver is not None:
+            # Solver inyectado — el caller sabe lo que hace (tests).
+            self._solver = solver
+        else:
+            # `FORCE_PURE_PURSUIT` (config) salta Acados y usa PP siempre. Útil
+            # cuando el solver Acados pide reversa al overshoot un waypoint y
+            # el coche queda atascado contra el `v_min_runtime` (ver comentario
+            # más abajo). PP siempre genera comando forward al setpoint del
+            # behavior_planner — más robusto cuando el coche se sale del carril
+            # y el `at_pose` matchea una lanelet detrás. En real hardware se
+            # deja en False para usar Acados (mejor tracking en pista).
+            try:
+                import config as _cfg_force
+                _force_pp = bool(getattr(_cfg_force, "FORCE_PURE_PURSUIT", False))
+            except Exception:
+                _force_pp = False
+
+            # Construcción por defecto: probamos AcadosMPC primero. Si no
+            # logra cargar (sin acados_template, sin código C generado),
+            # caemos a PurePursuitSolver para que el lazo de control
+            # funcione igual en sim/dev. La diferencia es solo de calidad
+            # de tracking — la geometría del bicycle model es la misma.
+            acados = None if _force_pp else AcadosMPC(
+                max_steering_deg=max_steering_deg,
+                output_deadband_deg=output_deadband_deg,
+            )
+            if acados is not None and acados.ready:
+                self._solver = acados
+                # Aplica pesos desde config en runtime — el .so compilado tiene
+                # los defaults de generate_solver() horneados (e.g. steer_cost=0).
+                # Mismo patrón que threadLineFollowing usa para el path legacy.
+                try:
+                    import config as _cfg
+                    acados.update_weights(
+                        x_cost=float(getattr(_cfg, "ACADOS_MPC_X_COST", 2.0)),
+                        y_cost=float(getattr(_cfg, "ACADOS_MPC_Y_COST", 2.0)),
+                        yaw_cost=float(getattr(_cfg, "ACADOS_MPC_YAW_COST", 0.5)),
+                        v_cost=float(getattr(_cfg, "ACADOS_MPC_V_COST", 1.0)),
+                        steer_cost=float(getattr(_cfg, "ACADOS_MPC_STEER_COST", 0.0)),
+                        delta_v_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_V_COST", 1.5)),
+                        delta_steer_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_STEER_COST", 0.75)),
+                    )
+                except Exception:
+                    pass  # sin config (tests unitarios) — pesos del solver compilado
+                # Limitar v_min en runtime: el .so compilado permite v=-0.5
+                # m/s (reversa completa) pero en cartesian (sin Frenet) eso
+                # causa que el solver pida reversa cuando el target_path
+                # momentáneamente queda detrás del ego (ej. en intersecciones
+                # donde at_pose oscila), llevando al auto a un loop de giros.
+                # Floor demasiado alto (v_min=0) y el auto queda atascado
+                # cuando el solver no puede converger forward — necesita
+                # un poquito de reversa para reposicionarse.
+                # Compromiso: v_min = -0.05 m/s (~5 cm/s, micro-reversa).
+                # Suficiente para liberar atasco, demasiado bajo para hacer
+                # loops. urt-ref no tiene este problema porque usa Frenet.
+                try:
+                    import math as _math
+                    import config as _cfg
+                    delta_max = _math.radians(float(getattr(_cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+                    v_max = float(getattr(_cfg, "ACADOS_MPC_V_MAX", 0.10))
+                    v_min_runtime = float(getattr(_cfg, "ACADOS_MPC_V_MIN_RUNTIME", -0.05))
+                    acados.update_bounds(
+                        v_min=v_min_runtime,
+                        v_max=v_max,
+                        delta_min_rad=-delta_max,
+                        delta_max_rad=delta_max,
+                    )
+                except Exception:
+                    pass
+            else:
+                # Aviso una sola vez al construir — facilita ver en stdout
+                # "estoy en modo fallback" sin tener que abrir el dashboard.
+                if _force_pp:
+                    print(
+                        "\033[1;97m[ MotionController ] :\033[0m "
+                        "\033[1;94mINFO\033[0m - FORCE_PURE_PURSUIT=True → "
+                        "skipping Acados, using PurePursuitSolver."
+                    )
+                else:
+                    print(
+                        "\033[1;97m[ MotionController ] :\033[0m "
+                        "\033[1;93mWARNING\033[0m - AcadosMPC not ready "
+                        "(acados_template missing or c_generated_code/ absent). "
+                        "Falling back to PurePursuitSolver — "
+                        "fine for sim/dev, REGENERATE acados for race deploy."
+                    )
+                try:
+                    import config as _cfg
+                    _lookahead_gain = float(
+                        getattr(_cfg, "BEHAVIOR_LOOKAHEAD_GAIN_S", 1.5)
+                    )
+                except Exception:
+                    _lookahead_gain = 1.5
+                self._solver = PurePursuitSolver(
+                    horizon_n=fallback_horizon_n,
+                    lookahead_gain_s=_lookahead_gain,
+                    max_steering_deg=max_steering_deg,
+                    output_deadband_deg=output_deadband_deg,
+                )
         self.max_steering_deg = float(max_steering_deg)
+
+        # Rate limiters de steering y velocidad — independientes del solver.
+        # Garantizan transiciones graduales aunque el solver entregue saltos.
+        self._prev_steer_deg: float = 0.0
+        self._prev_speed_mps: float = 0.0
+        try:
+            import config as _cfg
+            self._max_steer_rate_deg_s: float = float(
+                getattr(_cfg, "BEHAVIOR_MAX_STEER_RATE_DEG_S", 60.0)
+            )
+            self._max_speed_rate_mps2: float = float(
+                getattr(_cfg, "BEHAVIOR_MAX_SPEED_RATE_MPS2", 0.15)
+            )
+            self._steer_dt_s: float = float(getattr(_cfg, "BEHAVIOR_DT_S", 0.05))
+        except Exception:
+            self._max_steer_rate_deg_s = 60.0
+            self._max_speed_rate_mps2 = 0.15
+            self._steer_dt_s = 0.05
 
     # ------------------------------------------------------------------
     # IMotionController
@@ -321,8 +623,77 @@ class MotionController(IMotionController):
         self, behavior_output: BehaviorOutput, pose: PoseEstimate
     ) -> MotorCommand:
         # 1. Validez del plan: el planner ya nos dijo si pudo computar.
+        import logging as _log
+        import time as _t
+        if not hasattr(self, "_last_log_t"):
+            self._last_log_t: float = 0.0
+        _now = _t.monotonic()
+        _should_log = (_now - self._last_log_t) >= 2.0
+        sp0_for_log = float(behavior_output.speed_profile[0]) if (
+            hasattr(behavior_output.speed_profile, "__len__")
+            and len(behavior_output.speed_profile) > 0
+        ) else 0.0
+        notes_reason = (
+            str(behavior_output.notes.get("reason", ""))
+            if isinstance(getattr(behavior_output, "notes", None), dict)
+            else ""
+        )
+        # Loggear el primer punto del target_path para detectar el clásico
+        # "el path está atrás del auto" — síntoma de pose/yaw mal alineado
+        # con el mapa, que hace que el solver prefiera reversa (v_min=-0.5).
+        tp_first = None
+        tp_second = None
+        try:
+            if hasattr(behavior_output.target_path, "__len__") and len(behavior_output.target_path) > 0:
+                tp_first = list(behavior_output.target_path[0])
+            if hasattr(behavior_output.target_path, "__len__") and len(behavior_output.target_path) > 1:
+                tp_second = list(behavior_output.target_path[1])
+        except Exception:
+            pass
+        tp0_distance_m = None
+        tp0_heading_error_deg = None
+        if tp_first is not None and pose is not None:
+            try:
+                dx0 = float(tp_first[0]) - float(pose.fused_pose.x)
+                dy0 = float(tp_first[1]) - float(pose.fused_pose.y)
+                tp0_distance_m = math.hypot(dx0, dy0)
+                tp0_heading_error_deg = math.degrees(
+                    _wrap_angle(float(tp_first[2]) - float(pose.fused_pose.yaw))
+                )
+            except Exception:
+                tp0_distance_m = None
+                tp0_heading_error_deg = None
+        live_log(
+            "mpc", event="compute_in",
+            valid=bool(behavior_output.valid),
+            stop_req=bool(behavior_output.stop_required),
+            scenario=behavior_output.scenario_name,
+            sp0=sp0_for_log,
+            notes_reason=notes_reason,
+            pose_x=float(pose.fused_pose.x) if pose else None,
+            pose_y=float(pose.fused_pose.y) if pose else None,
+            pose_yaw_rad=float(pose.fused_pose.yaw) if pose else None,
+            tp0=tp_first,
+            tp1=tp_second,
+            tp0_distance_m=tp0_distance_m,
+            tp0_heading_error_deg=tp0_heading_error_deg,
+            n_path=int(len(behavior_output.target_path)) if hasattr(behavior_output.target_path, "__len__") else 0,
+        )
+        if _should_log:
+            self._last_log_t = _now
+            _log.getLogger(__name__).info(
+                "[ MPC-in ] valid=%s stop_req=%s scen=%s sp[0]=%.3f pose=(%.2f,%.2f,%.1f°)",
+                behavior_output.valid,
+                behavior_output.stop_required,
+                behavior_output.scenario_name,
+                sp0_for_log,
+                pose.fused_pose.x if pose else 0,
+                pose.fused_pose.y if pose else 0,
+                math.degrees(pose.fused_pose.yaw) if pose else 0,
+            )
         if not behavior_output.valid:
-            return self._invalid("behavior_invalid")
+            reason = f"behavior_invalid/{notes_reason}" if notes_reason else "behavior_invalid"
+            return self._invalid(reason)
 
         # 2. Stop request: el scenario o el overlay decidieron frenar.
         #    Devolvemos un MotorCommand explícito de stop — el dispatcher
@@ -382,13 +753,56 @@ class MotionController(IMotionController):
         if not (math.isfinite(v_opt) and math.isfinite(delta_deg)):
             return self._invalid("mpc_nonfinite_output")
 
-        # Velocidad negativa no se usa en BFMC (no hay reverse).
-        speed_mps = max(0.0, float(v_opt))
+        requested_speed_mps = max(0.0, float(speed_profile[0]))
+
+        # Velocidad negativa NO se usa: aunque el solver acados tenga
+        # v_min=-0.05 runtime (para evitar que se quede pegado al floor
+        # cuando el target apunta atrás), el motion_controller clampa a 0
+        # antes de mandar al motor. En cartesian, dejar pasar reversa real
+        # generaba loops en intersecciones. El v_min<0 del solver sigue
+        # ayudando: el solver puede usar un poquito de "espacio negativo"
+        # internamente para converger en su QP, aunque al motor solo
+        # mandemos v ≥ 0.
+        speed_mps = min(max(0.0, float(v_opt)), requested_speed_mps)
+
+        # El planner es la autoridad de velocidad. Limitamos solo la
+        # aceleración hacia arriba; si planner/solver piden menos velocidad,
+        # la bajada se aplica en el mismo tick para no quedar por encima
+        # del target actual.
+        max_speed_step = self._max_speed_rate_mps2 * self._steer_dt_s
+        if speed_mps > self._prev_speed_mps:
+            speed_mps = min(self._prev_speed_mps + max_speed_step, speed_mps)
+        self._prev_speed_mps = speed_mps
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
         steering_deg = max(
             -self.max_steering_deg,
             min(self.max_steering_deg, float(delta_deg)),
+        )
+
+        # Rate limiter de steering — independiente del solver.
+        max_steer_step = self._max_steer_rate_deg_s * self._steer_dt_s
+        steering_deg = max(
+            self._prev_steer_deg - max_steer_step,
+            min(self._prev_steer_deg + max_steer_step, steering_deg),
+        )
+        self._prev_steer_deg = steering_deg
+
+        if _should_log:
+            _log.getLogger(__name__).info(
+                "[ MPC-out ] v_opt=%.3f→%.3f delta=%.1f° (rate_limited)",
+                v_opt,
+                speed_mps,
+                steering_deg,
+            )
+
+        live_log(
+            "mpc", event="compute_out",
+            valid=True, reason="",
+            v_opt_raw=float(v_opt), speed_mps=float(speed_mps),
+            delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
+            scenario=behavior_output.scenario_name,
+            requested_speed_mps=float(requested_speed_mps),
         )
 
         return MotorCommand(
@@ -403,6 +817,8 @@ class MotionController(IMotionController):
 
     def reset(self) -> None:
         self._solver.reset()
+        self._prev_steer_deg = 0.0
+        self._prev_speed_mps = 0.0
 
     # ------------------------------------------------------------------
     # Helpers
@@ -410,6 +826,11 @@ class MotionController(IMotionController):
     @staticmethod
     def _invalid(reason: str) -> MotorCommand:
         """Comando inválido con razón. El dispatcher invocará el safety_gate."""
+        live_log(
+            "mpc", event="compute_out",
+            valid=False, reason=reason,
+            speed_mps=0.0, steering_deg=0.0,
+        )
         return MotorCommand(
             timestamp=time.time(),
             steering_deg=0.0,

@@ -35,49 +35,12 @@ import time
 
 from src.perception.lane.lane_observer_thread import threadLaneObserver
 from src.templates.workerprocess import WorkerProcess
-from src.hardware.camera.threads.threadCamera import threadCamera
-from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
-from src.hardware.camera.threads.threadVisualController import threadVisualController
-
-# Phase 4–6 control pipeline:
-#   BehaviorPlanner (Phase 4) → BehaviorOutput → MotionController (Phase 6)
-#   → MotorCommand → safety_gate → SpeedMotor/SteerMotor (firmware).
-# Estos cinco componentes son la ÚNICA fuente de verdad para el motor en
-# runtime de competencia. Sin BehaviorPlanner el dispatcher no recibe
-# BehaviorOutput fresco, el safety_gate dispara su fallback() y el auto
-# se queda con speed=0. Por eso el thread del planner se instancia acá.
-from src.behavior.planner import BehaviorPlanner
-from src.behavior.planner_thread import threadBehaviorPlanner
-from src.behavior.scenarios.crosswalk import Crosswalk
-from src.behavior.scenarios.highway import Highway
-from src.behavior.scenarios.intersection import Intersection
-from src.behavior.scenarios.lane_keep import LaneKeep
-from src.behavior.scenarios.parking import Parking
-from src.behavior.scenarios.roundabout import Roundabout
-from src.control.controller_thread import threadMotionController
-from src.control.motion_controller import MotionController
-from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
-from src.control.safety_gate import SafetyGate
 
 from src.core.messaging.buffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.allMessages import StateChange
-
-# GPS-free tracking (optional — requires scipy for spline interpolation)
-try:
-    from src.routing.navigation_planner_thread import threadNavigationPlanner
-    from src.localization.pose_estimator_thread import threadPoseEstimator
-    from src.localization.relocalization_thread import TrackingState
-    from src.routing.visualizer import TrackVisualizer
-    import config as _cfg
-    _TRACKING_ENABLED = True
-    _TRACKING_SHOW_WINDOW = getattr(_cfg, "TRACKING_SHOW_WINDOW", True)
-except Exception as _tracking_import_err:
-    _TRACKING_ENABLED = False
-    _TRACKING_SHOW_WINDOW = False
-    print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Tracking not available: {_tracking_import_err}")
 
 
 class processCamera(WorkerProcess):
@@ -100,7 +63,7 @@ class processCamera(WorkerProcess):
                  show_preview=False, debug_windows=None,
                  picamera_hdr_enabled=True, picamera_hdr_always_on=False,
                  picamera_hdr_glare_threshold=0.04,
-                 publish_serial_stream=True,
+                 stream_to_dashboard=True,
                  enable_sign_detection=True, sign_detection_actions=False,
                  sign_min_confidence=0.50,
                  sign_min_box_area=0.01,
@@ -121,7 +84,7 @@ class processCamera(WorkerProcess):
         self.picamera_hdr_enabled = picamera_hdr_enabled
         self.picamera_hdr_always_on = picamera_hdr_always_on
         self.picamera_hdr_glare_threshold = picamera_hdr_glare_threshold
-        self.publish_serial_stream = bool(publish_serial_stream)
+        self.stream_to_dashboard = bool(stream_to_dashboard)
         self.enable_sign_detection = enable_sign_detection
         self.sign_detection_actions = sign_detection_actions
         self.sign_min_confidence = sign_min_confidence
@@ -147,6 +110,49 @@ class processCamera(WorkerProcess):
     # ===================================== INIT TH ======================================
     def _init_threads(self):
         """Create the Camera Publisher thread, Line Following thread, and Sign Detection thread."""
+        # Lazy imports — must only execute in the child process (post-fork).
+        #
+        # Root cause of SIGSEGV in __kmp_suspend_initialize_thread:
+        #   If these are module-level, main.py imports processCamera in the
+        #   PARENT, which transitively loads trajectory_builder → numpy →
+        #   OpenBLAS → Homebrew libomp (UUID 63e2ee98).  After fork the child
+        #   inherits stale OpenMP thread structures (only the calling thread
+        #   survives fork); then torch loads its own bundled libomp (UUID
+        #   e56febf1).  Two conflicting runtimes + stale thread state →
+        #   NULL kmp_info_t* → crash at address 0x580.
+        #
+        #   Importing here instead means BOTH libomp instances are initialised
+        #   fresh inside the child — no stale state, KMP_DUPLICATE_LIB_OK=TRUE
+        #   keeps them from aborting on the duplicate.
+        from src.hardware.camera.threads.threadCamera import threadCamera
+        from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
+        from src.hardware.camera.threads.threadVisualController import threadVisualController
+        from src.behavior.planner import BehaviorPlanner
+        from src.behavior.planner_thread import threadBehaviorPlanner
+        from src.behavior.scenarios.crosswalk import Crosswalk
+        from src.behavior.scenarios.highway import Highway
+        from src.behavior.scenarios.intersection import Intersection
+        from src.behavior.scenarios.lane_keep import LaneKeep
+        from src.behavior.scenarios.parking import Parking
+        from src.behavior.scenarios.roundabout import Roundabout
+        from src.control.controller_thread import threadMotionController
+        from src.control.motion_controller import MotionController
+        from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
+        from src.control.safety_gate import SafetyGate
+
+        _TRACKING_ENABLED = False
+        _TRACKING_SHOW_WINDOW = False
+        try:
+            from src.routing.navigation_planner_thread import threadNavigationPlanner
+            from src.localization.pose_estimator_thread import threadPoseEstimator
+            from src.localization.relocalization_thread import TrackingState
+            from src.routing.visualizer import TrackVisualizer
+            import config as _cfg
+            _TRACKING_ENABLED = True
+            _TRACKING_SHOW_WINDOW = getattr(_cfg, "TRACKING_SHOW_WINDOW", True)
+        except Exception as _tracking_import_err:
+            print(f"\033[1;97m[ processCamera ] :\033[0m \033[1;93mWARNING\033[0m - Tracking not available: {_tracking_import_err}")
+
         # Shared event: when set, car is on highway — line following uses higher
         # speeds. Lo setea/clarea `ManeuverManager` (dentro de threadLineFollowing)
         # cuando observa highway_entrance/exit signs. Es lo único que sobrevive
@@ -162,7 +168,6 @@ class processCamera(WorkerProcess):
          self.queuesList, self.logging, self.debugging,
          show_preview=show_cam_preview,
          frame_buffer=self.frame_buffer,
-         publish_serial_stream=self.publish_serial_stream,
          camera_type=self.camera_type, usb_device=self.usb_device,
          usb_resolution=self.usb_resolution,
          jetson_sensor_id=self.jetson_sensor_id,
@@ -177,17 +182,20 @@ class processCamera(WorkerProcess):
         self.threads.append(camTh)
         
         # Local AI perception (TensorRT engine) now runs inside the camera process.
+        # Phase 6: este thread es el ÚNICO productor de `serialCamera` —
+        # publica el frame ya anotado (carriles + cajas de señales) al
+        # dashboard. `stream_to_dashboard` permite apagarlo en modo
+        # headless (config.STREAM_CAMERA_TO_DASHBOARD=False).
         localPerceptionTh = threadLocalPerception(
             self.queuesList, self.logging, self.debugging,
             frame_buffer=self.frame_buffer,
             local_lane_buffer=self.local_lane_buffer,
-            show_debug=self.show_preview,
-            debug_windows=self.debug_windows,
             enable_sign_detection=self.enable_sign_detection,
             enable_actions=self.sign_detection_actions,
             sign_min_confidence=self.sign_min_confidence,
             sign_min_box_area=self.sign_min_box_area,
             action_cooldown=self.sign_action_cooldown,
+            stream_to_dashboard=self.stream_to_dashboard,
         )
         self.threads.append(localPerceptionTh)
 
@@ -211,56 +219,58 @@ class processCamera(WorkerProcess):
         motor_command_buffer = LatestValueBuffer()
 
         # GPS-free tracking: dead reckoning + waypoint follower + map visualizer.
-        # El TrackGraph se carga acá una sola vez y se reusa para:
-        #   1. dar contexto al pose estimator + navigation planner (route_context),
-        #   2. construir un `LaneletMap` consumido por el `BehaviorPlanner`
-        #      (escenarios `Intersection`, `Crosswalk`, `Highway`, etc.),
-        #   3. opcionalmente alimentar el `TrackVisualizer` (ventana OpenCV).
-        # Si el GraphML falta, todo el bloque se desactiva — `BehaviorPlanner`
-        # corre con `lanelet_map=None` y solo `LaneKeep` (priority=0) puede
-        # disparar.
+        # El runtime usa OSM/Lanelet como única fuente de verdad: el route
+        # handler denso, el `LaneletMap` del behavior planner y el visualizador
+        # comparten exactamente la misma geometría.
         tracking_state = None
-        track_graph = None
+        route_graph = None
         lanelet_map = None
         if _TRACKING_ENABLED:
             tracking_state = TrackingState()
 
             try:
-                from src.routing.lanelet.from_graphml import TrackGraph
-                from src.routing.lanelet.lanelet_map import from_track_graph
-                import config as _cfg_track
-                _graphml = getattr(_cfg_track, "TRACKING_GRAPHML", "Track GraphML File.graphml")
-                _step = getattr(_cfg_track, "TRACKING_WAYPOINT_STEP_M", 0.05)
                 import os
-                if not os.path.isabs(_graphml):
+                import config as _cfg_track
+                from src.routing.lanelet.osm_router import OsmRouteGraph
+                _lanelet2_osm = getattr(_cfg_track, "TRACKING_LANELET2_OSM", "")
+                _step = getattr(_cfg_track, "TRACKING_WAYPOINT_STEP_M", 0.05)
+                _start_lanelet_id = getattr(_cfg_track, "TRACKING_START_LANELET_ID", None)
+                if not os.path.isabs(_lanelet2_osm):
                     _root = os.path.normpath(
                         os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                      "..", "..", "..")
                     )
-                    _graphml = os.path.join(_root, _graphml)
-                track_graph = TrackGraph(_graphml, step_m=_step)
-                # `from_track_graph` densifica centerlines a 0.20 m por defecto:
-                # más resolución que el waypoint step (0.05 m) hace `at_pose`
-                # más preciso sin disparar memoria.
-                lanelet_map = from_track_graph(track_graph)
+                    _lanelet2_osm = os.path.join(_root, _lanelet2_osm)
+
+                if _lanelet2_osm and os.path.exists(_lanelet2_osm):
+                    route_graph = OsmRouteGraph(
+                        _lanelet2_osm,
+                        step_m=_step,
+                        start_lanelet_id=_start_lanelet_id,
+                    )
+                    lanelet_map = route_graph.lanelet_map
             except Exception as _graph_err:
-                print(f"[ processCamera ] WARNING - track graph load failed: {_graph_err}")
-                track_graph = None
+                print(f"[ processCamera ] WARNING - OSM route graph load failed: {_graph_err}")
+                route_graph = None
                 lanelet_map = None
 
             visualizer = None
-            if _TRACKING_SHOW_WINDOW and track_graph is not None:
+            if _TRACKING_SHOW_WINDOW and route_graph is not None:
                 try:
                     import os as _os_vis
                     _root = _os_vis.path.normpath(
                         _os_vis.path.join(_os_vis.path.dirname(_os_vis.path.abspath(__file__)),
                                           "..", "..", "..")
                     )
-                    _json_path = _os_vis.path.join(_root, "Track Editor Save.json")
-                    _img_path  = _os_vis.path.join(_root, "CamScanner 16-3-26 18.52_1.JPG")
+                    def _resolve(rel):
+                        return rel if _os_vis.path.isabs(rel) else _os_vis.path.join(_root, rel)
+                    _json_path   = _resolve(getattr(_cfg_track, "TRACKING_META_JSON", "track_meta.json"))
+                    _svg_path    = _resolve(getattr(_cfg_track, "TRACKING_BG_SVG", ""))
+                    _raster_path = _resolve(getattr(_cfg_track, "TRACKING_BG_RASTER", ""))
                     visualizer = TrackVisualizer(
-                        track_graph,
-                        bg_image_path=_img_path,
+                        route_graph,
+                        bg_image_path=_raster_path,
+                        bg_svg_path=_svg_path,
                         track_json_path=_json_path,
                     )
                     # Start manually — do NOT add to self.threads because
@@ -287,6 +297,13 @@ class processCamera(WorkerProcess):
                 tracking_state,
                 pose_estimate_buffer=pose_estimate_buffer,
                 route_context_buffer=route_context_buffer,
+                # Phase 3: pasamos el `lanelet_map` para que el navigation
+                # planner pueda popular `RouteContext.current_lanelet_id` vía
+                # `at_pose(x, y)`. Sin esto, LaneKeep no puede construir un
+                # target_path y el dispatcher emite speed=0 indefinidamente
+                # (ese era el bug — feedback OK, comandos OK, pero el
+                # BehaviorPlanner sin lanelet_id caía en `_fallback_plan`).
+                lanelet_map=lanelet_map,
                 logging=self.logging,
                 debugging=self.debugging,
                 visualizer=visualizer,
@@ -325,7 +342,7 @@ class processCamera(WorkerProcess):
         # Inyectamos dependencias por constructor (DIP):
         #   - `BehaviorPlanner` recibe la lista de scenarios. Cada scenario
         #     respeta la interfaz `IScenario` (priority + is_active + plan).
-        #   - El `lanelet_map` puede ser `None` cuando el GraphML no está
+        #   - El `lanelet_map` puede ser `None` cuando el OSM no está
         #     disponible — el planner_thread degrada a un `RouteContext`
         #     vacío y solo `LaneKeep` se activa.
         #   - Los buffers se comparten con pose_estimator, navigation_planner,
@@ -334,14 +351,14 @@ class processCamera(WorkerProcess):
             import config as _cfg_behavior
             _behavior_dt_s = float(getattr(_cfg_behavior, "BEHAVIOR_DT_S", 0.05))
             _behavior_horizon_n = int(getattr(_cfg_behavior, "BEHAVIOR_HORIZON_N", 20))
-            _behavior_nominal = float(getattr(_cfg_behavior, "BEHAVIOR_NOMINAL_SPEED_MPS", 0.50))
-            _behavior_max = float(getattr(_cfg_behavior, "BEHAVIOR_MAX_SPEED_MPS", 1.00))
+            _behavior_nominal = float(getattr(_cfg_behavior, "BEHAVIOR_NOMINAL_SPEED_MPS", 0.10))
+            _behavior_max = float(getattr(_cfg_behavior, "BEHAVIOR_MAX_SPEED_MPS", 0.10))
             _behavior_pause = float(getattr(_cfg_behavior, "BEHAVIOR_THREAD_PAUSE_S", 0.05))
         except Exception:
             _behavior_dt_s = 0.05
             _behavior_horizon_n = 20
-            _behavior_nominal = 0.50
-            _behavior_max = 1.00
+            _behavior_nominal = 0.10
+            _behavior_max = 0.10
             _behavior_pause = 0.05
 
         behavior_planner = BehaviorPlanner(
@@ -379,7 +396,13 @@ class processCamera(WorkerProcess):
         # (target_path + speed_profile), MotionController lo ejecuta en
         # un MPC acoplado, el dispatcher lo manda al firmware con un
         # safety_gate que detecta staleness.
-        motion_controller = MotionController()
+        # `fallback_horizon_n` solo entra en juego si AcadosMPC no logra
+        # cargar (sim/dev sin código C generado). El PurePursuitSolver lo
+        # usa para reportar `solver.N` y satisfacer el chequeo dimensional
+        # de `MotionController.compute()` contra el `BehaviorOutput`.
+        motion_controller = MotionController(
+            fallback_horizon_n=_behavior_horizon_n,
+        )
         motionControllerTh = threadMotionController(
             self.queuesList,
             controller=motion_controller,
