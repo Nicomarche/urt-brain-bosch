@@ -74,6 +74,7 @@ class MapData:
         self.background: Optional[QPixmap] = None
         self.map_source: str = "none"
         self._meta_loaded: bool = False
+        self._bounds_loaded_from_meta: bool = False
         self.lanelet_map = None
         self.lanelet_polygons: list[tuple[str, list[tuple[float, float]], dict[str, str]]] = []
         self.lanelet_polygons_by_id: dict[str, tuple[tuple[float, float], ...]] = {}
@@ -98,6 +99,7 @@ class MapData:
         try:
             self.x_min_m = float(bounds.get("x_min", self.x_min_m))
             self.y_min_m = float(bounds.get("y_min", self.y_min_m))
+            self._bounds_loaded_from_meta = "x_min" in bounds and "y_min" in bounds
         except (TypeError, ValueError):
             pass
 
@@ -183,12 +185,13 @@ class MapData:
             except (TypeError, ValueError):
                 pass
             self.y_axis_inverted = bool(map_metadata.get("y_axis_inverted", self.y_axis_inverted))
-        bounds = map_metadata.get("world_bounds") or {}
-        try:
-            self.x_min_m = float(bounds.get("x_min", self.x_min_m))
-            self.y_min_m = float(bounds.get("y_min", self.y_min_m))
-        except (TypeError, ValueError):
-            pass
+        if not self._bounds_loaded_from_meta:
+            bounds = map_metadata.get("world_bounds") or {}
+            try:
+                self.x_min_m = float(bounds.get("x_min", self.x_min_m))
+                self.y_min_m = float(bounds.get("y_min", self.y_min_m))
+            except (TypeError, ValueError):
+                pass
 
     def _build_osm_geometry(self, *, parsed, lanelet_map) -> None:
         def _rel_member(rel, role: str, member_type: str = "way") -> str | None:

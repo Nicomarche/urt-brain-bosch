@@ -1660,7 +1660,7 @@ def test_path_optimizer_keeps_straight_hold_prefix_out_of_previous_blend() -> No
     assert out.target_path[2, 1] <= out.target_path[1, 1] + 0.01
 
 
-def test_path_optimizer_keeps_precision_horizon_during_visual_lane_reentry() -> None:
+def test_path_optimizer_keeps_precision_horizon_when_route_suppresses_visual_reentry() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
     route = router.go_to("50", {"lanelet_id": "75"})
@@ -1737,8 +1737,9 @@ def test_path_optimizer_keeps_precision_horizon_during_visual_lane_reentry() -> 
 
     horizon_distance_m = float(np.linalg.norm(out.target_path[-1, :2] - out.target_path[0, :2]))
     assert 0.45 < horizon_distance_m < 0.55
-    assert out.notes["visual_lane_reentry_active"] is True
-    assert out.notes["visual_lane_reentry_applied"] is True
+    assert out.notes["visual_lane_reentry_active"] is False
+    assert out.notes["visual_lane_reentry_reason"] == "route_corridor_primary"
+    assert out.notes["visual_lane_reentry_applied"] is False
 
 
 def test_path_optimizer_keeps_future_turn_out_of_low_speed_precision_horizon() -> None:

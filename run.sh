@@ -151,7 +151,17 @@ else
 fi
 
 export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"
-export URT_EXPECTED_MPC_BACKEND="${URT_EXPECTED_MPC_BACKEND:-acados}"
+if [[ -z "${URT_EXPECTED_MPC_BACKEND:-}" ]]; then
+    _URT_FORCE_PP_LC="$(printf '%s' "${URT_FORCE_PURE_PURSUIT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$_URT_FORCE_PP_LC" =~ ^(0|false|no|off)$ ]]; then
+        export URT_EXPECTED_MPC_BACKEND="acados"
+    elif [[ "$_URT_FORCE_PP_LC" =~ ^(1|true|yes|on)$ || "${URT_SIM_MODE:-0}" == "1" ]]; then
+        export URT_EXPECTED_MPC_BACKEND="pure_pursuit"
+    else
+        export URT_EXPECTED_MPC_BACKEND="acados"
+    fi
+    unset _URT_FORCE_PP_LC
+fi
 export URT_PYTHON_BIN="$PYTHON_BIN"
 
 # macOS + --monitor: if no brew/gz interpreter was chosen, we still need a venv

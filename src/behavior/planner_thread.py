@@ -110,15 +110,16 @@ class threadBehaviorPlanner(ThreadWithStop):
         self.logging = logging
         self.debugging = bool(debugging)
 
-        # Ramp de arranque: la velocidad de referencia sube gradualmente de 0
-        # hasta _nominal_speed_mps. Esto evita que el MPC/pure-pursuit salte
-        # directo a velocidad máxima desde el primer tick.
+        # Ramp de arranque: la velocidad de referencia sube gradualmente hasta
+        # _nominal_speed_mps, pero si se mueve respeta el mínimo competitivo.
         self._current_speed_mps: float = 0.0
         try:
-            from config import BEHAVIOR_ACCEL_MPS2
+            from config import BEHAVIOR_ACCEL_MPS2, BEHAVIOR_MIN_SPEED_MPS
             self._accel_mps2: float = float(BEHAVIOR_ACCEL_MPS2)
+            self._min_moving_speed_mps: float = float(BEHAVIOR_MIN_SPEED_MPS)
         except ImportError:
             self._accel_mps2 = 0.25  # 0→0.50 m/s en 2 s
+            self._min_moving_speed_mps = 0.20
 
         # Senders al dashboard. Mantenemos dos canales: el plan completo
         # (target_path + speed_profile) y un status corto para gauges.
@@ -243,7 +244,10 @@ class threadBehaviorPlanner(ThreadWithStop):
         # el nominal. Se resetea a 0 cuando el plan pide parar (ver abajo).
         self._current_speed_mps = min(
             self._nominal_speed_mps,
-            self._current_speed_mps + self._accel_mps2 * self._dt_s,
+            max(
+                self._min_moving_speed_mps,
+                self._current_speed_mps + self._accel_mps2 * self._dt_s,
+            ),
         )
 
         ctx = self._build_context(now_s=time.time())

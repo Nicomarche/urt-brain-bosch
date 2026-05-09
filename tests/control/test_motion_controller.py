@@ -87,15 +87,18 @@ def _bo(
     stop: bool = False,
     n: int = 5,
     speed_mps: float = 0.30,
+    target_path: np.ndarray | None = None,
+    notes: dict | None = None,
 ) -> BehaviorOutput:
     return BehaviorOutput(
         timestamp=0.0,
         dt=0.05,
-        target_path=np.zeros((n + 1, 3)),
+        target_path=np.zeros((n + 1, 3)) if target_path is None else target_path,
         speed_profile=np.full(n, speed_mps),
         scenario_name=ScenarioName.LANE_KEEP.value,
         valid=valid,
         stop_required=stop,
+        notes=dict(notes or {}),
     )
 
 
@@ -202,6 +205,34 @@ def test_negative_speed_clamped_to_zero() -> None:
     assert cmd.speed_mps == 0.0
 
 
+def test_negative_solver_speed_gets_forward_recovery_on_route_path() -> None:
+    """Si la ruta tiene una referencia adelante, no dejamos al auto clavado."""
+    target_path = np.array(
+        [
+            [1.0, 2.0, 0.5],
+            [1.08, 2.04, 0.52],
+            [1.16, 2.08, 0.52],
+            [1.24, 2.12, 0.52],
+            [1.32, 2.16, 0.52],
+            [1.40, 2.20, 0.52],
+        ],
+        dtype=float,
+    )
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(-0.05, 1.0))))
+
+    cmd = mc.compute(
+        _bo(
+            speed_mps=0.20,
+            target_path=target_path,
+            notes={"path_source": "route_waypoints"},
+        ),
+        _pose(),
+    )
+
+    assert cmd.valid is True
+    assert cmd.speed_mps == pytest.approx(0.20)
+
+
 def test_steering_clamped_to_max() -> None:
     """Si el solver entrega 40°, se reclampa a +25 (max_steering_deg)."""
     mc = _disable_rate_limits(MotionController(
@@ -213,11 +244,11 @@ def test_steering_clamped_to_max() -> None:
 
 
 def test_solver_speed_is_capped_to_current_planner_request() -> None:
-    """El controller nunca debe superar `speed_profile[0]`."""
+    """El controller no supera un `speed_profile[0]` competitivo."""
     mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.50, 1.0))))
-    cmd = mc.compute(_bo(speed_mps=0.10), _pose())
+    cmd = mc.compute(_bo(speed_mps=0.30), _pose())
     assert cmd.valid is True
-    assert cmd.speed_mps == pytest.approx(0.10)
+    assert cmd.speed_mps == pytest.approx(0.30)
 
 
 def test_motion_controller_converts_osm_frame_before_calling_solver() -> None:
@@ -289,10 +320,10 @@ def test_visual_left_route_in_osm_frame_produces_positive_left_steer() -> None:
 
 
 def test_speed_rate_limit_only_applies_when_accelerating() -> None:
-    """Si el solver acelera fuerte, el controller sube gradual."""
+    """El rate limiter no debe bajar un comando de avance debajo del mínimo."""
     mc = MotionController(solver=_FakeSolver(result=(0.30, 0.0)))
     cmd = mc.compute(_bo(speed_mps=0.30), _pose())
-    assert cmd.speed_mps == pytest.approx(0.0125)
+    assert cmd.speed_mps == pytest.approx(0.20)
 
 
 def test_reset_propagates_to_solver() -> None:

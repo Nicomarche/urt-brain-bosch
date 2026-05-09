@@ -292,7 +292,7 @@ ACADOS_MPC_T = 0.05
 
 # Velocidad de referencia por defecto [m/s].  El MPC optimiza alrededor de
 # este valor.  En competencia ajustar según la zona (highway vs curva).
-ACADOS_MPC_V_REF = 0.10
+ACADOS_MPC_V_REF = 0.20
 
 # Modelo del vehículo.
 ACADOS_MPC_WHEELBASE = 0.258      # distancia entre ejes [m]
@@ -300,7 +300,7 @@ ACADOS_MPC_L_R = 0.103            # eje trasero a CG [m]
 ACADOS_MPC_L_F = 0.155            # eje delantero a CG [m]
 
 # Límites de control.
-ACADOS_MPC_V_MAX = 0.10           # velocidad máxima [m/s] en AUTO = 10 cm/s
+ACADOS_MPC_V_MAX = 0.40           # velocidad máxima [m/s] en AUTO = 40 cm/s
 ACADOS_MPC_V_MIN = -0.50          # velocidad mínima [m/s] (reversa)
 ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
 
@@ -416,14 +416,19 @@ TRACKING_IMU_YAW_SIGN = 1.0 if _SIM_MODE else -1.0
 # para compatibilidad con checkouts viejos.
 SIM_IMU_YAW_OFFSET_DEG = 0.0
 
-# Forzar PurePursuit en lugar de AcadosMPC. Acados resuelve un OCP cartesiano
-# que pide reversa cuando el target_path queda detrás del coche (ej. después
-# de un overshoot al salir de una curva). Con `v_min_runtime=-0.05` el solver
-# satura ahí y el speed se clamp a 0 → coche detenido. PurePursuit no tiene
-# este modo de falla: siempre genera steer hacia el goal a la velocidad del
-# behavior_planner, así que el coche se autoalinea. En real hardware con
-# pista calibrada Acados anda mejor — dejar False allí.
-FORCE_PURE_PURSUIT = False
+# Forzar PurePursuit en lugar de AcadosMPC. En simulador las curvas cerradas
+# del mapa actual se siguen mucho mejor con PurePursuit (evita que Acados
+# sature el steering contra una referencia cartesiana difícil). En real
+# hardware mantenemos Acados como default, pero se puede overridear sin tocar
+# código:
+#   URT_FORCE_PURE_PURSUIT=1  fuerza PurePursuit
+#   URT_FORCE_PURE_PURSUIT=0  fuerza Acados
+_FORCE_PP_ENV = _os.environ.get("URT_FORCE_PURE_PURSUIT")
+FORCE_PURE_PURSUIT = (
+    _SIM_MODE
+    if _FORCE_PP_ENV is None
+    else _FORCE_PP_ENV.strip().lower() in {"1", "true", "yes", "on"}
+)
 
 # Filtro de lag del actuador de dirección para el dead reckoning.
 # Modela el delay entre el comando de steering y la posición real de las ruedas.
@@ -529,15 +534,18 @@ BEHAVIOR_DT_S = 0.05
 BEHAVIOR_HORIZON_N = 40  # must match N_horizon in c_generated_code/acados_ocp_bfmc_bicycle.json
                          # 40 × 0.05 = 2.0s preview (era 30=1.5s) — alineado con urt-ref
 
+# Límites competitivos de velocidad. 0.0 sigue siendo válido para STOP; cuando
+# el auto está en movimiento no debe mandar menos de 20 cm/s.
+BEHAVIOR_MIN_SPEED_MPS = 0.20       # velocidad mínima de movimiento = 20 cm/s
+
 # Velocidad nominal de lane_keep "limpio" (sin signs, sin regulators).
-BEHAVIOR_NOMINAL_SPEED_MPS = 0.10   # 10 cm/s en AUTO.
+BEHAVIOR_NOMINAL_SPEED_MPS = 0.20   # target base = mínimo competitivo.
                                     # El planner sigue siendo la fuente única
-                                    # de verdad: este es el target base para
-                                    # lane_keep cuando no hay overlays/scenarios.
+                                    # de verdad para el perfil de velocidad.
 
 # Hard cap absoluto. Aplicado por velocity_overlay al final, ningún
 # scenario puede emitir velocidades por encima.
-BEHAVIOR_MAX_SPEED_MPS = 0.10       # cap absoluto de AUTO = 10 cm/s
+BEHAVIOR_MAX_SPEED_MPS = 0.40       # cap absoluto de AUTO = 40 cm/s
 
 # Geometría y containment lateral del planner. Los valores están escalados
 # para BFMC (carril 35 cm, vehículo ~19 cm de ancho) y se usan para exigir
@@ -546,7 +554,7 @@ BEHAVIOR_VEHICLE_WIDTH_M = 0.19
 BEHAVIOR_CONTAINMENT_CLEARANCE_M = 0.01
 BEHAVIOR_CONTAINMENT_WARN_ERROR_M = 0.05
 BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M = 0.07
-BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
+BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.20
 
 # Stuck-recovery del LaneContainmentRule. Si el robot lleva varios ticks
 # en crawl (4 cm/s) sin que el error lateral decrezca, sube temporalmente
@@ -555,7 +563,7 @@ BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
 # es tan lenta que el centerline del próximo lanelet rota más rápido que
 # el ego avanza → loop estable de crawl. STUCK_TICKS=40 ≈ 2 s a 20 Hz.
 BEHAVIOR_CONTAINMENT_STUCK_TICKS = 40
-BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
+BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.20
 
 # Aceleración máxima del ramp de velocidad en el BehaviorPlanner [m/s²].
 # 0.25 m/s² → llega a 0.15 m/s en ~0.6 s (12 ticks a 20 Hz).
@@ -571,10 +579,12 @@ BEHAVIOR_MAX_SPEED_RATE_MPS2 = 0.25
 # Bajar si el auto sigue oscilando; subir si es demasiado lento en curvas.
 BEHAVIOR_MAX_STEER_RATE_DEG_S = 60.0
 
-# Lookahead gain del PurePursuitSolver (fallback sin acados) [s].
-# L_d = max(min_lookahead, LOOKAHEAD_GAIN * v). Con v=0.50 m/s y gain=1.5:
-# L_d = 0.75 m → más suave que 0.30 m del gain=0.6 original.
-BEHAVIOR_LOOKAHEAD_GAIN_S = 1.5
+# Lookahead del PurePursuitSolver (fallback sin acados).
+# Con el piso reglamentario de 20 cm/s, 30 cm de lookahead abre demasiado la
+# entrada de curvas chicas. Apuntamos a ~22 cm a 20 cm/s y dejamos que crezca
+# con la velocidad hasta el techo de competencia.
+BEHAVIOR_MIN_LOOKAHEAD_M = 0.22
+BEHAVIOR_LOOKAHEAD_GAIN_S = 1.1
 
 # Tasa de actualización del thread (s). Con pause=0.05 corremos a ~20 Hz,
 # emparejando dt del MPC.

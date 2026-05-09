@@ -16,8 +16,14 @@ _CROSSWALK_SPEED_MPS = 0.30
 _INTERSECTION_SPEED_MPS = 0.40
 _INTERSECTION_RANGE_M = 6.0
 _CURVATURE_A_LAT_MAX_MPS2 = 0.45
-_CURVATURE_SPEED_FLOOR_MPS = 0.05
-_LANE_CONTAINMENT_WARN_CAP_MPS = 0.06
+
+try:
+    from config import BEHAVIOR_MIN_SPEED_MPS as _BEHAVIOR_MIN_SPEED_MPS
+except Exception:
+    _BEHAVIOR_MIN_SPEED_MPS = 0.20
+
+_CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
+_LANE_CONTAINMENT_WARN_CAP_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
 
 try:
     from config import (
@@ -99,6 +105,36 @@ class GlobalSpeedCapRule:
             speed_profile=capped,
             stop_required=bool(stop_required),
             notes={"kind": self.name, "cap_mps": float(ctx.max_speed_mps)},
+            triggered=triggered,
+        )
+
+
+class CompetitionSpeedBoundsRule:
+    name = "competition_speed_bounds"
+
+    def apply(
+        self,
+        *,
+        speed_profile: np.ndarray,
+        target_path: np.ndarray,
+        ctx: PlanningContext,
+        stop_required: bool,
+        planning_notes: dict,
+    ) -> VelocityRuleResult:
+        bounded = _apply_competition_speed_bounds(
+            speed_profile,
+            min_speed_mps=float(_BEHAVIOR_MIN_SPEED_MPS),
+            max_speed_mps=float(ctx.max_speed_mps),
+        )
+        triggered = bool(np.any(np.abs(bounded - np.asarray(speed_profile, dtype=float)) > 1e-9))
+        return VelocityRuleResult(
+            speed_profile=bounded,
+            stop_required=bool(stop_required),
+            notes={
+                "kind": self.name,
+                "min_moving_mps": float(_BEHAVIOR_MIN_SPEED_MPS),
+                "max_mps": float(ctx.max_speed_mps),
+            },
             triggered=triggered,
         )
 
@@ -331,6 +367,7 @@ class BehaviorVelocityPlanner:
                 LaneContainmentRule(),
                 CurvatureConstraintRule(),
                 RegulatoryElementRule(),
+                CompetitionSpeedBoundsRule(),
             ]
         )
 
@@ -407,6 +444,20 @@ def _fit_speed_profile(
     x_old = np.linspace(0.0, 1.0, num=speed.size)
     x_new = np.linspace(0.0, 1.0, num=horizon_n)
     return np.interp(x_new, x_old, speed).astype(float)
+
+
+def _apply_competition_speed_bounds(
+    speed_profile: np.ndarray,
+    *,
+    min_speed_mps: float,
+    max_speed_mps: float,
+) -> np.ndarray:
+    """Keep moving commands inside competition bounds while preserving stops."""
+    speed = np.asarray(speed_profile, dtype=float)
+    bounded = np.minimum(np.array(speed, copy=True), float(max_speed_mps))
+    moving = bounded > 1e-6
+    bounded[moving] = np.maximum(bounded[moving], float(min_speed_mps))
+    return bounded
 
 
 def _ramp_to_zero(speed: np.ndarray, *, dt: float, distance_to_stop_m: float) -> np.ndarray:

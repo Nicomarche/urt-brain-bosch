@@ -59,6 +59,13 @@ from src.utils.live_log import live_log
 
 _SOLVER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "c_generated_code")
 _JSON_FILE = os.path.join(_SOLVER_DIR, "acados_ocp_bfmc_bicycle.json")
+try:
+    from config import BEHAVIOR_MIN_SPEED_MPS as _FORWARD_RECOVERY_MIN_SPEED_MPS
+except Exception:
+    _FORWARD_RECOVERY_MIN_SPEED_MPS = 0.20
+_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M = 0.02
+_FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M = 0.18
+_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG = 45.0
 
 
 def _solver_lib_path() -> str:
@@ -111,6 +118,37 @@ def _osm_states_to_controller_frame(states: np.ndarray) -> np.ndarray:
     arr[:, 1] *= -1.0
     arr[:, 2] = np.array([_wrap_angle(-float(yaw)) for yaw in arr[:, 2]], dtype=np.float64)
     return arr
+
+
+def _first_forward_reference_hint(
+    target_path: np.ndarray,
+    *,
+    pose_x: float,
+    pose_y: float,
+    pose_yaw: float,
+) -> dict[str, float] | None:
+    path = np.asarray(target_path, dtype=np.float64)
+    if path.ndim != 2 or path.shape[0] < 2 or path.shape[1] < 3:
+        return None
+    cos_yaw = math.cos(float(pose_yaw))
+    sin_yaw = math.sin(float(pose_yaw))
+    for idx in range(1, path.shape[0]):
+        dx = float(path[idx, 0]) - float(pose_x)
+        dy = float(path[idx, 1]) - float(pose_y)
+        dist_m = math.hypot(dx, dy)
+        if dist_m < float(_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M):
+            continue
+        x_fwd_m = (cos_yaw * dx) + (sin_yaw * dy)
+        y_left_m = (sin_yaw * dx) - (cos_yaw * dy)
+        heading_error_deg = abs(math.degrees(_wrap_angle(float(path[idx, 2]) - float(pose_yaw))))
+        return {
+            "sample_idx": float(idx),
+            "distance_m": float(dist_m),
+            "x_fwd_m": float(x_fwd_m),
+            "y_left_m": float(y_left_m),
+            "heading_error_deg": float(heading_error_deg),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -670,13 +708,18 @@ class MotionController(IMotionController):
                     )
                     try:
                         import config as _cfg
+                        _min_lookahead = float(
+                            getattr(_cfg, "BEHAVIOR_MIN_LOOKAHEAD_M", 0.30)
+                        )
                         _lookahead_gain = float(
-                            getattr(_cfg, "BEHAVIOR_LOOKAHEAD_GAIN_S", 1.5)
+                            getattr(_cfg, "BEHAVIOR_LOOKAHEAD_GAIN_S", 1.1)
                         )
                     except Exception:
-                        _lookahead_gain = 1.5
+                        _min_lookahead = 0.30
+                        _lookahead_gain = 1.1
                     self._solver = PurePursuitSolver(
                         horizon_n=fallback_horizon_n,
+                        min_lookahead_m=_min_lookahead,
                         lookahead_gain_s=_lookahead_gain,
                         max_steering_deg=max_steering_deg,
                         output_deadband_deg=output_deadband_deg,
@@ -720,10 +763,14 @@ class MotionController(IMotionController):
                 getattr(_cfg, "BEHAVIOR_MAX_SPEED_RATE_MPS2", 0.15)
             )
             self._steer_dt_s: float = float(getattr(_cfg, "BEHAVIOR_DT_S", 0.05))
+            self._min_moving_speed_mps: float = float(
+                getattr(_cfg, "BEHAVIOR_MIN_SPEED_MPS", 0.20)
+            )
         except Exception:
             self._max_steer_rate_deg_s = 60.0
             self._max_speed_rate_mps2 = 0.15
             self._steer_dt_s = 0.05
+            self._min_moving_speed_mps = 0.20
 
     # ------------------------------------------------------------------
     # IMotionController
@@ -840,10 +887,6 @@ class MotionController(IMotionController):
         if n != self._solver.N:
             return self._invalid("horizon_mismatch", backend=self._backend_name)
 
-        input_refs = np.zeros((n, 2), dtype=np.float64)
-        input_refs[:, 0] = speed_profile  # v_ref
-        # input_refs[:, 1] = 0  # delta_ref (steering ref siempre 0)
-
         # The planner publishes the path in the OSM/map frame (y-down, yaw CW+),
         # while the bicycle model in Acados/PurePursuit expects the standard
         # ENU/CCW convention with `+delta = left`. Mirror Y here so both the
@@ -854,6 +897,10 @@ class MotionController(IMotionController):
             pose.fused_pose.yaw,
         )
         state_refs_solver = _osm_states_to_controller_frame(state_refs)
+
+        input_refs = np.zeros((n, 2), dtype=np.float64)
+        input_refs[:, 0] = speed_profile  # v_ref
+        # input_refs[:, 1] = 0  # delta_ref (steering ref siempre 0)
 
         # 5. Llamar al solver. Si devuelve None, el OCP no resolvió.
         result = self._solver.compute(
@@ -883,6 +930,40 @@ class MotionController(IMotionController):
         # internamente para converger en su QP, aunque al motor solo
         # mandemos v ≥ 0.
         speed_mps = min(max(0.0, float(v_opt)), requested_speed_mps)
+        forward_recovery_reason = ""
+        forward_recovery_hint: dict[str, float] | None = None
+        notes = getattr(behavior_output, "notes", None)
+        path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
+        if (
+            speed_mps <= 1e-6
+            and float(v_opt) < 0.0
+            and requested_speed_mps > 1e-6
+            and path_source == "route_waypoints"
+        ):
+            forward_recovery_hint = _first_forward_reference_hint(
+                state_refs,
+                pose_x=float(pose.fused_pose.x),
+                pose_y=float(pose.fused_pose.y),
+                pose_yaw=float(pose.fused_pose.yaw),
+            )
+            if (
+                forward_recovery_hint is not None
+                and forward_recovery_hint["x_fwd_m"] >= float(_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M)
+                and abs(forward_recovery_hint["y_left_m"]) <= float(_FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M)
+                and forward_recovery_hint["heading_error_deg"] <= float(_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG)
+            ):
+                speed_mps = min(
+                    requested_speed_mps,
+                    max(
+                        float(_FORWARD_RECOVERY_MIN_SPEED_MPS),
+                        0.5 * requested_speed_mps,
+                    ),
+                )
+                if speed_mps < float(_FORWARD_RECOVERY_MIN_SPEED_MPS):
+                    speed_mps = float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
+                forward_recovery_reason = "negative_solver_forward_route_recovery"
+            else:
+                forward_recovery_reason = "negative_solver_no_forward_hint"
 
         # El planner es la autoridad de velocidad. Limitamos solo la
         # aceleración hacia arriba; si planner/solver piden menos velocidad,
@@ -891,6 +972,12 @@ class MotionController(IMotionController):
         max_speed_step = self._max_speed_rate_mps2 * self._steer_dt_s
         if speed_mps > self._prev_speed_mps:
             speed_mps = min(self._prev_speed_mps + max_speed_step, speed_mps)
+        if (
+            requested_speed_mps > 1e-6
+            and speed_mps > 1e-6
+            and speed_mps < float(self._min_moving_speed_mps)
+        ):
+            speed_mps = float(self._min_moving_speed_mps)
         self._prev_speed_mps = speed_mps
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
@@ -927,6 +1014,8 @@ class MotionController(IMotionController):
             delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
             scenario=behavior_output.scenario_name,
             requested_speed_mps=float(requested_speed_mps),
+            speed_recovery_reason=forward_recovery_reason,
+            speed_recovery_hint=forward_recovery_hint,
             backend=self._backend_name,
             **solver_debug,
         )

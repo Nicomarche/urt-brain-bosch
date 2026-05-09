@@ -240,6 +240,9 @@ def _select_visual_primary_path(
     ):
         return False, "visual_path_gate_rejected"
 
+    if route_corridor_available:
+        return False, "route_corridor_primary"
+
     measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
     if measurement_mode == "two_line":
         return True, "two_line_primary"

@@ -883,6 +883,33 @@ def _apply_visual_lane_reentry_bias(
     ctx: PlanningContext,
 ) -> tuple[np.ndarray, dict[str, object]]:
     path_source = _path_note_str(path_plan, "path_source")
+    if path_source == "route_waypoints" and _route_corridor_is_authoritative(ctx):
+        # Cuando hay una ruta OSM activa, el corredor densificado es la
+        # referencia de verdad. El sesgo visual puede ser util como fallback,
+        # pero si se suma encima de route_waypoints termina compitiendo con la
+        # trayectoria esperada en curvas cerradas.
+        notes: dict[str, object] = {
+            "visual_lane_reentry_active": False,
+            "visual_lane_reentry_reason": "route_corridor_primary",
+            "visual_lane_measurement_mode": "",
+            "visual_lane_reentry_applied": False,
+            "visual_lane_error_m": 0.0,
+            "visual_lane_quality": 0.0,
+            "visual_lane_shift_m": 0.0,
+            "visual_lane_prefix_samples": 0,
+        }
+        live_log(
+            "path_optimizer",
+            event="visual_lane_reentry_bias",
+            applied=False,
+            reason="route_corridor_primary",
+            error_m=0.0,
+            quality=0.0,
+            shift_m=0.0,
+            prefix_samples=0,
+            path_source=path_source,
+        )
+        return np.array(sampled_xy, copy=True), notes
     if path_source == "visual_lane_waypoints":
         # La corrección visual ya está horneada en los waypoints — un sesgo
         # perpendicular adicional sería doble corrección (paradigma urt-ref).
@@ -990,6 +1017,15 @@ def _apply_visual_lane_reentry_bias(
         path_source=_path_note_str(path_plan, "path_source"),
     )
     return biased_xy, notes
+
+
+def _route_corridor_is_authoritative(ctx: PlanningContext) -> bool:
+    route = getattr(ctx, "route", None)
+    if route is None:
+        return False
+    return bool(getattr(route, "route_active", False)) and bool(
+        getattr(route, "route_waypoints", None)
+    )
 
 
 def _stabilize_visual_path_prefix(
@@ -1913,7 +1949,8 @@ def _contain_path_within_corridor(
         bool(visual_lane_state.active)
         and abs(float(visual_lane_base_shift_m)) >= 1e-6
     )
-    path_source_visual = _path_note_str(path_plan, "path_source") == "visual_lane_waypoints"
+    path_source = _path_note_str(path_plan, "path_source")
+    path_source_visual = path_source == "visual_lane_waypoints"
     corridor_visual_path_priority_active = (
         bool(path_source_visual)
         and bool(corridor_visual_lane_guidance_active)

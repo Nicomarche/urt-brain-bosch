@@ -104,7 +104,7 @@ def test_constant_speed_plan_does_not_cap_or_stop_for_visual_lane_drift_inputs()
     assert plan.speed_profile[0] == pytest.approx(0.4, abs=1e-6)
 
 
-def test_constant_speed_plan_keeps_single_line_visual_primary_path() -> None:
+def test_constant_speed_plan_prefers_active_route_over_single_line_visual_path() -> None:
     scenario = _ConstantSpeedScenario()
     pose_x = 0.02
     pose_y = 0.05
@@ -140,14 +140,13 @@ def test_constant_speed_plan_keeps_single_line_visual_primary_path() -> None:
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
-    assert plan.notes["path_source"] == "visual_lane_waypoints"
-    assert plan.notes["visual_path_primary_reason"] == "single_line_primary"
-    assert plan.notes["visual_path_connected_from_ego_pose"] is False
-    assert plan.target_path[0, 0] > pose_x + 0.15
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "route_corridor_primary"
+    assert plan.target_path[0, 0] == pytest.approx(pose_x, abs=1e-6)
     assert plan.target_path[0, 1] == pytest.approx(pose_y, abs=1e-6)
 
 
-def test_constant_speed_plan_keeps_two_line_visual_primary_path() -> None:
+def test_constant_speed_plan_prefers_active_route_over_two_line_visual_path() -> None:
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -180,5 +179,41 @@ def test_constant_speed_plan_keeps_two_line_visual_primary_path() -> None:
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "route_corridor_primary"
+
+
+def test_constant_speed_plan_keeps_visual_primary_path_without_route_corridor() -> None:
+    scenario = _ConstantSpeedScenario()
+    pose_x = 0.02
+    pose_y = 0.05
+    ctx = replace(
+        make_context(
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.35,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=True,
+            direct_error_m=0.05,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
     assert plan.notes["path_source"] == "visual_lane_waypoints"
-    assert plan.notes["visual_path_primary_reason"] == "two_line_primary"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_primary"
+    assert plan.notes["visual_path_connected_from_ego_pose"] is False
