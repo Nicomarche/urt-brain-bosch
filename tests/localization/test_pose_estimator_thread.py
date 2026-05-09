@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +25,9 @@ class _FakeDR:
         self.x -= dx
         self.y -= dy
 
+    def correct_yaw(self, yaw_correction_rad: float) -> None:
+        self.yaw += float(yaw_correction_rad)
+
     def get_state(self) -> tuple[float, float, float]:
         return self.x, self.y, self.yaw
 
@@ -41,6 +45,9 @@ def _make_estimator(*, speed_mps: float = 0.20, dr_y: float = 0.05) -> threadPos
     estimator._dr = _FakeDR(y=dr_y)
     estimator._last_speed = float(speed_mps)
     estimator._last_camera_lateral_correction_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_yaw_rad = 0.0
+    estimator.tracking_state = SimpleNamespace(last_yaw_correction_deg=0.0)
     return estimator
 
 
@@ -54,6 +61,36 @@ def test_apply_lane_observation_skips_invalid_single_line_measurement() -> None:
         measurement_mode="single_line",
         direct_error_valid=False,
         control_policy_mode="ROUTE_TRACKING",
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        _make_route_context(),
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.05,
+        raw_yaw=0.0,
+    )
+
+    assert new_x == 0.0
+    assert new_y == 0.05
+    assert new_yaw == 0.0
+    assert correction_m == 0.0
+    assert reliable is False
+    assert estimator._dr.corrections == []
+
+
+def test_apply_lane_observation_still_skips_valid_single_line_measurement() -> None:
+    estimator = _make_estimator()
+    lane_observation = LaneObservation(
+        detected_sides=("right",),
+        lateral_offset_m=-0.12,
+        direct_error_m=-0.12,
+        quality=0.65,
+        measurement_mode="single_line",
+        direct_error_valid=True,
+        control_policy_mode="ROUTE_TRACKING",
+        planner_priority_active=True,
     )
 
     new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
@@ -98,5 +135,123 @@ def test_apply_lane_observation_accepts_valid_two_line_measurement() -> None:
     assert correction_m > 0.0
     assert new_x == pytest.approx(0.0, abs=1e-9)
     assert new_y < 0.05
+    assert new_yaw == pytest.approx(0.0, abs=1e-9)
+    assert len(estimator._dr.corrections) == 1
+
+
+def test_apply_camera_yaw_hint_blocks_conflicting_single_line_turn_on_straight_route() -> None:
+    estimator = _make_estimator(speed_mps=0.20)
+    lane_observation = LaneObservation(
+        detected_sides=("right",),
+        quality=0.65,
+        measurement_mode="single_line",
+        direct_error_valid=True,
+        heading_error_rad=math.radians(20.0),
+        camera_yaw_hint_rad=math.radians(20.0),
+        camera_yaw_hint_confidence=0.9,
+    )
+    route_context = RouteContext(
+        route_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+        path_psi=0.0,
+        path_heading_change_rad=0.0,
+    )
+
+    correction = estimator._apply_camera_yaw_hint(10.0, 0.0, route_context, lane_observation)
+
+    assert correction == 0.0
+    assert estimator._dr.yaw == pytest.approx(0.0, abs=1e-9)
+    assert estimator.tracking_state.last_yaw_correction_deg == pytest.approx(0.0, abs=1e-9)
+
+
+def test_apply_camera_yaw_hint_allows_single_line_when_route_turn_matches() -> None:
+    estimator = _make_estimator(speed_mps=0.20)
+    lane_observation = LaneObservation(
+        detected_sides=("right",),
+        quality=0.65,
+        measurement_mode="single_line",
+        direct_error_valid=True,
+        heading_error_rad=math.radians(12.0),
+        camera_yaw_hint_rad=math.radians(14.0),
+        camera_yaw_hint_confidence=0.9,
+    )
+    route_context = RouteContext(
+        route_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+        path_psi=math.radians(12.0),
+        path_heading_change_rad=math.radians(18.0),
+    )
+
+    correction = estimator._apply_camera_yaw_hint(10.0, 0.0, route_context, lane_observation)
+
+    assert correction > 0.0
+    assert estimator._dr.yaw > 0.0
+
+
+def test_apply_lane_observation_accepts_valid_two_line_in_waypoint_mode() -> None:
+    estimator = _make_estimator(speed_mps=0.10)
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=-0.20,
+        direct_error_m=-0.20,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+        control_policy_mode="ROUTE_TRACKING",
+        planner_priority_active=True,
+    )
+    route_context = RouteContext(
+        route_active=True,
+        waypoint_mode_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        route_context,
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.05,
+        raw_yaw=0.0,
+    )
+
+    assert reliable is True
+    assert correction_m < 0.0
+    assert new_x == pytest.approx(0.0, abs=1e-9)
+    assert new_y > 0.05
+    assert new_yaw == pytest.approx(0.0, abs=1e-9)
+    assert len(estimator._dr.corrections) == 1
+
+
+def test_apply_lane_observation_accepts_valid_two_line_at_low_route_speed() -> None:
+    estimator = _make_estimator(speed_mps=0.04)
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=-0.20,
+        direct_error_m=-0.20,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+        control_policy_mode="VISUAL_ASSIST",
+    )
+    route_context = RouteContext(
+        route_active=True,
+        waypoint_mode_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        route_context,
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.05,
+        raw_yaw=0.0,
+    )
+
+    assert reliable is True
+    assert correction_m < 0.0
+    assert new_x == pytest.approx(0.0, abs=1e-9)
+    assert new_y > 0.05
     assert new_yaw == pytest.approx(0.0, abs=1e-9)
     assert len(estimator._dr.corrections) == 1

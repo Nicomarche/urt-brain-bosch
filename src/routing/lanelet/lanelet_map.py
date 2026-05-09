@@ -88,6 +88,8 @@ class Lanelet:
     centerline: np.ndarray  # shape (N, 2)
     length_m: float
     attribute: int
+    left_boundary: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), dtype=float))
+    right_boundary: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), dtype=float))
     predecessor_ids: tuple[str, ...] = ()
     successor_ids: tuple[str, ...] = ()
     regulatory_element_ids: tuple[str, ...] = ()
@@ -482,6 +484,12 @@ def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
     # Importación local para romper ciclo: queries.py importa Lanelet.
     from src.routing.lanelet.queries import LaneletKDTreeIndex
 
+    try:
+        from config import LANE_WIDTH_CM as _LANE_WIDTH_CM
+    except Exception:
+        _LANE_WIDTH_CM = 35.0
+    half_width_m = max(0.05, float(_LANE_WIDTH_CM) / 200.0)
+
     # 1. Regulators: primero los explícitos (semantics), luego los
     #    implícitos por atributo de nodo. El primero gana en colisión
     #    porque tiene más data (label, control_type, etc.).
@@ -508,6 +516,10 @@ def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
             centerline = _densify_segment(
                 src_node.x, src_node.y, tgt_node.x, tgt_node.y, step_m=step_m
             )
+            left_boundary, right_boundary = _offset_polyline_bounds(
+                centerline,
+                half_width_m=half_width_m,
+            )
             length = float(np.sum(np.linalg.norm(np.diff(centerline, axis=0), axis=1))) if centerline.shape[0] >= 2 else 0.0
             reg_ids = tuple(
                 regulators_by_node.get(src_id, []) + regulators_by_node.get(tgt_id, [])
@@ -518,6 +530,8 @@ def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
                 source_node_id=str(src_id),
                 target_node_id=str(tgt_id),
                 centerline=centerline,
+                left_boundary=left_boundary,
+                right_boundary=right_boundary,
                 length_m=length,
                 attribute=int(tgt_node.attribute),
                 regulatory_element_ids=reg_ids,
@@ -541,6 +555,8 @@ def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
             source_node_id=ll.source_node_id,
             target_node_id=ll.target_node_id,
             centerline=ll.centerline,
+            left_boundary=ll.left_boundary,
+            right_boundary=ll.right_boundary,
             length_m=ll.length_m,
             attribute=ll.attribute,
             predecessor_ids=predecessors,
@@ -551,3 +567,44 @@ def from_track_graph(track_graph: Any, step_m: float = 0.20) -> LaneletMap:
     # 5. KDTree index.
     kdtree = LaneletKDTreeIndex.from_lanelets(enriched)
     return LaneletMap(lanelets=enriched, regulators=regulators, kdtree_index=kdtree)
+
+
+def _offset_polyline_bounds(
+    polyline: np.ndarray,
+    *,
+    half_width_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    arr = np.asarray(polyline, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] == 0:
+        empty = np.zeros((0, 2), dtype=float)
+        return empty, empty
+    if arr.shape[0] == 1:
+        tangent = np.array([1.0, 0.0], dtype=float)
+        normal = np.array([0.0, 1.0], dtype=float)
+        offset = float(half_width_m) * normal
+        return arr + offset, arr - offset
+
+    tangents = np.zeros_like(arr)
+    tangents[0] = arr[1] - arr[0]
+    tangents[-1] = arr[-1] - arr[-2]
+    for idx in range(1, arr.shape[0] - 1):
+        tangents[idx] = arr[idx + 1] - arr[idx - 1]
+
+    left = np.zeros_like(arr)
+    right = np.zeros_like(arr)
+    for idx, tangent in enumerate(tangents):
+        tx = float(tangent[0])
+        ty = float(tangent[1])
+        norm = math.hypot(tx, ty)
+        if norm <= 1e-9:
+            if idx > 0:
+                left[idx] = left[idx - 1]
+                right[idx] = right[idx - 1]
+                continue
+            tx, ty, norm = 1.0, 0.0, 1.0
+        nx = -ty / norm
+        ny = tx / norm
+        offset = float(half_width_m)
+        left[idx] = np.array([arr[idx, 0] + offset * nx, arr[idx, 1] + offset * ny], dtype=float)
+        right[idx] = np.array([arr[idx, 0] - offset * nx, arr[idx, 1] - offset * ny], dtype=float)
+    return left, right

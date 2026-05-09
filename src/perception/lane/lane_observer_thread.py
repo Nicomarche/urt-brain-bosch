@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import math
 import time
 
+import config as _config
 from src.core.types import LaneObservation, StoplineObservation, VisualStateSnapshot
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
+
+_VISUAL_PATH_QUALITY_BUMP = 0.85
+_VISUAL_PATH_MIN_POINTS = max(2, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8)))
 
 
 class threadLaneObserver(ThreadWithStop):
@@ -25,7 +30,60 @@ class threadLaneObserver(ThreadWithStop):
         self._last_sequence = 0
 
     @staticmethod
+    def _line_side_from_screen_position(snapshot: VisualStateSnapshot) -> tuple[str, ...]:
+        local_payload = snapshot.local_lane_payload or {}
+        lines = dict(local_payload.get("lane_side_lines") or {})
+        try:
+            img_w = float(local_payload.get("frame_width") or 0.0)
+        except (TypeError, ValueError):
+            img_w = 0.0
+        if img_w <= 1.0:
+            return tuple()
+
+        present_lines: list[tuple[str, tuple[float, float, float, float]]] = []
+        for raw_side in ("left", "right"):
+            raw_line = lines.get(raw_side)
+            if not isinstance(raw_line, (list, tuple)) or len(raw_line) < 4:
+                continue
+            try:
+                x1, y1, x2, y2 = (float(raw_line[0]), float(raw_line[1]), float(raw_line[2]), float(raw_line[3]))
+            except (TypeError, ValueError):
+                continue
+            if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+                continue
+            present_lines.append((raw_side, (x1, y1, x2, y2)))
+
+        if not present_lines:
+            return tuple()
+        if len(present_lines) >= 2:
+            return ("left", "right")
+
+        _raw_side, (x1, y1, x2, y2) = present_lines[0]
+        # Usamos el extremo más cercano a la parte baja de la imagen, que es el
+        # punto más estable para decidir si la línea visible cae a la izquierda
+        # o a la derecha del auto en pantalla.
+        line_x = x1 if y1 >= y2 else x2
+        return ("left",) if line_x < (img_w / 2.0) else ("right",)
+
+    @staticmethod
     def _detected_sides(snapshot: VisualStateSnapshot) -> tuple[str, ...]:
+        frame_trace = snapshot.frame_trace or {}
+        lane_observation = frame_trace.get("lane_observation") or {}
+        visible_side = str(lane_observation.get("visible_side", "") or "")
+        if visible_side == "both":
+            return ("left", "right")
+        if visible_side in {"left", "right"}:
+            return (visible_side,)
+
+        debug = frame_trace.get("debug") or {}
+        resolved_side = str(debug.get("single_line_resolved_side", "") or "")
+        if resolved_side in {"left", "right"}:
+            return (resolved_side,)
+
+        line_sides = threadLaneObserver._line_side_from_screen_position(snapshot)
+        if line_sides:
+            return line_sides
+
         local_payload = snapshot.local_lane_payload or {}
         point_counts = dict(local_payload.get("lane_side_point_counts") or {})
         sides = []
@@ -35,14 +93,6 @@ class threadLaneObserver(ThreadWithStop):
             sides.append("right")
         if sides:
             return tuple(sides)
-
-        frame_trace = snapshot.frame_trace or {}
-        lane_observation = frame_trace.get("lane_observation") or {}
-        visible_side = str(lane_observation.get("visible_side", "") or "")
-        if visible_side == "both":
-            return ("left", "right")
-        if visible_side in {"left", "right"}:
-            return (visible_side,)
 
         if frame_trace.get("avg_left_line") is not None and frame_trace.get("avg_right_line") is not None:
             return ("left", "right")
@@ -79,6 +129,17 @@ class threadLaneObserver(ThreadWithStop):
             value = debug.get(key)
             if value is not None:
                 return float(value)
+        local_mask_guidance = debug.get("local_mask_guidance")
+        if isinstance(local_mask_guidance, dict):
+            guidance_mode = str(local_mask_guidance.get("guidance_mode", "") or "")
+            if guidance_mode == "single_line_physical":
+                error_cm = local_mask_guidance.get("error_cm")
+                try:
+                    error_m = float(error_cm) / 100.0 if error_cm is not None else None
+                except (TypeError, ValueError):
+                    error_m = None
+                if error_m is not None and math.isfinite(error_m):
+                    return error_m
         error_m = frame_trace.get("error_m")
         return float(error_m) if error_m is not None else None
 
@@ -129,7 +190,23 @@ class threadLaneObserver(ThreadWithStop):
         debug = frame_trace.get("debug") or {}
         if "direct_error_valid" in debug:
             return bool(debug.get("direct_error_valid"))
-        return measurement_mode == "two_line" and direct_error_m is not None
+        if measurement_mode == "two_line":
+            return direct_error_m is not None
+        if measurement_mode == "single_line":
+            if debug.get("sl_direct_error_m") is not None:
+                return True
+            local_mask_guidance = debug.get("local_mask_guidance")
+            if isinstance(local_mask_guidance, dict):
+                guidance_mode = str(local_mask_guidance.get("guidance_mode", "") or "")
+                if guidance_mode == "single_line_physical":
+                    error_cm = local_mask_guidance.get("error_cm")
+                    try:
+                        error_m = float(error_cm) / 100.0 if error_cm is not None else None
+                    except (TypeError, ValueError):
+                        error_m = None
+                    return error_m is not None and math.isfinite(error_m)
+            return False
+        return False
 
     @staticmethod
     def _quality_from_sides(detected_sides: tuple[str, ...], blind_mode: str | None) -> float:
@@ -142,6 +219,38 @@ class threadLaneObserver(ThreadWithStop):
         if len(detected_sides) == 1:
             return 0.65
         return 0.0
+
+    @staticmethod
+    def _coerce_waypoints(raw) -> tuple[tuple[float, float, float], ...]:
+        if not raw:
+            return ()
+        out: list[tuple[float, float, float]] = []
+        for item in raw:
+            if item is None:
+                continue
+            try:
+                values = tuple(float(v) for v in item)
+            except (TypeError, ValueError):
+                continue
+            if len(values) < 3:
+                continue
+            x, y, psi = values[0], values[1], values[2]
+            if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(psi)):
+                continue
+            out.append((x, y, psi))
+        return tuple(out)
+
+    @staticmethod
+    def _coerce_poly(raw) -> tuple[float, ...] | None:
+        if raw is None:
+            return None
+        try:
+            coeffs = tuple(float(v) for v in raw)
+        except (TypeError, ValueError):
+            return None
+        if not coeffs or not all(math.isfinite(c) for c in coeffs):
+            return None
+        return coeffs
 
     def _build_lane_observation(self, snapshot: VisualStateSnapshot) -> LaneObservation:
         frame_trace = snapshot.frame_trace or {}
@@ -158,8 +267,45 @@ class threadLaneObserver(ThreadWithStop):
             direct_error_m=raw_direct_error_m,
         )
         direct_error_m = raw_direct_error_m if direct_error_valid else None
+
+        visual_payload = frame_trace.get("visual_lane_waypoints") if isinstance(frame_trace, dict) else None
+        center_waypoints_body: tuple[tuple[float, float, float], ...] = ()
+        left_poly_coeffs: tuple[float, ...] | None = None
+        right_poly_coeffs: tuple[float, ...] | None = None
+        lane_width_m: float | None = None
+        extrapolated_side: str | None = None
+        if isinstance(visual_payload, dict):
+            center_waypoints_body = self._coerce_waypoints(visual_payload.get("center_waypoints_body"))
+            left_poly_coeffs = self._coerce_poly(visual_payload.get("left_poly_coeffs"))
+            right_poly_coeffs = self._coerce_poly(visual_payload.get("right_poly_coeffs"))
+            lw = visual_payload.get("lane_width_m")
+            try:
+                lane_width_m = float(lw) if lw is not None else None
+            except (TypeError, ValueError):
+                lane_width_m = None
+            side_value = visual_payload.get("extrapolated_side")
+            if side_value in ("left", "right"):
+                extrapolated_side = side_value
+
+        base_quality = self._quality_from_sides(detected_sides, blind_mode)
+        if len(center_waypoints_body) >= _VISUAL_PATH_MIN_POINTS:
+            quality = max(base_quality, _VISUAL_PATH_QUALITY_BUMP)
+            # Derivar `direct_error_m` desde el primer waypoint cuando hay
+            # waypoints visuales. y_left positivo = vehículo desplazado a la
+            # izquierda del centro de carril → direct_error es el negativo.
+            derived_error = -float(center_waypoints_body[0][1])
+            if direct_error_m is None and math.isfinite(derived_error):
+                direct_error_m = derived_error
+                direct_error_valid = True
+        else:
+            quality = base_quality
+
         observation_debug = dict(debug)
         observation_debug["raw_direct_error_m"] = raw_direct_error_m
+        if center_waypoints_body:
+            observation_debug["visual_waypoint_count"] = len(center_waypoints_body)
+            if extrapolated_side:
+                observation_debug["visual_extrapolated_side"] = extrapolated_side
         return LaneObservation(
             timestamp=float(snapshot.timestamp),
             source_mode=str(snapshot.detection_mode or "unknown"),
@@ -168,7 +314,7 @@ class threadLaneObserver(ThreadWithStop):
             heading_error_rad=float(snapshot.heading_error_rad or 0.0),
             direct_error_m=direct_error_m,
             lane_width_px=self._lane_width_px(snapshot),
-            quality=self._quality_from_sides(detected_sides, blind_mode),
+            quality=quality,
             curve_hint=str(snapshot.curve_state or "STRAIGHT"),
             camera_yaw_hint_rad=snapshot.camera_yaw_hint_rad,
             camera_yaw_hint_confidence=float(snapshot.camera_yaw_hint_confidence or 0.0),
@@ -177,6 +323,11 @@ class threadLaneObserver(ThreadWithStop):
             control_policy_mode=self._control_policy_mode(snapshot),
             planner_priority_active=self._planner_priority_active(snapshot),
             blind_mode=str(blind_mode) if blind_mode else None,
+            center_waypoints_body=center_waypoints_body,
+            left_poly_coeffs=left_poly_coeffs,
+            right_poly_coeffs=right_poly_coeffs,
+            lane_width_m=lane_width_m,
+            extrapolated_side=extrapolated_side,
             debug=observation_debug,
         )
 
@@ -233,6 +384,9 @@ class threadLaneObserver(ThreadWithStop):
             direct_error_valid=bool(lane_observation.direct_error_valid),
             control_policy_mode=lane_observation.control_policy_mode,
             planner_priority_active=bool(lane_observation.planner_priority_active),
+            visual_waypoint_count=len(lane_observation.center_waypoints_body or ()),
+            extrapolated_side=lane_observation.extrapolated_side,
+            lane_width_m=lane_observation.lane_width_m,
         )
 
         if stopline_observation.visible or stopline_observation.pass_event is not None:

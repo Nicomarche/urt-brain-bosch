@@ -349,6 +349,28 @@ def test_route_target_path_keeps_straight_prefix_when_small_gap_would_snap_to_ro
     assert path[8, 1] < path[6, 1]
 
 
+def test_route_target_path_keeps_straight_hold_across_small_yaw_drift_near_threshold() -> None:
+    route = np.array([[0.10 * idx, 0.0, 0.0] for idx in range(30)], dtype=float)
+    pose = (0.0, 0.03, math.radians(8.5))
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=1,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=(0.1, 0.0),
+        target_speed_mps=0.1,
+        horizon_n=20,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "straight_hold"
+    assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
+    assert path[0, 1] == pytest.approx(pose[1], abs=1e-6)
+    assert path[1, 1] >= pose[1] - 0.01
+    assert path[6, 1] < path[2, 1]
+
+
 def test_route_target_path_does_not_insert_backward_micro_segment_at_matched_join() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
@@ -404,3 +426,127 @@ def test_route_target_path_uses_local_recenter_without_dragging_future_turn_bran
     assert path[3, 1] < path[1, 1]
     assert path[5, 1] < path[3, 1]
     assert path[-1, 1] > 5.88
+
+
+def test_local_recenter_tail_does_not_extend_into_future_curve() -> None:
+    # Reproduce el bug del run_20260508_222139: cuando el ego está desviado
+    # lateralmente (local_recenter_only) y la cola del path se extiende más
+    # allá de la ventana straight (0.60 m), incluye la curva del próximo
+    # lanelet. El MPC entonces empieza a doblar antes de tiempo.
+    # Construimos una ruta con suficientes rectos para que `route_is_straight`
+    # pase la ventana de 0.60 m, seguido de una curva. Sin truncado adicional
+    # la cola de 0.60 m del path entraría en la curva. El ego está desplazado
+    # lateralmente para activar `local_recenter_only`.
+    n_straight = 18  # 0.85 m de recto, _is_straight ve los primeros 0.60 m
+    straight = np.column_stack(
+        [
+            np.full(n_straight, 5.0),
+            10.0 - 0.05 * np.arange(n_straight, dtype=float),
+            np.full(n_straight, -math.pi / 2.0),
+        ]
+    )
+    radius = 0.30
+    n_curve = 25
+    theta = np.linspace(0.0, math.pi / 2.0, n_curve)
+    last_straight_y = float(straight[-1, 1])
+    curve = np.column_stack(
+        [
+            5.0 - radius + radius * np.cos(theta),
+            (last_straight_y - radius) + radius * np.sin(theta),
+            -math.pi / 2.0 - theta,
+        ]
+    )
+    route = np.vstack([straight, curve])
+
+    pose = (5.25, 9.95, -math.pi / 2.0)
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=0,
+        start_xy=(pose[0], pose[1]),
+        start_yaw_rad=pose[2],
+        matched_xy=(5.0, 10.0),
+        target_speed_mps=0.10,
+        horizon_n=18,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "connector"
+    # El último yaw del path debe seguir siendo cercano a -pi/2 (sur recto):
+    # si la cola entra en la curva, last_yaw caería hacia -pi (-3.14).
+    last_yaw = float(path[-1, 2])
+    assert abs(last_yaw - (-math.pi / 2.0)) < math.radians(20.0), (
+        f"path se extiende a la curva (last_yaw={last_yaw:.3f} rad)"
+    )
+
+
+def test_local_recenter_connector_uses_heading_to_goal_to_avoid_s_curve() -> None:
+    # Reproduce el bug del run_20260508_224751: el ego está 13 cm al este
+    # del centerline recto, con pose_yaw apuntando sudeste (-1.27 rad).
+    # Antes, el cubic connector usaba pose_yaw como tangente inicial → el
+    # path empezaba yendo sudeste (alejándose del centerline), luego se
+    # curvaba al sur → S-curve. El MPC interpretaba esa S-curve como
+    # "atrás-izquierda" y emitía v_opt<0 quedando atascado.
+    # Con el fix, la tangente inicial se cambia a heading-to-goal: el
+    # primer paso del path ya apunta hacia el goal (sudoeste), no
+    # alejándose, y la S-curve desaparece.
+    n = 30
+    route = np.column_stack(
+        [
+            np.full(n, 5.0),
+            10.0 - 0.05 * np.arange(n, dtype=float),
+            np.full(n, -math.pi / 2.0),
+        ]
+    )
+    pose = (5.13, 9.95, -1.27)  # 13 cm al este, yaw sudeste
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=0,
+        start_xy=(pose[0], pose[1]),
+        start_yaw_rad=pose[2],
+        matched_xy=(5.0, 10.0),
+        target_speed_mps=0.10,
+        horizon_n=18,
+        dt=0.05,
+        return_metadata=True,
+    )
+
+    assert bridge_meta["bridge_mode"] == "connector"
+    # El cubic connector debe arrancar tirando hacia el centerline (oeste),
+    # no hacia el este como con la S-curve. El primer paso post-pose tiene
+    # x menor o igual que la pose; si fuera S-curve, x crecería primero.
+    assert path[1, 0] <= path[0, 0] + 1e-3, (
+        f"path[1].x={path[1, 0]:.4f} > path[0].x={path[0, 0]:.4f}: S-curve detectada"
+    )
+
+
+def test_severely_misaligned_yaw_near_corridor_skips_cubic_connector() -> None:
+    # Reproduce el bug del run_20260508_223858: el robot llega a una junta
+    # de lanelets con yaw mal alineado al corredor (>30°) pero
+    # geométricamente sobre el centerline (gap<4cm). El cubic connector
+    # con esa combinación genera una S-curve apretada y el MPC interpreta
+    # el path como reverse (v_opt<0) y queda atascado en speed=0.
+    # En ese caso debemos saltarnos el cubic y usar matched_route_only.
+    n = 30
+    route = np.column_stack(
+        [
+            5.0 - 0.05 * np.arange(n, dtype=float),  # corredor recto al oeste
+            np.full(n, 3.0),
+            np.full(n, math.pi),  # heading al oeste
+        ]
+    )
+    pose = (4.99, 3.01, -math.pi / 2.0)  # gap≈1cm, yaw apunta al sur
+    path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route,
+        matched_idx=0,
+        start_xy=(pose[0], pose[1]),
+        start_yaw_rad=pose[2],
+        matched_xy=(5.0, 3.0),
+        target_speed_mps=0.10,
+        horizon_n=18,
+        dt=0.05,
+        return_metadata=True,
+    )
+    assert bridge_meta["bridge_mode"] == "matched_route_only", (
+        f"esperaba matched_route_only pero fue {bridge_meta['bridge_mode']}"
+    )

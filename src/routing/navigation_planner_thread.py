@@ -27,8 +27,12 @@ from src.core.messaging.allMessages import NavigationCommand, NavigationStatus
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
-_ROUTE_LANELET_OVERRIDE_ERROR_M = 0.60
-_ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M = 0.10
+try:
+    from config import TRACKING_ROUTE_LANELET_OVERRIDE_ERROR_M as _ROUTE_LANELET_OVERRIDE_ERROR_M
+except Exception:
+    _ROUTE_LANELET_OVERRIDE_ERROR_M = 0.12
+
+_ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M = 0.02
 _ROUTE_LANELET_OVERRIDE_CONFIRM_TICKS = 3
 _ROUTE_LANELET_PROMOTION_MAX_ERROR_M = 0.20
 

@@ -996,6 +996,7 @@ Args:
         # aggressive for AI masks and causes "No lines detected" in curves.
         self.ai_local_roi_height_start = 0.15
         self._last_local_lane_payload = None
+        self._last_frame_size = None
         self._last_local_perception_status = None
         self._last_actuator_status = None
         self._last_local_ai_lane_width_px = None
@@ -1392,6 +1393,260 @@ Args:
 
         return avg_left, avg_right
 
+    def _extract_lane_polynomials_and_waypoints(
+        self,
+        lane_side_points,
+        img_h,
+        img_w,
+        *,
+        heading_hint_rad=None,
+        lateral_hint_m=None,
+        single_line_target_factor=None,
+    ):
+        """Fit polynomials to left/right lane points and emit body-frame waypoints.
+
+        Replica el paradigma de `urt-ref::LaneDetector::find_lanes` +
+        `get_waypoints`: ajusta `bev_x = poly(bev_y)` por lado y muestrea el
+        centro del carril paso a paso a lo largo de `forward_m`. La curvatura
+        del polinomio del lado visible se preserva incluso en single_line —
+        la línea ausente se sintetiza desplazando lateralmente `LANE_WIDTH_M`,
+        sin asumir paralelismo respecto al carril.
+
+        Heading anchor (vital en curvas): empíricamente el polinomio fitteado
+        a los puntos YOLO del local AI sub-estima la rotación del carril en
+        curvas pronunciadas — los puntos cubren un rango corto y la BEV
+        introduce distorsión. Para evitar que el coche "doble demasiado
+        abierto", si llega `heading_hint_rad` (típicamente
+        `self._heading_error`, el heading legacy near-field), se rota
+        rígidamente el conjunto de waypoints alrededor del primer punto
+        para que el heading inicial del path matchee al hint
+        (`-heading_hint_rad` en convención body CCW+). La curvatura del
+        polinomio se preserva en términos relativos.
+
+        Lateral anchor (two_line cases): el legacy `two_line_direct_error_m`
+        se computa en `reference_y` (lookahead ~0.18 m) usando los píxeles
+        de las líneas tal cual los detecta el AI. El polinomio fitteado y
+        evaluado en BEV puede dar un offset diferente porque (a) suaviza
+        ruido de los puntos, (b) la calibración BEV no es perfectamente
+        métrica fuera del strip cercano. Cuando el path resultante
+        sub-corrige (ej. log: legacy -0.188 m vs polinomio -0.117 m), el
+        coche "no le da bola al punto verde" del centro detectado. Si llega
+        `lateral_hint_m` (= -direct_error_m legacy, en convención body
+        y_left), trasladamos el path entero para que el primer waypoint
+        matchee al hint exacto. Preserva la forma/curvatura — solo desplaza
+        rígidamente.
+
+        Args:
+          lane_side_points: dict con `'left'` y `'right'` como listas de
+            `(x_px, y_px)` en pixeles del frame original (perspectiva).
+          img_h, img_w: dimensiones del frame.
+          heading_hint_rad: heading_error_rad legacy (CCW+); si está
+            disponible, ancla el heading inicial del path. None desactiva.
+          lateral_hint_m: y_left target en body (= -direct_error_m); si
+            está disponible y difiere significativamente del polinomio,
+            traslada el path para fijar el primer waypoint en ese valor.
+            None desactiva.
+          single_line_target_factor: en `single_line`, qué fracción del
+            ancho total del carril usar entre la línea visible y el centro
+            reconstruido. `0.50` = centro geométrico; `<0.50` = mantener el
+            path más cerca de la línea visible, como hacía Stanley en curva.
+
+        Returns:
+          dict con claves:
+            - `center_waypoints_body`: lista de `(forward_m, lateral_m_left, psi_rad)`
+            - `left_poly_coeffs`: tupla de coeficientes BEV o None
+            - `right_poly_coeffs`: tupla idem o None
+            - `lane_width_m`: ancho usado al extrapolar
+            - `extrapolated_side`: `'left'` / `'right'` / None
+            - `samples_used`: cuántos puntos por lado entraron al polyfit
+            - `heading_anchor_applied_rad`: rotación aplicada al path para
+              alinear con el hint (0 si no se aplicó)
+            - `lateral_anchor_applied_m`: traslación lateral aplicada al
+              path para alinear con `lateral_hint_m` (0 si no se aplicó)
+          o None si no hay datos suficientes ni transformación BEV.
+        """
+        if not isinstance(lane_side_points, dict):
+            return None
+        if not getattr(self, "perspective_initialized", False):
+            return None
+        bev_cm_per_px = float(getattr(self, "bev_cm_per_px", 0.0) or 0.0)
+        if bev_cm_per_px <= 0.0:
+            return None
+
+        min_points = int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8))
+        density_m = float(getattr(_config, "LANE_VISUAL_WAYPOINT_DENSITY_M", 0.032))
+        n_points = max(2, int(getattr(_config, "LANE_VISUAL_WAYPOINT_COUNT", 40)))
+        deg_high = int(getattr(_config, "LANE_VISUAL_POLY_DEGREE_HIGH", 3))
+        deg_low = int(getattr(_config, "LANE_VISUAL_POLY_DEGREE_LOW", 2))
+        lane_width_cm = float(getattr(self, "lane_width_cm", 35.0) or 35.0)
+        lane_width_m = lane_width_cm / 100.0
+
+        def _project_to_bev(points):
+            cleaned = []
+            for pt in points or ():
+                if pt is None or len(pt) < 2:
+                    continue
+                try:
+                    cleaned.append((float(pt[0]), float(pt[1])))
+                except (TypeError, ValueError):
+                    continue
+            if len(cleaned) < min_points:
+                return np.empty((0, 2), dtype=float)
+            arr = np.asarray(cleaned, dtype=np.float32).reshape(-1, 1, 2)
+            try:
+                bev = cv2.perspectiveTransform(arr, self.perspective_M)
+            except cv2.error:
+                return np.empty((0, 2), dtype=float)
+            if bev is None:
+                return np.empty((0, 2), dtype=float)
+            return bev.reshape(-1, 2).astype(float)
+
+        bev_left = _project_to_bev(lane_side_points.get("left"))
+        bev_right = _project_to_bev(lane_side_points.get("right"))
+
+        def _fit(bev_pts):
+            if bev_pts.shape[0] < min_points:
+                return None
+            ys = bev_pts[:, 1]
+            xs = bev_pts[:, 0]
+            deg = deg_high if bev_pts.shape[0] >= 12 else deg_low
+            try:
+                coeffs = np.polyfit(ys, xs, deg)
+            except (np.linalg.LinAlgError, TypeError, ValueError):
+                return None
+            if not np.all(np.isfinite(coeffs)):
+                return None
+            return tuple(float(c) for c in coeffs), float(ys.min()), float(ys.max())
+
+        left_fit = _fit(bev_left)
+        right_fit = _fit(bev_right)
+        if left_fit is None and right_fit is None:
+            return None
+
+        center_bev_x = float(img_w) / 2.0
+        lane_half_px = (lane_width_m * 100.0 / 2.0) / bev_cm_per_px
+        single_line_center_factor = max(
+            0.20,
+            min(0.50, float(single_line_target_factor if single_line_target_factor is not None else 0.50)),
+        )
+
+        # Determinar el rango de y_bev disponible. Usamos la intersección
+        # cuando hay dos lados (para evitar extrapolar uno) o el rango del
+        # lado disponible cuando hay uno solo.
+        if left_fit is not None and right_fit is not None:
+            y_min = max(left_fit[1], right_fit[1])
+            y_max = min(left_fit[2], right_fit[2])
+            extrapolated_side = None
+        elif left_fit is not None:
+            y_min, y_max = left_fit[1], left_fit[2]
+            extrapolated_side = "right"
+        else:
+            y_min, y_max = right_fit[1], right_fit[2]
+            extrapolated_side = "left"
+        if not (np.isfinite(y_min) and np.isfinite(y_max)) or y_max - y_min <= 1.0:
+            return None
+
+        forward_far_m = (float(img_h) - y_min) * bev_cm_per_px / 100.0
+        forward_near_m = max(0.0, (float(img_h) - y_max) * bev_cm_per_px / 100.0)
+        forward_far_m = max(forward_near_m + density_m, forward_far_m)
+
+        center_pts: list[tuple[float, float]] = []
+        for k in range(n_points):
+            forward_m = forward_near_m + density_m * k
+            if forward_m > forward_far_m:
+                break
+            bev_y = float(img_h) - (forward_m * 100.0 / bev_cm_per_px)
+            if left_fit is not None and right_fit is not None:
+                left_x = float(np.polyval(left_fit[0], bev_y))
+                right_x = float(np.polyval(right_fit[0], bev_y))
+                center_x = 0.5 * (left_x + right_x)
+            elif left_fit is not None:
+                left_x = float(np.polyval(left_fit[0], bev_y))
+                center_x = left_x + (2.0 * single_line_center_factor * lane_half_px)
+            else:
+                right_x = float(np.polyval(right_fit[0], bev_y))
+                center_x = right_x - (2.0 * single_line_center_factor * lane_half_px)
+            lateral_left_m = -(center_x - center_bev_x) * bev_cm_per_px / 100.0
+            center_pts.append((forward_m, lateral_left_m))
+
+        if len(center_pts) < 2:
+            return None
+
+        center_arr = np.asarray(center_pts, dtype=float)
+        diffs = np.diff(center_arr, axis=0)
+        psi = np.zeros(center_arr.shape[0], dtype=float)
+        psi[:-1] = np.arctan2(diffs[:, 1], diffs[:, 0])
+        psi[-1] = psi[-2]
+
+        # Anclaje conservador: si el polinomio sub-rotó (heading inicial mucho
+        # menor que el legacy near-field), corregir hacia el legacy. Si ya
+        # rota igual o más, dejar al polinomio. Esto ataca el caso del
+        # usuario ("dobló demasiado abierto" = under-correction) sin cortar
+        # la curva en frames donde el polinomio captó bien la curvatura.
+        anchor_applied = 0.0
+        if heading_hint_rad is not None and math.isfinite(float(heading_hint_rad)):
+            target_psi = -float(heading_hint_rad)  # CCW+ heading_err → body psi negative
+            initial_psi = float(psi[0])
+            target_mag = abs(target_psi)
+            initial_mag = abs(initial_psi)
+            same_sign = (target_psi * initial_psi) >= 0.0
+            under_rotation = (target_mag - initial_mag) > 0.08  # ~4.6°
+            sign_flip = (target_mag > 0.10) and (not same_sign)
+            if under_rotation or sign_flip:
+                delta_psi = target_psi - initial_psi
+                wrap = math.atan2(math.sin(delta_psi), math.cos(delta_psi))
+                # Rota rígidamente alrededor del primer waypoint — preserva la
+                # curvatura/forma del polinomio, solo gira el path entero.
+                anchor_x, anchor_y = float(center_arr[0, 0]), float(center_arr[0, 1])
+                cos_d = math.cos(wrap)
+                sin_d = math.sin(wrap)
+                rel = center_arr - np.array([anchor_x, anchor_y], dtype=float)
+                rotated = np.empty_like(rel)
+                rotated[:, 0] = rel[:, 0] * cos_d - rel[:, 1] * sin_d
+                rotated[:, 1] = rel[:, 0] * sin_d + rel[:, 1] * cos_d
+                center_arr = rotated + np.array([anchor_x, anchor_y], dtype=float)
+                psi = psi + wrap
+                anchor_applied = float(wrap)
+
+        # Lateral anchor: traslada el path para que el primer waypoint matchee
+        # al lateral_hint_m (= -direct_error_m legacy). Sin esto, en two_line
+        # el polinomio bajo-corrige (mid-bev difiere del midpoint a reference_y
+        # en píxeles que usa el legacy) y el coche "no le da bola al punto
+        # verde". Sólo aplica si la diferencia es significativa para evitar
+        # ruido de polyfit.
+        lateral_anchor_applied = 0.0
+        if lateral_hint_m is not None and math.isfinite(float(lateral_hint_m)):
+            target_y = float(lateral_hint_m)
+            current_y = float(center_arr[0, 1])
+            delta_y = target_y - current_y
+            if abs(delta_y) > 0.02:  # 2 cm threshold — debajo es ruido del fit
+                center_arr[:, 1] += delta_y
+                lateral_anchor_applied = float(delta_y)
+
+        center_waypoints_body = tuple(
+            (float(center_arr[i, 0]), float(center_arr[i, 1]), float(psi[i]))
+            for i in range(center_arr.shape[0])
+        )
+
+        return {
+            "center_waypoints_body": center_waypoints_body,
+            "left_poly_coeffs": left_fit[0] if left_fit is not None else None,
+            "right_poly_coeffs": right_fit[0] if right_fit is not None else None,
+            "lane_width_m": float(lane_width_m),
+            "extrapolated_side": extrapolated_side,
+            "samples_used": {
+                "left": int(bev_left.shape[0]),
+                "right": int(bev_right.shape[0]),
+            },
+            "heading_anchor_applied_rad": anchor_applied,
+            "lateral_anchor_applied_m": lateral_anchor_applied,
+            "single_line_target_factor": (
+                float(single_line_center_factor)
+                if extrapolated_side is not None
+                else None
+            ),
+        }
+
     def _coerce_explicit_line(self, line_value, img_h, img_w):
         """Parse an explicitly provided line segment from the local AI payload."""
         if not isinstance(line_value, (list, tuple)):
@@ -1479,13 +1734,14 @@ Args:
 
         detected_side = detected_sides[0]
         detected_source = str(lane_side_sources.get(detected_side, 'none') or 'none')
-        if not detected_source.startswith('guessed_single'):
-            return normalized_masks, normalized_lines, resolution
-
         candidate_line = left_line if detected_side == 'left' else right_line
         if candidate_line is None:
             return normalized_masks, normalized_lines, resolution
 
+        # Even when the local AI explicitly classifies the single visible line,
+        # that side label can flip in curves/intersections. Re-resolve it against
+        # the recent two-line geometry so rendering and single-line centering stay
+        # attached to the same physical boundary.
         resolved_side, resolution_source = self._resolve_ambiguous_local_lane(
             candidate_line,
             img_h,
@@ -6195,6 +6451,17 @@ Args:
     ):
         """Compute steering with the active controller policy for the current mode.
 
+        DEPRECATED (paradigma urt-ref): la corrección lateral primaria ahora
+        viene de los waypoints visuales (`LaneObservation.center_waypoints_body`)
+        consumidos por el `BehaviorPlanner` → `path_optimizer` (acados MPC).
+        En producción `threadVisualController` instancia este thread con
+        `emit_motor_commands=False` y `tracking_state_direct_writes=False`,
+        así que el resultado de Stanley queda solo en
+        `VisualControlCandidate` para debug. Pendiente: borrar los call-sites
+        y helpers (`_get_stanley_dynamic_terms`, `_predict_swept_path`,
+        `_get_stanley_curve_reference`, `steer_history`) tras validar el path
+        visual en pista. No agregar nuevos consumidores a este método.
+
         For Stanley, inputs are converted to physical units:
         - crosstrack error: pixels -> meters (using lane-width scale), OR
           direct_error_m can be provided as a pre-computed physical error (meters)
@@ -8834,6 +9101,151 @@ Much faster and better for curves than blind sliding window."""
             debug=debug,
         )
 
+    def _resolve_visual_lane_side_points(self, lane_side_points, debug_block):
+        """Remap single-line points onto the geometrically resolved visible side."""
+        if not isinstance(lane_side_points, dict):
+            return None
+
+        normalized = {
+            "left": list(lane_side_points.get("left") or []),
+            "right": list(lane_side_points.get("right") or []),
+        }
+        populated_sides = [side for side in ("left", "right") if normalized[side]]
+        if len(populated_sides) != 1 or not isinstance(debug_block, dict):
+            return normalized
+
+        detected_side = populated_sides[0]
+        resolved_side = str(debug_block.get("single_line_resolved_side", "") or "")
+        if resolved_side not in {"left", "right"}:
+            local_mask_guidance = debug_block.get("local_mask_guidance")
+            if isinstance(local_mask_guidance, dict):
+                lane_observation = local_mask_guidance.get("lane_observation")
+                if isinstance(lane_observation, dict):
+                    resolved_side = str(lane_observation.get("visible_side", "") or "")
+
+        if resolved_side not in {"left", "right"} or resolved_side == detected_side:
+            return normalized
+
+        normalized[resolved_side] = list(normalized[detected_side])
+        normalized[detected_side] = []
+        return normalized
+
+    def _single_line_visual_target_factor(self, debug_block):
+        """Mirror the Stanley-era conservative center reconstruction for visual paths."""
+        if not isinstance(debug_block, dict):
+            return None
+
+        local_mask_guidance = debug_block.get("local_mask_guidance")
+        if not isinstance(local_mask_guidance, dict):
+            return None
+
+        detected_sides = tuple(local_mask_guidance.get("detected_sides", ()) or ())
+        if len(detected_sides) != 1:
+            return None
+
+        projection_debug = local_mask_guidance.get("single_line_projection_debug")
+        curve_context = False
+        prefer_center = local_mask_guidance.get("single_line_prefer_center")
+        if isinstance(projection_debug, dict):
+            curve_context = bool(projection_debug.get("single_line_curve_context", False))
+            if prefer_center is None:
+                prefer_center = projection_debug.get("single_line_prefer_center")
+
+        if bool(prefer_center) or not curve_context:
+            return 0.50
+
+        return max(
+            0.25,
+            min(0.50, float(getattr(self, "single_line_offset_factor", 0.42))),
+        )
+
+    def _compute_visual_lane_waypoints_payload(self):
+        """Build the visual lane waypoint payload from the latest local AI snapshot.
+
+        Wraps `_extract_lane_polynomials_and_waypoints` and packages the result
+        into the dict that `lane_observer_thread` reads from
+        `frame_trace["visual_lane_waypoints"]`. Returns None when there is no
+        usable local lane payload, no perspective calibration, or not enough
+        points to fit a polynomial.
+        """
+        payload = getattr(self, "_last_local_lane_payload", None)
+        if not isinstance(payload, dict):
+            return None
+        lane_side_points = payload.get("lane_side_points")
+        if not isinstance(lane_side_points, dict):
+            return None
+        debug_block = self._last_frame_trace.get("debug") if isinstance(self._last_frame_trace, dict) else None
+        lane_side_points = self._resolve_visual_lane_side_points(lane_side_points, debug_block)
+        if not any(lane_side_points.get(side) for side in ("left", "right")):
+            return None
+        last_size = getattr(self, "_last_frame_size", None) or (0, 0)
+        img_h = int(payload.get("frame_height") or last_size[0] or 0) or None
+        img_w = int(payload.get("frame_width") or last_size[1] or 0) or None
+        if not img_h or not img_w:
+            return None
+        # Heading legacy near-field — empíricamente más confiable que la
+        # derivada del polinomio en curvas, donde el polinomio sub-rota
+        # (puntos cortos + distorsión BEV) y el coche dobla "abierto".
+        heading_hint_rad = None
+        legacy_heading = getattr(self, "_heading_error", None)
+        if legacy_heading is not None:
+            try:
+                hh = float(legacy_heading)
+                if math.isfinite(hh):
+                    heading_hint_rad = hh
+            except (TypeError, ValueError):
+                heading_hint_rad = None
+        # Lateral hint: el direct_error legacy se computa al lookahead con los
+        # píxeles tal cual los detecta el AI (= "punto verde" del overlay).
+        # Si está disponible y es válido, anclar el path ahí — sin esto el
+        # polinomio sub-corrige el offset y el coche se va del carril.
+        lateral_hint_m = None
+        if isinstance(debug_block, dict):
+            for key in ("two_line_direct_error_m", "sl_direct_error_m"):
+                value = debug_block.get(key)
+                if value is None:
+                    continue
+                try:
+                    val = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(val):
+                    lateral_hint_m = -val  # direct_error_m → body y_left
+                    break
+            if lateral_hint_m is None:
+                local_mask_guidance = debug_block.get("local_mask_guidance")
+                if isinstance(local_mask_guidance, dict):
+                    guidance_mode = str(local_mask_guidance.get("guidance_mode", "") or "")
+                    if guidance_mode == "single_line_physical":
+                        error_cm = local_mask_guidance.get("error_cm")
+                        try:
+                            error_m = float(error_cm) / 100.0 if error_cm is not None else None
+                        except (TypeError, ValueError):
+                            error_m = None
+                        if error_m is not None and math.isfinite(error_m):
+                            # Fallback robusto: en algunos frames la guía física
+                            # queda sólo en local_mask_guidance.error_cm y no en
+                            # debug["sl_direct_error_m"]. Reusamos el mismo
+                            # convenio: lateral_hint = -direct_error_m.
+                            lateral_hint_m = -error_m
+        single_line_target_factor = self._single_line_visual_target_factor(debug_block)
+        try:
+            return self._extract_lane_polynomials_and_waypoints(
+                lane_side_points,
+                img_h,
+                img_w,
+                heading_hint_rad=heading_hint_rad,
+                lateral_hint_m=lateral_hint_m,
+                single_line_target_factor=single_line_target_factor,
+            )
+        except Exception as exc:
+            if getattr(self, "show_debug", False):
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m "
+                    f"\033[1;91mWAYPOINT\033[0m - extract failed: {exc}"
+                )
+            return None
+
     def _publish_visual_pipeline_state(
         self,
         candidate,
@@ -8843,7 +9255,10 @@ Much faster and better for curves than blind sliding window."""
         if self.visual_candidate_buffer is not None and candidate is not None:
             self.visual_candidate_buffer.write(candidate, timestamp=float(candidate.timestamp))
         if self.visual_state_buffer is not None:
+            visual_lane_waypoints = self._compute_visual_lane_waypoints_payload()
             frame_trace = dict(self._last_frame_trace or {})
+            if visual_lane_waypoints is not None:
+                frame_trace["visual_lane_waypoints"] = visual_lane_waypoints
             frame_debug = dict(frame_trace.get("debug") or {})
             control_policy_mode = getattr(self, "_control_policy_mode", None)
             planner_priority_active = bool(getattr(self, "_planner_priority_active", False))
@@ -8860,20 +9275,22 @@ Much faster and better for curves than blind sliding window."""
                 else:
                     measurement_mode = "none"
                 frame_debug["measurement_mode"] = measurement_mode
-            if (
-                measurement_mode == "single_line"
-                and (
-                    control_policy_mode in {"ROUTE_TRACKING", "MANEUVER_CONTROL"}
-                    or planner_priority_active
-                )
-            ):
-                frame_debug["direct_error_valid"] = False
-                frame_debug["direct_error_reason"] = "policy_blocked"
-            elif "direct_error_valid" not in frame_debug:
-                frame_debug["direct_error_valid"] = bool(
-                    measurement_mode == "two_line"
-                    and frame_debug.get("two_line_direct_error_m") is not None
-                )
+            if "direct_error_valid" not in frame_debug:
+                if measurement_mode == "two_line":
+                    frame_debug["direct_error_valid"] = bool(
+                        frame_debug.get("two_line_direct_error_m") is not None
+                    )
+                elif measurement_mode == "single_line":
+                    frame_debug["direct_error_valid"] = bool(
+                        frame_debug.get("sl_direct_error_m") is not None
+                    )
+                else:
+                    frame_debug["direct_error_valid"] = False
+            if frame_debug.get("direct_error_valid", False):
+                if measurement_mode == "two_line":
+                    frame_debug.setdefault("direct_error_reason", "two_line_physical")
+                elif measurement_mode == "single_line":
+                    frame_debug.setdefault("direct_error_reason", "single_line_physical")
             if not frame_debug.get("direct_error_valid", False):
                 frame_debug.setdefault("direct_error_reason", "no_lateral_measurement")
             frame_trace["debug"] = frame_debug
@@ -9978,6 +10395,7 @@ Much faster and better for curves than blind sliding window."""
         messages) no observe cadenas legacy persistidas en config.
         """
         height, width = frame.shape[:2]
+        self._last_frame_size = (int(height), int(width))
         if self.detection_mode != DetectionMode.AI_LOCAL.value:
             self.detection_mode = DetectionMode.AI_LOCAL.value
         self._set_frame_trace({

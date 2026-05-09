@@ -352,6 +352,8 @@ def _build_lanelets(
                 "centerline": centerline,
                 "attr": int(attr),
                 "regulatory_ids": regulatory_ids,
+                "left_boundary": np.asarray(left, dtype=float),
+                "right_boundary": np.asarray(right, dtype=float),
                 "left_node_ids": left_node_ids,
                 "right_node_ids": right_node_ids,
             }
@@ -378,6 +380,8 @@ def _build_lanelets(
         centerline = np.asarray(spec["centerline"], dtype=float)
         attr = int(spec["attr"])
         regulatory_ids = tuple(spec["regulatory_ids"])
+        left_boundary = np.asarray(spec["left_boundary"], dtype=float)
+        right_boundary = np.asarray(spec["right_boundary"], dtype=float)
         length = float(np.sum(np.linalg.norm(np.diff(centerline, axis=0), axis=1)))
         lanelets[lanelet_id] = Lanelet(
             lanelet_id=str(lanelet_id),
@@ -386,6 +390,8 @@ def _build_lanelets(
             centerline=centerline,
             length_m=length,
             attribute=int(attr),
+            left_boundary=left_boundary,
+            right_boundary=right_boundary,
             predecessor_ids=(),
             successor_ids=(),
             regulatory_element_ids=tuple(regulatory_ids),
@@ -432,6 +438,8 @@ def _build_lanelets(
             centerline=lanelet.centerline,
             length_m=lanelet.length_m,
             attribute=lanelet.attribute,
+            left_boundary=lanelet.left_boundary,
+            right_boundary=lanelet.right_boundary,
             predecessor_ids=tuple(predecessors),
             successor_ids=tuple(successors),
             regulatory_element_ids=lanelet.regulatory_element_ids,

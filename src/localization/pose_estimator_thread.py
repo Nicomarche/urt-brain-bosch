@@ -38,6 +38,62 @@ from src.core.messaging.allMessages import Localisation
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
+_WAYPOINT_TWO_LINE_LATERAL_RELOCALIZATION_SPEED_MIN_MPS = 0.02
+_SINGLE_LINE_ROUTE_STRAIGHT_TOL_RAD = math.radians(6.0)
+_SINGLE_LINE_ROUTE_DIRECTION_MARGIN_RAD = math.radians(10.0)
+_SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD = math.radians(18.0)
+
+
+def _wrap_angle(angle_rad: float) -> float:
+    angle = float(angle_rad)
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+
+
+def _single_line_direction_conflicts_with_route(
+    route_context: RouteContext | None,
+    lane_observation: LaneObservation | None,
+    *,
+    reference_yaw: float,
+) -> bool:
+    if route_context is None or lane_observation is None:
+        return False
+    if str(getattr(lane_observation, "measurement_mode", "none") or "none") != "single_line":
+        return False
+
+    route_path_yaw = float(
+        getattr(route_context, "path_psi", getattr(route_context.matched_pose, "yaw", reference_yaw)) or reference_yaw
+    )
+    route_delta = _wrap_angle(route_path_yaw - float(reference_yaw))
+
+    heading_hint = None
+    cam_yaw = getattr(lane_observation, "camera_yaw_hint_rad", None)
+    cam_conf = float(getattr(lane_observation, "camera_yaw_hint_confidence", 0.0) or 0.0)
+    if cam_yaw is not None and cam_conf > 0.3:
+        heading_hint = _wrap_angle(float(cam_yaw) - float(reference_yaw))
+    else:
+        try:
+            heading_hint = float(getattr(lane_observation, "heading_error_rad", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            heading_hint = None
+
+    if heading_hint is None:
+        return False
+
+    if abs(route_delta) <= _SINGLE_LINE_ROUTE_STRAIGHT_TOL_RAD:
+        return abs(float(heading_hint)) > _SINGLE_LINE_ROUTE_DIRECTION_MARGIN_RAD
+
+    if (
+        abs(float(heading_hint)) > _SINGLE_LINE_ROUTE_STRAIGHT_TOL_RAD
+        and math.copysign(1.0, float(heading_hint)) != math.copysign(1.0, float(route_delta))
+    ):
+        return True
+
+    return abs(_wrap_angle(float(heading_hint) - float(route_delta))) > _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD
+
 
 class threadPoseEstimator(threadTracking):
     """Dead-reckoning pose estimator with visual and semantic corrections."""
@@ -127,6 +183,7 @@ class threadPoseEstimator(threadTracking):
         self,
         now: float,
         raw_yaw: float,
+        route_context: RouteContext | None,
         lane_observation: LaneObservation | None,
     ) -> float:
         if lane_observation is None:
@@ -150,6 +207,12 @@ class threadPoseEstimator(threadTracking):
         cam_yaw = lane_observation.camera_yaw_hint_rad
         cam_conf = float(lane_observation.camera_yaw_hint_confidence or 0.0)
         if cam_yaw is None or cam_conf <= 0.3:
+            return 0.0
+        if _single_line_direction_conflicts_with_route(
+            route_context,
+            lane_observation,
+            reference_yaw=raw_yaw,
+        ):
             return 0.0
         alpha = 0.08 * cam_conf
         delta = float(cam_yaw) - float(raw_yaw)
@@ -176,11 +239,18 @@ class threadPoseEstimator(threadTracking):
             return raw_x, raw_y, raw_yaw, 0.0, False
         if lane_observation is None:
             return raw_x, raw_y, raw_yaw, 0.0, False
-        if route_context.waypoint_mode_active:
+        supports_lateral_relocalization = lane_observation_supports_lateral_relocalization(
+            lane_observation
+        )
+        if not supports_lateral_relocalization:
             return raw_x, raw_y, raw_yaw, 0.0, False
-        if abs(self._last_speed) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
-            return raw_x, raw_y, raw_yaw, 0.0, False
-        if not lane_observation_supports_lateral_relocalization(lane_observation):
+        min_speed_mps = float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS)
+        if bool(route_context.waypoint_mode_active):
+            min_speed_mps = min(
+                min_speed_mps,
+                float(_WAYPOINT_TWO_LINE_LATERAL_RELOCALIZATION_SPEED_MIN_MPS),
+            )
+        if abs(self._last_speed) < min_speed_mps:
             return raw_x, raw_y, raw_yaw, 0.0, False
 
         measurement = lane_observation.direct_error_m
@@ -477,7 +547,7 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized = False
             stopline_match = None
         else:
-            yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, lane_observation)
+            yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, route_context, lane_observation)
             if abs(yaw_correction_rad) > 1e-9:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
 

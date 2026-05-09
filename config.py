@@ -14,6 +14,18 @@ _SIM_MODE = _os.environ.get("URT_SIM_MODE", "1" if _sys.platform == "darwin" els
 LANE_WIDTH_CM = 35.0           # carril: distancia entre bordes interiores de líneas
 LINE_WIDTH_CM = 2.0            # ancho de las marcas viales pintadas
 
+# ── Visual lane → MPC reference (paradigma urt-ref) ─────────────────────────
+# La percepción ajusta polinomios a las líneas detectadas y emite waypoints
+# del centro de carril; esos waypoints son la referencia primaria del MPC en
+# `LaneKeep`. Mantienen la curvatura del polinomio incluso cuando se ve una
+# sola línea (la otra se sintetiza desplazando lateralmente LANE_WIDTH_M).
+LANE_VISUAL_WAYPOINT_DENSITY_M = 0.032          # paso entre waypoints generados (≈ urt-ref)
+LANE_VISUAL_WAYPOINT_COUNT = 40                 # cantidad mínima de waypoints emitidos
+LANE_VISUAL_MIN_POLY_POINTS = 8                 # mínimo de muestras por línea para fittear
+LANE_VISUAL_POLY_DEGREE_HIGH = 3                # grado del polinomio con ≥12 muestras
+LANE_VISUAL_POLY_DEGREE_LOW = 2                 # grado con <12 muestras (evita overshoot)
+LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH = 0.55 # quality mínima para usar waypoints como path
+
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
 PARKING_SPOT_WIDTH_CM  = 35.0  # ancho del espacio de estacionamiento
@@ -527,6 +539,24 @@ BEHAVIOR_NOMINAL_SPEED_MPS = 0.10   # 10 cm/s en AUTO.
 # scenario puede emitir velocidades por encima.
 BEHAVIOR_MAX_SPEED_MPS = 0.10       # cap absoluto de AUTO = 10 cm/s
 
+# Geometría y containment lateral del planner. Los valores están escalados
+# para BFMC (carril 35 cm, vehículo ~19 cm de ancho) y se usan para exigir
+# que la referencia publicada al MPC permanezca dentro del corredor del mapa.
+BEHAVIOR_VEHICLE_WIDTH_M = 0.19
+BEHAVIOR_CONTAINMENT_CLEARANCE_M = 0.01
+BEHAVIOR_CONTAINMENT_WARN_ERROR_M = 0.05
+BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M = 0.07
+BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
+
+# Stuck-recovery del LaneContainmentRule. Si el robot lleva varios ticks
+# en crawl (4 cm/s) sin que el error lateral decrezca, sube temporalmente
+# el cap a RECOVERY_SPEED_MPS para que pueda maniobrar y volver al carril.
+# A 4 cm/s con steering al máximo el yaw rate alcanza pero la traslación
+# es tan lenta que el centerline del próximo lanelet rota más rápido que
+# el ego avanza → loop estable de crawl. STUCK_TICKS=40 ≈ 2 s a 20 Hz.
+BEHAVIOR_CONTAINMENT_STUCK_TICKS = 40
+BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
+
 # Aceleración máxima del ramp de velocidad en el BehaviorPlanner [m/s²].
 # 0.25 m/s² → llega a 0.15 m/s en ~0.6 s (12 ticks a 20 Hz).
 BEHAVIOR_ACCEL_MPS2 = 0.25
@@ -581,6 +611,12 @@ TRACKING_VISUAL_LANE_RELOCALIZATION_GAIN = 0.15
 TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
 TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
 TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
+
+# Recovery del matcher/ruta a escala BFMC. En un carril de 35 cm no podemos
+# esperar 60-75 cm de error para intentar volver a la ruta.
+TRACKING_ROUTE_RECOVERY_ERROR_M = 0.10
+TRACKING_ROUTE_GLOBAL_RECOVERY_ERROR_M = 0.14
+TRACKING_ROUTE_LANELET_OVERRIDE_ERROR_M = 0.12
 
 # Reanclaje semántico: cuando una señal esperada coincide cerca del próximo
 # evento de ruta, el DR puede resetearse a la pose matcheada del mapa.

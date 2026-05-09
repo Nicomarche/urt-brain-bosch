@@ -11,6 +11,8 @@ import pytest
 from src.core.types.pose import Pose2D
 from src.routing.lanelet.attributes import ATTR_NORMAL
 from src.routing.lanelet.lanelet_map import from_track_graph
+from src.routing import navigation_planner_thread as nav_thread_module
+from src.routing import route_planner as route_planner_module
 from src.routing.navigation_planner_thread import threadNavigationPlanner
 from src.routing.route_planner import PathUpdate
 
@@ -277,3 +279,9 @@ def test_resolve_lanelet_context_does_not_override_to_lanelet_outside_active_rou
     assert current_lanelet_id == "route_a->route_b"
     assert next_lanelet_ids == ("route_b->route_c",)
     assert getattr(thread, "_route_override_candidate_hits", 0) == 0
+
+
+def test_bfmc_route_recovery_thresholds_are_scaled_to_lane_width() -> None:
+    assert route_planner_module._MAP_MATCH_RECOVERY_ERROR_M == pytest.approx(0.10, abs=1e-9)
+    assert route_planner_module._MAP_MATCH_GLOBAL_RECOVERY_ERROR_M == pytest.approx(0.14, abs=1e-9)
+    assert nav_thread_module._ROUTE_LANELET_OVERRIDE_ERROR_M == pytest.approx(0.12, abs=1e-9)

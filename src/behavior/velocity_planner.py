@@ -8,6 +8,7 @@ import numpy as np
 
 from src.behavior.context import PlanningContext
 from src.core.types.behavior import BehaviorOutput, BehaviorPathPlan
+from src.utils.live_log import live_log
 
 _STOPLINE_STOP_RANGE_M = 5.0
 _CROSSWALK_SLOWDOWN_RANGE_M = 4.0
@@ -16,6 +17,46 @@ _INTERSECTION_SPEED_MPS = 0.40
 _INTERSECTION_RANGE_M = 6.0
 _CURVATURE_A_LAT_MAX_MPS2 = 0.45
 _CURVATURE_SPEED_FLOOR_MPS = 0.05
+_LANE_CONTAINMENT_WARN_CAP_MPS = 0.06
+
+try:
+    from config import (
+        BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M as _BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M,
+    )
+except Exception:
+    _BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M = 0.07
+
+try:
+    from config import (
+        BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS as _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS,
+    )
+except Exception:
+    _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
+
+try:
+    from config import (
+        BEHAVIOR_CONTAINMENT_WARN_ERROR_M as _BEHAVIOR_CONTAINMENT_WARN_ERROR_M,
+    )
+except Exception:
+    _BEHAVIOR_CONTAINMENT_WARN_ERROR_M = 0.05
+
+try:
+    from config import (
+        BEHAVIOR_CONTAINMENT_STUCK_TICKS as _BEHAVIOR_CONTAINMENT_STUCK_TICKS,
+    )
+except Exception:
+    _BEHAVIOR_CONTAINMENT_STUCK_TICKS = 40
+
+try:
+    from config import (
+        BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS as _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS,
+    )
+except Exception:
+    _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
+
+# Histeresis para que el error tenga que decrecer al menos 5 mm por tick
+# para considerarse "el robot está recuperando"; valores menores son ruido.
+_LANE_CONTAINMENT_DECREASE_EPS_M = 0.005
 
 
 @dataclass(frozen=True)
@@ -36,6 +77,7 @@ class VelocityRule(Protocol):
         target_path: np.ndarray,
         ctx: PlanningContext,
         stop_required: bool,
+        planning_notes: dict,
     ) -> VelocityRuleResult: ...
 
 
@@ -49,6 +91,7 @@ class GlobalSpeedCapRule:
         target_path: np.ndarray,
         ctx: PlanningContext,
         stop_required: bool,
+        planning_notes: dict,
     ) -> VelocityRuleResult:
         capped = np.minimum(speed_profile, float(ctx.max_speed_mps))
         triggered = bool(np.any(capped < speed_profile - 1e-9))
@@ -58,6 +101,123 @@ class GlobalSpeedCapRule:
             notes={"kind": self.name, "cap_mps": float(ctx.max_speed_mps)},
             triggered=triggered,
         )
+
+
+class LaneContainmentRule:
+    name = "lane_containment"
+
+    def __init__(self) -> None:
+        # Estado para detectar el robot atascado en crawl.
+        # Si el error lateral no decrece por _BEHAVIOR_CONTAINMENT_STUCK_TICKS
+        # ticks consecutivos en crawl, escalamos a recovery_speed para que
+        # la cinemática (v · tan δ / L) pueda recuperar el centerline.
+        self._prev_effective_error_m: float = 0.0
+        self._stuck_tick_count: int = 0
+        self._recovery_active: bool = False
+
+    def apply(
+        self,
+        *,
+        speed_profile: np.ndarray,
+        target_path: np.ndarray,
+        ctx: PlanningContext,
+        stop_required: bool,
+        planning_notes: dict,
+    ) -> VelocityRuleResult:
+        speed = np.array(speed_profile, copy=True, dtype=float)
+        visual_error_m = _visual_lane_error_m(ctx)
+        corridor_error_m = abs(float(planning_notes.get("ego_corridor_error_m", 0.0) or 0.0))
+        effective_error_m = max(corridor_error_m, abs(visual_error_m) if visual_error_m is not None else 0.0)
+        touches_bound = bool(planning_notes.get("corridor_touches_bound", False))
+        used_prev_safe_path = bool(planning_notes.get("used_prev_safe_path", False))
+        infeasible_ticks = int(planning_notes.get("containment_infeasible_ticks", 0) or 0)
+        stop_after_ticks = int(planning_notes.get("containment_stop_after_ticks", 4) or 4)
+        first_infeasible_index = planning_notes.get("first_infeasible_index")
+
+        trigger_warn = effective_error_m >= float(_BEHAVIOR_CONTAINMENT_WARN_ERROR_M)
+        trigger_crawl = (
+            effective_error_m >= float(_BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M)
+            or touches_bound
+            or used_prev_safe_path
+        )
+
+        # Tracking de stuck-recovery. Solo cuenta cuando estamos en crawl;
+        # fuera de crawl, reset total.
+        if trigger_crawl:
+            decreased = effective_error_m < (
+                self._prev_effective_error_m - _LANE_CONTAINMENT_DECREASE_EPS_M
+            )
+            if decreased:
+                self._stuck_tick_count = 0
+            else:
+                self._stuck_tick_count += 1
+        else:
+            self._stuck_tick_count = 0
+            self._recovery_active = False
+
+        # Entrar a recovery si llevamos demasiados ticks atascados.
+        recovery_was_active = self._recovery_active
+        if self._stuck_tick_count >= int(_BEHAVIOR_CONTAINMENT_STUCK_TICKS):
+            self._recovery_active = True
+
+        # Salir de recovery solo cuando el error baja del threshold de crawl
+        # (histeresis: no oscilar en el límite).
+        if self._recovery_active and effective_error_m < float(_BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M):
+            self._recovery_active = False
+            self._stuck_tick_count = 0
+
+        if self._recovery_active != recovery_was_active:
+            live_log(
+                "velocity_planner",
+                event="containment_recovery",
+                active=bool(self._recovery_active),
+                effective_error_m=float(effective_error_m),
+                stuck_tick_count=int(self._stuck_tick_count),
+                crawl_speed_mps=float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS),
+                recovery_speed_mps=float(_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS),
+            )
+
+        self._prev_effective_error_m = float(effective_error_m)
+
+        if not trigger_warn and not trigger_crawl and infeasible_ticks <= 0:
+            return VelocityRuleResult(speed, bool(stop_required), {}, False)
+
+        stop_req = bool(stop_required)
+        note: dict[str, object] = {
+            "kind": self.name,
+            "effective_error_m": float(effective_error_m),
+            "corridor_error_m": float(corridor_error_m),
+            "visual_error_m": float(visual_error_m) if visual_error_m is not None else None,
+            "touches_bound": bool(touches_bound),
+            "used_prev_safe_path": bool(used_prev_safe_path),
+            "containment_infeasible_ticks": int(infeasible_ticks),
+            "stuck_tick_count": int(self._stuck_tick_count),
+        }
+
+        if (
+            infeasible_ticks >= stop_after_ticks
+            and first_infeasible_index is not None
+            and speed.shape[0] > 0
+        ):
+            zero_from_idx = max(0, min(speed.shape[0] - 1, int(first_infeasible_index) - 1))
+            speed[zero_from_idx:] = 0.0
+            stop_req = True
+            note["mode"] = "stop"
+            note["zero_from_idx"] = int(zero_from_idx)
+            return VelocityRuleResult(speed, stop_req, note, True)
+
+        if self._recovery_active:
+            cap_mps = float(_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS)
+            note["mode"] = "stuck_recovery"
+        elif trigger_crawl or infeasible_ticks > 0:
+            cap_mps = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
+            note["mode"] = "crawl"
+        else:
+            cap_mps = float(_LANE_CONTAINMENT_WARN_CAP_MPS)
+            note["mode"] = "warn"
+        note["cap_mps"] = float(cap_mps)
+        speed = np.minimum(speed, cap_mps)
+        return VelocityRuleResult(speed, stop_req, note, True)
 
 
 class CurvatureConstraintRule:
@@ -70,6 +230,7 @@ class CurvatureConstraintRule:
         target_path: np.ndarray,
         ctx: PlanningContext,
         stop_required: bool,
+        planning_notes: dict,
     ) -> VelocityRuleResult:
         kappas = _compute_curvature(target_path)
         if kappas.size == 0:
@@ -108,6 +269,7 @@ class RegulatoryElementRule:
         target_path: np.ndarray,
         ctx: PlanningContext,
         stop_required: bool,
+        planning_notes: dict,
     ) -> VelocityRuleResult:
         speed = np.array(speed_profile, copy=True, dtype=float)
         notes: list[dict] = []
@@ -166,6 +328,7 @@ class BehaviorVelocityPlanner:
             rules
             or [
                 GlobalSpeedCapRule(),
+                LaneContainmentRule(),
                 CurvatureConstraintRule(),
                 RegulatoryElementRule(),
             ]
@@ -178,6 +341,7 @@ class BehaviorVelocityPlanner:
         target_path: np.ndarray,
         drivable_left_bound: np.ndarray,
         drivable_right_bound: np.ndarray,
+        optimizer_notes: dict | None = None,
         ctx: PlanningContext,
     ) -> BehaviorOutput:
         speed = _fit_speed_profile(
@@ -188,6 +352,8 @@ class BehaviorVelocityPlanner:
         )
         stop_required = bool(path_plan.stop_required)
         notes = dict(path_plan.notes)
+        if optimizer_notes:
+            notes.update(dict(optimizer_notes))
         notes["turn_signal"] = str(path_plan.turn_signal)
         notes["drivable_left_bound"] = np.asarray(drivable_left_bound, dtype=float)
         notes["drivable_right_bound"] = np.asarray(drivable_right_bound, dtype=float)
@@ -199,6 +365,7 @@ class BehaviorVelocityPlanner:
                 target_path=target_path,
                 ctx=ctx,
                 stop_required=stop_required,
+                planning_notes=notes,
             )
             speed = np.asarray(result.speed_profile, dtype=float)
             stop_required = bool(result.stop_required)
@@ -261,6 +428,25 @@ def _ramp_to_zero(speed: np.ndarray, *, dt: float, distance_to_stop_m: float) ->
     out[: ramp_end + 1] = np.minimum(out[: ramp_end + 1], ramp)
     out[ramp_end + 1 :] = 0.0
     return out
+
+
+def _visual_lane_error_m(ctx: PlanningContext) -> float | None:
+    lane_observation = getattr(ctx, "lane_observation", None)
+    if lane_observation is None:
+        return None
+    if not bool(getattr(lane_observation, "direct_error_valid", False)):
+        return None
+    if str(getattr(lane_observation, "measurement_mode", "none")) != "two_line":
+        return None
+    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < 0.8:
+        return None
+    value = getattr(lane_observation, "direct_error_m", None)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _compute_curvature(target_path: np.ndarray) -> np.ndarray:

@@ -45,6 +45,10 @@ from src.core.types.behavior import BehaviorOutput, ScenarioName
 from src.core.types.perception import LaneObservation, StoplineObservation, TrackedObject
 from src.core.types.pose import PoseEstimate
 from src.core.types.routing import RouteContext
+from src.routing.lanelet.runtime_loader import (
+    lanelet_map_covers_ids,
+    load_tracking_lanelet_map,
+)
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
 
@@ -52,6 +56,11 @@ if TYPE_CHECKING:
     from src.behavior.planner import BehaviorPlanner
     from src.core.messaging.buffers import LatestValueBuffer
     from src.routing.lanelet.lanelet_map import LaneletMap
+
+
+def _load_lanelet_map_from_tracking_config(*, force_reload: bool = False):
+    """Load the Lanelet map directly from tracking config as a recovery path."""
+    return load_tracking_lanelet_map(force_reload=force_reload)
 
 
 class threadBehaviorPlanner(ThreadWithStop):
@@ -86,6 +95,8 @@ class threadBehaviorPlanner(ThreadWithStop):
         self.queuesList = queuesList
         self._planner = planner
         self._lanelet_map = lanelet_map
+        self._lanelet_map_last_recovery_attempt_mono = 0.0
+        self._lanelet_map_recovery_retry_s = 1.0
         self._pose_buf = pose_estimate_buffer
         self._route_buf = route_context_buffer
         self._lane_buf = lane_observation_buffer
@@ -128,6 +139,83 @@ class threadBehaviorPlanner(ThreadWithStop):
         self._last_status_publish_t = 0.0
         self._status_period_s = 0.5  # 2 Hz al dashboard alcanza
         self._last_plan_dt_ms = 0.0
+
+    def _route_corridor_ids(self, route: RouteContext | None) -> tuple[str, ...]:
+        if route is None:
+            return ()
+        ordered: list[str] = []
+        if route.current_lanelet_id:
+            ordered.append(str(route.current_lanelet_id))
+        ordered.extend(str(item) for item in (route.next_lanelet_ids or ()) if str(item))
+        return tuple(dict.fromkeys(ordered))
+
+    def _ensure_lanelet_map(self, route: RouteContext | None = None) -> None:
+        corridor_ids = self._route_corridor_ids(route)
+        missing_map = self._lanelet_map is None
+        missing_route_geometry = bool(corridor_ids) and not lanelet_map_covers_ids(
+            self._lanelet_map,
+            corridor_ids,
+        )
+        if not missing_map and not missing_route_geometry:
+            return
+        now_mono = time.monotonic()
+        if (
+            self._lanelet_map_last_recovery_attempt_mono > 0.0
+            and (now_mono - self._lanelet_map_last_recovery_attempt_mono) < self._lanelet_map_recovery_retry_s
+        ):
+            return
+        self._lanelet_map_last_recovery_attempt_mono = now_mono
+        force_reload = bool(missing_route_geometry)
+        try:
+            try:
+                recovered_map = _load_lanelet_map_from_tracking_config(force_reload=force_reload)
+            except TypeError:
+                recovered_map = _load_lanelet_map_from_tracking_config()
+        except Exception as exc:
+            live_log(
+                "behavior_planner",
+                event="lanelet_map_recovery",
+                recovered=False,
+                reason="exception",
+                detail=str(exc),
+                current_lanelet_id=(route.current_lanelet_id if route is not None else None),
+                requested_lanelet_ids=list(corridor_ids),
+            )
+            return
+        if recovered_map is None:
+            live_log(
+                "behavior_planner",
+                event="lanelet_map_recovery",
+                recovered=False,
+                reason="tracking_config_unavailable",
+                current_lanelet_id=(route.current_lanelet_id if route is not None else None),
+                requested_lanelet_ids=list(corridor_ids),
+            )
+            return
+        if corridor_ids and not lanelet_map_covers_ids(recovered_map, corridor_ids):
+            live_log(
+                "behavior_planner",
+                event="lanelet_map_recovery",
+                recovered=False,
+                reason="route_lanelet_missing",
+                current_lanelet_id=(route.current_lanelet_id if route is not None else None),
+                requested_lanelet_ids=list(corridor_ids),
+            )
+            return
+        self._lanelet_map = recovered_map
+        try:
+            lanelet_count = int(len(recovered_map))
+        except Exception:
+            lanelet_count = 0
+        live_log(
+            "behavior_planner",
+            event="lanelet_map_recovery",
+            recovered=True,
+            reason=("route_lanelet_reload" if force_reload else "tracking_config_load"),
+            lanelet_count=lanelet_count,
+            current_lanelet_id=(route.current_lanelet_id if route is not None else None),
+            requested_lanelet_ids=list(corridor_ids),
+        )
 
     # ----------------------------------------------------------------
     # Loop principal
@@ -325,6 +413,7 @@ class threadBehaviorPlanner(ThreadWithStop):
             # el `start_lanelet_id` del scenario evaluará None y caerá en
             # fallback. Es válido: el bootstrap necesita primero NavPlanner.
             route = RouteContext()
+        self._ensure_lanelet_map(route)
 
         lane_obs = self._lane_buf.read_latest() if self._lane_buf is not None else None
         if not isinstance(lane_obs, LaneObservation):

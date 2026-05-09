@@ -40,12 +40,24 @@ if TYPE_CHECKING:
 
 _STRAIGHT_ROUTE_HEADING_TOL_DEG = 8.0
 _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG = 8.0
+_STRAIGHT_HOLD_YAW_STABILITY_MARGIN_DEG = 1.0
 _STRAIGHT_HOLD_PREFIX_M = 0.45
 _STRAIGHT_HOLD_ROUTE_WINDOW_M = 0.60
 _STRAIGHT_HOLD_EARLY_RECENTER_FORWARD_M = 0.45
 _STRAIGHT_HOLD_EARLY_RECENTER_LATERAL_M = 0.005
 _ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M = 0.12
 _ROUTE_LOCAL_RECENTER_TAIL_M = 0.60
+# Si el ego está casi sobre el corredor (gap pequeño) pero su yaw está muy
+# desalineado con la dirección del corredor (>30°), el cubic connector
+# genera S-curves apretadas que el MPC interpreta como reverse: pide
+# v_opt < 0 y queda atascado en speed=0 con steering al máximo.
+# Saltamos el connector y usamos matched_route_only para que el MPC
+# alinee el yaw siguiendo el corredor crudo.
+_CONNECTOR_NEAR_CORRIDOR_GAP_M = 0.04
+_CONNECTOR_MAX_YAW_DELTA_DEG = 30.0
+_VISUAL_PREFIX_MIN_FORWARD_M = 0.02
+_VISUAL_PREFIX_NEAR_ORIGIN_M = 0.02
+_VISUAL_PREFIX_MIN_TANGENT_X_M = -0.001
 
 
 def build_target_path(
@@ -220,11 +232,21 @@ def build_target_path_from_route(
         window_m=_STRAIGHT_HOLD_ROUTE_WINDOW_M,
         heading_tol_deg=_STRAIGHT_ROUTE_HEADING_TOL_DEG,
     )
+    # En tramos rectos, una deriva chica del yaw estimado alrededor del
+    # umbral puede hacer flip-flop frame a frame entre straight_hold y
+    # connector aunque la geometria de la ruta no haya cambiado. Le damos
+    # un margen extra chico para preferir la referencia recta, que es la
+    # mas estable en este caso.
+    straight_hold_yaw_limit_deg = (
+        _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG + _STRAIGHT_HOLD_YAW_STABILITY_MARGIN_DEG
+        if route_is_straight
+        else _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG
+    )
     local_recenter_only = (
         route_is_straight
         and (
             pose_gap_m > _ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M
-            or yaw_delta_deg > _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG
+            or yaw_delta_deg > straight_hold_yaw_limit_deg
         )
     )
     use_straight_hold = (
@@ -232,7 +254,11 @@ def build_target_path_from_route(
         and route_corridor_xy.shape[0] >= 2
         and (pose_gap_m > 0.02 or early_recenter_snap)
         and pose_gap_m <= _ROUTE_LOCAL_RECENTER_MAX_POSE_GAP_M
-        and yaw_delta_rad <= math.radians(_STRAIGHT_HOLD_MAX_YAW_DELTA_DEG)
+        and yaw_delta_rad <= math.radians(straight_hold_yaw_limit_deg)
+    )
+    yaw_severely_misaligned_near_corridor = (
+        pose_gap_m < _CONNECTOR_NEAR_CORRIDOR_GAP_M
+        and yaw_delta_rad > math.radians(_CONNECTOR_MAX_YAW_DELTA_DEG)
     )
     use_connector = (
         route_corridor_xy.shape[0] >= 2
@@ -241,6 +267,7 @@ def build_target_path_from_route(
             pose_gap_m > 0.02
             or yaw_delta_rad > math.radians(_STRAIGHT_HOLD_MAX_YAW_DELTA_DEG)
         )
+        and not yaw_severely_misaligned_near_corridor
     )
 
     if use_straight_hold:
@@ -275,9 +302,25 @@ def build_target_path_from_route(
                 int(math.ceil(_polyline_arc_length(route_corridor_xy[: bridge_goal_idx + 1]) / max(step_arc, 1e-6))) + 2,
             ),
         )
+        # Cuando estamos en local_recenter_only (ego desviado lateralmente del
+        # corredor recto) la combinación de pose_yaw distinto al heading-to-goal
+        # genera una S-curve apretada en el cubic Hermite: el path va primero
+        # en dirección de pose_yaw y luego se curva al goal_yaw. El MPC
+        # interpreta esa S-curve como "ve atrás-izquierda" y emite v_opt<0.
+        # Evitamos la S-curve usando heading-to-goal como tangente inicial:
+        # el cubic se vuelve casi una línea recta + curvatura final, sin
+        # rebote inicial.
+        if local_recenter_only:
+            chord_vec = goal_xy - pose_xy
+            if float(np.linalg.norm(chord_vec)) > 1e-6:
+                connector_start_yaw = float(math.atan2(chord_vec[1], chord_vec[0]))
+            else:
+                connector_start_yaw = float(start_yaw_rad)
+        else:
+            connector_start_yaw = float(start_yaw_rad)
         connector_xy = _sample_cubic_connector(
             start_xy=pose_xy,
-            start_yaw_rad=float(start_yaw_rad),
+            start_yaw_rad=connector_start_yaw,
             goal_xy=goal_xy,
             goal_yaw_rad=goal_yaw,
             n_samples=connector_samples,
@@ -286,11 +329,27 @@ def build_target_path_from_route(
         tail_after_goal = route_corridor_xy[bridge_goal_idx + 1 :]
         if tail_after_goal.shape[0] > 0:
             if local_recenter_only:
-                tail_after_goal = _truncate_polyline_prefix(
-                    tail_after_goal,
-                    max_arc_m=_ROUTE_LOCAL_RECENTER_TAIL_M,
+                # En local_recenter_only la ruta se verificó "straight" en la
+                # ventana _STRAIGHT_HOLD_ROUTE_WINDOW_M desde el corridor inicio.
+                # Si el tail se extiende más allá de esa ventana (porque
+                # bridge_goal está dentro y la cola añade _ROUTE_LOCAL_RECENTER_TAIL_M
+                # encima), puede entrar en la curva del lanelet siguiente y
+                # el MPC empieza a doblar antes de tiempo. Acotamos la cola
+                # al espacio remanente de la ventana verificada.
+                bridge_arc_m = float(
+                    _polyline_arc_length(route_corridor_xy[: bridge_goal_idx + 1])
                 )
-            polyline_xy = np.vstack([polyline_xy, tail_after_goal])
+                safe_tail_m = max(0.0, _STRAIGHT_HOLD_ROUTE_WINDOW_M - bridge_arc_m)
+                tail_max_m = min(_ROUTE_LOCAL_RECENTER_TAIL_M, safe_tail_m)
+                if tail_max_m <= 0.0:
+                    tail_after_goal = tail_after_goal[:0]
+                else:
+                    tail_after_goal = _truncate_polyline_prefix(
+                        tail_after_goal,
+                        max_arc_m=tail_max_m,
+                    )
+            if tail_after_goal.shape[0] > 0:
+                polyline_xy = np.vstack([polyline_xy, tail_after_goal])
         bridge_reason = "local_recenter_connector" if local_recenter_only else "connector"
         bridge_meta = _bridge_metadata(
             bridge_mode="connector",
@@ -317,6 +376,7 @@ def build_target_path_from_route(
         route_start_yaw_rad=float(route_start_yaw),
         start_yaw_rad=float(start_yaw_rad),
         yaw_delta_deg=float(yaw_delta_deg),
+        straight_hold_yaw_limit_deg=float(straight_hold_yaw_limit_deg),
         route_is_straight=bool(route_is_straight),
         local_recenter_only=bool(local_recenter_only),
         early_recenter_snap=bool(early_recenter_snap),
@@ -341,6 +401,184 @@ def build_target_path_from_route(
     if return_metadata:
         return target_path, bridge_meta
     return target_path
+
+
+def build_target_path_from_visual(
+    center_waypoints_body,
+    ego_pose,
+    target_speed_mps: float,
+    horizon_n: int,
+    dt: float,
+    *,
+    connect_from_ego_pose: bool = True,
+) -> np.ndarray:
+    """Construye target_path (N+1, 3) en frame OSM/mapa a partir de waypoints visuales.
+
+    Replica el paradigma de `urt-ref::LaneDetector::get_waypoints` →
+    `state_refs` del solver acados: la percepción ya trae la curva del
+    centro de carril en frame body (x adelante, y izquierda) y la
+    transformamos rígidamente con la pose fusionada del ego.
+
+    Convención de frames:
+      - Body: x adelante del coche, y a la IZQUIERDA del piloto, ψ CCW+.
+      - OSM/mapa (lo que consume el resto del pipeline): y crece HACIA
+        EL SUR en pantalla, yaw es CW+ desde +x. Por eso al rotar el
+        offset body→mundo hay que NEGAR la contribución de `y_left` en
+        el eje y (la izquierda en body = norte en pantalla = -y en OSM).
+        `motion_controller._osm_pose_to_controller_frame` se ocupa luego
+        de espejar al frame estándar ENU del solver acados.
+
+    Args:
+      center_waypoints_body: iterable de `(x_fwd_m, y_left_m, psi_rad)`
+        en frame body del vehículo. Ya viene con la curvatura del
+        polinomio fitteado a las líneas detectadas (incluso en
+        single_line, porque la línea ausente se sintetiza desplazando
+        la opuesta — no se asume paralelismo).
+      ego_pose: cualquier objeto con `.x`, `.y` y `.yaw` (Pose2D o
+        PoseEstimate). El yaw está en convención OSM (CW+).
+      target_speed_mps: velocidad de referencia para definir step_arc
+        (`max(0.10, v*dt)`). Mismo criterio que `build_target_path`.
+      horizon_n: cantidad de pasos de control. El path tiene N+1 filas.
+      dt: duración del paso (s).
+      connect_from_ego_pose: si True, prepende la pose actual cuando los
+        waypoints visuales arrancan más adelante. Conviene en `two_line`
+        para no dejar un gap en el path; en `single_line` puede crear una
+        diagonal artificial que hace que el MPC "entre a doblar" demasiado
+        pronto, así que el caller puede desactivarlo.
+
+    Returns:
+      ndarray (N+1, 3) con `(x, y, psi)` en frame OSM/mapa. Si el
+      polinomio no cubre todo el horizonte, los samples sobrantes se
+      extienden en línea recta con el yaw del último waypoint
+      transformado (no se extrapola el polinomio fuera de su rango).
+    """
+    pose_x = float(getattr(ego_pose, "x", 0.0) or 0.0)
+    pose_y = float(getattr(ego_pose, "y", 0.0) or 0.0)
+    pose_yaw = float(getattr(ego_pose, "yaw", 0.0) or 0.0)
+    if horizon_n <= 0:
+        return np.array([[pose_x, pose_y, pose_yaw]], dtype=float)
+
+    waypoints = [
+        (float(w[0]), float(w[1]), float(w[2]))
+        for w in (center_waypoints_body or ())
+        if w is not None and len(w) >= 3
+    ]
+    if not waypoints:
+        return np.tile(np.array([pose_x, pose_y, pose_yaw]), (horizon_n + 1, 1))
+    waypoints, trimmed_prefix_points = _trim_nonforward_visual_prefix(waypoints)
+
+    # Body (x_fwd, y_left) → OSM (x_east, y_south_screen):
+    #   heading vector h_osm = (cos θ, sin θ)
+    #   left vector   l_osm = (sin θ, -cos θ)  ← rota h 90° en sentido del
+    #                                            piloto (norte de pantalla)
+    cos_y = math.cos(pose_yaw)
+    sin_y = math.sin(pose_yaw)
+    world_xy = np.empty((len(waypoints), 2), dtype=float)
+    for idx, (x_fwd, y_left, _psi) in enumerate(waypoints):
+        world_xy[idx, 0] = pose_x + cos_y * x_fwd + sin_y * y_left
+        world_xy[idx, 1] = pose_y + sin_y * x_fwd - cos_y * y_left
+
+    pose_xy = np.array([pose_x, pose_y], dtype=float)
+    first_gap_m = float(np.linalg.norm(world_xy[0] - pose_xy))
+    if connect_from_ego_pose and first_gap_m > 1e-6:
+        # Los waypoints visuales arrancan en el primer lookahead visible del
+        # BEV, no necesariamente en la pose actual. En two-line conviene
+        # cerrar ese hueco para no dejar un target_path "saltado". En
+        # single-line, en cambio, esa unión puede generar una diagonal
+        # sintética hacia el centro reconstruido y adelantar demasiado el
+        # giro, por eso el caller puede desactivarla.
+        world_xy = np.vstack([pose_xy, world_xy])
+
+    if world_xy.shape[0] < 2:
+        # Polinomio degenerado: un solo punto. Replicamos con yaw del ego para
+        # que el MPC reciba un plan estático en lugar de crashear.
+        return np.tile(np.array([pose_x, pose_y, pose_yaw]), (horizon_n + 1, 1))
+
+    step_arc = max(0.10, float(target_speed_mps) * float(dt))
+    total_required_m = step_arc * horizon_n
+    seg_lens = np.linalg.norm(np.diff(world_xy, axis=0), axis=1)
+    polyline_arc_m = float(np.sum(seg_lens))
+    if polyline_arc_m < total_required_m:
+        # Extender en línea recta con el heading del último segmento real
+        # — NO seguir extrapolando el polinomio fuera del rango fitteado.
+        last_diff = world_xy[-1] - world_xy[-2]
+        last_norm = float(np.linalg.norm(last_diff))
+        if last_norm > 1e-9:
+            tail_dir = last_diff / last_norm
+            extra_m = total_required_m - polyline_arc_m + step_arc
+            extension = world_xy[-1] + tail_dir * extra_m
+            world_xy = np.vstack([world_xy, extension])
+
+    sampled_xy = _resample_polyline(world_xy, step_arc=step_arc, n_samples=horizon_n + 1)
+    psi = _compute_headings(sampled_xy)
+    target_path = np.column_stack([sampled_xy, psi])
+    live_log(
+        "trajectory_builder", event="visual_target_path_built",
+        ego_pose=[round(pose_x, 3), round(pose_y, 3), round(pose_yaw, 4)],
+        connected_from_ego_pose=bool(connect_from_ego_pose and first_gap_m > 1e-6),
+        body_waypoint_count=int(len(waypoints)),
+        trimmed_prefix_points=int(trimmed_prefix_points),
+        polyline_arc_m=round(polyline_arc_m, 3),
+        step_arc_m=round(step_arc, 4),
+        path_points=int(target_path.shape[0]),
+        first_ref=[
+            round(float(target_path[0, 0]), 3),
+            round(float(target_path[0, 1]), 3),
+            round(float(target_path[0, 2]), 4),
+        ],
+        last_ref=[
+            round(float(target_path[-1, 0]), 3),
+            round(float(target_path[-1, 1]), 3),
+            round(float(target_path[-1, 2]), 4),
+        ],
+    )
+    return target_path
+
+
+def _trim_nonforward_visual_prefix(
+    waypoints: list[tuple[float, float, float]],
+) -> tuple[list[tuple[float, float, float]], int]:
+    """Drop a pathological visual prefix that starts lateral/backwards.
+
+    En `waypoint_mode` el PathOptimizer puede re-muestrear el path visual a
+    pasos muy chicos (~1.25 cm). Si conectamos la pose actual con un primer
+    waypoint que está casi al costado o apenas atrás del auto, ese prefijo
+    queda "micro-sampleado" por el MPC como una maniobra de reversa lateral.
+    El síntoma en pista es exactamente el visto en logs: steer saturado y
+    `v_opt_raw < 0`.
+
+    Conservamos prefijos sanos:
+      - cuando el primer waypoint ya está claramente adelante; o
+      - cuando arranca prácticamente en el origen y la tangente local avanza.
+    """
+    if len(waypoints) < 2:
+        return waypoints, 0
+
+    body_xy = np.asarray([(float(item[0]), float(item[1])) for item in waypoints], dtype=float)
+    if _visual_prefix_is_forward(body_xy):
+        return waypoints, 0
+
+    for idx in range(1, len(waypoints) - 1):
+        tail_xy = body_xy[idx:]
+        if _visual_prefix_is_forward(tail_xy):
+            return waypoints[idx:], idx
+    return waypoints, 0
+
+
+def _visual_prefix_is_forward(body_xy: np.ndarray) -> bool:
+    if body_xy.ndim != 2 or body_xy.shape[0] == 0:
+        return True
+    first = np.asarray(body_xy[0], dtype=float)
+    if float(first[0]) >= _VISUAL_PREFIX_MIN_FORWARD_M:
+        return True
+    if body_xy.shape[0] < 2:
+        return False
+    first_gap_m = float(np.linalg.norm(first))
+    tangent_x = float(body_xy[1, 0] - body_xy[0, 0])
+    return (
+        first_gap_m <= _VISUAL_PREFIX_NEAR_ORIGIN_M
+        and tangent_x >= _VISUAL_PREFIX_MIN_TANGENT_X_M
+    )
 
 
 # ---------------------------------------------------------------------

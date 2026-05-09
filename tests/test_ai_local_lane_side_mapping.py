@@ -10,6 +10,16 @@ from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEng
 from src.hardware.camera.threads.threadLineFollowing import threadLineFollowing
 
 
+class _CaptureBuffer:
+    def __init__(self):
+        self.value = None
+        self.timestamp = None
+
+    def write(self, value, timestamp=None):
+        self.value = value
+        self.timestamp = timestamp
+
+
 class AILocalLaneSideMappingTests(unittest.TestCase):
     @staticmethod
     def _mask_from_points(points, shape=(100, 100)):
@@ -291,6 +301,67 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertIsNone(direct_error_m)
         self.assertFalse(debug_info["direct_error_valid"])
         self.assertEqual(debug_info["direct_error_reason"], "stale_two_line_reference")
+
+    def test_prepare_local_ai_side_masks_reassigns_wrong_explicit_single_side_using_history(self):
+        self.detector._last_two_line_left = np.array([[28, 95, 26, 55]], dtype=np.int32)
+        self.detector._last_two_line_right = np.array([[72, 95, 70, 55]], dtype=np.int32)
+        self.detector._last_two_line_ts = time.time()
+        self.detector.last_seen_side = "both"
+
+        left_mask = self._mask_from_points([(72, 95), (71, 85), (70, 75), (69, 65), (68, 55)])
+        side_masks = {"left": left_mask, "right": None}
+        lane_side_sources = {"left": "explicit_class", "right": "none"}
+        lane_side_lines = {"left": [72, 95, 68, 55], "right": []}
+
+        prepared_masks, prepared_lines, resolution = self.detector._prepare_local_ai_side_masks(
+            side_masks,
+            lane_side_sources,
+            lane_side_lines,
+            100,
+            100,
+        )
+
+        self.assertIsNone(prepared_masks["left"])
+        self.assertIsNotNone(prepared_masks["right"])
+        self.assertIsNone(prepared_lines["left"])
+        self.assertIsNotNone(prepared_lines["right"])
+        self.assertIsNotNone(resolution)
+        self.assertEqual(resolution["detected_side"], "left")
+        self.assertEqual(resolution["resolved_side"], "right")
+        self.assertEqual(resolution["source"], "explicit_class")
+        self.assertEqual(resolution["resolution_source"], "history")
+
+    def test_publish_visual_pipeline_state_keeps_valid_single_line_measurement_in_route_tracking(self):
+        capture = _CaptureBuffer()
+        self.detector.visual_candidate_buffer = None
+        self.detector.visual_state_buffer = capture
+        self.detector._control_policy_mode = "ROUTE_TRACKING"
+        self.detector._planner_priority_active = True
+        self.detector.is_line_following_active = True
+        self.detector.detection_mode = "ai_local"
+        self.detector._curve_state = "IN_CURVE"
+        self.detector._heading_error = 0.0
+        self.detector._last_camera_yaw_hint_rad = None
+        self.detector._last_camera_yaw_hint_confidence = 0.0
+        self.detector._build_local_lane_payload_log = lambda: {}
+        self.detector._last_stopline_visual_debug = {}
+        self.detector._last_frame_trace = {
+            "debug": {
+                "measurement_mode": "single_line",
+                "sl_direct_error_m": -0.08,
+                "direct_error_valid": True,
+                "direct_error_reason": "single_line_physical",
+            }
+        }
+
+        self.detector._publish_visual_pipeline_state(None, frame_sequence=17)
+
+        self.assertIsNotNone(capture.value)
+        debug_info = capture.value.frame_trace["debug"]
+        self.assertEqual(debug_info["control_policy_mode"], "ROUTE_TRACKING")
+        self.assertTrue(debug_info["planner_priority_active"])
+        self.assertTrue(debug_info["direct_error_valid"])
+        self.assertEqual(debug_info["direct_error_reason"], "single_line_physical")
 
     def test_build_local_mask_guidance_single_line_uses_conservative_center_after_streak(self):
         self.detector.consecutive_single_right = 4

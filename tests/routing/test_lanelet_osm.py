@@ -209,6 +209,22 @@ def test_load_lanelet2_osm_prefers_local_xy_tags(tmp_path: Path) -> None:
     assert lanelet_map.at_pose(1.5, 1.5, max_distance_m=0.6) == "100"
 
 
+def test_load_lanelet2_osm_keeps_each_lanelet_boundary_geometry(tmp_path: Path) -> None:
+    osm_path = tmp_path / "chain_lanelets.osm"
+    osm_path.write_text(_LOCAL_XY_CHAIN_OSM, encoding="utf-8")
+
+    lanelet_map = load_lanelet2_osm(str(osm_path), step_m=0.10)
+    lanelet_100 = lanelet_map.get_lanelet("100")
+    lanelet_200 = lanelet_map.get_lanelet("200")
+
+    assert lanelet_100 is not None
+    assert lanelet_200 is not None
+    assert float(lanelet_100.left_boundary[:, 0].mean()) < 1.75
+    assert float(lanelet_200.left_boundary[:, 0].mean()) > 2.25
+    assert float(lanelet_100.right_boundary[:, 0].mean()) < 1.75
+    assert float(lanelet_200.right_boundary[:, 0].mean()) > 2.25
+
+
 def test_router_uses_yaw_to_avoid_selecting_opposite_direction_lanelet(tmp_path: Path) -> None:
     osm_path = tmp_path / "opposite_lanelets.osm"
     osm_path.write_text(_LOCAL_XY_OPPOSITE_OSM, encoding="utf-8")

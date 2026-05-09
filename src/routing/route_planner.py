@@ -20,11 +20,21 @@ from src.routing.lanelet.attributes import (
 from src.routing.lanelet.route_path import RoutePath
 from src.utils.live_log import live_log
 
-_MAP_MATCH_RECOVERY_ERROR_M = 0.75
-_MAP_MATCH_RECOVERY_MIN_IMPROVEMENT_M = 0.20
+try:
+    from config import (
+        TRACKING_ROUTE_GLOBAL_RECOVERY_ERROR_M as _MAP_MATCH_GLOBAL_RECOVERY_ERROR_M,
+    )
+except Exception:
+    _MAP_MATCH_GLOBAL_RECOVERY_ERROR_M = 0.14
+
+try:
+    from config import TRACKING_ROUTE_RECOVERY_ERROR_M as _MAP_MATCH_RECOVERY_ERROR_M
+except Exception:
+    _MAP_MATCH_RECOVERY_ERROR_M = 0.10
+
+_MAP_MATCH_RECOVERY_MIN_IMPROVEMENT_M = 0.02
 _MAP_MATCH_RECOVERY_WINDOW_MULT = 6
-_MAP_MATCH_GLOBAL_RECOVERY_ERROR_M = 0.60
-_MAP_MATCH_GLOBAL_MIN_IMPROVEMENT_M = 0.15
+_MAP_MATCH_GLOBAL_MIN_IMPROVEMENT_M = 0.03
 
 
 def _preview_waypoints(waypoints, limit: int = 3) -> list[list[float]]:

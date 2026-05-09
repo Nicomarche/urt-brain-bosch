@@ -268,36 +268,8 @@ class threadLocalPerception(ThreadWithStop):
         except (TypeError, ValueError, IndexError, ZeroDivisionError):
             return None
 
-    def _enter_parking_mode(self):
-        """Send a StateChange PARKING when in AUTO mode to start the parking sequence."""
-        if self._current_mode != "auto":
-            return
-        # Test toggle: deshabilita el "walk_area→PARKING" durante runs
-        # automatizados de lane following. Set URT_DISABLE_AUTO_PARKING=1
-        # (run_test.sh lo setea por default).
-        import os
-        if os.environ.get("URT_DISABLE_AUTO_PARKING", "0") == "1":
-            try:
-                from src.utils.live_log import live_log
-                live_log("local_perception", event="parking_request_ignored",
-                         reason="URT_DISABLE_AUTO_PARKING=1", source="walk_area_crossed")
-            except Exception:
-                pass
-            return
-        print(
-            f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA→PARKING\033[0m - "
-            f"Walk area cruzada en modo AUTO, cambiando a modo PARKING"
-        )
-        try:
-            self.stateChangeSender.send("PARKING")
-        except Exception as e:
-            print(
-                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - "
-                f"No se pudo enviar StateChange PARKING: {e}"
-            )
-
     def _handle_walk_area(self, detections, now):
-        """Track walk-area detections y, en modo AUTO, dispara cambio a PARKING.
+        """Track walk-area detections sin forzar cambios de modo.
 
         Phase 6 (post-port Autoware): este método YA NO frena el auto. El
         freno por crosswalk/walk-area lo decide el `BehaviorPlanner` —
@@ -309,9 +281,7 @@ class threadLocalPerception(ThreadWithStop):
           1. Observar walk_area + presencia/ausencia de obstáculo.
           2. Mantener una pequeña máquina de estados con cooldown para
              saber cuándo "se cruzó" una zona walk_area.
-          3. Disparar `StateChange("PARKING")` en modo AUTO cuando se
-             cruzó la zona — eso hace que la state machine entre al
-             scenario `Parking` del BehaviorPlanner.
+          3. Marcar la zona como cruzada para evitar retrigger inmediato.
 
         Reglas:
         - Sólo se considera la zona si bbox area >= WALK_AREA_MIN_BOX_AREA
@@ -320,8 +290,7 @@ class threadLocalPerception(ThreadWithStop):
           último resume. Esto evita re-disparos si la cámara sigue viendo
           la misma zona unos frames después de haberla cruzado.
         - Mientras está activa, esperamos WALK_AREA_STOP_DURATION segundos
-          sin obstáculo antes de considerar la zona "cruzada" → emit
-          PARKING.
+          sin obstáculo antes de considerar la zona "cruzada".
         """
         _OBSTACLE_CLASSES = frozenset({
             "obstacle", "pedestrian", "person", "yaya", "human",
@@ -384,15 +353,16 @@ class threadLocalPerception(ThreadWithStop):
                     f"Sin obstáculo, esperando {self._walk_area_stop_duration:.0f}s para considerar zona cruzada"
                 )
             elif now - self._walk_area_no_obstacle_since >= self._walk_area_stop_duration:
-                # Zona despejada por suficiente tiempo → entrar en modo PARKING.
+                # Zona despejada por suficiente tiempo: se considera cruzada y
+                # se cierra la ventana local. El cambio de modo walk_area→parking
+                # era un comportamiento legacy y ya no debe ocurrir.
                 self._walk_area_active = False
                 self._walk_area_no_obstacle_since = None
                 self._walk_area_last_cleared = now
                 print(
                     f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA\033[0m - "
-                    f"Zona cruzada, solicitando modo PARKING"
+                    f"Zona cruzada, sin cambio de modo"
                 )
-                self._enter_parking_mode()
 
     def _publish_sign(self, detections, now, img_shape=None):
         if not self.enable_sign_detection or not detections:

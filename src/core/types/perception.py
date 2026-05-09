@@ -24,11 +24,11 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
 _LATERAL_RELOCALIZATION_BLOCKED_CONTROL_MODES = frozenset({
-    "ROUTE_TRACKING",
     "MANEUVER_CONTROL",
 })
 
@@ -39,7 +39,8 @@ class LaneObservation:
 
     Conventions:
       - `lateral_offset_m`: positivo = vehículo a la izquierda del centro.
-        None si la confianza es demasiado baja.
+        None si la confianza es demasiado baja. Derivado del primer waypoint
+        cuando hay `center_waypoints_body` disponibles.
       - `heading_error_rad`: error de yaw del vehículo respecto a la tangente
         del carril (radianes; positivo CCW).
       - `quality ∈ [0, 1]`: cuánto confiar; consumidores pueden ponderar
@@ -48,6 +49,14 @@ class LaneObservation:
       - `blind_mode`: si el detector no ve carril, anuncia el modo en el que
         está operando ("lost", "single_line", etc.) para que el planner
         decida si frena o usa GPS+map.
+      - `center_waypoints_body`: tupla de `(x_fwd_m, y_left_m, ψ_rad)` en
+        frame body del vehículo (x adelante, y izquierda). Es la
+        referencia primaria del MPC cuando se sigue carril por visión —
+        equivalente al `flat` de `LaneDetector::get_waypoints` en el repo
+        urt-ref. Vacía si no se pudo fitear polinomio.
+      - `extrapolated_side`: `"left"` o `"right"` cuando esa línea fue
+        sintetizada desplazando la opuesta (single_line). None si se
+        vieron ambas o no hay waypoints.
     """
 
     timestamp: float = 0.0
@@ -66,7 +75,39 @@ class LaneObservation:
     control_policy_mode: str | None = None
     planner_priority_active: bool = False
     blind_mode: str | None = None
+    center_waypoints_body: tuple[tuple[float, float, float], ...] = field(default_factory=tuple)
+    left_poly_coeffs: tuple[float, ...] | None = None
+    right_poly_coeffs: tuple[float, ...] | None = None
+    lane_width_m: float | None = None
+    extrapolated_side: str | None = None
     debug: dict[str, Any] = field(default_factory=dict)
+
+
+def lane_observation_has_visual_path(
+    observation: LaneObservation | None,
+    *,
+    min_quality: float = 0.55,
+    min_points: int = 8,
+) -> bool:
+    """True cuando la observación tiene waypoints visuales utilizables como path primario.
+
+    El gate combina (a) calidad mínima — la default 0.55 acepta single_line con
+    polinomio sólido, (b) cantidad mínima de waypoints para que el MPC tenga
+    horizonte y (c) que cada waypoint sea finito. NO mira `measurement_mode`:
+    en single_line con polinomio bien fitteado los waypoints son tan válidos
+    como en two_line (la curvatura la pone el polinomio, no se asume paralelo).
+    """
+    if observation is None:
+        return False
+    waypoints = tuple(observation.center_waypoints_body or ())
+    if len(waypoints) < int(min_points):
+        return False
+    if float(observation.quality or 0.0) < float(min_quality):
+        return False
+    for x, y, psi in waypoints:
+        if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(psi)):
+            return False
+    return True
 
 
 def lane_observation_supports_lateral_relocalization(

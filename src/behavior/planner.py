@@ -68,11 +68,17 @@ class BehaviorPlanner:
             )
 
         optimized = self._path_optimizer.optimize(path_plan, ctx)
+        if bool(optimized.notes.get("corridor_required_missing", False)):
+            return _empty_fallback(
+                ctx,
+                reason="lanelet_corridor_unavailable",
+            )
         return self._velocity_planner.build_output(
             path_plan=path_plan,
             target_path=optimized.target_path,
             drivable_left_bound=optimized.drivable_left_bound,
             drivable_right_bound=optimized.drivable_right_bound,
+            optimizer_notes=optimized.notes,
             ctx=ctx,
         )
 

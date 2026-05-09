@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+import src.behavior.path_optimizer as path_optimizer_module
 from src.behavior.planner import BehaviorPlanner
 from src.behavior.scenarios.base import BaseScenario, HysteresisGate
 from src.core.types.behavior import BehaviorOutput, ScenarioName
@@ -142,6 +143,29 @@ def test_planner_applies_velocity_overlay() -> None:
     out = p.plan(ctx)
     assert out.stop_required is True
     assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_planner_returns_fallback_when_real_corridor_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        path_optimizer_module,
+        "load_tracking_lanelet_map",
+        lambda force_reload=False: None,
+    )
+    s = _FakeScenario(ScenarioName.INTERSECTION.value, priority=10, active=True, speed=0.2)
+    p = BehaviorPlanner([s])
+    ctx = make_context(
+        current_lanelet_id="154",
+        next_lanelet_ids=("159",),
+        max_speed_mps=1.5,
+        dt=0.1,
+        horizon_n=20,
+    )
+
+    out = p.plan(ctx)
+
+    assert out.valid is False
+    assert out.stop_required is True
+    assert out.notes.get("reason") == "lanelet_corridor_unavailable"
 
 
 # ---------- HysteresisGate -------------------------------------------------
