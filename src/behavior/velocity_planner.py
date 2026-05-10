@@ -236,10 +236,16 @@ class LaneContainmentRule:
             and speed.shape[0] > 0
         ):
             zero_from_idx = max(0, min(speed.shape[0] - 1, int(first_infeasible_index) - 1))
-            speed[zero_from_idx:] = 0.0
-            stop_req = True
-            note["mode"] = "stop"
+            if zero_from_idx <= 0:
+                speed[:] = 0.0
+                stop_req = True
+                note["mode"] = "stop"
+                note["zero_from_idx"] = int(zero_from_idx)
+                return VelocityRuleResult(speed, stop_req, note, True)
+            speed = np.minimum(speed, float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS))
+            note["mode"] = "future_horizon_crawl"
             note["zero_from_idx"] = int(zero_from_idx)
+            note["cap_mps"] = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
             return VelocityRuleResult(speed, stop_req, note, True)
 
         if self._recovery_active:

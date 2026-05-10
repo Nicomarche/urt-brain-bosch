@@ -12,6 +12,13 @@ from src.routing.lanelet.runtime_loader import (
     lanelet_map_covers_ids,
     load_tracking_lanelet_map,
 )
+from src.routing.lanelet.attributes import (
+    ATTR_DOTTED,
+    ATTR_HIGHWAY_LEFT,
+    ATTR_HIGHWAY_RIGHT,
+    ATTR_NORMAL,
+    ATTR_ONEWAY,
+)
 from src.utils.live_log import live_log
 
 try:
@@ -75,6 +82,23 @@ _VISUAL_LANE_REENTRY_SINGLE_LINE_MIN_QUALITY = 0.6
 _VISUAL_LANE_REENTRY_SINGLE_LINE_GAIN = 0.40
 _VISUAL_LANE_REENTRY_SINGLE_LINE_MAX_SHIFT_M = 0.07
 _VISUAL_LANE_REENTRY_SINGLE_LINE_FADE_DISTANCE_M = 0.65
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MIN_QUALITY = 0.82
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_GAIN = 0.38
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_SHIFT_M = 0.065
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_FADE_DISTANCE_M = 0.65
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_HEADING_RAD = math.radians(28.0)
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_ERROR_M = 0.16
+_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_ATTRS = frozenset({
+    ATTR_NORMAL,
+    ATTR_ONEWAY,
+    ATTR_HIGHWAY_LEFT,
+    ATTR_HIGHWAY_RIGHT,
+    ATTR_DOTTED,
+})
+_VISUAL_ROUTE_BLEND_SINGLE_LINE_WEIGHT = 0.18
+_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_SHIFT_M = 0.035
+_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_OBSERVATION_M = 0.16
+_VISUAL_ROUTE_BLEND_SINGLE_LINE_MIN_SHIFT_M = 0.005
 _VISUAL_LANE_REENTRY_RELAXED_MAP_MATCH_ERROR_M = 0.10
 _VISUAL_PATH_PRIORITY_TWO_LINE_BLEND = 0.35
 _VISUAL_PATH_PRIORITY_SINGLE_LINE_BLEND = 0.20
@@ -199,6 +223,78 @@ def _visual_lane_reentry_base_shift_m(state: _VisualLaneReentryState) -> float:
     ))
     quality_scale = max(0.0, min(1.0, float(state.quality)))
     return float(base_shift_m * quality_scale)
+
+
+def _route_context_allows_derived_single_line_reentry(ctx: PlanningContext) -> bool:
+    route = getattr(ctx, "route", None)
+    if route is None or not bool(getattr(route, "route_active", False)):
+        return False
+    lanelet_map = getattr(ctx, "lanelet_map", None)
+    lanelet_id = getattr(route, "current_lanelet_id", None)
+    if lanelet_map is not None and lanelet_id:
+        try:
+            lanelet = lanelet_map.get_lanelet(str(lanelet_id))
+        except Exception:
+            lanelet = None
+        if lanelet is not None:
+            return int(getattr(lanelet, "attribute", -1)) in _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_ATTRS
+    try:
+        return int(getattr(route, "current_node_attr", -1)) in _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_ATTRS
+    except (TypeError, ValueError):
+        return False
+
+
+def _single_line_visual_waypoint_error_m(ctx: PlanningContext, lane_observation) -> float | None:
+    if lane_observation is None:
+        return None
+    if str(getattr(lane_observation, "measurement_mode", "none") or "none") != "single_line":
+        return None
+    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(
+        _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MIN_QUALITY
+    ):
+        return None
+    if not bool(getattr(getattr(ctx, "route", None), "route_active", False)):
+        return None
+    if not _route_context_allows_derived_single_line_reentry(ctx):
+        return None
+    try:
+        heading_error_rad = abs(float(getattr(lane_observation, "heading_error_rad", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        return None
+    if heading_error_rad > float(_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_HEADING_RAD):
+        return None
+
+    waypoints = tuple(getattr(lane_observation, "center_waypoints_body", ()) or ())
+    if len(waypoints) < 3:
+        return None
+
+    lateral_samples: list[float] = []
+    for x_fwd_m, y_left_m, _psi_rad in waypoints[: min(len(waypoints), 10)]:
+        try:
+            x_fwd = float(x_fwd_m)
+            y_left = float(y_left_m)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(x_fwd) and math.isfinite(y_left)):
+            continue
+        if x_fwd < 0.02 or x_fwd > 0.45:
+            continue
+        lateral_samples.append(y_left)
+    if not lateral_samples:
+        return None
+
+    lateral_samples.sort()
+    mid = len(lateral_samples) // 2
+    if len(lateral_samples) % 2:
+        center_y_left_m = float(lateral_samples[mid])
+    else:
+        center_y_left_m = 0.5 * (float(lateral_samples[mid - 1]) + float(lateral_samples[mid]))
+    error_m = -center_y_left_m
+    if not math.isfinite(error_m):
+        return None
+    if abs(error_m) > float(_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_ERROR_M):
+        return None
+    return float(error_m)
 
 
 class PathOptimizer:
@@ -340,6 +436,12 @@ class PathOptimizer:
                 sampled_xy[0] = pose_xy
 
         sampled_xy, visual_lane_notes = _apply_visual_lane_reentry_bias(
+            sampled_xy=sampled_xy,
+            path_plan=path_plan,
+            ctx=ctx,
+        )
+
+        sampled_xy, visual_route_blend_notes = _maybe_blend_route_with_visual_waypoints(
             sampled_xy=sampled_xy,
             path_plan=path_plan,
             ctx=ctx,
@@ -507,6 +609,7 @@ class PathOptimizer:
             self._containment_infeasible_ticks = 0
 
         optimizer_notes = dict(visual_lane_notes)
+        optimizer_notes.update(dict(visual_route_blend_notes))
         optimizer_notes.update(dict(visual_prefix_notes))
         if single_line_transition_hold is not None:
             optimizer_notes.update(dict(single_line_transition_hold.notes))
@@ -788,14 +891,21 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
     lane_observation = getattr(ctx, "lane_observation", None)
     if lane_observation is None:
         return _VisualLaneReentryState(active=False, reason="lane_observation_unusable")
-    if not bool(getattr(lane_observation, "direct_error_valid", False)):
-        return _VisualLaneReentryState(active=False, reason="lane_observation_unusable")
     measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
     measurement_source = "direct_error_m"
-    measurement = getattr(lane_observation, "line_center_offset_m", None)
-    if measurement is not None:
-        measurement_source = "line_center_offset_m"
-    else:
+    direct_error_valid = bool(getattr(lane_observation, "direct_error_valid", False))
+    measurement = None
+    if direct_error_valid:
+        measurement = getattr(lane_observation, "line_center_offset_m", None)
+        if measurement is not None:
+            measurement_source = "line_center_offset_m"
+        else:
+            measurement = getattr(lane_observation, "direct_error_m", None)
+    elif measurement_mode == "single_line":
+        measurement = _single_line_visual_waypoint_error_m(ctx, lane_observation)
+        if measurement is not None:
+            measurement_source = "visual_waypoint_center"
+    if measurement is None and direct_error_valid:
         measurement = getattr(lane_observation, "direct_error_m", None)
     if measurement is None:
         measurement = getattr(lane_observation, "lateral_offset_m", None)
@@ -859,7 +969,10 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 measurement_mode=measurement_mode,
                 measurement_source=measurement_source,
             )
-        if _single_line_direction_conflicts_with_route(ctx):
+        if (
+            measurement_source != "visual_waypoint_center"
+            and _single_line_direction_conflicts_with_route(ctx)
+        ):
             return _VisualLaneReentryState(
                 active=False,
                 error_m=float(error_m),
@@ -868,10 +981,16 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 measurement_mode=measurement_mode,
                 measurement_source=measurement_source,
             )
-        reason = "single_line_physical_reentry"
-        gain = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_GAIN)
-        max_shift_m = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_MAX_SHIFT_M)
-        fade_distance_m = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_FADE_DISTANCE_M)
+        if measurement_source == "visual_waypoint_center":
+            reason = "single_line_visual_waypoint_reentry"
+            gain = float(_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_GAIN)
+            max_shift_m = float(_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_SHIFT_M)
+            fade_distance_m = float(_VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_FADE_DISTANCE_M)
+        else:
+            reason = "single_line_physical_reentry"
+            gain = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_GAIN)
+            max_shift_m = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_MAX_SHIFT_M)
+            fade_distance_m = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_FADE_DISTANCE_M)
     else:
         return _VisualLaneReentryState(
             active=False,
@@ -1062,6 +1181,156 @@ def _route_corridor_is_authoritative(ctx: PlanningContext) -> bool:
     return bool(getattr(route, "route_active", False)) and bool(
         getattr(route, "route_waypoints", None)
     )
+
+
+def _route_waypoint_visual_priority_allowed(ctx: PlanningContext) -> bool:
+    route = getattr(ctx, "route", None)
+    if route is None or not bool(getattr(route, "route_active", False)):
+        return False
+    if bool(getattr(route, "waypoint_mode_active", False)):
+        return False
+    next_semantic_type = str(getattr(route, "next_semantic_type", "") or "")
+    if next_semantic_type in _PRECISION_ROUTE_SEMANTIC_TYPES:
+        next_distance = getattr(route, "next_semantic_distance_m", None)
+        if next_distance is None:
+            return False
+        try:
+            if float(next_distance) <= float(_PRECISION_ROUTE_ARM_DISTANCE_M):
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
+
+
+def _maybe_blend_route_with_visual_waypoints(
+    *,
+    sampled_xy: np.ndarray,
+    path_plan: BehaviorPathPlan,
+    ctx: PlanningContext,
+) -> tuple[np.ndarray, dict[str, object]]:
+    notes: dict[str, object] = {
+        "visual_route_blend_applied": False,
+        "visual_route_blend_points": 0,
+        "visual_route_blend_max_shift_m": 0.0,
+        "visual_route_blend_reason": "inactive",
+    }
+    if _path_note_str(path_plan, "path_source") != "route_waypoints":
+        notes["visual_route_blend_reason"] = "path_source_not_route"
+        return np.array(sampled_xy, copy=True), notes
+
+    lane_observation = getattr(ctx, "lane_observation", None)
+    if lane_observation is None:
+        notes["visual_route_blend_reason"] = "lane_observation_missing"
+        return np.array(sampled_xy, copy=True), notes
+    if str(getattr(lane_observation, "measurement_mode", "none") or "none") != "single_line":
+        notes["visual_route_blend_reason"] = "measurement_not_single_line"
+        return np.array(sampled_xy, copy=True), notes
+    if bool(getattr(lane_observation, "direct_error_valid", False)):
+        notes["visual_route_blend_reason"] = "physical_error_available"
+        return np.array(sampled_xy, copy=True), notes
+    if not _route_context_allows_derived_single_line_reentry(ctx):
+        notes["visual_route_blend_reason"] = "route_attr_blocked"
+        return np.array(sampled_xy, copy=True), notes
+    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(
+        _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MIN_QUALITY
+    ):
+        notes["visual_route_blend_reason"] = "low_quality"
+        return np.array(sampled_xy, copy=True), notes
+
+    waypoints_body = tuple(getattr(lane_observation, "center_waypoints_body", ()) or ())
+    if len(waypoints_body) < 3 or sampled_xy.shape[0] < 3:
+        notes["visual_route_blend_reason"] = "insufficient_points"
+        return np.array(sampled_xy, copy=True), notes
+
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    visual_points: list[np.ndarray] = []
+    previous_x_fwd = -float("inf")
+    for x_fwd_m, y_left_m, _psi_rad in waypoints_body:
+        try:
+            x_fwd = float(x_fwd_m)
+            y_left = float(y_left_m)
+        except (TypeError, ValueError):
+            continue
+        if not (math.isfinite(x_fwd) and math.isfinite(y_left)):
+            continue
+        if x_fwd < 0.02:
+            continue
+        if x_fwd + 1e-4 < previous_x_fwd:
+            continue
+        previous_x_fwd = x_fwd
+        visual_points.append(
+            _body_to_world_xy(
+                x_fwd_m=x_fwd,
+                y_left_m=y_left,
+                pose_x=pose_x,
+                pose_y=pose_y,
+                pose_yaw=pose_yaw,
+            )
+        )
+    if len(visual_points) < 3:
+        notes["visual_route_blend_reason"] = "insufficient_forward_points"
+        return np.array(sampled_xy, copy=True), notes
+
+    route_steps = [
+        float(np.linalg.norm(sampled_xy[idx] - sampled_xy[idx - 1]))
+        for idx in range(1, sampled_xy.shape[0])
+    ]
+    positive_steps = [step for step in route_steps if step > 1e-6]
+    step_arc = float(np.median(positive_steps)) if positive_steps else _MIN_STEP_M
+    visual_polyline = np.asarray(visual_points, dtype=float)
+    visual_xy = _resample_polyline(
+        visual_polyline,
+        step_arc=max(_MIN_STEP_M, step_arc),
+        n_samples=sampled_xy.shape[0],
+    )
+
+    blended = np.array(sampled_xy, copy=True)
+    max_shift = 0.0
+    points = 0
+    for idx in range(1, min(blended.shape[0], visual_xy.shape[0])):
+        route_heading = _tangent_heading_at(sampled_xy, idx)
+        if route_heading is None:
+            route_heading = float(ctx.pose.fused_pose.yaw)
+        lateral_dir = np.array(
+            [-math.sin(float(route_heading)), math.cos(float(route_heading))],
+            dtype=float,
+        )
+        observed_shift_m = float(np.dot(visual_xy[idx] - sampled_xy[idx], lateral_dir))
+        if not math.isfinite(observed_shift_m):
+            continue
+        observed_shift_m = float(np.clip(
+            observed_shift_m,
+            -float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_OBSERVATION_M),
+            float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_OBSERVATION_M),
+        ))
+        shift_m = float(np.clip(
+            observed_shift_m * float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_WEIGHT),
+            -float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_SHIFT_M),
+            float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_SHIFT_M),
+        ))
+        if abs(shift_m) < float(_VISUAL_ROUTE_BLEND_SINGLE_LINE_MIN_SHIFT_M):
+            continue
+        blended[idx] = sampled_xy[idx] + (shift_m * lateral_dir)
+        max_shift = max(max_shift, abs(shift_m))
+        points = idx
+
+    notes["visual_route_blend_applied"] = bool(points > 0)
+    notes["visual_route_blend_points"] = int(points)
+    notes["visual_route_blend_max_shift_m"] = float(max_shift)
+    notes["visual_route_blend_reason"] = "single_line_route_lane"
+    live_log(
+        "path_optimizer",
+        event="visual_route_blend",
+        applied=bool(points > 0),
+        points=int(points),
+        max_shift_m=float(max_shift),
+        reason=str(notes["visual_route_blend_reason"]),
+        measurement_mode=str(getattr(lane_observation, "measurement_mode", "none") or "none"),
+        quality=float(getattr(lane_observation, "quality", 0.0) or 0.0),
+    )
+    return blended, notes
 
 
 def _stabilize_visual_path_prefix(
@@ -1460,9 +1729,11 @@ def _maybe_hold_previous_path_on_single_line_transition(
         return None
     if not bool(getattr(lane_observation, "planner_priority_active", False)):
         return None
-    if not bool(getattr(lane_observation, "direct_error_valid", False)):
-        return None
-    direct_error_m = getattr(lane_observation, "direct_error_m", None)
+    direct_error_m = None
+    if bool(getattr(lane_observation, "direct_error_valid", False)):
+        direct_error_m = getattr(lane_observation, "direct_error_m", None)
+    if direct_error_m is None:
+        direct_error_m = _single_line_visual_waypoint_error_m(ctx, lane_observation)
     if direct_error_m is None:
         return None
     direct_error_m = abs(float(direct_error_m))
@@ -1987,10 +2258,21 @@ def _contain_path_within_corridor(
     )
     path_source = _path_note_str(path_plan, "path_source")
     path_source_visual = path_source == "visual_lane_waypoints"
+    # A high-quality two-line measurement is the best source of the physical
+    # lane center. Allow the target to use the same relaxed corridor budget for
+    # route waypoints too; otherwise small OSM-vs-texture offsets force the MPC
+    # to hug the visual lane edge even while both painted lines are visible.
     corridor_visual_path_priority_active = (
-        bool(path_source_visual)
-        and bool(corridor_visual_lane_guidance_active)
+        bool(corridor_visual_lane_guidance_active)
         and bool(getattr(ctx.lane_observation, "planner_priority_active", False))
+        and (
+            bool(path_source_visual)
+            or (
+                path_source == "route_waypoints"
+                and str(visual_lane_state.measurement_mode) == "two_line"
+                and _route_waypoint_visual_priority_allowed(ctx)
+            )
+        )
     )
     corridor_visual_lane_prefix_samples = 0
     corridor_visual_lane_max_shift_m = 0.0
