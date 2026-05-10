@@ -6,9 +6,15 @@ import numpy as np
 
 from src.dashboard.gui.config import settings
 from src.dashboard.gui.widgets._map_alignment import (
+    adjusted_map_transform,
+    map_to_texture_point,
+    relative_layer_adjustment_px,
     relative_offset_px,
+    scale_is_effectively_one,
+    shifted_map_transform_translation,
     shifted_world_bounds,
     texture_offset_m,
+    texture_to_map_point,
     world_bounds_delta_for_visual_offset,
 )
 from src.dashboard.gui.widgets._map_path_overlay import (
@@ -143,6 +149,24 @@ def test_alignment_relative_offset_can_drag_either_layer() -> None:
     ) == (12.0, -3.0)
 
 
+def test_alignment_relative_adjustment_handles_scaling_either_layer() -> None:
+    assert relative_layer_adjustment_px(
+        lanelet_offset_px=(12.0, -3.0),
+        background_offset_px=(0.0, 0.0),
+        lanelet_scale_xy=(1.02, 0.98),
+        background_scale_xy=(1.0, 1.0),
+    ) == ((12.0, -3.0), (1.02, 0.98))
+
+    rel_offset, rel_scale = relative_layer_adjustment_px(
+        lanelet_offset_px=(0.0, 0.0),
+        background_offset_px=(-12.0, 3.0),
+        lanelet_scale_xy=(1.0, 1.0),
+        background_scale_xy=(1.02, 0.98),
+    )
+    assert tuple(round(value, 6) for value in rel_offset) == (11.764706, -3.061224)
+    assert tuple(round(value, 6) for value in rel_scale) == (0.980392, 1.020408)
+
+
 def test_alignment_world_bounds_delta_matches_non_inverted_dashboard_frame() -> None:
     visual_px = (10.0, -5.0)
 
@@ -170,3 +194,71 @@ def test_alignment_world_bounds_delta_flips_y_when_axis_is_inverted() -> None:
         meters_per_pixel=0.01,
         y_axis_inverted=True,
     ) == (-0.0, 0.05)
+
+
+def test_alignment_offsets_support_distinct_x_y_scale() -> None:
+    visual_px = (10.0, -5.0)
+
+    assert texture_offset_m(
+        visual_px,
+        meters_per_pixel_x=0.01,
+        meters_per_pixel_y=0.02,
+    ) == (0.1, -0.1)
+    assert world_bounds_delta_for_visual_offset(
+        visual_px,
+        meters_per_pixel_x=0.01,
+        meters_per_pixel_y=0.02,
+        y_axis_inverted=False,
+    ) == (-0.1, 0.1)
+
+
+def test_map_to_texture_transform_scales_and_round_trips_points() -> None:
+    transform = {
+        "scale_xy": [1.015, 1.027],
+        "translation_xy": [-0.089, 0.119],
+        "yaw_deg": 0.0,
+    }
+    point = (4.0, -2.0)
+
+    texture_point = map_to_texture_point(point, transform)
+
+    assert tuple(round(value, 6) for value in texture_point) == (3.971, -1.935)
+    assert tuple(round(value, 6) for value in texture_to_map_point(texture_point, transform)) == point
+
+
+def test_shifted_map_transform_translation_preserves_scale() -> None:
+    transform = {
+        "scale_xy": [1.015, 1.027],
+        "translation_xy": [-0.089, 0.119],
+    }
+
+    assert shifted_map_transform_translation(
+        transform,
+        dx_m=0.1,
+        dy_m=-0.2,
+    ) == {
+        "scale_xy": [1.015, 1.027],
+        "translation_xy": [0.011, -0.081],
+    }
+
+
+def test_adjusted_map_transform_scales_around_anchor() -> None:
+    transform = {
+        "scale_xy": [1.015, 1.027],
+        "translation_xy": [-0.089, 0.119],
+    }
+
+    assert adjusted_map_transform(
+        transform,
+        scale_xy=(1.1, 0.9),
+        offset_m=(0.2, -0.1),
+        anchor_m=(0.0, 0.0),
+    ) == {
+        "scale_xy": [1.1165, 0.9243],
+        "translation_xy": [0.1021, 0.0071],
+    }
+
+
+def test_scale_is_effectively_one() -> None:
+    assert scale_is_effectively_one((1.0, 1.0))
+    assert not scale_is_effectively_one((1.001, 1.0))
