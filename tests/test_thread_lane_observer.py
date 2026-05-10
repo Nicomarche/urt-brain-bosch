@@ -82,6 +82,67 @@ class LaneObserverTests(unittest.TestCase):
         self.assertTrue(lane_observation.planner_priority_active)
         self.assertAlmostEqual(lane_observation.debug["raw_direct_error_m"], -0.0825, places=4)
 
+    def test_build_lane_observation_rejects_impossible_line_geometry(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=12.5,
+            detection_mode="ai_local",
+            curve_state="IN_CURVE",
+            local_lane_payload={
+                "lane_side_point_counts": {"left": 8, "right": 8},
+            },
+            frame_trace={
+                "debug": {
+                    "measurement_mode": "two_line",
+                    "two_line_direct_error_m": -1.62,
+                    "two_line_D_left_cm": 100.0,
+                    "two_line_D_right_cm": -65.0,
+                },
+                "visual_lane_waypoints": {
+                    "center_waypoints_body": tuple((0.05 * idx, 0.10, 0.0) for idx in range(20)),
+                    "lane_width_m": 0.35,
+                },
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertEqual(lane_observation.measurement_mode, "two_line")
+        self.assertFalse(lane_observation.direct_error_valid)
+        self.assertIsNone(lane_observation.direct_error_m)
+        self.assertIsNone(lane_observation.left_line_distance_m)
+        self.assertIsNone(lane_observation.right_line_distance_m)
+        self.assertIsNone(lane_observation.line_center_offset_m)
+        self.assertLessEqual(lane_observation.quality, 0.2)
+        self.assertFalse(lane_observation.debug["line_geometry_valid"])
+        self.assertAlmostEqual(lane_observation.debug["raw_left_line_distance_m"], 1.0, places=4)
+
+    def test_build_lane_observation_respects_explicit_invalid_direct_error(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=12.6,
+            detection_mode="ai_local",
+            local_lane_payload={
+                "lane_side_point_counts": {"left": 8, "right": 8},
+            },
+            frame_trace={
+                "debug": {
+                    "measurement_mode": "two_line",
+                    "direct_error_valid": False,
+                },
+                "visual_lane_waypoints": {
+                    "center_waypoints_body": tuple((0.05 * idx, 0.04, 0.0) for idx in range(20)),
+                    "lane_width_m": 0.35,
+                },
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertFalse(lane_observation.direct_error_valid)
+        self.assertIsNone(lane_observation.direct_error_m)
+        self.assertGreaterEqual(lane_observation.quality, 0.85)
+
     def test_build_lane_observation_prefers_resolved_visible_side_over_raw_payload_counts(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)
         snapshot = VisualStateSnapshot(

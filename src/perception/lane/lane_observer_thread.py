@@ -10,6 +10,8 @@ from src.utils.live_log import live_log
 
 _VISUAL_PATH_QUALITY_BUMP = 0.85
 _VISUAL_PATH_MIN_POINTS = max(2, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8)))
+_LANE_WIDTH_M = max(0.01, float(getattr(_config, "LANE_WIDTH_CM", 35.0) or 35.0) / 100.0)
+_LINE_DISTANCE_MARGIN_M = max(0.04, _LANE_WIDTH_M * 0.18)
 
 
 class threadLaneObserver(ThreadWithStop):
@@ -145,6 +147,20 @@ class threadLaneObserver(ThreadWithStop):
             center_offset_m = 0.5 * (right_m - left_m)
             return left_m, right_m, center_offset_m
         return None, None, None
+
+    @staticmethod
+    def _line_geometry_valid(
+        left_m: float | None,
+        right_m: float | None,
+        lane_width_m: float | None = None,
+    ) -> bool:
+        if left_m is None or right_m is None:
+            return True
+        width = lane_width_m if lane_width_m is not None and lane_width_m > 0.0 else _LANE_WIDTH_M
+        margin = max(_LINE_DISTANCE_MARGIN_M, width * 0.18)
+        lower = -margin
+        upper = width + margin
+        return lower <= left_m <= upper and lower <= right_m <= upper
 
     @staticmethod
     def _direct_error_m(snapshot: VisualStateSnapshot) -> float | None:
@@ -293,6 +309,11 @@ class threadLaneObserver(ThreadWithStop):
         )
         direct_error_m = raw_direct_error_m if direct_error_valid else None
         left_line_distance_m, right_line_distance_m, line_center_offset_m = self._line_distance_metrics(snapshot)
+        explicit_direct_error_invalid = (
+            isinstance(debug, dict)
+            and "direct_error_valid" in debug
+            and not bool(debug.get("direct_error_valid"))
+        )
 
         visual_payload = frame_trace.get("visual_lane_waypoints") if isinstance(frame_trace, dict) else None
         center_waypoints_body: tuple[tuple[float, float, float], ...] = ()
@@ -313,14 +334,31 @@ class threadLaneObserver(ThreadWithStop):
             if side_value in ("left", "right"):
                 extrapolated_side = side_value
 
+        raw_left_line_distance_m = left_line_distance_m
+        raw_right_line_distance_m = right_line_distance_m
+        raw_line_center_offset_m = line_center_offset_m
+        line_geometry_valid = self._line_geometry_valid(
+            left_line_distance_m,
+            right_line_distance_m,
+            lane_width_m,
+        )
+        if not line_geometry_valid:
+            direct_error_m = None
+            direct_error_valid = False
+            left_line_distance_m = None
+            right_line_distance_m = None
+            line_center_offset_m = None
+
         base_quality = self._quality_from_sides(detected_sides, blind_mode)
-        if len(center_waypoints_body) >= _VISUAL_PATH_MIN_POINTS:
+        if not line_geometry_valid:
+            quality = min(base_quality, 0.2)
+        elif len(center_waypoints_body) >= _VISUAL_PATH_MIN_POINTS:
             quality = max(base_quality, _VISUAL_PATH_QUALITY_BUMP)
             # Derivar `direct_error_m` desde el primer waypoint cuando hay
             # waypoints visuales. y_left positivo = vehículo desplazado a la
             # izquierda del centro de carril → direct_error es el negativo.
             derived_error = -float(center_waypoints_body[0][1])
-            if direct_error_m is None and math.isfinite(derived_error):
+            if direct_error_m is None and math.isfinite(derived_error) and not explicit_direct_error_invalid:
                 direct_error_m = derived_error
                 direct_error_valid = True
         else:
@@ -328,6 +366,12 @@ class threadLaneObserver(ThreadWithStop):
 
         observation_debug = dict(debug)
         observation_debug["raw_direct_error_m"] = raw_direct_error_m
+        observation_debug["line_geometry_valid"] = bool(line_geometry_valid)
+        if not line_geometry_valid:
+            observation_debug["line_geometry_reject_reason"] = "line_distance_out_of_lane_bounds"
+            observation_debug["raw_left_line_distance_m"] = raw_left_line_distance_m
+            observation_debug["raw_right_line_distance_m"] = raw_right_line_distance_m
+            observation_debug["raw_line_center_offset_m"] = raw_line_center_offset_m
         if center_waypoints_body:
             observation_debug["visual_waypoint_count"] = len(center_waypoints_body)
             if extrapolated_side:

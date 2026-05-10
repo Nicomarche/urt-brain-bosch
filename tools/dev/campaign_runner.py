@@ -598,11 +598,19 @@ def _build_expected_route(
     if str(BRAIN_DIR) not in sys.path:
         sys.path.insert(0, str(BRAIN_DIR))
     from src.routing.lanelet.osm_router import OsmRouteGraph
+    from src.utils.sim_start_pose import load_saved_start_pose, resolve_saved_start_pose
 
     graph = OsmRouteGraph(str(osm_path))
-    start_lanelet = graph.get_start_node_id()
-    start_x, start_y, start_yaw = graph.get_start_pose()
-    start_spec = {"lanelet_id": start_lanelet, "x": start_x, "y": start_y, "yaw_rad": start_yaw}
+    default_start_pose = graph.get_start_pose()
+    saved_start_pose = load_saved_start_pose(map_dir=osm_path.resolve().parent)
+    start_x, start_y, start_yaw = resolve_saved_start_pose(graph, default=default_start_pose)
+    start_spec: dict[str, Any] = {"x": start_x, "y": start_y, "yaw_rad": start_yaw}
+    if saved_start_pose and saved_start_pose.get("lanelet_id") is not None:
+        start_spec["lanelet_id"] = str(saved_start_pose["lanelet_id"])
+        start_source = "saved_sim_start_pose"
+    else:
+        start_spec["lanelet_id"] = graph.get_start_node_id()
+        start_source = "map_default_start_pose"
 
     if destination_lanelet:
         destination_spec: dict[str, Any] = {"lanelet_id": str(destination_lanelet)}
@@ -621,6 +629,7 @@ def _build_expected_route(
     expected = {
         "source": "campaign_runner",
         "osm_path": str(osm_path),
+        "start_source": start_source,
         "start": start_spec,
         "destination": destination_spec,
         "node_ids": list(route.node_ids),
@@ -727,15 +736,14 @@ def _compute_metrics(
         and ev.get("event") == "lane_obs"
         and float(ev.get("quality", 0.0) or 0.0) > 0.5
     ]
-    lane_offsets = [
+    lane_offsets: list[float] = []
+    direct_lane_offsets = [
         offset
         for ev in lane_events
         for offset in [_finite_float(ev.get("offset_m"))]
         if offset is not None
     ]
     lane_abs_offsets = [abs(value) for value in lane_offsets]
-    lane_p90 = _percentile(lane_abs_offsets, 90) if lane_abs_offsets else None
-    lane_max = max(lane_abs_offsets) if lane_abs_offsets else None
     line_left_distances: list[float] = []
     line_right_distances: list[float] = []
     line_gap_distances: list[float] = []
@@ -754,24 +762,27 @@ def _compute_metrics(
         return str(lanelet) if lanelet is not None else None
 
     for ev in lane_events:
+        offset_m = _finite_float(ev.get("offset_m"))
         left_m = _finite_float(ev.get("left_line_distance_m"))
         right_m = _finite_float(ev.get("right_line_distance_m"))
         center_offset_m = _finite_float(ev.get("line_center_offset_m"))
         if center_offset_m is None and left_m is not None and right_m is not None:
             center_offset_m = 0.5 * (right_m - left_m)
-        if left_m is None or right_m is None:
-            continue
-        line_left_distances.append(left_m)
-        line_right_distances.append(right_m)
-        line_gap_distances.append(left_m + right_m)
-        if center_offset_m is not None:
-            line_center_offsets.append(center_offset_m)
-        if abs(left_m - right_m) < 0.01:
-            closer_side_counts["balanced"] += 1
-        elif left_m < right_m:
-            closer_side_counts["left"] += 1
-        else:
-            closer_side_counts["right"] += 1
+        visual_offset_m = center_offset_m if center_offset_m is not None else offset_m
+        if visual_offset_m is not None:
+            lane_offsets.append(visual_offset_m)
+        if left_m is not None and right_m is not None:
+            line_left_distances.append(left_m)
+            line_right_distances.append(right_m)
+            line_gap_distances.append(left_m + right_m)
+            if center_offset_m is not None:
+                line_center_offsets.append(center_offset_m)
+            if abs(left_m - right_m) < 0.01:
+                closer_side_counts["balanced"] += 1
+            elif left_m < right_m:
+                closer_side_counts["left"] += 1
+            else:
+                closer_side_counts["right"] += 1
 
         lanelet_id = lanelet_at(float(ev.get("ts", 0.0) or 0.0))
         if lanelet_id is None:
@@ -784,18 +795,23 @@ def _compute_metrics(
             "right_line_distance_m": [],
             "line_gap_m": [],
             "line_center_offset_m": [],
-            "line_center_offset_abs_m": [],
-        },
+                "line_center_offset_abs_m": [],
+            },
         )
-        offset_m = _finite_float(ev.get("offset_m"))
-        if offset_m is not None:
-            bucket["offset_m"].append(offset_m)
+        if visual_offset_m is not None:
+            bucket["offset_m"].append(visual_offset_m)
+        if left_m is None or right_m is None:
+            continue
         bucket["left_line_distance_m"].append(left_m)
         bucket["right_line_distance_m"].append(right_m)
         bucket["line_gap_m"].append(left_m + right_m)
         if center_offset_m is not None:
             bucket["line_center_offset_m"].append(center_offset_m)
             bucket["line_center_offset_abs_m"].append(abs(center_offset_m))
+
+    lane_abs_offsets = [abs(value) for value in lane_offsets]
+    lane_p90 = _percentile(lane_abs_offsets, 90) if lane_abs_offsets else None
+    lane_max = max(lane_abs_offsets) if lane_abs_offsets else None
 
     per_lanelet_summary: dict[str, Any] = {}
     for lanelet_id, bucket in sorted(per_lanelet.items(), key=lambda item: item[0]):
@@ -854,6 +870,7 @@ def _compute_metrics(
         },
         "visual_lane": {
             "samples": len(lane_abs_offsets),
+            "offset_source": "line_center_offset_m when available, offset_m fallback",
             "offset_abs_m": {
                 "p50": _percentile(lane_abs_offsets, 50) if lane_abs_offsets else None,
                 "p90": lane_p90,
@@ -867,6 +884,7 @@ def _compute_metrics(
                 if lane_offsets
                 else None
             ),
+            "direct_offset_abs_m": _summary([abs(value) for value in direct_lane_offsets]),
             "line_distance_samples": len(line_gap_distances),
             "left_line_distance_m": _summary(line_left_distances),
             "right_line_distance_m": _summary(line_right_distances),
@@ -976,6 +994,164 @@ def _write_overlay(
     return bool(cv2.imwrite(str(out_path), img))
 
 
+def _collect_visual_lane_samples(
+    brain_events: list[dict[str, Any]],
+    *,
+    record_start_ts: float | None = None,
+    fps: float | None = None,
+) -> list[dict[str, Any]]:
+    route_updates = [
+        ev for ev in brain_events
+        if ev.get("thread") == "nav_planner" and ev.get("event") == "route_update"
+    ]
+    route_ts = [float(ev.get("ts", 0.0) or 0.0) for ev in route_updates]
+
+    def route_at(ts: float) -> dict[str, Any]:
+        if not route_ts:
+            return {}
+        idx = bisect.bisect_right(route_ts, ts) - 1
+        if idx < 0:
+            idx = 0
+        return route_updates[idx]
+
+    samples: list[dict[str, Any]] = []
+    for ev in brain_events:
+        if ev.get("thread") != "lane_observer" or ev.get("event") != "lane_obs":
+            continue
+        if float(ev.get("quality", 0.0) or 0.0) <= 0.5:
+            continue
+        ts = float(ev.get("ts", 0.0) or 0.0)
+        route_ev = route_at(ts)
+        pose_x = _finite_float(route_ev.get("pose_x"))
+        pose_y = _finite_float(route_ev.get("pose_y"))
+        if pose_x is None or pose_y is None:
+            continue
+
+        left_m = _finite_float(ev.get("left_line_distance_m"))
+        right_m = _finite_float(ev.get("right_line_distance_m"))
+        center_offset_m = _finite_float(ev.get("line_center_offset_m"))
+        if center_offset_m is None and left_m is not None and right_m is not None:
+            center_offset_m = 0.5 * (right_m - left_m)
+        direct_offset_m = _finite_float(ev.get("offset_m"))
+        visual_offset_m = center_offset_m if center_offset_m is not None else direct_offset_m
+        if visual_offset_m is None:
+            continue
+
+        frame = None
+        if record_start_ts is not None and fps is not None and fps > 0.0:
+            frame = int(round((ts - record_start_ts) * fps)) + 1
+
+        samples.append(
+            {
+                "ts": ts,
+                "frame": frame,
+                "lanelet_id": str(route_ev.get("current_lanelet_id")) if route_ev.get("current_lanelet_id") is not None else None,
+                "route_progress": _finite_float(route_ev.get("route_progress")),
+                "pose_x": pose_x,
+                "pose_y": pose_y,
+                "visual_offset_m": float(visual_offset_m),
+                "visual_offset_abs_m": abs(float(visual_offset_m)),
+                "direct_offset_m": direct_offset_m,
+                "left_line_distance_m": left_m,
+                "right_line_distance_m": right_m,
+                "measurement_mode": ev.get("measurement_mode"),
+                "quality": _finite_float(ev.get("quality")),
+            }
+        )
+    return samples
+
+
+def _write_visual_lane_overlay(
+    *,
+    out_path: Path,
+    track_png: Path,
+    expected_route: dict[str, Any],
+    actual_xy: list[list[float]],
+    visual_samples: list[dict[str, Any]],
+    min_abs_m: float = 0.08,
+) -> bool:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return False
+
+    meta = _overlay_map_metadata(track_png, expected_route)
+    img = cv2.imread(str(track_png), cv2.IMREAD_COLOR) if track_png.exists() else None
+    if img is None:
+        width = int(meta.get("image_width_px", 2039) or 2039)
+        height = int(meta.get("image_height_px", 1343) or 1343)
+        img = np.full((height, width, 3), 245, dtype=np.uint8)
+
+    bounds = dict(meta.get("world_bounds") or {})
+    x_min = float(bounds.get("x_min", 0.0) or 0.0)
+    y_min = float(bounds.get("y_min", 0.0) or 0.0)
+    mpp = float(meta.get("meters_per_pixel", 0.01) or 0.01)
+    y_axis_inverted = bool(meta.get("y_axis_inverted", False))
+    height_px = int(img.shape[0])
+
+    def world_to_pixel(x: float, y: float) -> tuple[int, int]:
+        px = (float(x) - x_min) / mpp
+        local_y = float(y) - y_min
+        py = height_px - (local_y / mpp) if y_axis_inverted else local_y / mpp
+        return int(round(px)), int(round(py))
+
+    def draw_polyline(points: list[tuple[float, float]], color: tuple[int, int, int], thickness: int) -> None:
+        if len(points) < 2:
+            return
+        pix = np.asarray([world_to_pixel(x, y) for x, y in points], dtype=np.int32)
+        cv2.polylines(img, [pix], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+    expected_xy = [
+        (float(pt[0]), float(pt[1]))
+        for pt in expected_route.get("waypoints", [])
+        if isinstance(pt, list) and len(pt) >= 2
+    ]
+    actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
+    draw_polyline(expected_xy, (0, 170, 0), 4)
+    draw_polyline(actual_points, (30, 30, 220), 3)
+
+    drawn: list[dict[str, Any]] = []
+    for sample in visual_samples:
+        abs_m = _finite_float(sample.get("visual_offset_abs_m"))
+        x = _finite_float(sample.get("pose_x"))
+        y = _finite_float(sample.get("pose_y"))
+        if abs_m is None or x is None or y is None or abs_m < min_abs_m:
+            continue
+        px, py = world_to_pixel(x, y)
+        if abs_m >= 0.18:
+            color = (255, 0, 255)
+            radius = 8
+        elif abs_m >= 0.12:
+            color = (0, 170, 255)
+            radius = 6
+        else:
+            color = (255, 255, 0)
+            radius = 4
+        cv2.circle(img, (px, py), radius, color, -1, lineType=cv2.LINE_AA)
+        cv2.circle(img, (px, py), radius + 2, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+        drawn.append(sample)
+
+    for sample in sorted(drawn, key=lambda item: float(item.get("visual_offset_abs_m", 0.0) or 0.0), reverse=True)[:12]:
+        x = _finite_float(sample.get("pose_x"))
+        y = _finite_float(sample.get("pose_y"))
+        signed = _finite_float(sample.get("visual_offset_m"))
+        if x is None or y is None or signed is None:
+            continue
+        px, py = world_to_pixel(x, y)
+        frame = sample.get("frame")
+        lanelet = sample.get("lanelet_id") or "?"
+        label = f"f{frame} L{lanelet} {signed:+.2f}m" if frame is not None else f"L{lanelet} {signed:+.2f}m"
+        cv2.putText(img, label, (px + 8, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img, label, (px + 8, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
+
+    cv2.putText(img, "expected", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 120, 0), 2, cv2.LINE_AA)
+    cv2.putText(img, "actual GT", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
+    cv2.putText(img, "visual lane offset: cyan>8cm orange>12cm magenta>18cm", (24, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(out_path), img))
+
+
 def _collect_camera_video(brain_dir: Path, run_dir: Path, started_at: float) -> str | None:
     candidates = [
         path for path in brain_dir.glob("output_video*.avi")
@@ -991,6 +1167,76 @@ def _collect_camera_video(brain_dir: Path, run_dir: Path, started_at: float) -> 
         return str(target)
     except OSError:
         return str(source)
+
+
+def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, Any]:
+    try:
+        import cv2
+    except ImportError:
+        return {
+            "video_path": str(video_path),
+            "frame_count": 0,
+            "saved_frame_count": 0,
+            "error": "opencv_unavailable",
+        }
+
+    video = Path(video_path)
+    frames_dir = run_dir / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    cap = cv2.VideoCapture(str(video))
+    if not cap.isOpened():
+        return {
+            "video_path": str(video),
+            "frames_dir": str(frames_dir),
+            "frame_count": 0,
+            "saved_frame_count": 0,
+            "error": "video_open_failed",
+        }
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    total_reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    index: list[dict[str, Any]] = []
+    frame_count = 0
+    saved_count = 0
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frame_count += 1
+        frame_path = frames_dir / f"frame_{frame_count:06d}.png"
+        if cv2.imwrite(str(frame_path), frame):
+            saved_count += 1
+            index.append(
+                {
+                    "frame": frame_count,
+                    "time_s": ((frame_count - 1) / fps) if fps > 0.0 else None,
+                    "path": str(frame_path),
+                }
+            )
+
+    cap.release()
+    meta: dict[str, Any] = {
+        "video_path": str(video),
+        "frames_dir": str(frames_dir),
+        "index_json": str(frames_dir / "index.json"),
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "reported_frame_count": total_reported,
+        "frame_count": frame_count,
+        "saved_frame_count": saved_count,
+        "frames": index,
+    }
+    if frame_count <= 0:
+        meta["error"] = "video_has_no_frames"
+    (frames_dir / "index.json").write_text(
+        json.dumps(meta, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return meta
 
 
 def _update_latest_symlink(root: Path, target: Path) -> None:
@@ -1017,8 +1263,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="http://localhost:5005")
     parser.add_argument("--max-cross-track-p90-m", type=float, default=0.20)
     parser.add_argument("--max-cross-track-max-m", type=float, default=0.35)
-    parser.add_argument("--max-lane-offset-p90-m", type=float, default=0.20)
-    parser.add_argument("--max-lane-offset-max-m", type=float, default=0.35)
+    parser.add_argument("--max-lane-offset-p90-m", type=float, default=0.12)
+    parser.add_argument("--max-lane-offset-max-m", type=float, default=0.20)
     parser.add_argument("--no-record", action="store_true", help="Do not toggle camera AVI recording.")
     parser.add_argument("--skip-cleanup-before", action="store_true", help="Do not kill previous sim/brain processes before starting.")
     parser.add_argument("--keep-running", action="store_true", help="Leave sim/brain running after the route attempt.")
@@ -1069,6 +1315,8 @@ def main() -> int:
     processes: list[ManagedProcess] = []
     client: DashboardClient | None = None
     started_at = time.time()
+    record_start_ts: float | None = None
+    record_stop_ts: float | None = None
 
     print(f"[campaign] run_id={run_id}")
     print(f"[campaign] brain logs: {brain_run_dir}")
@@ -1149,6 +1397,7 @@ def main() -> int:
 
         if not args.no_record:
             client.emit_message("Record", True, wait_response=True)
+            record_start_ts = time.time()
             time.sleep(0.5)
 
         nav_ok = False
@@ -1179,6 +1428,7 @@ def main() -> int:
         client.emit_message("DrivingMode", "stop")
         if not args.no_record:
             client.emit_message("Record", False, wait_response=True)
+            record_stop_ts = time.time()
         time.sleep(0.5)
 
     except Exception as exc:
@@ -1197,6 +1447,9 @@ def main() -> int:
         shutil.copy2(sim_jsonl, copied_sim_jsonl)
 
     video_path = None if args.no_record else _collect_camera_video(brain_dir, brain_run_dir, started_at)
+    video_frames: dict[str, Any] | None = None
+    if video_path:
+        video_frames = _extract_video_frames(video_path, brain_run_dir)
     brain_events = _load_jsonl(brain_jsonl)
     gt_events = _load_jsonl(copied_sim_jsonl)
     auto_start_ts = _find_auto_start_ts(brain_events)
@@ -1211,8 +1464,22 @@ def main() -> int:
         max_lane_offset_max_m=args.max_lane_offset_max_m,
         route_result=route_result,
     )
+    visual_samples = _collect_visual_lane_samples(
+        brain_events,
+        record_start_ts=record_start_ts,
+        fps=float(video_frames.get("fps", 0.0) or 0.0) if video_frames else None,
+    )
+    if "visual_lane" in metrics:
+        metrics["visual_lane"]["worst_samples"] = sorted(
+            visual_samples,
+            key=lambda sample: float(sample.get("visual_offset_abs_m", 0.0) or 0.0),
+            reverse=True,
+        )[:30]
     if video_path:
         metrics["artifacts"] = {"camera_video": video_path}
+        if video_frames:
+            metrics["artifacts"]["camera_frames_dir"] = str(brain_run_dir / "frames")
+            metrics["artifacts"]["camera_frames_index_json"] = str(brain_run_dir / "frames" / "index.json")
     else:
         metrics["artifacts"] = {}
 
@@ -1224,6 +1491,15 @@ def main() -> int:
     )
     if overlay_written:
         metrics["artifacts"]["overlay_png"] = str(brain_run_dir / "overlay.png")
+    visual_overlay_written = _write_visual_lane_overlay(
+        out_path=brain_run_dir / "overlay_visual_lane.png",
+        track_png=args.track_png.resolve(),
+        expected_route=expected_route,
+        actual_xy=metrics["ground_truth"]["actual_path"],
+        visual_samples=visual_samples,
+    )
+    if visual_overlay_written:
+        metrics["artifacts"]["overlay_visual_lane_png"] = str(brain_run_dir / "overlay_visual_lane.png")
     metrics["artifacts"].update(
         {
             "brain_jsonl": str(brain_jsonl),
@@ -1234,6 +1510,14 @@ def main() -> int:
     )
     metrics["run_id"] = run_id
     metrics["auto_start_ts"] = auto_start_ts
+    metrics["record_start_ts"] = record_start_ts
+    metrics["record_stop_ts"] = record_stop_ts
+    if video_frames:
+        metrics["video_frames"] = {
+            key: value
+            for key, value in video_frames.items()
+            if key != "frames"
+        }
 
     (brain_run_dir / "report.json").write_text(
         json.dumps(metrics, indent=2, sort_keys=True),

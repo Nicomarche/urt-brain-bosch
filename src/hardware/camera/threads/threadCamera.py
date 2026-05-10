@@ -99,7 +99,9 @@ class threadCamera(ThreadWithStop):
         self.picamera_hdr_always_on = bool(picamera_hdr_always_on)
         self.picamera_hdr_glare_threshold = max(0.0, min(1.0, float(picamera_hdr_glare_threshold)))
 
-        self.video_writer = ""
+        self.video_writer = None
+        self._recording_path = None
+        self._recording_size = None
 
         # PiCamera adaptive exposure controls (robustness against direct sunlight).
         self._picamera_control_lock = threading.RLock()
@@ -165,20 +167,13 @@ class threadCamera(ThreadWithStop):
             
         try:
             recordRecv = self.recordSubscriber.receive()
-            if recordRecv is not None: 
-                self.recording = bool(recordRecv)
-                if recordRecv == False:
-                    self.video_writer.release() # type: ignore
+            if recordRecv is not None:
+                if bool(recordRecv):
+                    if not self.recording:
+                        self._prepare_recording()
                 else:
-                    fourcc = cv2.VideoWriter_fourcc( # type: ignore
-                        *"XVID"
-                    )  # You can choose different codecs, e.g., 'MJPG', 'XVID', 'H264', etc.
-                    self.video_writer = cv2.VideoWriter(
-                        "output_video" + str(time.time()) + ".avi",
-                        fourcc,
-                        self.frame_rate,
-                        (2048, 1080),
-                    )
+                    self.recording = False
+                    self._release_video_writer()
 
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
@@ -201,7 +196,7 @@ class threadCamera(ThreadWithStop):
                 self.frame_buffer.write(serialRequest)
 
             if self.recording == True and mainRequest is not None:
-                self.video_writer.write(mainRequest) # type: ignore
+                self._write_recording_frame(mainRequest)
 
             # Phase 6: este thread ya no publica `serialCamera`. El productor
             # único de ese canal pasó a ser `threadLocalPerception`, que envía
@@ -217,6 +212,66 @@ class threadCamera(ThreadWithStop):
         serialRequest = self.camera.capture_array("lores")
         serialRequest = cv2.cvtColor(serialRequest, cv2.COLOR_YUV2BGR_I420)  # type: ignore
         return mainRequest, serialRequest
+
+    def _prepare_recording(self):
+        """Arm recording; the writer is opened lazily with the first frame size."""
+        self._release_video_writer()
+        self._recording_path = "output_video" + str(time.time()) + ".avi"
+        self._recording_size = None
+        self.recording = True
+
+    def _release_video_writer(self):
+        writer = self.video_writer
+        if writer is not None:
+            try:
+                writer.release()
+            except Exception as e:
+                print(f"\033[1;97m[ Camera ] :\033[0m \033[1;93mWARNING\033[0m - Failed to release recording writer: {e}")
+        self.video_writer = None
+        self._recording_path = None
+        self._recording_size = None
+
+    def _ensure_video_writer(self, frame):
+        if self.video_writer is not None:
+            return self.video_writer
+        if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
+            return None
+        height, width = frame.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        path = self._recording_path or ("output_video" + str(time.time()) + ".avi")
+        fourcc = cv2.VideoWriter_fourcc(*"XVID")  # type: ignore
+        writer = cv2.VideoWriter(path, fourcc, self.frame_rate, (int(width), int(height)))
+        if not writer.isOpened():
+            try:
+                writer.release()
+            except Exception:
+                pass
+            print(
+                f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - "
+                f"Could not open recording writer at {path} with size {width}x{height}"
+            )
+            return None
+        self.video_writer = writer
+        self._recording_path = path
+        self._recording_size = (int(width), int(height))
+        print(
+            f"\033[1;97m[ Camera ] :\033[0m \033[1;92mRECORDING\033[0m - "
+            f"{path} @ {width}x{height} {self.frame_rate}fps"
+        )
+        return writer
+
+    def _write_recording_frame(self, frame):
+        writer = self._ensure_video_writer(frame)
+        if writer is None:
+            return
+        out_frame = frame
+        if self._recording_size is not None:
+            width, height = self._recording_size
+            frame_height, frame_width = frame.shape[:2]
+            if (int(frame_width), int(frame_height)) != (width, height):
+                out_frame = cv2.resize(frame, (width, height))
+        writer.write(out_frame)
 
     def _should_apply_picamera_hdr(self, frame):
         """Decide whether HDR fusion is needed based on glare saturation."""

@@ -7,6 +7,7 @@ import time
 from src.core.types import Pose2D, PoseEstimate, RouteContext
 from src.core.types.routing import RegulatoryElement
 from src.routing.route_planner import PathManager
+from src.utils.sim_start_pose import resolve_saved_start_pose
 from src.utils.live_log import live_log
 from src.localization.relocalization_thread import (
     _ADVANCE_DIST,
@@ -31,6 +32,13 @@ try:
     from config import TRACKING_ROUTE_LANELET_OVERRIDE_ERROR_M as _ROUTE_LANELET_OVERRIDE_ERROR_M
 except Exception:
     _ROUTE_LANELET_OVERRIDE_ERROR_M = 0.12
+
+try:
+    from config import MOTOR_OUTPUT as _MOTOR_OUTPUT
+except Exception:
+    _MOTOR_OUTPUT = ""
+
+_USE_SAVED_SIM_START_POSE = _MOTOR_OUTPUT == "zmq"
 
 _ROUTE_LANELET_OVERRIDE_MIN_IMPROVEMENT_M = 0.02
 _ROUTE_LANELET_OVERRIDE_CONFIRM_TICKS = 3
@@ -117,11 +125,7 @@ class threadNavigationPlanner(ThreadWithStop):
         self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
         self._graph = self._load_graph()
         self._path_manager = PathManager(self._graph) if self._graph is not None else None
-        if self._graph is not None:
-            x0, y0, yaw0 = self._graph.get_start_pose()
-            self._last_pose = Pose2D(float(x0), float(y0), float(yaw0))
-        else:
-            self._last_pose = Pose2D()
+        self._last_pose = self._resolve_initial_pose()
         self._last_speed = 0.0
         # Tracking del cambio de nodo para emitir un evento `node_change`
         # discreto en el JSONL cada vez que current_node_id cambia. Útil para
@@ -155,6 +159,18 @@ class threadNavigationPlanner(ThreadWithStop):
             step_m=_STEP_M,
             start_lanelet_id=_START_LANELET_ID,
         )
+
+    def _resolve_initial_pose(self) -> Pose2D:
+        if self._graph is None:
+            return Pose2D()
+        default_pose = self._graph.get_start_pose()
+        pose = (
+            resolve_saved_start_pose(self._graph, default=default_pose)
+            if _USE_SAVED_SIM_START_POSE
+            else default_pose
+        )
+        x0, y0, yaw0 = pose
+        return Pose2D(float(x0), float(y0), float(yaw0))
 
     def _future_lanelet_hints(self, current_lanelet_id: str | None, path_update) -> tuple[str, ...]:
         if self._lanelet_map is None or not current_lanelet_id:

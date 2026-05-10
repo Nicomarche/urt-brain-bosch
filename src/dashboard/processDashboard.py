@@ -198,6 +198,20 @@ class processDashboard(WorkerProcess):
         return car
 
     @staticmethod
+    def _is_manual_dashboard_localisation(payload):
+        if not isinstance(payload, dict):
+            return False
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            if bool(meta.get("manual")):
+                return True
+            source = str(meta.get("source") or "").strip().lower()
+            if source.startswith("manual"):
+                return True
+        source = str(payload.get("source") or "").strip().lower()
+        return source.startswith("manual")
+
+    @staticmethod
     def _summarize_navigation_command(payload):
         if not isinstance(payload, dict):
             return {"type": "invalid"}
@@ -381,6 +395,22 @@ class processDashboard(WorkerProcess):
                         f" {dataName}={dataDict.get('Value')!r}"
                         f" registered={is_registered}"
                     )
+                if (
+                    dataName == "Localisation"
+                    and self._is_manual_dashboard_localisation(dataDict.get("Value"))
+                    and self._current_mode != SystemMode.STOP
+                ):
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m"
+                        " - Manual localisation ignored because mode is not STOP"
+                    )
+                    if socketId:
+                        self.socketio.emit(
+                            'response',
+                            {'error': 'Manual localisation is only allowed in STOP mode'},
+                            room=socketId,
+                        )
+                    return
                 if dataName == "NavigationCommand":
                     live_log(
                         "dashboard", event="navigation_command_received",

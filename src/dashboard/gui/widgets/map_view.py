@@ -56,6 +56,11 @@ from src.routing.lanelet.attributes import (
     ATTR_STOPLINE,
 )
 from src.routing.lanelet.from_osm import parse_lanelet2_osm, load_lanelet2_osm
+from src.utils.sim_start_pose import (
+    load_saved_start_pose,
+    save_saved_start_pose,
+    saved_start_pose_path,
+)
 
 
 _logger = logging.getLogger(__name__)
@@ -460,6 +465,8 @@ class MapView(QWidget):
         self._client = client
         self._compact = bool(compact)
         self._map_dir = Path(map_dir) if map_dir else self._guess_map_dir()
+        self._saved_start_pose = load_saved_start_pose(map_dir=self._map_dir)
+        self._last_pose_snapshot: dict[str, object] | None = None
         self._data = MapData(self._map_dir)
 
         self._scene = _MapScene(self._data, self)
@@ -494,11 +501,21 @@ class MapView(QWidget):
             self._relocate_btn = QToolButton()
             self._relocate_btn.setText("Relocate")
             self._relocate_btn.setToolTip(
-                "Toggle: when ON, left-click on the map sends a Localisation "
-                "command to the car (and the simulator, in sim mode)."
+                "Stop only: when ON, left-click on the map sends a "
+                "Localisation command to the car and teleports the simulator "
+                "pose in sim mode."
             )
             self._relocate_btn.setCheckable(True)
             self._relocate_btn.toggled.connect(self._on_relocate_toggled)
+            self._save_start_btn = QPushButton("Save start")
+            self._save_start_btn.setToolTip(
+                "Stop only: save the current car pose into "
+                "config/sim_start_pose.json so the next sim run starts there."
+            )
+            self._save_start_btn.clicked.connect(self._save_current_pose_as_start)
+            self._start_pose_label = QLabel()
+            self._start_pose_label.setStyleSheet("color:#666; font-size: 10pt;")
+            self._update_saved_start_label()
 
             fit_btn = QPushButton("Fit view")
             fit_btn.clicked.connect(self._fit_view)
@@ -515,8 +532,11 @@ class MapView(QWidget):
             toolbar.addWidget(fit_btn)
             toolbar.addWidget(clear_route_btn)
             toolbar.addWidget(self._relocate_btn)
+            toolbar.addWidget(self._save_start_btn)
             toolbar.addStretch(1)
             toolbar.addWidget(hint)
+            toolbar.addSpacing(12)
+            toolbar.addWidget(self._start_pose_label)
             toolbar.addSpacing(12)
             toolbar.addWidget(self._gps_label)
             toolbar.addSpacing(8)
@@ -555,6 +575,7 @@ class MapView(QWidget):
         self._client.gps_fix_signal.connect(self._on_gps_fix)
         self._mode = ev.MODE_STOP
         self._relocate_mode = False
+        self._refresh_manual_pose_controls()
         self._fit_view()
 
     # ------------------------------------------------------------------
@@ -734,6 +755,8 @@ class MapView(QWidget):
         self._data = MapData(self._map_dir)
         self._scene._data = self._data  # keep scene in sync
         self._build_scene()
+        self._saved_start_pose = load_saved_start_pose(map_dir=self._map_dir)
+        self._update_saved_start_label()
         self._fit_view()
 
     def _ensure_scene_contains(self, px: float, py: float, *, margin: float = 80.0) -> None:
@@ -775,6 +798,231 @@ class MapView(QWidget):
             f"({x_m:.2f}, {y_m:.2f}) m  yaw_vis={display_yaw_deg:.0f}°  raw={yaw_deg:.0f}°"
         )
 
+    def _is_stop_mode(self) -> bool:
+        return str(self._mode or "").lower() == ev.MODE_STOP
+
+    @staticmethod
+    def _distance_point_to_segment(
+        x_m: float,
+        y_m: float,
+        ax_m: float,
+        ay_m: float,
+        bx_m: float,
+        by_m: float,
+    ) -> float:
+        seg_dx = float(bx_m) - float(ax_m)
+        seg_dy = float(by_m) - float(ay_m)
+        seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+        if seg_len_sq <= 1e-12:
+            return math.hypot(float(x_m) - float(ax_m), float(y_m) - float(ay_m))
+        rel_x = float(x_m) - float(ax_m)
+        rel_y = float(y_m) - float(ay_m)
+        proj_t = max(0.0, min(1.0, (rel_x * seg_dx + rel_y * seg_dy) / seg_len_sq))
+        proj_x = float(ax_m) + proj_t * seg_dx
+        proj_y = float(ay_m) + proj_t * seg_dy
+        return math.hypot(float(x_m) - proj_x, float(y_m) - proj_y)
+
+    def _remember_pose_snapshot(
+        self,
+        x_m: float,
+        y_m: float,
+        yaw_deg: float,
+        *,
+        lanelet_id: str | None = None,
+    ) -> None:
+        snapshot: dict[str, object] = {
+            "world_x": float(x_m),
+            "world_y": float(y_m),
+            "yaw_deg": float(yaw_deg),
+        }
+        if lanelet_id:
+            snapshot["lanelet_id"] = str(lanelet_id)
+        self._last_pose_snapshot = snapshot
+        self._refresh_manual_pose_controls()
+
+    def _resolve_lanelet_id_for_pose(
+        self,
+        x_m: float,
+        y_m: float,
+        *,
+        yaw_deg: float | None = None,
+        prefer_active_corridor: bool = False,
+    ) -> str | None:
+        lanelet_map = self._data.lanelet_map
+        if lanelet_map is None:
+            return None
+        if yaw_deg is not None:
+            try:
+                lanelet_id = lanelet_map.at_pose(
+                    float(x_m),
+                    float(y_m),
+                    yaw_rad=math.radians(float(yaw_deg)),
+                )
+                if lanelet_id is not None:
+                    return str(lanelet_id)
+            except Exception:
+                pass
+        return resolve_click_destination_lanelet(
+            x_m=x_m,
+            y_m=y_m,
+            lanelet_map=lanelet_map,
+            lanelet_polygons=self._data.lanelet_polygons_by_id,
+            current_lanelet_id=self._active_current_lanelet_id if prefer_active_corridor else None,
+            next_lanelet_ids=self._active_next_lanelet_ids if prefer_active_corridor else (),
+        )
+
+    def _heading_deg_for_pose(
+        self,
+        x_m: float,
+        y_m: float,
+        *,
+        lanelet_id: str | None = None,
+        fallback_deg: float | None = None,
+    ) -> float:
+        fallback = float(self._last_location_yaw_deg if fallback_deg is None else fallback_deg)
+        lanelet_map = self._data.lanelet_map
+        if lanelet_map is None or lanelet_id is None:
+            return fallback
+        lanelet = lanelet_map.get_lanelet(str(lanelet_id))
+        centerline = getattr(lanelet, "centerline", None)
+        if lanelet is None or centerline is None or getattr(centerline, "shape", (0,))[0] < 2:
+            return fallback
+        points = centerline.tolist()
+        best_heading_deg = fallback
+        best_distance = float("inf")
+        for idx in range(len(points) - 1):
+            ax_m, ay_m = points[idx]
+            bx_m, by_m = points[idx + 1]
+            distance_m = self._distance_point_to_segment(x_m, y_m, ax_m, ay_m, bx_m, by_m)
+            if distance_m < best_distance:
+                best_distance = distance_m
+                best_heading_deg = math.degrees(math.atan2(float(by_m) - float(ay_m), float(bx_m) - float(ax_m)))
+        return float(best_heading_deg)
+
+    def _manual_localisation_payload(self, x_m: float, y_m: float) -> dict[str, object]:
+        lanelet_id = self._resolve_lanelet_id_for_pose(
+            x_m,
+            y_m,
+            prefer_active_corridor=True,
+        )
+        yaw_deg = self._heading_deg_for_pose(
+            x_m,
+            y_m,
+            lanelet_id=lanelet_id,
+            fallback_deg=self._last_location_yaw_deg,
+        )
+        payload: dict[str, object] = {
+            "world_x": round(float(x_m), 6),
+            "world_y": round(float(y_m), 6),
+            "posA": round(float(x_m), 6),
+            "posB": round(float(y_m), 6),
+            "rotA": 0.0,
+            "rotB": 0.0,
+            "yaw_deg": round(float(yaw_deg), 3),
+            "timestamp": _time.time(),
+            "meta": {"source": "manual_dashboard", "manual": True},
+        }
+        if lanelet_id is not None:
+            payload["lanelet_id"] = str(lanelet_id)
+        return payload
+
+    def _saved_start_pose_payload(self) -> dict[str, object] | None:
+        if not isinstance(self._last_pose_snapshot, dict):
+            return None
+        try:
+            x_m = float(self._last_pose_snapshot["world_x"])
+            y_m = float(self._last_pose_snapshot["world_y"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        try:
+            yaw_deg = float(self._last_pose_snapshot.get("yaw_deg", self._last_location_yaw_deg))
+        except (TypeError, ValueError):
+            yaw_deg = float(self._last_location_yaw_deg)
+        lanelet_id = self._last_pose_snapshot.get("lanelet_id")
+        lanelet_text = str(lanelet_id).strip() if lanelet_id is not None else ""
+        if not lanelet_text:
+            lanelet_text = self._resolve_lanelet_id_for_pose(x_m, y_m, yaw_deg=yaw_deg) or ""
+        yaw_deg = self._heading_deg_for_pose(
+            x_m,
+            y_m,
+            lanelet_id=lanelet_text or None,
+            fallback_deg=yaw_deg,
+        )
+        payload: dict[str, object] = {
+            "world_x": round(float(x_m), 6),
+            "world_y": round(float(y_m), 6),
+            "yaw_deg": round(float(yaw_deg), 3),
+            "saved_at": round(_time.time(), 3),
+            "map_dir": str(self._map_dir.resolve()),
+        }
+        if lanelet_text:
+            payload["lanelet_id"] = lanelet_text
+        return payload
+
+    def _update_saved_start_label(self) -> None:
+        if self._compact or not hasattr(self, "_start_pose_label"):
+            return
+        config_hint = str(saved_start_pose_path())
+        pose = self._saved_start_pose
+        if isinstance(pose, dict):
+            try:
+                x_m = float(pose["world_x"])
+                y_m = float(pose["world_y"])
+                yaw_deg = float(
+                    pose.get("yaw_deg")
+                    if pose.get("yaw_deg") is not None
+                    else math.degrees(float(pose["yaw_rad"]))
+                    if pose.get("yaw_rad") is not None
+                    else 0.0
+                )
+            except (KeyError, TypeError, ValueError):
+                pose = None
+            else:
+                self._start_pose_label.setText(f"Start: ({x_m:.2f}, {y_m:.2f})")
+                self._start_pose_label.setStyleSheet("color:#8fd19e; font-size: 10pt;")
+                self._start_pose_label.setToolTip(
+                    f"Saved sim start pose for this map.\nYaw: {yaw_deg:.1f}°\n{config_hint}"
+                )
+                return
+        self._start_pose_label.setText("Start: default")
+        self._start_pose_label.setStyleSheet("color:#666; font-size: 10pt;")
+        self._start_pose_label.setToolTip(
+            f"No saved sim start pose for this map.\n{config_hint}"
+        )
+
+    def _refresh_manual_pose_controls(self) -> None:
+        if self._compact:
+            return
+        can_edit_pose = self._is_stop_mode()
+        if not can_edit_pose and getattr(self, "_relocate_mode", False):
+            self._relocate_btn.blockSignals(True)
+            self._relocate_btn.setChecked(False)
+            self._relocate_btn.blockSignals(False)
+            self._on_relocate_toggled(False)
+        self._relocate_btn.setEnabled(can_edit_pose)
+        if hasattr(self, "_save_start_btn"):
+            self._save_start_btn.setEnabled(can_edit_pose and self._last_pose_snapshot is not None)
+
+    def _save_current_pose_as_start(self) -> None:
+        if not self._is_stop_mode():
+            self._location_label.setText("Save start is only available in Stop mode")
+            return
+        payload = self._saved_start_pose_payload()
+        if payload is None:
+            self._location_label.setText("No car pose available yet to save")
+            self._refresh_manual_pose_controls()
+            return
+        try:
+            self._saved_start_pose = save_saved_start_pose(payload)
+        except Exception as exc:
+            _logger.warning("Could not save sim start pose: %s", exc)
+            self._location_label.setText("Could not save start pose")
+            return
+        self._update_saved_start_label()
+        self._location_label.setText(
+            f"Start saved → ({float(payload['world_x']):.2f}, {float(payload['world_y']):.2f}) m"
+        )
+
     # ------------------------------------------------------------------
     # Backend → us
     # ------------------------------------------------------------------
@@ -789,6 +1037,7 @@ class MapView(QWidget):
             return
         self._last_location_time = _time.monotonic()
         self._last_location_yaw_deg = yaw_deg
+        self._remember_pose_snapshot(x_m, y_m, yaw_deg)
         self._set_cursor_pose(x_m, y_m, yaw_deg)
 
     def _on_cars(self, payload) -> None:
@@ -895,6 +1144,7 @@ class MapView(QWidget):
     def _on_state_change(self, mode: str) -> None:
         if mode:
             self._mode = mode.lower()
+        self._refresh_manual_pose_controls()
 
     def _on_gps_fix(self, payload) -> None:
         if not isinstance(payload, dict):
@@ -947,6 +1197,13 @@ class MapView(QWidget):
         cross-hair cursor over the viewport so the user knows the next click
         will move the car, not plan a route.
         """
+        if checked and not self._is_stop_mode():
+            if hasattr(self, "_relocate_btn"):
+                self._relocate_btn.blockSignals(True)
+                self._relocate_btn.setChecked(False)
+                self._relocate_btn.blockSignals(False)
+            self._location_label.setText("Relocate is only available in Stop mode")
+            checked = False
         self._relocate_mode = checked
         if checked:
             if hasattr(self, "_relocate_btn"):
@@ -969,16 +1226,21 @@ class MapView(QWidget):
         #    This includes AUTO mode + known node — the user wants navigation,
         #    not a teleport.
         if self._relocate_mode:
-            self._client.emit_message(ev.CMD_LOCALISATION, {
-                "world_x": x_m,
-                "world_y": y_m,
-                "posA": x_m,
-                "posB": y_m,
-                "rotA": 0.0,
-                "rotB": 0.0,
-                "timestamp": _time.time(),
-                "meta": {"source": "manual_dashboard", "manual": True},
-            })
+            if not self._is_stop_mode():
+                self._location_label.setText("Relocate is only available in Stop mode")
+                self._on_relocate_toggled(False)
+                return
+            payload = self._manual_localisation_payload(x_m, y_m)
+            yaw_deg = float(payload.get("yaw_deg", self._last_location_yaw_deg))
+            lanelet_id = payload.get("lanelet_id")
+            self._remember_pose_snapshot(
+                x_m,
+                y_m,
+                yaw_deg,
+                lanelet_id=str(lanelet_id) if lanelet_id is not None else None,
+            )
+            self._set_cursor_pose(x_m, y_m, yaw_deg)
+            self._client.emit_message(ev.CMD_LOCALISATION, payload)
             self._location_label.setText(
                 f"Relocated → ({x_m:.2f}, {y_m:.2f}) m"
             )

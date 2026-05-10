@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
 from src.core.types.perception import lane_observation_supports_lateral_relocalization
 from src.utils.live_log import live_log
+from src.utils.sim_start_pose import resolve_saved_start_pose
 from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
     _CAMERA_LATERAL_CORRECTION_GAIN,
@@ -121,7 +122,65 @@ class threadPoseEstimator(threadTracking):
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
+        self._startup_world_pose = self._resolve_initial_world_pose()
+        self._apply_start_pose_override()
         self._send_sim_relocalize()
+
+    @staticmethod
+    def _sim_start_pose_enabled() -> bool:
+        try:
+            from config import MOTOR_OUTPUT
+        except ImportError:
+            return False
+        return MOTOR_OUTPUT == "zmq"
+
+    def _resolve_initial_world_pose(self) -> tuple[float, float, float] | None:
+        if self._graph is None:
+            return None
+        default_pose = self._graph.get_start_pose()
+        if not self._sim_start_pose_enabled():
+            return default_pose
+        return resolve_saved_start_pose(self._graph, default=default_pose)
+
+    def _apply_start_pose_override(self) -> None:
+        if self._dr is None or self._startup_world_pose is None:
+            return
+        x0, y0, yaw0 = self._startup_world_pose
+        self._dr.reset(float(x0), float(y0), float(yaw0))
+        self._start_yaw_rad = float(yaw0)
+        self._last_yaw_rad = float(yaw0)
+        self._yaw_offset = 0.0
+        self._yaw_offset_calibrated = False
+
+    def _send_sim_relocalize_pose(
+        self,
+        x_m: float,
+        y_m: float,
+        yaw_rad: float,
+        *,
+        source: str,
+    ) -> None:
+        try:
+            from config import (
+                MOTOR_OUTPUT,
+                GZ_SPAWN_Z,
+            )
+        except ImportError:
+            return
+        if MOTOR_OUTPUT != "zmq":
+            return
+        from src.core.messaging.allMessages import SimRelocalize
+        messageHandlerSender(self.queuesList, SimRelocalize).send({
+            "world_x": float(x_m),
+            "world_y": float(y_m),
+            "yaw_rad": float(yaw_rad),
+            "z": float(GZ_SPAWN_Z),
+        })
+        print(
+            f"\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - SIM: {source} → ({float(x_m):.3f}, {float(y_m):.3f})"
+            f" yaw={math.degrees(float(yaw_rad)):.1f}°"
+        )
 
     def _has_fresh_absolute_yaw_fix(self, now: float, freshness_s: float = 0.50) -> bool:
         return (
@@ -130,28 +189,16 @@ class threadPoseEstimator(threadTracking):
         )
 
     def _send_sim_relocalize(self) -> None:
-        """In sim mode, teleport the Gazebo car to the OSM start pose at startup."""
-        try:
-            from config import (
-                MOTOR_OUTPUT,
-                GZ_SPAWN_Z,
-            )
-        except ImportError:
+        """In sim mode, teleport the Gazebo car to the startup pose."""
+        if self._graph is None:
             return
-        if MOTOR_OUTPUT != "zmq" or self._graph is None:
-            return
-        from src.core.messaging.allMessages import SimRelocalize
-        x0, y0, yaw0 = self._graph.get_start_pose()
-        messageHandlerSender(self.queuesList, SimRelocalize).send({
-            "world_x": float(x0),
-            "world_y": float(y0),
-            "yaw_rad": float(yaw0),
-            "z": float(GZ_SPAWN_Z),
-        })
-        print(
-            f"\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
-            f" - SIM: reubicar auto → osm_map ({float(x0):.3f}, {float(y0):.3f})"
-            f" yaw={math.degrees(float(yaw0)):.1f}°"
+        pose = self._startup_world_pose or self._graph.get_start_pose()
+        x0, y0, yaw0 = pose
+        self._send_sim_relocalize_pose(
+            x0,
+            y0,
+            yaw0,
+            source="startup pose",
         )
 
     @staticmethod
@@ -393,6 +440,8 @@ class threadPoseEstimator(threadTracking):
         resolved_node_id = self._graph.resolve_node_id(meta.get("node_id") or payload.get("node_id"))
         if resolved_node_id is not None:
             source = f"{source}:{resolved_node_id}"
+        if bool(meta.get("manual")):
+            self._send_sim_relocalize_pose(float(x), float(y), float(yaw), source=source)
         error_m = math.hypot(float(x) - float(old_x), float(y) - float(old_y))
         return True, {
             "mode": "gps_fix",

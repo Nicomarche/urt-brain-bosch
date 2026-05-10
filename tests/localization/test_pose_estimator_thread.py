@@ -31,6 +31,11 @@ class _FakeDR:
     def get_state(self) -> tuple[float, float, float]:
         return self.x, self.y, self.yaw
 
+    def reset(self, x: float, y: float, yaw: float) -> None:
+        self.x = float(x)
+        self.y = float(y)
+        self.yaw = float(yaw)
+
 
 def _make_route_context() -> RouteContext:
     return RouteContext(
@@ -255,3 +260,68 @@ def test_apply_lane_observation_accepts_valid_two_line_at_low_route_speed() -> N
     assert new_y > 0.05
     assert new_yaw == pytest.approx(0.0, abs=1e-9)
     assert len(estimator._dr.corrections) == 1
+
+
+def test_apply_localisation_fix_manual_pose_teleports_sim(monkeypatch) -> None:
+    sent_messages: list[dict] = []
+
+    class _FakeSender:
+        def __init__(self, _queues_list, _message) -> None:
+            pass
+
+        def send(self, value) -> None:
+            sent_messages.append(dict(value))
+
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "zmq", raising=False)
+    monkeypatch.setattr(cfg, "GZ_SPAWN_Z", 0.123, raising=False)
+    monkeypatch.setattr(
+        "src.localization.pose_estimator_thread.messageHandlerSender",
+        _FakeSender,
+    )
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._dr = _FakeDR(x=0.0, y=0.0, yaw=0.0)
+    estimator._graph = SimpleNamespace(
+        localisation_to_world_pose=lambda payload, default_yaw=0.0: (
+            float(payload["world_x"]),
+            float(payload["world_y"]),
+            math.radians(float(payload["yaw_deg"])),
+        ),
+        resolve_node_id=lambda _value: None,
+    )
+    estimator._localisation_fix_sub = SimpleNamespace(
+        receive=lambda: {
+            "world_x": 1.5,
+            "world_y": -2.0,
+            "yaw_deg": 90.0,
+            "meta": {"manual": True, "source": "manual_dashboard"},
+        }
+    )
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_source = None
+    estimator._last_yaw_rad = 0.0
+    estimator._yaw_ekf_p = 0.0
+    estimator.tracking_state = SimpleNamespace(
+        set_lane_measurement_state=lambda *_args, **_kwargs: None
+    )
+    estimator.queuesList = {"General": object()}
+
+    applied, info = estimator._apply_localisation_fix(current_yaw=0.0)
+
+    assert applied is True
+    assert info is not None
+    assert info["source"] == "manual_dashboard"
+    assert estimator._dr.get_state() == pytest.approx(
+        (1.5, -2.0, math.pi / 2.0),
+        abs=1e-9,
+    )
+    assert sent_messages == [
+        {
+            "world_x": 1.5,
+            "world_y": -2.0,
+            "yaw_rad": math.pi / 2.0,
+            "z": 0.123,
+        }
+    ]

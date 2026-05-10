@@ -285,3 +285,20 @@ def test_bfmc_route_recovery_thresholds_are_scaled_to_lane_width() -> None:
     assert route_planner_module._MAP_MATCH_RECOVERY_ERROR_M == pytest.approx(0.10, abs=1e-9)
     assert route_planner_module._MAP_MATCH_GLOBAL_RECOVERY_ERROR_M == pytest.approx(0.14, abs=1e-9)
     assert nav_thread_module._ROUTE_LANELET_OVERRIDE_ERROR_M == pytest.approx(0.12, abs=1e-9)
+
+
+def test_resolve_initial_pose_prefers_saved_sim_start_pose(monkeypatch) -> None:
+    thread = threadNavigationPlanner.__new__(threadNavigationPlanner)
+    thread._graph = SimpleNamespace(
+        get_start_pose=lambda: (0.0, 0.0, 0.0),
+    )
+    monkeypatch.setattr(nav_thread_module, "_USE_SAVED_SIM_START_POSE", True)
+    monkeypatch.setattr(
+        nav_thread_module,
+        "resolve_saved_start_pose",
+        lambda graph, default=None: (1.2, -0.8, 0.45),
+    )
+
+    pose = thread._resolve_initial_pose()
+
+    assert pose == Pose2D(1.2, -0.8, 0.45)

@@ -168,13 +168,6 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Fallback: pose_estimator también tiene camera_lateral_correction_m
     pose_pubs = _filter(brain_events, thread="pose_estimator", event="pose_published")
 
-    offsets = []
-    for ev in lane_obs:
-        q = ev.get("quality", 0)
-        off = ev.get("offset_m")
-        if q is not None and q > 0.5 and off is not None:
-            offsets.append(abs(off))
-
     def _finite(value: Any) -> Optional[float]:
         try:
             out = float(value)
@@ -200,22 +193,28 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
     center_offsets: List[float] = []
     center_abs_offsets: List[float] = []
     closer_side_counts = Counter()
+    offsets = []
     for ev in lane_obs:
         q = ev.get("quality", 0)
         if q is None or q <= 0.5:
             continue
         left_m = _finite(ev.get("left_line_distance_m"))
         right_m = _finite(ev.get("right_line_distance_m"))
+        center_offset_m = _finite(ev.get("line_center_offset_m"))
+        if center_offset_m is None and left_m is not None and right_m is not None:
+            center_offset_m = 0.5 * (right_m - left_m)
+        direct_offset_m = _finite(ev.get("offset_m"))
+        visual_offset_m = center_offset_m if center_offset_m is not None else direct_offset_m
+        if visual_offset_m is not None:
+            offsets.append(abs(visual_offset_m))
         if left_m is None or right_m is None:
             continue
-        center_offset_m = _finite(ev.get("line_center_offset_m"))
-        if center_offset_m is None:
-            center_offset_m = 0.5 * (right_m - left_m)
         left_distances.append(left_m)
         right_distances.append(right_m)
         gaps.append(left_m + right_m)
-        center_offsets.append(center_offset_m)
-        center_abs_offsets.append(abs(center_offset_m))
+        if center_offset_m is not None:
+            center_offsets.append(center_offset_m)
+            center_abs_offsets.append(abs(center_offset_m))
         if abs(left_m - right_m) < 0.01:
             closer_side_counts["balanced"] += 1
         elif left_m < right_m:
@@ -229,7 +228,12 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
         stretch_start = None
         for ev in sorted_obs:
             q = ev.get("quality", 0)
-            off = ev.get("offset_m", 0)
+            left_m = _finite(ev.get("left_line_distance_m"))
+            right_m = _finite(ev.get("right_line_distance_m"))
+            center_offset_m = _finite(ev.get("line_center_offset_m"))
+            if center_offset_m is None and left_m is not None and right_m is not None:
+                center_offset_m = 0.5 * (right_m - left_m)
+            off = center_offset_m if center_offset_m is not None else _finite(ev.get("offset_m"))
             is_bad = q is not None and q > 0.5 and off is not None and abs(off) > 0.20
             if is_bad and stretch_start is None:
                 stretch_start = ev["ts"]
@@ -270,7 +274,7 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     return {
         "available": True,
-        "source": "lane_observer.offset_m (quality>0.5)",
+        "source": "lane_observer.line_center_offset_m when available, offset_m fallback (quality>0.5)",
         "samples": len(offsets),
         "mean_m": statistics.mean(offsets),
         "p50_m": _percentile(offsets, 50),
@@ -512,8 +516,8 @@ def render_report(
         lines.append(f"  source:         {lane['source']}")
         lines.append(f"  samples:        {lane['samples']}")
         lines.append(f"  p50:            {lane['p50_m']:.3f} m")
-        lines.append(f"  p90:            {lane['p90_m']:.3f} m   (target < 0.20)")
-        lines.append(f"  max:            {lane['max_m']:.3f} m")
+        lines.append(f"  p90:            {lane['p90_m']:.3f} m   (target < 0.12)")
+        lines.append(f"  max:            {lane['max_m']:.3f} m   (target < 0.20)")
         if lane.get("line_distance_samples", 0):
             left = lane["left_line_distance"]
             right = lane["right_line_distance"]
