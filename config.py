@@ -556,6 +556,14 @@ BEHAVIOR_CONTAINMENT_WARN_ERROR_M = 0.05
 BEHAVIOR_CONTAINMENT_CRAWL_ERROR_M = 0.07
 BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.20
 
+# Si la cámara alterna entre lados físicos de carril con error lateral visible,
+# bajamos por debajo del mínimo competitivo para que el steering deje de
+# saturar y no termine leyendo líneas del carril vecino.
+BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS = 0.12
+BEHAVIOR_VISUAL_INSTABILITY_FLIP_HOLD_TICKS = 8
+BEHAVIOR_VISUAL_INSTABILITY_MIN_ERROR_M = 0.04
+BEHAVIOR_VISUAL_BOUNDARY_CRAWL_ERROR_M = 0.10
+
 # Stuck-recovery del LaneContainmentRule. Si el robot lleva varios ticks
 # en crawl (4 cm/s) sin que el error lateral decrezca, sube temporalmente
 # el cap a RECOVERY_SPEED_MPS para que pueda maniobrar y volver al carril.

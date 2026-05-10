@@ -5,7 +5,13 @@ from dataclasses import replace
 import numpy as np
 import pytest
 
-from src.behavior.velocity_planner import BehaviorVelocityPlanner
+from src.behavior.velocity_planner import (
+    _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS,
+    _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS,
+    _BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS,
+    _LANE_CONTAINMENT_WARN_CAP_MPS,
+    BehaviorVelocityPlanner,
+)
 from src.core.types.behavior import BehaviorPathPlan, ScenarioName
 from src.core.types.perception import LaneObservation
 from src.core.types.routing import RegulatoryElement
@@ -79,7 +85,7 @@ def test_velocity_planner_caps_speed_on_curvature() -> None:
 
 
 def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
-    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.10, max_speed_mps=0.10)
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
     ctx = replace(
         ctx,
         lane_observation=LaneObservation(
@@ -95,7 +101,7 @@ def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
     plan = BehaviorPathPlan(
         timestamp=ctx.now_s,
         raw_path=target_path,
-        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
         scenario_name=ScenarioName.LANE_KEEP.value,
         valid=True,
     )
@@ -109,7 +115,7 @@ def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
         ctx=ctx,
     )
 
-    assert np.max(out.speed_profile) == pytest.approx(0.06, abs=1e-6)
+    assert np.max(out.speed_profile) == pytest.approx(_LANE_CONTAINMENT_WARN_CAP_MPS, abs=1e-6)
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "warn"
         for note in out.notes.get("velocity_modules", [])
@@ -117,12 +123,12 @@ def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
 
 
 def test_velocity_planner_crawls_when_corridor_touches_bound() -> None:
-    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.10, max_speed_mps=0.10)
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
     target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])
     plan = BehaviorPathPlan(
         timestamp=ctx.now_s,
         raw_path=target_path,
-        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
         scenario_name=ScenarioName.LANE_KEEP.value,
         valid=True,
     )
@@ -139,9 +145,107 @@ def test_velocity_planner_crawls_when_corridor_touches_bound() -> None:
         ctx=ctx,
     )
 
-    assert np.max(out.speed_profile) == pytest.approx(0.04, abs=1e-6)
+    assert np.max(out.speed_profile) == pytest.approx(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS, abs=1e-6)
+    assert out.notes["allow_sub_min_speed"] is True
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "crawl"
+        for note in out.notes.get("velocity_modules", [])
+    )
+
+
+def test_velocity_planner_crawls_below_min_when_visual_side_flips() -> None:
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.65,
+            measurement_mode="single_line",
+            direct_error_valid=True,
+            direct_error_m=0.055,
+            control_policy_mode="MAP_ONLY",
+        ),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((21, 2), dtype=float),
+        drivable_right_bound=np.zeros((21, 2), dtype=float),
+        optimizer_notes={
+            "visual_lane_detected_side": "left",
+            "visual_lane_shift_side_flip": True,
+            "visual_lane_measurement_source": "single_line_boundary_hint",
+            "visual_lane_measurement_mode": "single_line",
+            "visual_lane_error_m": 0.055,
+            "visual_lane_quality": 0.65,
+        },
+        ctx=ctx,
+    )
+
+    assert np.max(out.speed_profile) == pytest.approx(
+        _BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS,
+        abs=1e-6,
+    )
+    assert out.notes["allow_sub_min_speed"] is True
+    assert any(
+        note.get("kind") == "lane_containment" and note.get("mode") == "visual_instability_crawl"
+        for note in out.notes.get("velocity_modules", [])
+    )
+
+
+def test_velocity_planner_crawls_below_min_on_large_visual_boundary_error() -> None:
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.65,
+            measurement_mode="single_line",
+            direct_error_valid=True,
+            direct_error_m=-0.13,
+            control_policy_mode="MAP_ONLY",
+        ),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((21, 2), dtype=float),
+        drivable_right_bound=np.zeros((21, 2), dtype=float),
+        optimizer_notes={
+            "visual_lane_detected_side": "right",
+            "visual_lane_measurement_source": "single_line_boundary_hint",
+            "visual_lane_measurement_mode": "single_line",
+            "visual_lane_error_m": -0.13,
+            "visual_lane_quality": 0.65,
+        },
+        ctx=ctx,
+    )
+
+    assert np.max(out.speed_profile) == pytest.approx(
+        _BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS,
+        abs=1e-6,
+    )
+    assert out.notes["allow_sub_min_speed"] is True
+    assert any(
+        note.get("kind") == "lane_containment" and note.get("mode") == "visual_boundary_crawl"
         for note in out.notes.get("velocity_modules", [])
     )
 
@@ -167,13 +271,13 @@ def test_velocity_planner_stops_after_repeated_infeasible_containment() -> None:
             "used_prev_safe_path": True,
             "containment_infeasible_ticks": 4,
             "containment_stop_after_ticks": 4,
-            "first_infeasible_index": 3,
+            "first_infeasible_index": 1,
         },
         ctx=ctx,
     )
 
     assert out.stop_required is True
-    assert np.allclose(out.speed_profile[2:], 0.0)
+    assert np.allclose(out.speed_profile, 0.0)
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "stop"
         for note in out.notes.get("velocity_modules", [])
@@ -185,7 +289,7 @@ def _build_containment_plan(ctx):
     plan = BehaviorPathPlan(
         timestamp=ctx.now_s,
         raw_path=target_path,
-        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        base_speed_profile=np.full(ctx.horizon_n, ctx.nominal_speed_mps, dtype=float),
         scenario_name=ScenarioName.LANE_KEEP.value,
         valid=True,
     )
@@ -197,7 +301,7 @@ def test_velocity_planner_escapes_crawl_after_stuck_ticks() -> None:
     # crawl con error lateral grande sin decrecer. Tras N ticks sin recuperar
     # el cap sube a recovery_speed para que el robot pueda maniobrar.
     from src.behavior.velocity_planner import _BEHAVIOR_CONTAINMENT_STUCK_TICKS
-    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.10, max_speed_mps=0.10)
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
     plan, target_path = _build_containment_plan(ctx)
     planner = BehaviorVelocityPlanner()
     optimizer_notes = {
@@ -216,7 +320,10 @@ def test_velocity_planner_escapes_crawl_after_stuck_ticks() -> None:
             ctx=ctx,
         )
 
-    assert np.max(last_out.speed_profile) == pytest.approx(0.08, abs=1e-6)
+    assert np.max(last_out.speed_profile) == pytest.approx(
+        _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS,
+        abs=1e-6,
+    )
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "stuck_recovery"
         for note in last_out.notes.get("velocity_modules", [])
@@ -227,7 +334,7 @@ def test_velocity_planner_resets_stuck_when_error_decreases() -> None:
     # Si el error decrece al menos 5 mm/tick, no se considera atascado y
     # el cap se mantiene en crawl normal (4 cm/s) — no escala a recovery.
     from src.behavior.velocity_planner import _BEHAVIOR_CONTAINMENT_STUCK_TICKS
-    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.10, max_speed_mps=0.10)
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=0.40)
     plan, target_path = _build_containment_plan(ctx)
     planner = BehaviorVelocityPlanner()
 
@@ -248,7 +355,10 @@ def test_velocity_planner_resets_stuck_when_error_decreases() -> None:
         )
         error = max(error - 0.01, 0.08)
 
-    assert np.max(last_out.speed_profile) == pytest.approx(0.04, abs=1e-6)
+    assert np.max(last_out.speed_profile) == pytest.approx(
+        _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS,
+        abs=1e-6,
+    )
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "crawl"
         for note in last_out.notes.get("velocity_modules", [])

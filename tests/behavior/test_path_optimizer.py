@@ -17,6 +17,7 @@ from src.behavior.trajectory_builder import (
 )
 from src.core.types.behavior import BehaviorPathPlan, ScenarioName
 from src.core.types.perception import LaneObservation
+from src.routing.lanelet.attributes import ATTR_INTERSECTION, ATTR_ROUNDABOUT
 from src.routing.lanelet.from_osm import load_lanelet2_osm
 from src.routing.lanelet.lanelet_map import Lanelet, from_track_graph
 from src.routing.lanelet.osm_router import OsmRouteGraph
@@ -208,8 +209,80 @@ def test_path_optimizer_projects_visual_reentry_inside_lanelet_corridor() -> Non
     assert out_with_corridor.notes["visual_lane_measurement_source"] == "line_center_offset_m"
     assert out_with_corridor.notes["corridor_visual_lane_guidance_active"] is True
     assert out_with_corridor.notes["corridor_visual_lane_guidance_mode"] == "two_line"
-    assert float(out_without_corridor.target_path[1, 1]) > 0.0
+    assert float(out_without_corridor.target_path[1, 1]) < float(raw_path[1, 1])
+    assert float(out_without_corridor.target_path[1, 1]) > 0.035
     assert float(out_with_corridor.target_path[1, 1]) < 0.0
+
+
+def test_path_optimizer_relaxes_route_corridor_for_single_line_boundary_hint() -> None:
+    lanelet_map = from_track_graph(
+        _build_track_graph(
+            [("n1", 0.0, 0.0, 0), ("n2", 1.0, 0.0, 0), ("n3", 2.0, 0.0, 0)]
+        ),
+        step_m=0.10,
+    )
+    base_ctx = _with_route_signature(
+        make_context(
+            pose_x=0.0,
+            pose_y=-0.12,
+            pose_yaw=0.0,
+            horizon_n=12,
+            dt=0.1,
+            lanelet_map=lanelet_map,
+            nominal_speed_mps=0.10,
+        ),
+        route_id="route-corridor-single-line-boundary",
+        current_lanelet_id="n1->n2",
+        next_lanelet_ids=("n2->n3",),
+    )
+    ctx = replace(
+        base_ctx,
+        lane_observation=LaneObservation(
+            measurement_mode="single_line",
+            detected_sides=("right",),
+            direct_error_valid=False,
+            quality=0.90,
+            planner_priority_active=True,
+            control_policy_mode="ROUTE_TRACKING",
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["right"],
+                    "error_cm": 18.0,
+                    "single_line_projection_debug": {
+                        "single_line_transversal_detected": False,
+                    },
+                },
+            },
+        ),
+    )
+    raw_path = np.array(
+        [
+            [0.0, -0.12, 0.0],
+            [0.5, -0.12, 0.0],
+            [1.0, -0.12, 0.0],
+            [1.5, -0.12, 0.0],
+        ],
+        dtype=float,
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=raw_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["corridor_source"] == "lanelet_bounds"
+    assert out.notes["visual_lane_measurement_source"] == "single_line_boundary_hint"
+    assert out.notes["corridor_visual_lane_guidance_active"] is True
+    assert out.notes["corridor_visual_path_priority_active"] is True
+    assert out.notes["corridor_visual_lane_guidance_max_limit_m"] > 0.080
+    assert float(out.target_path[1, 1]) < -0.075
+    assert float(out.target_path[1, 1]) > -0.105
 
 
 @pytest.mark.parametrize(
@@ -281,7 +354,7 @@ def test_path_optimizer_preserves_visual_path_priority_inside_lanelet_corridor(
     assert out.notes["corridor_visual_path_priority_active"] is True
     assert out.notes["corridor_visual_lane_guidance_max_limit_m"] > 0.085
     assert float(out.target_path[1, 1]) < -0.085
-    assert float(out.target_path[1, 1]) > -0.11
+    assert float(out.target_path[1, 1]) > -0.13
 
 
 def test_path_optimizer_keeps_single_line_visual_path_when_route_match_is_far_off() -> None:
@@ -962,7 +1035,8 @@ def test_path_optimizer_biases_prefix_back_toward_visual_lane_center() -> None:
     assert out.notes["visual_lane_reentry_active"] is True
     assert out.notes["visual_lane_reentry_applied"] is True
     assert out.notes["visual_lane_prefix_samples"] >= 4
-    assert out.target_path[1, 1] > 0.04
+    assert out.notes["visual_lane_shift_rate_limited"] is True
+    assert out.target_path[1, 1] > 0.008
     assert out.target_path[3, 1] > out.target_path[8, 1]
 
 
@@ -1011,9 +1085,359 @@ def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measuremen
     assert out.notes["visual_lane_measurement_mode"] == "single_line"
     assert out.notes["visual_lane_reentry_reason"] == "single_line_physical_reentry"
     assert out.notes["visual_lane_reentry_applied"] is True
-    assert out.target_path[1, 1] > 0.02
+    assert out.notes["visual_lane_shift_rate_limited"] is True
+    assert out.target_path[1, 1] > 0.008
     assert out.target_path[1, 1] < 0.08
     assert out.target_path[3, 1] > out.target_path[8, 1]
+
+
+def test_path_optimizer_uses_single_line_boundary_hint_when_direct_error_is_invalid() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.04,
+            horizon_n=12,
+            dt=0.05,
+            current_lanelet_id="lanelet-a",
+            nominal_speed_mps=0.1,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["right"],
+                    "error_cm": 14.0,
+                    "single_line_projection_debug": {
+                        "single_line_transversal_detected": False,
+                    },
+                },
+            },
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_active"] is True
+    assert out.notes["visual_lane_reentry_reason"] == "single_line_boundary_reentry"
+    assert out.notes["visual_lane_measurement_source"] == "single_line_boundary_hint"
+    assert out.notes["single_line_boundary_error_m"] == pytest.approx(0.14, abs=1e-6)
+    assert out.notes["visual_lane_shift_rate_limited"] is True
+    assert out.notes["visual_lane_shift_m"] == pytest.approx(0.015, abs=1e-6)
+    assert out.notes["visual_lane_reentry_applied"] is True
+    assert out.target_path[1, 1] < -0.008
+
+
+def test_path_optimizer_rate_limits_single_line_boundary_shift_side_flip() -> None:
+    optimizer = PathOptimizer()
+    base_ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        speed_mps=0.04,
+        horizon_n=12,
+        dt=0.05,
+        current_lanelet_id="lanelet-a",
+        nominal_speed_mps=0.1,
+    )
+    plan = BehaviorPathPlan(
+        timestamp=base_ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(base_ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    first_ctx = replace(
+        base_ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["right"],
+                    "error_cm": 20.0,
+                },
+            },
+        ),
+    )
+    first = optimizer.optimize(plan, first_ctx)
+
+    second_ctx = replace(
+        base_ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["left"],
+                    "error_cm": -20.0,
+                },
+            },
+        ),
+    )
+    second = optimizer.optimize(plan, second_ctx)
+
+    assert first.notes["visual_lane_shift_m"] == pytest.approx(0.015, abs=1e-6)
+    assert second.notes["visual_lane_side_switch_pending"] is True
+    assert second.notes["visual_lane_raw_detected_side"] == "left"
+    assert second.notes["visual_lane_detected_side"] == "right"
+    assert second.notes["visual_lane_shift_side_flip"] is False
+    assert second.notes["visual_lane_shift_m"] == pytest.approx(0.0, abs=1e-6)
+    assert abs(second.notes["visual_lane_shift_m"]) < abs(first.notes["visual_lane_shift_m"])
+
+
+@pytest.mark.parametrize("route_attr", [ATTR_INTERSECTION, ATTR_ROUNDABOUT])
+def test_path_optimizer_accepts_single_line_boundary_hint_on_precision_route_attrs(route_attr: int) -> None:
+    base_ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        speed_mps=0.04,
+        horizon_n=12,
+        dt=0.05,
+        current_lanelet_id="lanelet-a",
+        nominal_speed_mps=0.1,
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(base_ctx.route, current_node_attr=int(route_attr)),
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["right"],
+                    "error_cm": 11.0,
+                },
+            },
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_active"] is True
+    assert out.notes["visual_lane_reentry_reason"] == "single_line_boundary_reentry"
+    assert out.notes["visual_lane_measurement_source"] == "single_line_boundary_hint"
+    assert out.notes["single_line_boundary_error_m"] == pytest.approx(0.11, abs=1e-6)
+
+
+def test_path_optimizer_reports_single_line_rejection_reason() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.04,
+            horizon_n=12,
+            dt=0.05,
+            current_lanelet_id="lanelet-a",
+            nominal_speed_mps=0.1,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={},
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_active"] is False
+    assert out.notes["visual_lane_reentry_reason"] == "no_lateral_measurement"
+    assert "boundary:local_mask_guidance_missing" in out.notes["visual_lane_measurement_rejection_reason"]
+
+
+def test_path_optimizer_rejects_oblique_single_line_boundary_hint() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.04,
+            horizon_n=12,
+            dt=0.05,
+            current_lanelet_id="lanelet-a",
+            nominal_speed_mps=0.1,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            heading_error_rad=math.radians(42.0),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            debug={
+                "local_mask_guidance": {
+                    "guidance_mode": "single_line_physical",
+                    "detected_sides": ["left"],
+                    "error_cm": 15.0,
+                },
+            },
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_active"] is False
+    assert out.notes["visual_lane_reentry_reason"] == "no_lateral_measurement"
+    assert "heading_error_too_high" in out.notes["visual_lane_measurement_rejection_reason"]
+
+
+def test_path_optimizer_blends_two_line_visual_waypoints_into_route_laterally() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.04,
+            horizon_n=12,
+            dt=0.05,
+            current_lanelet_id="lanelet-a",
+            nominal_speed_mps=0.1,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.0,
+            line_center_offset_m=0.0,
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=tuple((0.08 + i * 0.04, 0.12, 0.0) for i in range(12)),
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    optimizer = PathOptimizer()
+    out = optimizer.optimize(plan, ctx)
+    second = optimizer.optimize(plan, ctx)
+
+    assert out.notes["visual_route_blend_applied"] is True
+    assert out.notes["visual_route_blend_reason"] == "two_line_route_lane"
+    assert out.notes["visual_route_blend_shift_rate_limited"] is True
+    assert out.notes["visual_route_blend_raw_shift_m"] == pytest.approx(-0.036, abs=1e-6)
+    assert out.notes["visual_route_blend_max_shift_m"] == pytest.approx(0.015, abs=1e-6)
+    assert second.notes["visual_route_blend_max_shift_m"] > out.notes["visual_route_blend_max_shift_m"]
+    assert second.notes["visual_route_blend_max_shift_m"] < 0.04
+    assert second.target_path[3, 1] < -0.005
+    assert np.all(np.diff(out.target_path[:6, 0]) >= -1e-6)
 
 
 def test_path_optimizer_ignores_single_line_reentry_when_direction_conflicts_with_route() -> None:
@@ -1394,6 +1818,38 @@ def test_path_optimizer_route_reference_stays_on_planned_corridor_after_lanelet_
     assert out.target_path[10, 1] < out.target_path[8, 1]
     assert out.target_path[12, 1] < out.target_path[10, 1]
     assert heading_error_deg < 1e-3
+
+
+def test_concat_corridor_triplets_keeps_gapped_handoff_width_stable() -> None:
+    axis_a = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    left_a = np.array([[0.0, 0.20], [1.0, 0.20]], dtype=float)
+    right_a = np.array([[0.0, -0.20], [1.0, -0.20]], dtype=float)
+
+    axis_b = np.array([[1.40, 0.0], [2.40, 0.0]], dtype=float)
+    left_b = np.array([[1.40, -0.22], [2.40, -0.22]], dtype=float)
+    right_b = np.array([[1.40, 0.22], [2.40, 0.22]], dtype=float)
+
+    axis, left, right = path_optimizer_module._concat_corridor_triplets(
+        [axis_a, axis_b],
+        [left_a, left_b],
+        [right_a, right_b],
+    )
+    corridor = path_optimizer_module._CorridorGeometry(
+        axis=axis,
+        left=left,
+        right=right,
+        lanelet_ids=("a", "b"),
+        source="test",
+    )
+
+    projection = path_optimizer_module._project_point_to_corridor(
+        corridor,
+        np.array([1.20, 0.0], dtype=float),
+    )
+
+    assert projection is not None
+    assert projection.width_m > 0.30
+    assert projection.center_offset_m == pytest.approx(0.0, abs=1e-6)
 
 
 def test_path_optimizer_preserves_current_yaw_at_tp0_for_route_connector() -> None:

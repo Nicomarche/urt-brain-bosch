@@ -1,8 +1,8 @@
 {
-  "lanelet_id": "995",
+  "lanelet_id": "138",
   "map_dir": "/Users/luciogarcia/urt-brain-bosch/maps/sim",
-  "saved_at": 1778376406.79,
-  "world_x": 1.331123,
-  "world_y": 4.773513,
-  "yaw_deg": 0.563
+  "saved_at": 1778422868.329,
+  "world_x": 5.894701,
+  "world_y": -2.475579,
+  "yaw_deg": -89.333
 }

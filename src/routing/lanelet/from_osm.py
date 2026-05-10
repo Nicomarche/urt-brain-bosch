@@ -336,6 +336,11 @@ def _build_lanelets(
         if left.shape[0] < 2 or right.shape[0] < 2:
             continue
         right = _align_boundary_direction(left, right)
+        # `_flip_nodes_y()` mirrors the authored OSM into the simulator frame.
+        # A mirror changes handedness: the geometry is in the right place, but
+        # the semantic left/right roles are inverted unless we swap them here.
+        left, right = right, left
+        left_node_ids, right_node_ids = right_node_ids, left_node_ids
         centerline = _centerline_from_bounds(left, right, step_m=step_m)
         if centerline.shape[0] < 2:
             continue
@@ -427,10 +432,28 @@ def _build_lanelets(
             if predecessor_candidate is not None:
                 predecessor_candidates[lanelet_id].append((*predecessor_candidate, other_id))
 
+    selected_successors = {
+        lanelet_id: _select_connection_ids(successor_candidates.get(lanelet_id, []))
+        for lanelet_id in lanelets
+    }
+    selected_predecessors = {
+        lanelet_id: _select_connection_ids(predecessor_candidates.get(lanelet_id, []))
+        for lanelet_id in lanelets
+    }
+    successors_by_id = _make_topology_reciprocal(
+        lanelet_ids=tuple(lanelets.keys()),
+        selected_successors=selected_successors,
+        selected_predecessors=selected_predecessors,
+    )
+    predecessors_by_id = _predecessors_from_successors(
+        lanelet_ids=tuple(lanelets.keys()),
+        successors_by_id=successors_by_id,
+    )
+
     enriched: dict[str, Lanelet] = {}
     for lanelet_id, lanelet in lanelets.items():
-        successors = _select_connection_ids(successor_candidates.get(lanelet_id, []))
-        predecessors = _select_connection_ids(predecessor_candidates.get(lanelet_id, []))
+        successors = tuple(successors_by_id.get(lanelet_id, ()))
+        predecessors = tuple(predecessors_by_id.get(lanelet_id, ()))
         enriched[lanelet_id] = Lanelet(
             lanelet_id=lanelet.lanelet_id,
             source_node_id=lanelet.source_node_id,
@@ -445,6 +468,54 @@ def _build_lanelets(
             regulatory_element_ids=lanelet.regulatory_element_ids,
         )
     return enriched
+
+
+def _append_unique(items: list[str], item: str) -> None:
+    item = str(item)
+    if item not in items:
+        items.append(item)
+
+
+def _make_topology_reciprocal(
+    *,
+    lanelet_ids: tuple[str, ...],
+    selected_successors: dict[str, list[str]],
+    selected_predecessors: dict[str, list[str]],
+) -> dict[str, tuple[str, ...]]:
+    successors_by_id: dict[str, list[str]] = {lanelet_id: [] for lanelet_id in lanelet_ids}
+    known_ids = set(lanelet_ids)
+
+    for lanelet_id in lanelet_ids:
+        for successor_id in selected_successors.get(lanelet_id, []):
+            if successor_id in known_ids:
+                _append_unique(successors_by_id[lanelet_id], successor_id)
+
+    for lanelet_id in lanelet_ids:
+        for predecessor_id in selected_predecessors.get(lanelet_id, []):
+            if predecessor_id in known_ids:
+                _append_unique(successors_by_id[predecessor_id], lanelet_id)
+
+    return {
+        lanelet_id: tuple(successors)
+        for lanelet_id, successors in successors_by_id.items()
+    }
+
+
+def _predecessors_from_successors(
+    *,
+    lanelet_ids: tuple[str, ...],
+    successors_by_id: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    predecessors_by_id: dict[str, list[str]] = {lanelet_id: [] for lanelet_id in lanelet_ids}
+    known_ids = set(lanelet_ids)
+    for lanelet_id in lanelet_ids:
+        for successor_id in successors_by_id.get(lanelet_id, ()):
+            if successor_id in known_ids:
+                _append_unique(predecessors_by_id[successor_id], lanelet_id)
+    return {
+        lanelet_id: tuple(predecessors)
+        for lanelet_id, predecessors in predecessors_by_id.items()
+    }
 
 
 def _member_ref(rel: OsmRelation, *, role: str, member_type: str) -> str | None:
@@ -538,9 +609,8 @@ def _boundary_connection_candidate(
     *,
     match_tol_m: float = _TOPOLOGY_MATCH_TOL_M,
 ) -> tuple[int, float, float] | None:
-    # The imported OSM is mirrored in Y to match the simulator/dashboard frame,
-    # which flips the handedness of the lanelet geometry. Because of that, a
-    # true successor can align either left->left/right->right or crossed.
+    # Some exported lanelet segments share endpoints with crossed boundary
+    # roles, so accept either direct or crossed endpoint alignment.
     direct_pairs = (
         math.dist(current["left_end_xy"], candidate["left_start_xy"]),
         math.dist(current["right_end_xy"], candidate["right_start_xy"]),

@@ -238,6 +238,49 @@ class LaneObserverTests(unittest.TestCase):
         self.assertTrue(lane_observation.direct_error_valid)
         self.assertAlmostEqual(lane_observation.direct_error_m, -0.103, places=4)
 
+    def test_build_lane_observation_keeps_explicit_invalid_single_line_mask_error_as_debug_hint(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=15.5,
+            detection_mode="ai_local",
+            curve_state="STRAIGHT",
+            local_lane_payload={
+                "frame_width": 640,
+                "lane_side_point_counts": {"left": 0, "right": 14},
+            },
+            frame_trace={
+                "lane_observation": {
+                    "visible_side": "right",
+                    "sides": ["right"],
+                },
+                "debug": {
+                    "measurement_mode": "single_line",
+                    "direct_error_valid": False,
+                    "direct_error_reason": "stale_two_line_reference",
+                    "control_policy_mode": "ROUTE_TRACKING",
+                    "local_mask_guidance": {
+                        "guidance_mode": "single_line_physical",
+                        "detected_sides": ["right"],
+                        "error_cm": 12.5,
+                    },
+                },
+                "visual_lane_waypoints": {
+                    "center_waypoints_body": tuple((0.05 * idx, -0.08, 0.0) for idx in range(20)),
+                    "lane_width_m": 0.35,
+                    "extrapolated_side": "left",
+                },
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertEqual(lane_observation.detected_sides, ("right",))
+        self.assertFalse(lane_observation.direct_error_valid)
+        self.assertIsNone(lane_observation.direct_error_m)
+        self.assertGreaterEqual(lane_observation.quality, 0.85)
+        self.assertEqual(lane_observation.debug["direct_error_reason"], "stale_two_line_reference")
+        self.assertEqual(lane_observation.debug["local_mask_guidance"]["error_cm"], 12.5)
+
     def test_build_stopline_observation_keeps_pass_event_payload(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)
         snapshot = VisualStateSnapshot(

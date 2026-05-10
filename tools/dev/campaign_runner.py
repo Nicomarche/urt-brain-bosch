@@ -651,6 +651,7 @@ def _compute_metrics(
     brain_events: list[dict[str, Any]],
     gt_events: list[dict[str, Any]],
     auto_start_ts: float | None,
+    trace_start_ts: float | None,
     max_p90_m: float,
     max_max_m: float,
     max_lane_offset_p90_m: float,
@@ -667,8 +668,9 @@ def _compute_metrics(
         for ev in gt_events
         if ev.get("thread") == "ground_truth" and ev.get("event") == "gz_pose"
     ]
-    if auto_start_ts is not None:
-        gt_poses = [ev for ev in gt_poses if float(ev.get("ts", 0.0) or 0.0) >= auto_start_ts]
+    run_start_ts = trace_start_ts if trace_start_ts is not None else auto_start_ts
+    if run_start_ts is not None:
+        gt_poses = [ev for ev in gt_poses if float(ev.get("ts", 0.0) or 0.0) >= run_start_ts]
 
     distances: list[float] = []
     actual_xy: list[tuple[float, float]] = []
@@ -858,6 +860,7 @@ def _compute_metrics(
         },
         "ground_truth": {
             "samples": len(actual_xy),
+            "trace_start_ts": run_start_ts,
             "cross_track_error_m": {
                 "p50": _percentile(distances, 50) if distances else None,
                 "p90": p90,
@@ -941,6 +944,26 @@ def _overlay_map_metadata(track_png: Path, expected_route: dict[str, Any]) -> di
     return meta
 
 
+def _split_polyline_on_jumps(
+    points: list[tuple[float, float]],
+    *,
+    max_jump_m: float = 0.60,
+) -> list[list[tuple[float, float]]]:
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+    for point in points:
+        if current:
+            last_x, last_y = current[-1]
+            if math.hypot(float(point[0]) - last_x, float(point[1]) - last_y) > max_jump_m:
+                if len(current) >= 2:
+                    segments.append(current)
+                current = []
+        current.append(point)
+    if len(current) >= 2:
+        segments.append(current)
+    return segments
+
+
 def _write_overlay(
     *,
     out_path: Path,
@@ -987,7 +1010,8 @@ def _write_overlay(
     ]
     actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
     draw_polyline(expected_xy, (0, 170, 0), 4)
-    draw_polyline(actual_points, (30, 30, 220), 3)
+    for segment in _split_polyline_on_jumps(actual_points):
+        draw_polyline(segment, (30, 30, 220), 3)
     cv2.putText(img, "expected", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 120, 0), 2, cv2.LINE_AA)
     cv2.putText(img, "actual", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1109,7 +1133,8 @@ def _write_visual_lane_overlay(
     ]
     actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
     draw_polyline(expected_xy, (0, 170, 0), 4)
-    draw_polyline(actual_points, (30, 30, 220), 3)
+    for segment in _split_polyline_on_jumps(actual_points):
+        draw_polyline(segment, (30, 30, 220), 3)
 
     drawn: list[dict[str, Any]] = []
     for sample in visual_samples:
@@ -1169,7 +1194,7 @@ def _collect_camera_video(brain_dir: Path, run_dir: Path, started_at: float) -> 
         return str(source)
 
 
-def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, Any]:
+def _extract_video_frames(video_path: str | Path, run_dir: Path, frames_subdir: str = "frames") -> dict[str, Any]:
     try:
         import cv2
     except ImportError:
@@ -1181,7 +1206,7 @@ def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, An
         }
 
     video = Path(video_path)
-    frames_dir = run_dir / "frames"
+    frames_dir = run_dir / frames_subdir
     frames_dir.mkdir(parents=True, exist_ok=True)
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
@@ -1239,6 +1264,153 @@ def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, An
     return meta
 
 
+def _index_image_frames(frames_dir: Path, *, fps: float | None = None, video_path: Path | None = None) -> dict[str, Any]:
+    images = sorted(
+        [
+            path
+            for pattern in ("frame_*.jpg", "frame_*.jpeg", "frame_*.png")
+            for path in frames_dir.glob(pattern)
+        ]
+    )
+    frame_records: list[dict[str, Any]] = []
+    index_jsonl = frames_dir / "index.jsonl"
+    if index_jsonl.exists():
+        for line in index_jsonl.read_text(encoding="utf-8", errors="ignore").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(record, dict):
+                frame_records.append(record)
+    if frame_records:
+        first_wall_time = float(frame_records[0].get("wall_time", 0.0) or 0.0)
+        index = []
+        for idx, record in enumerate(frame_records, start=1):
+            wall_time = float(record.get("wall_time", 0.0) or 0.0)
+            item = dict(record)
+            item.setdefault("frame", idx)
+            item["time_s"] = (wall_time - first_wall_time) if wall_time and first_wall_time else (
+                ((idx - 1) / fps) if fps and fps > 0.0 else None
+            )
+            index.append(item)
+    else:
+        index = [
+            {
+                "frame": idx,
+                "time_s": ((idx - 1) / fps) if fps and fps > 0.0 else None,
+                "path": str(path),
+            }
+            for idx, path in enumerate(images, start=1)
+        ]
+    meta: dict[str, Any] = {
+        "video_path": str(video_path) if video_path is not None else None,
+        "frames_dir": str(frames_dir),
+        "index_json": str(frames_dir / "index.json"),
+        "index_jsonl": str(index_jsonl) if index_jsonl.exists() else None,
+        "fps": float(fps or 0.0),
+        "frame_count": len(images),
+        "saved_frame_count": len(images),
+        "frames": index,
+    }
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    (frames_dir / "index.json").write_text(
+        json.dumps(meta, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    return meta
+
+
+def _write_video_from_image_frames(frames_dir: Path, out_path: Path, *, fps: float = 10.0) -> dict[str, Any]:
+    try:
+        import cv2
+    except ImportError:
+        return {"video_path": str(out_path), "error": "opencv_unavailable"}
+
+    images = sorted(
+        [
+            path
+            for pattern in ("frame_*.jpg", "frame_*.jpeg", "frame_*.png")
+            for path in frames_dir.glob(pattern)
+        ]
+    )
+    if not images:
+        return {"video_path": str(out_path), "error": "no_image_frames"}
+
+    first = cv2.imread(str(images[0]))
+    if first is None:
+        return {"video_path": str(out_path), "error": "first_frame_read_failed"}
+    height, width = first.shape[:2]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(out_path),
+        cv2.VideoWriter_fourcc(*"XVID"),
+        max(1.0, float(fps or 10.0)),
+        (int(width), int(height)),
+    )
+    if not writer.isOpened():
+        return {"video_path": str(out_path), "error": "video_writer_open_failed"}
+
+    written = 0
+    try:
+        for path in images:
+            frame = cv2.imread(str(path))
+            if frame is None:
+                continue
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+            writer.write(frame)
+            written += 1
+    finally:
+        writer.release()
+
+    meta: dict[str, Any] = {
+        "video_path": str(out_path),
+        "frames_dir": str(frames_dir),
+        "fps": float(fps or 10.0),
+        "width": int(width),
+        "height": int(height),
+        "frame_count": len(images),
+        "written_frame_count": written,
+    }
+    if written <= 0:
+        meta["error"] = "no_frames_written"
+    return meta
+
+
+def _write_satellite_artifacts(
+    *,
+    brain_run_dir: Path,
+    brain_jsonl: Path,
+    sim_jsonl: Path,
+    sim_dir: Path,
+    record_start_ts: float | None,
+    stride: int,
+    width_px: int,
+) -> dict[str, Any]:
+    try:
+        from tools.dev.render_satellite_frames import render_satellite_frames
+    except Exception as exc:
+        return {"error": f"import_failed:{exc}"}
+
+    args = argparse.Namespace(
+        run_dir=str(brain_run_dir),
+        sim_jsonl=str(sim_jsonl),
+        brain_jsonl=str(brain_jsonl),
+        world=str(sim_dir / "Simulator/src/sim_pkg/worlds/world_with_separators.world"),
+        texture=str(sim_dir / "Simulator/src/models_pkg/track/materials/textures/new_Small.png"),
+        out_dir=None,
+        width_px=int(width_px),
+        stride=max(1, int(stride)),
+        max_frames=0,
+        record_start_ts=record_start_ts,
+        video=True,
+    )
+    try:
+        return render_satellite_frames(args)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def _update_latest_symlink(root: Path, target: Path) -> None:
     latest = root / "latest"
     try:
@@ -1266,6 +1438,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lane-offset-p90-m", type=float, default=0.12)
     parser.add_argument("--max-lane-offset-max-m", type=float, default=0.20)
     parser.add_argument("--no-record", action="store_true", help="Do not toggle camera AVI recording.")
+    parser.add_argument("--no-ai-debug-video", action="store_true", help="Do not record the AI/dashboard debug preview.")
+    parser.add_argument("--no-satellite", action="store_true", help="Do not render Gazebo-texture top-down frames.")
+    parser.add_argument("--satellite-stride", type=int, default=1, help="Render every Nth camera frame in the top-down view.")
+    parser.add_argument("--satellite-width-px", type=int, default=1280, help="Width of rendered top-down frames.")
     parser.add_argument("--skip-cleanup-before", action="store_true", help="Do not kill previous sim/brain processes before starting.")
     parser.add_argument("--keep-running", action="store_true", help="Leave sim/brain running after the route attempt.")
     parser.add_argument("--skip-analyze-run", action="store_true", help="Do not run tools/dev/analyze_run.py after cleanup.")
@@ -1288,6 +1464,9 @@ def main() -> int:
     brain_jsonl = brain_run_dir / "brain.jsonl"
     sim_jsonl = sim_run_dir / "sim_bridge.jsonl"
     copied_sim_jsonl = brain_run_dir / "sim_bridge.jsonl"
+    ai_debug_live_video = brain_run_dir / "ai_debug_live.avi"
+    ai_debug_video = brain_run_dir / "ai_debug.avi"
+    ai_debug_frames_dir = brain_run_dir / "ai_debug_frames"
 
     brain_run_dir.mkdir(parents=True, exist_ok=True)
     sim_run_dir.mkdir(parents=True, exist_ok=True)
@@ -1364,6 +1543,12 @@ def main() -> int:
         brain_env["URT_LIVE_LOG_PATH"] = str(brain_jsonl)
         brain_env["URT_SIM_MODE"] = "1"
         brain_env.setdefault("URT_DISABLE_AUTO_PARKING", "1")
+        if not args.no_ai_debug_video:
+            brain_env["URT_RECORD_AI_DEBUG_VIDEO"] = "1"
+            brain_env["URT_AI_DEBUG_VIDEO_PATH"] = str(ai_debug_live_video)
+            brain_env["URT_AI_DEBUG_FRAMES_DIR"] = str(ai_debug_frames_dir)
+            brain_env.setdefault("URT_AI_DEBUG_VIDEO_FPS", "10")
+            print(f"[campaign] AI debug preview: {ai_debug_frames_dir}")
         processes.append(
             _run(
                 ["./run.sh", "--no-gui"],
@@ -1450,14 +1635,37 @@ def main() -> int:
     video_frames: dict[str, Any] | None = None
     if video_path:
         video_frames = _extract_video_frames(video_path, brain_run_dir)
+    ai_debug_meta: dict[str, Any] | None = None
+    ai_debug_video_meta: dict[str, Any] | None = None
+    if not args.no_ai_debug_video:
+        if ai_debug_frames_dir.exists():
+            ai_debug_video_meta = _write_video_from_image_frames(
+                ai_debug_frames_dir,
+                ai_debug_video,
+                fps=float(os.environ.get("URT_AI_DEBUG_VIDEO_FPS", "10") or 10.0),
+            )
+            ai_debug_meta = _index_image_frames(
+                ai_debug_frames_dir,
+                fps=float(ai_debug_video_meta.get("fps", 10.0) if ai_debug_video_meta else 10.0),
+                video_path=ai_debug_video if ai_debug_video.exists() else ai_debug_live_video,
+            )
+        elif ai_debug_live_video.exists():
+            ai_debug_meta = _extract_video_frames(ai_debug_live_video, brain_run_dir, frames_subdir="ai_debug_frames")
+            if ai_debug_live_video != ai_debug_video:
+                try:
+                    shutil.copy2(ai_debug_live_video, ai_debug_video)
+                except OSError:
+                    pass
     brain_events = _load_jsonl(brain_jsonl)
     gt_events = _load_jsonl(copied_sim_jsonl)
     auto_start_ts = _find_auto_start_ts(brain_events)
+    trace_start_ts = record_start_ts if record_start_ts is not None else auto_start_ts
     metrics = _compute_metrics(
         expected_route=expected_route,
         brain_events=brain_events,
         gt_events=gt_events,
         auto_start_ts=auto_start_ts,
+        trace_start_ts=trace_start_ts,
         max_p90_m=args.max_cross_track_p90_m,
         max_max_m=args.max_cross_track_max_m,
         max_lane_offset_p90_m=args.max_lane_offset_p90_m,
@@ -1482,6 +1690,17 @@ def main() -> int:
             metrics["artifacts"]["camera_frames_index_json"] = str(brain_run_dir / "frames" / "index.json")
     else:
         metrics["artifacts"] = {}
+    if ai_debug_live_video.exists():
+        metrics["artifacts"]["ai_debug_live_video"] = str(ai_debug_live_video)
+    if ai_debug_video.exists():
+        metrics["artifacts"]["ai_debug_video"] = str(ai_debug_video)
+    if ai_debug_meta:
+        metrics["artifacts"]["ai_debug_frames_dir"] = str(ai_debug_frames_dir)
+        metrics["artifacts"]["ai_debug_frames_index_json"] = str(ai_debug_frames_dir / "index.json")
+        if (ai_debug_frames_dir / "index.jsonl").exists():
+            metrics["artifacts"]["ai_debug_frames_index_jsonl"] = str(ai_debug_frames_dir / "index.jsonl")
+    if ai_debug_video_meta and ai_debug_video_meta.get("error"):
+        metrics["artifacts"]["ai_debug_video_error"] = ai_debug_video_meta.get("error")
 
     overlay_written = _write_overlay(
         out_path=brain_run_dir / "overlay.png",
@@ -1500,6 +1719,25 @@ def main() -> int:
     )
     if visual_overlay_written:
         metrics["artifacts"]["overlay_visual_lane_png"] = str(brain_run_dir / "overlay_visual_lane.png")
+    if not args.no_satellite and video_frames and copied_sim_jsonl.exists():
+        satellite_meta = _write_satellite_artifacts(
+            brain_run_dir=brain_run_dir,
+            brain_jsonl=brain_jsonl,
+            sim_jsonl=copied_sim_jsonl,
+            sim_dir=sim_dir,
+            record_start_ts=record_start_ts,
+            stride=args.satellite_stride,
+            width_px=args.satellite_width_px,
+        )
+        if satellite_meta.get("error"):
+            metrics["artifacts"]["satellite_error"] = satellite_meta["error"]
+        else:
+            metrics["artifacts"]["satellite_frames_dir"] = satellite_meta.get("frames_dir")
+            metrics["artifacts"]["satellite_frames_index_json"] = str(
+                Path(str(satellite_meta.get("frames_dir"))) / "index.json"
+            )
+            if satellite_meta.get("video_path"):
+                metrics["artifacts"]["satellite_video"] = satellite_meta.get("video_path")
     metrics["artifacts"].update(
         {
             "brain_jsonl": str(brain_jsonl),
@@ -1510,12 +1748,19 @@ def main() -> int:
     )
     metrics["run_id"] = run_id
     metrics["auto_start_ts"] = auto_start_ts
+    metrics["trace_start_ts"] = trace_start_ts
     metrics["record_start_ts"] = record_start_ts
     metrics["record_stop_ts"] = record_stop_ts
     if video_frames:
         metrics["video_frames"] = {
             key: value
             for key, value in video_frames.items()
+            if key != "frames"
+        }
+    if ai_debug_meta:
+        metrics["ai_debug_video_frames"] = {
+            key: value
+            for key, value in ai_debug_meta.items()
             if key != "frames"
         }
 

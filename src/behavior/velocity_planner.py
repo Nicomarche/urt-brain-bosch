@@ -60,6 +60,34 @@ try:
 except Exception:
     _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
 
+try:
+    from config import (
+        BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS as _BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS,
+    )
+except Exception:
+    _BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS = 0.12
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_INSTABILITY_FLIP_HOLD_TICKS as _BEHAVIOR_VISUAL_INSTABILITY_FLIP_HOLD_TICKS,
+    )
+except Exception:
+    _BEHAVIOR_VISUAL_INSTABILITY_FLIP_HOLD_TICKS = 8
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_INSTABILITY_MIN_ERROR_M as _BEHAVIOR_VISUAL_INSTABILITY_MIN_ERROR_M,
+    )
+except Exception:
+    _BEHAVIOR_VISUAL_INSTABILITY_MIN_ERROR_M = 0.04
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_BOUNDARY_CRAWL_ERROR_M as _BEHAVIOR_VISUAL_BOUNDARY_CRAWL_ERROR_M,
+    )
+except Exception:
+    _BEHAVIOR_VISUAL_BOUNDARY_CRAWL_ERROR_M = 0.10
+
 # Histeresis para que el error tenga que decrecer al menos 5 mm por tick
 # para considerarse "el robot está recuperando"; valores menores son ruido.
 _LANE_CONTAINMENT_DECREASE_EPS_M = 0.005
@@ -121,9 +149,10 @@ class CompetitionSpeedBoundsRule:
         stop_required: bool,
         planning_notes: dict,
     ) -> VelocityRuleResult:
+        allow_sub_min_speed = _planning_notes_allow_sub_min_speed(planning_notes)
         bounded = _apply_competition_speed_bounds(
             speed_profile,
-            min_speed_mps=float(_BEHAVIOR_MIN_SPEED_MPS),
+            min_speed_mps=(0.0 if allow_sub_min_speed else float(_BEHAVIOR_MIN_SPEED_MPS)),
             max_speed_mps=float(ctx.max_speed_mps),
         )
         triggered = bool(np.any(np.abs(bounded - np.asarray(speed_profile, dtype=float)) > 1e-9))
@@ -132,7 +161,8 @@ class CompetitionSpeedBoundsRule:
             stop_required=bool(stop_required),
             notes={
                 "kind": self.name,
-                "min_moving_mps": float(_BEHAVIOR_MIN_SPEED_MPS),
+                "min_moving_mps": (0.0 if allow_sub_min_speed else float(_BEHAVIOR_MIN_SPEED_MPS)),
+                "allow_sub_min_speed": bool(allow_sub_min_speed),
                 "max_mps": float(ctx.max_speed_mps),
             },
             triggered=triggered,
@@ -150,6 +180,8 @@ class LaneContainmentRule:
         self._prev_effective_error_m: float = 0.0
         self._stuck_tick_count: int = 0
         self._recovery_active: bool = False
+        self._prev_visual_side: str = "none"
+        self._visual_instability_hold_ticks: int = 0
 
     def apply(
         self,
@@ -161,7 +193,20 @@ class LaneContainmentRule:
         planning_notes: dict,
     ) -> VelocityRuleResult:
         speed = np.array(speed_profile, copy=True, dtype=float)
-        visual_error_m = _visual_lane_error_m(ctx)
+        visual_error_m = _visual_lane_error_m(ctx, planning_notes)
+        visual_side = _visual_lane_side(ctx, planning_notes)
+        visual_side_flip = _visual_lane_side_flip(
+            previous_side=self._prev_visual_side,
+            current_side=visual_side,
+            planning_notes=planning_notes,
+        )
+        if visual_side_flip:
+            self._visual_instability_hold_ticks = int(_BEHAVIOR_VISUAL_INSTABILITY_FLIP_HOLD_TICKS)
+        elif self._visual_instability_hold_ticks > 0:
+            self._visual_instability_hold_ticks -= 1
+        if visual_side in {"left", "right", "both"}:
+            self._prev_visual_side = visual_side
+
         corridor_error_m = abs(float(planning_notes.get("ego_corridor_error_m", 0.0) or 0.0))
         effective_error_m = max(corridor_error_m, abs(visual_error_m) if visual_error_m is not None else 0.0)
         touches_bound = bool(planning_notes.get("corridor_touches_bound", False))
@@ -176,6 +221,21 @@ class LaneContainmentRule:
             or touches_bound
             or used_prev_safe_path
         )
+        trigger_visual_instability_crawl = (
+            self._visual_instability_hold_ticks > 0
+            and visual_error_m is not None
+            and abs(float(visual_error_m)) >= float(_BEHAVIOR_VISUAL_INSTABILITY_MIN_ERROR_M)
+        )
+        trigger_visual_boundary_crawl = (
+            visual_error_m is not None
+            and abs(float(visual_error_m)) >= float(_BEHAVIOR_VISUAL_BOUNDARY_CRAWL_ERROR_M)
+            and _visual_lane_measurement_source(planning_notes) in {
+                "single_line_boundary_hint",
+                "line_center_offset_m",
+                "direct_error_m",
+            }
+        )
+        trigger_crawl = trigger_crawl or trigger_visual_instability_crawl or trigger_visual_boundary_crawl
 
         # Tracking de stuck-recovery. Solo cuenta cuando estamos en crawl;
         # fuera de crawl, reset total.
@@ -224,6 +284,9 @@ class LaneContainmentRule:
             "effective_error_m": float(effective_error_m),
             "corridor_error_m": float(corridor_error_m),
             "visual_error_m": float(visual_error_m) if visual_error_m is not None else None,
+            "visual_side": str(visual_side),
+            "visual_side_flip": bool(visual_side_flip),
+            "visual_instability_hold_ticks": int(self._visual_instability_hold_ticks),
             "touches_bound": bool(touches_bound),
             "used_prev_safe_path": bool(used_prev_safe_path),
             "containment_infeasible_ticks": int(infeasible_ticks),
@@ -246,14 +309,24 @@ class LaneContainmentRule:
             note["mode"] = "future_horizon_crawl"
             note["zero_from_idx"] = int(zero_from_idx)
             note["cap_mps"] = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
+            note["allow_sub_min_speed"] = True
             return VelocityRuleResult(speed, stop_req, note, True)
 
         if self._recovery_active:
             cap_mps = float(_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS)
             note["mode"] = "stuck_recovery"
+        elif trigger_visual_instability_crawl and not (touches_bound or used_prev_safe_path or infeasible_ticks > 0):
+            cap_mps = float(_BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS)
+            note["mode"] = "visual_instability_crawl"
+            note["allow_sub_min_speed"] = True
+        elif trigger_visual_boundary_crawl and not (touches_bound or used_prev_safe_path or infeasible_ticks > 0):
+            cap_mps = float(_BEHAVIOR_VISUAL_INSTABILITY_CRAWL_SPEED_MPS)
+            note["mode"] = "visual_boundary_crawl"
+            note["allow_sub_min_speed"] = True
         elif trigger_crawl or infeasible_ticks > 0:
             cap_mps = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
             note["mode"] = "crawl"
+            note["allow_sub_min_speed"] = True
         else:
             cap_mps = float(_LANE_CONTAINMENT_WARN_CAP_MPS)
             note["mode"] = "warn"
@@ -414,6 +487,8 @@ class BehaviorVelocityPlanner:
             stop_required = bool(result.stop_required)
             if result.triggered:
                 notes["velocity_modules"].append(result.notes)
+                if bool(result.notes.get("allow_sub_min_speed", False)):
+                    notes["allow_sub_min_speed"] = True
 
         return BehaviorOutput(
             timestamp=float(path_plan.timestamp or ctx.now_s),
@@ -462,7 +537,8 @@ def _apply_competition_speed_bounds(
     speed = np.asarray(speed_profile, dtype=float)
     bounded = np.minimum(np.array(speed, copy=True), float(max_speed_mps))
     moving = bounded > 1e-6
-    bounded[moving] = np.maximum(bounded[moving], float(min_speed_mps))
+    effective_min_mps = min(float(min_speed_mps), float(max_speed_mps))
+    bounded[moving] = np.maximum(bounded[moving], effective_min_mps)
     return bounded
 
 
@@ -487,15 +563,84 @@ def _ramp_to_zero(speed: np.ndarray, *, dt: float, distance_to_stop_m: float) ->
     return out
 
 
-def _visual_lane_error_m(ctx: PlanningContext) -> float | None:
+def _planning_notes_allow_sub_min_speed(planning_notes: dict) -> bool:
+    if bool(planning_notes.get("allow_sub_min_speed", False)):
+        return True
+    modules = planning_notes.get("velocity_modules")
+    if not isinstance(modules, list):
+        return False
+    return any(
+        isinstance(note, dict) and bool(note.get("allow_sub_min_speed", False))
+        for note in modules
+    )
+
+
+def _visual_lane_side(ctx: PlanningContext, planning_notes: dict) -> str:
+    note_side = str(planning_notes.get("visual_lane_detected_side", "") or "")
+    if note_side in {"left", "right", "both"}:
+        return note_side
+    lane_observation = getattr(ctx, "lane_observation", None)
+    detected_sides = tuple(getattr(lane_observation, "detected_sides", ()) or ())
+    if len(detected_sides) >= 2:
+        return "both"
+    if len(detected_sides) == 1 and detected_sides[0] in {"left", "right"}:
+        return str(detected_sides[0])
+    return "none"
+
+
+def _visual_lane_side_flip(
+    *,
+    previous_side: str,
+    current_side: str,
+    planning_notes: dict,
+) -> bool:
+    if bool(planning_notes.get("visual_lane_shift_side_flip", False)) or bool(
+        planning_notes.get("visual_lane_side_switch_pending", False)
+    ):
+        return True
+    return (
+        previous_side in {"left", "right"}
+        and current_side in {"left", "right"}
+        and previous_side != current_side
+    )
+
+
+def _visual_lane_measurement_source(planning_notes: dict) -> str:
+    return str(planning_notes.get("visual_lane_measurement_source", "") or "")
+
+
+def _visual_lane_error_m(ctx: PlanningContext, planning_notes: dict | None = None) -> float | None:
+    planning_notes = planning_notes if isinstance(planning_notes, dict) else {}
+    note_source = str(planning_notes.get("visual_lane_measurement_source", "") or "")
+    note_mode = str(planning_notes.get("visual_lane_measurement_mode", "") or "")
+    if note_source in {
+        "line_center_offset_m",
+        "direct_error_m",
+        "single_line_boundary_hint",
+        "visual_waypoint_center",
+        "lateral_offset_m",
+    }:
+        value = planning_notes.get("visual_lane_error_m")
+        try:
+            error_m = float(value)
+        except (TypeError, ValueError):
+            error_m = None
+        if error_m is not None and math.isfinite(error_m):
+            quality = _finite_float(planning_notes.get("visual_lane_quality"), default=1.0)
+            min_quality = 0.55 if note_mode == "single_line" else 0.75
+            if quality >= min_quality:
+                return error_m
+
     lane_observation = getattr(ctx, "lane_observation", None)
     if lane_observation is None:
         return None
     if not bool(getattr(lane_observation, "direct_error_valid", False)):
         return None
-    if str(getattr(lane_observation, "measurement_mode", "none")) != "two_line":
+    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none"))
+    if measurement_mode not in {"two_line", "single_line"}:
         return None
-    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < 0.8:
+    min_quality = 0.8 if measurement_mode == "two_line" else 0.60
+    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < min_quality:
         return None
     value = getattr(lane_observation, "direct_error_m", None)
     if value is None:
@@ -504,6 +649,16 @@ def _visual_lane_error_m(ctx: PlanningContext) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _finite_float(value: object, *, default: float = 0.0) -> float:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if not math.isfinite(out):
+        return float(default)
+    return out
 
 
 def _compute_curvature(target_path: np.ndarray) -> np.ndarray:

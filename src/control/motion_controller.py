@@ -66,6 +66,7 @@ except Exception:
 _FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M = 0.02
 _FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M = 0.18
 _FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG = 45.0
+_STEER_SIGN_FLIP_CROSS_EPS_DEG = 2.0
 
 
 def _solver_lib_path() -> str:
@@ -118,6 +119,20 @@ def _osm_states_to_controller_frame(states: np.ndarray) -> np.ndarray:
     arr[:, 1] *= -1.0
     arr[:, 2] = np.array([_wrap_angle(-float(yaw)) for yaw in arr[:, 2]], dtype=np.float64)
     return arr
+
+
+def _allow_sub_min_speed(notes: object) -> bool:
+    if not isinstance(notes, dict):
+        return False
+    if bool(notes.get("allow_sub_min_speed", False)):
+        return True
+    modules = notes.get("velocity_modules")
+    if not isinstance(modules, list):
+        return False
+    return any(
+        isinstance(note, dict) and bool(note.get("allow_sub_min_speed", False))
+        for note in modules
+    )
 
 
 def _first_forward_reference_hint(
@@ -920,6 +935,8 @@ class MotionController(IMotionController):
             return self._invalid("mpc_nonfinite_output", backend=self._backend_name)
 
         requested_speed_mps = max(0.0, float(speed_profile[0]))
+        notes = getattr(behavior_output, "notes", None)
+        allow_sub_min_speed = _allow_sub_min_speed(notes)
 
         # Velocidad negativa NO se usa: aunque el solver acados tenga
         # v_min=-0.05 runtime (para evitar que se quede pegado al floor
@@ -932,7 +949,6 @@ class MotionController(IMotionController):
         speed_mps = min(max(0.0, float(v_opt)), requested_speed_mps)
         forward_recovery_reason = ""
         forward_recovery_hint: dict[str, float] | None = None
-        notes = getattr(behavior_output, "notes", None)
         path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
         if (
             speed_mps <= 1e-6
@@ -952,14 +968,17 @@ class MotionController(IMotionController):
                 and abs(forward_recovery_hint["y_left_m"]) <= float(_FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M)
                 and forward_recovery_hint["heading_error_deg"] <= float(_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG)
             ):
+                recovery_min_speed_mps = (
+                    0.0 if allow_sub_min_speed else float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
+                )
                 speed_mps = min(
                     requested_speed_mps,
                     max(
-                        float(_FORWARD_RECOVERY_MIN_SPEED_MPS),
+                        recovery_min_speed_mps,
                         0.5 * requested_speed_mps,
                     ),
                 )
-                if speed_mps < float(_FORWARD_RECOVERY_MIN_SPEED_MPS):
+                if not allow_sub_min_speed and speed_mps < float(_FORWARD_RECOVERY_MIN_SPEED_MPS):
                     speed_mps = float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
                 forward_recovery_reason = "negative_solver_forward_route_recovery"
             else:
@@ -976,22 +995,37 @@ class MotionController(IMotionController):
             requested_speed_mps > 1e-6
             and speed_mps > 1e-6
             and speed_mps < float(self._min_moving_speed_mps)
+            and not allow_sub_min_speed
         ):
             speed_mps = float(self._min_moving_speed_mps)
         self._prev_speed_mps = speed_mps
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
-        steering_deg = max(
+        desired_steering_deg = max(
             -self.max_steering_deg,
             min(self.max_steering_deg, float(delta_deg)),
         )
 
         # Rate limiter de steering — independiente del solver.
         max_steer_step = self._max_steer_rate_deg_s * self._steer_dt_s
-        steering_deg = max(
-            self._prev_steer_deg - max_steer_step,
-            min(self._prev_steer_deg + max_steer_step, steering_deg),
+        prev_steer_deg = float(self._prev_steer_deg)
+        steering_sign_flip_limited = (
+            abs(prev_steer_deg) >= float(_STEER_SIGN_FLIP_CROSS_EPS_DEG)
+            and abs(desired_steering_deg) >= float(_STEER_SIGN_FLIP_CROSS_EPS_DEG)
+            and (prev_steer_deg * desired_steering_deg) < 0.0
         )
+        if steering_sign_flip_limited:
+            # Do not keep a command on the stale side, but also do not leave the
+            # car with zero lateral authority while it is still re-centering.
+            steering_deg = math.copysign(
+                min(abs(desired_steering_deg), max_steer_step),
+                desired_steering_deg,
+            )
+        else:
+            steering_deg = max(
+                self._prev_steer_deg - max_steer_step,
+                min(self._prev_steer_deg + max_steer_step, desired_steering_deg),
+            )
         self._prev_steer_deg = steering_deg
         solver_debug = (
             dict(self._solver.debug)
@@ -1012,6 +1046,9 @@ class MotionController(IMotionController):
             valid=True, reason="",
             v_opt_raw=float(v_opt), speed_mps=float(speed_mps),
             delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
+            desired_steering_deg=float(desired_steering_deg),
+            steering_sign_flip_zeroed=False,
+            steering_sign_flip_limited=bool(steering_sign_flip_limited),
             scenario=behavior_output.scenario_name,
             requested_speed_mps=float(requested_speed_mps),
             speed_recovery_reason=forward_recovery_reason,

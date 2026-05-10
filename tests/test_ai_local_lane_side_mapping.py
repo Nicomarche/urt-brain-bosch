@@ -48,6 +48,12 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.detector.lane_safety_margin_cm = 5.0
         self.detector.camera_to_front_axle = 0.0
         self.detector._last_local_ai_lane_width_px = None
+        self.detector._last_local_ai_lane_center_ref_x = None
+        self.detector._last_local_ai_lane_center_bottom_x = None
+        self.detector._last_local_ai_lane_pair_ts = 0.0
+        self.detector._last_two_line_left = None
+        self.detector._last_two_line_right = None
+        self.detector._last_two_line_ts = 0.0
         self.detector._last_px_per_cm = None
         self.detector._last_good_steering = 0.0
         self.detector._curve_state = "STRAIGHT"
@@ -128,6 +134,103 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertFalse(guidance["used_virtual_boundary"])
         self.assertGreater(guidance["lane_width_px"], 0.0)
         self.assertAlmostEqual(guidance["midpoint_x"], 50.0, delta=5.0)
+
+    def test_build_local_mask_guidance_uses_inner_clusters_when_adjacent_lines_are_visible(self):
+        left_mask = self._mask_from_points(
+            [(10, 95), (10, 85), (10, 75), (40, 95), (40, 85), (40, 75)],
+            shape=(100, 200),
+        )
+        right_mask = self._mask_from_points(
+            [(60, 95), (60, 85), (60, 75), (170, 95), (170, 85), (170, 75)],
+            shape=(100, 200),
+        )
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            200,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["detected_sides"], ("left", "right"))
+        self.assertAlmostEqual(guidance["left_x"], 40.0, delta=2.0)
+        self.assertAlmostEqual(guidance["right_x"], 60.0, delta=2.0)
+        self.assertAlmostEqual(guidance["midpoint_x"], 50.0, delta=2.0)
+
+    def test_build_local_mask_guidance_prefers_recent_two_line_cluster_over_inner_guess(self):
+        self.detector._last_two_line_left = np.array([[40, 95, 40, 55]], dtype=np.int32)
+        self.detector._last_two_line_right = np.array([[80, 95, 80, 55]], dtype=np.int32)
+        self.detector._last_two_line_ts = time.time()
+        left_mask = self._mask_from_points(
+            [(40, 95), (40, 85), (40, 75), (110, 95), (110, 85), (110, 75)],
+            shape=(100, 200),
+        )
+        right_mask = self._mask_from_points(
+            [(80, 95), (80, 85), (80, 75), (165, 95), (165, 85), (165, 75)],
+            shape=(100, 200),
+        )
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            200,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertAlmostEqual(guidance["left_x"], 40.0, delta=2.0)
+        self.assertAlmostEqual(guidance["right_x"], 80.0, delta=2.0)
+        self.assertAlmostEqual(guidance["midpoint_x"], 60.0, delta=2.0)
+
+    def test_build_local_mask_guidance_selects_lane_width_pair_with_adjacent_highway_lines(self):
+        self.detector._last_local_ai_lane_width_px = 40.0
+        left_mask = self._mask_from_points(
+            [(10, 95), (10, 85), (10, 75), (40, 95), (40, 85), (40, 75)],
+            shape=(100, 200),
+        )
+        right_mask = self._mask_from_points(
+            [(80, 95), (80, 85), (80, 75), (150, 95), (150, 85), (150, 75)],
+            shape=(100, 200),
+        )
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            200,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertAlmostEqual(guidance["left_x"], 40.0, delta=2.0)
+        self.assertAlmostEqual(guidance["right_x"], 80.0, delta=2.0)
+        self.assertAlmostEqual(guidance["lane_width_px"], 40.0, delta=2.0)
+        self.assertIn("lane_pair_selection", guidance)
+        self.assertEqual(guidance["lane_pair_selection"]["width_source"], "cached_two_line")
+
+    def test_build_local_mask_guidance_uses_history_to_pick_intended_parallel_lane(self):
+        self.detector._last_local_ai_lane_width_px = 40.0
+        self.detector._last_two_line_left = np.array([[80, 95, 80, 55]], dtype=np.int32)
+        self.detector._last_two_line_right = np.array([[120, 95, 120, 55]], dtype=np.int32)
+        self.detector._last_two_line_ts = time.time()
+        left_mask = self._mask_from_points(
+            [(20, 95), (20, 85), (20, 75), (80, 95), (80, 85), (80, 75)],
+            shape=(100, 200),
+        )
+        right_mask = self._mask_from_points(
+            [(60, 95), (60, 85), (60, 75), (120, 95), (120, 85), (120, 75)],
+            shape=(100, 200),
+        )
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": left_mask, "right": right_mask},
+            100,
+            200,
+        )
+
+        self.assertIsNotNone(guidance)
+        self.assertAlmostEqual(guidance["left_x"], 80.0, delta=2.0)
+        self.assertAlmostEqual(guidance["right_x"], 120.0, delta=2.0)
+        self.assertAlmostEqual(guidance["midpoint_x"], 100.0, delta=2.0)
+        row_info = guidance["lane_pair_selection"]["rows"]["reference"]
+        self.assertEqual(row_info["center_source"], "recent_two_line")
 
     def test_build_local_mask_guidance_estimates_virtual_boundary_for_single_side(self):
         self.detector._last_local_ai_lane_width_px = 36.0
@@ -380,6 +483,34 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(guidance["guidance_mode"], "single_line_physical")
         self.assertFalse(guidance["single_line_prefer_center"])
         self.assertEqual(guidance["single_line_streak"], 5)
+
+    def test_build_local_mask_guidance_single_line_curve_uses_geometric_center(self):
+        self.detector.detection_mode = "ai_local"
+        self.detector._curve_state = "IN_CURVE"
+        self.detector.consecutive_single_right = 4
+        self.detector.single_line_prefer_center_frames = 2
+        right_mask = self._mask_from_points([(70, 95), (70, 85), (70, 75), (70, 65), (70, 55)])
+
+        self.detector.single_line_offset_factor = 0.1
+        low_bias = self.detector._build_local_mask_guidance(
+            {"left": None, "right": right_mask},
+            100,
+            100,
+            side_lines={"right": np.array([[70, 95, 70, 55]], dtype=np.int32)},
+        )
+        self.detector.single_line_offset_factor = 0.45
+        high_bias = self.detector._build_local_mask_guidance(
+            {"left": None, "right": right_mask},
+            100,
+            100,
+            side_lines={"right": np.array([[70, 95, 70, 55]], dtype=np.int32)},
+        )
+
+        self.assertIsNotNone(low_bias)
+        self.assertIsNotNone(high_bias)
+        self.assertEqual(low_bias["guidance_mode"], "single_line_physical")
+        self.assertEqual(high_bias["guidance_mode"], "single_line_physical")
+        self.assertAlmostEqual(low_bias["error_px"], high_bias["error_px"], places=3)
 
     def test_detect_with_local_ai_prefers_raw_masks_when_enabled(self):
         left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])

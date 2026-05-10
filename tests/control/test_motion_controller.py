@@ -243,6 +243,17 @@ def test_steering_clamped_to_max() -> None:
     assert cmd.steering_deg == pytest.approx(25.0)
 
 
+def test_steering_sign_flip_crosses_to_new_side_before_ramping() -> None:
+    """No mantiene el lado viejo ni se queda sin autoridad lateral al cambiar de signo."""
+    mc = MotionController(solver=_FakeSolver(result=(0.30, -20.0)))
+    mc._prev_steer_deg = 20.0
+
+    cmd = mc.compute(_bo(), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(-3.0)
+
+
 def test_solver_speed_is_capped_to_current_planner_request() -> None:
     """El controller no supera un `speed_profile[0]` competitivo."""
     mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.50, 1.0))))

@@ -21,7 +21,7 @@ except ImportError:
     _SCIPY_AVAILABLE = False
 import config as _config
 from src.core.types import VisualControlCandidate, VisualStateSnapshot
-from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
+from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, MotorCommandMsg, SignDetected, LaneCalibMode
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -999,7 +999,11 @@ Args:
         self._last_frame_size = None
         self._last_local_perception_status = None
         self._last_actuator_status = None
+        self._last_motor_command_msg = None
         self._last_local_ai_lane_width_px = None
+        self._last_local_ai_lane_center_ref_x = None
+        self._last_local_ai_lane_center_bottom_x = None
+        self._last_local_ai_lane_pair_ts = 0.0
         self._last_two_line_left = None
         self._last_two_line_right = None
         self._last_two_line_ts = 0.0
@@ -1094,6 +1098,27 @@ Args:
         self._debug_frame_counter = 0
         self._debug_images = {}  # Store debug images for streaming
         self._last_stream_time = 0
+        self.record_ai_debug_video = str(
+            os.environ.get("URT_RECORD_AI_DEBUG_VIDEO", "")
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        self._ai_debug_video_path = (
+            os.environ.get("URT_AI_DEBUG_VIDEO_PATH")
+            or os.path.abspath(f"output_ai_debug{time.time()}.avi")
+        )
+        self._ai_debug_frames_dir = os.environ.get("URT_AI_DEBUG_FRAMES_DIR")
+        self._ai_debug_frame_index_path = (
+            os.path.join(self._ai_debug_frames_dir, "index.jsonl")
+            if self._ai_debug_frames_dir
+            else None
+        )
+        try:
+            self._ai_debug_video_fps = float(os.environ.get("URT_AI_DEBUG_VIDEO_FPS", "10") or 10.0)
+        except (TypeError, ValueError):
+            self._ai_debug_video_fps = 10.0
+        self._ai_debug_video_writer = None
+        self._ai_debug_video_size = None
+        self._ai_debug_frame_index = 0
+        self._ai_debug_last_record_ts = 0.0
         self.line_visual_smoothing_alpha = 0.35
         self.line_visual_missing_reset_frames = 2
         self._smoothed_left_line = None
@@ -1239,6 +1264,7 @@ Args:
             self.localLanePerceptionSubscriber = None
         self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
         self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ActuatorCommandStatus, "lastOnly", True)
+        self.motorCommandMsgSubscriber = messageHandlerSubscriber(self.queuesList, MotorCommandMsg, "lastOnly", True)
         
         # Sensor feedback subscribers (for Stanley controller)
         self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
@@ -1362,6 +1388,10 @@ Args:
         actuator_payload = self.actuatorStatusSubscriber.receive()
         if actuator_payload is not None:
             self._last_actuator_status = actuator_payload
+
+        motor_command_payload = self.motorCommandMsgSubscriber.receive()
+        if motor_command_payload is not None:
+            self._last_motor_command_msg = motor_command_payload
 
     def _fit_lane_points_line(self, lane_points, img_h, img_w):
         """Compatibility wrapper for generic AI lane-point geometry."""
@@ -1911,7 +1941,87 @@ Args:
             'duplicate_line_collapse_active': bool(entry.get('duplicate_collapse', False)),
         }
 
-    def _mask_x_at_y(self, mask, y_target, search_radius=8):
+    @staticmethod
+    def _mask_x_clusters_from_pixels(xs, *, img_w=None):
+        """Return lane-line cluster centers for one mask row."""
+        if xs is None or xs.size == 0:
+            return []
+
+        xs = np.asarray(xs, dtype=float)
+        xs.sort()
+        if xs.size == 1:
+            return [float(xs[0])]
+
+        gap_px = 4.0
+        if isinstance(img_w, (int, float)) and float(img_w) > 0.0:
+            gap_px = max(gap_px, float(img_w) * 0.008)
+
+        clusters = []
+        start = 0
+        for idx in range(1, xs.size):
+            if float(xs[idx] - xs[idx - 1]) > gap_px:
+                clusters.append(xs[start:idx])
+                start = idx
+        clusters.append(xs[start:])
+        centers = [float(cluster.mean()) for cluster in clusters if cluster.size > 0]
+        return centers
+
+    @staticmethod
+    def _select_mask_x_cluster(xs, *, side=None, img_w=None, preferred_x=None):
+        """Pick one physical lane-line cluster from a mask row.
+
+        AI side masks can include lane markings from a neighboring lane when
+        the car oscillates.  Averaging every active column then invents a line
+        between physical markings.  Prefer temporal continuity when available;
+        otherwise use the inner boundary for the requested side.
+        """
+        centers = threadLineFollowing._mask_x_clusters_from_pixels(xs, img_w=img_w)
+        if not centers:
+            if xs is None or xs.size == 0:
+                return None
+            return float(np.asarray(xs, dtype=float).mean())
+        if len(centers) == 1:
+            return centers[0]
+
+        try:
+            preferred = float(preferred_x)
+        except (TypeError, ValueError):
+            preferred = None
+        if preferred is not None and math.isfinite(preferred):
+            return min(centers, key=lambda value: abs(float(value) - preferred))
+
+        if side == 'left':
+            return max(centers)
+        if side == 'right':
+            return min(centers)
+        return float(xs.mean())
+
+    def _mask_x_clusters_at_y(self, mask, y_target, search_radius=8, *, img_w=None):
+        """Return physical lane-line clusters near a row, preserving separated marks."""
+        if not isinstance(mask, np.ndarray) or mask.size == 0:
+            return []
+
+        mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+        if mask_2d.ndim != 2 or mask_2d.size == 0:
+            return []
+
+        height, width = mask_2d.shape[:2]
+        y_target = int(np.clip(y_target, 0, height - 1))
+        search_radius = max(0, int(search_radius))
+        effective_w = img_w if img_w is not None else width
+
+        for delta in range(search_radius + 1):
+            rows = [y_target] if delta == 0 else [y_target - delta, y_target + delta]
+            for row in rows:
+                if row < 0 or row >= height:
+                    continue
+                xs = np.where(mask_2d[row] > 0)[0]
+                centers = self._mask_x_clusters_from_pixels(xs, img_w=effective_w)
+                if centers:
+                    return centers
+        return []
+
+    def _mask_x_at_y(self, mask, y_target, search_radius=8, *, side=None, img_w=None, preferred_x=None):
         """Return the average x coordinate of a binary mask at a given row."""
         if not isinstance(mask, np.ndarray) or mask.size == 0:
             return None
@@ -1931,7 +2041,12 @@ Args:
                     continue
                 xs = np.where(mask_2d[row] > 0)[0]
                 if xs.size > 0:
-                    return float(xs.mean())
+                    return self._select_mask_x_cluster(
+                        xs,
+                        side=side,
+                        img_w=img_w if img_w is not None else mask_2d.shape[1],
+                        preferred_x=preferred_x,
+                    )
         return None
 
     def _collapse_duplicate_local_ai_sides(self, side_masks, side_lines, lane_side_sources, img_h, img_w):
@@ -2046,9 +2161,245 @@ Args:
             'line_gap_px': None if line_gap_px is None else float(line_gap_px),
         }
 
-    def _sample_mask_boundary(self, mask, y_rows):
+    def _sample_mask_boundary(self, mask, y_rows, *, side=None, img_w=None):
         """Sample a lane mask boundary at the requested rows."""
-        return [self._mask_x_at_y(mask, y_value) for y_value in y_rows]
+        preferred_line = None
+        if side == 'left':
+            preferred_line = getattr(self, '_last_two_line_left', None)
+        elif side == 'right':
+            preferred_line = getattr(self, '_last_two_line_right', None)
+
+        reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+        last_two_line_ts = float(getattr(self, '_last_two_line_ts', 0.0) or 0.0)
+        history_active = bool(
+            preferred_line is not None
+            and last_two_line_ts
+            and (time.time() - last_two_line_ts) <= reference_ttl
+        )
+
+        samples = []
+        for y_value in y_rows:
+            preferred_x = None
+            if history_active:
+                preferred_x = self._line_x_at_y(preferred_line, y_value)
+            samples.append(
+                self._mask_x_at_y(
+                    mask,
+                    y_value,
+                    side=side,
+                    img_w=img_w,
+                    preferred_x=preferred_x,
+                )
+            )
+        return samples
+
+    def _reliable_local_lane_width_px(self, img_w):
+        """Return a learned lane width in pixels only when it is grounded in observations."""
+        try:
+            cached_lane_width = float(getattr(self, '_last_local_ai_lane_width_px', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            cached_lane_width = 0.0
+        if cached_lane_width > 1.0:
+            return cached_lane_width, 'cached_two_line'
+
+        try:
+            cached_px_per_cm = float(getattr(self, '_last_px_per_cm', 0.0) or 0.0)
+            lane_width_cm = float(getattr(self, 'lane_width_cm', 35.0) or 35.0)
+        except (TypeError, ValueError):
+            cached_px_per_cm = 0.0
+            lane_width_cm = 35.0
+        if cached_px_per_cm > 0.5 and lane_width_cm > 1e-3:
+            return cached_px_per_cm * lane_width_cm, 'cached_scale'
+
+        return None, 'none'
+
+    def _recent_two_line_pair_at_y(self, y_value):
+        """Project the recent two-line reference pair to a row if it is still fresh."""
+        reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+        last_two_line_ts = float(getattr(self, '_last_two_line_ts', 0.0) or 0.0)
+        if not last_two_line_ts or (time.time() - last_two_line_ts) > reference_ttl:
+            return None
+
+        left_ref = getattr(self, '_last_two_line_left', None)
+        right_ref = getattr(self, '_last_two_line_right', None)
+        left_x = self._line_x_at_y(left_ref, y_value)
+        right_x = self._line_x_at_y(right_ref, y_value)
+        if left_x is None or right_x is None or float(right_x) <= float(left_x):
+            return None
+        return {
+            'left_x': float(left_x),
+            'right_x': float(right_x),
+            'center_x': (float(left_x) + float(right_x)) / 2.0,
+            'width_px': float(right_x) - float(left_x),
+            'source': 'recent_two_line',
+        }
+
+    def _current_line_pair_at_y(self, side_lines, y_value):
+        """Project current payload side-lines to a row when both are plausible."""
+        if not isinstance(side_lines, dict):
+            return None
+        left_x = self._line_x_at_y(side_lines.get('left'), y_value)
+        right_x = self._line_x_at_y(side_lines.get('right'), y_value)
+        if left_x is None or right_x is None or float(right_x) <= float(left_x):
+            return None
+        return {
+            'left_x': float(left_x),
+            'right_x': float(right_x),
+            'center_x': (float(left_x) + float(right_x)) / 2.0,
+            'width_px': float(right_x) - float(left_x),
+            'source': 'current_side_lines',
+        }
+
+    def _last_local_lane_pair_center(self, row_key):
+        reference_ttl = max(1.0, float(getattr(self, 'local_ai_max_result_age', 0.35)) * 3.0)
+        last_pair_ts = float(getattr(self, '_last_local_ai_lane_pair_ts', 0.0) or 0.0)
+        if not last_pair_ts or (time.time() - last_pair_ts) > reference_ttl:
+            return None
+        attr = '_last_local_ai_lane_center_bottom_x' if row_key == 'bottom' else '_last_local_ai_lane_center_ref_x'
+        try:
+            value = float(getattr(self, attr, 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    def _select_local_ai_lane_pair(self, side_masks, y_rows, img_w, side_lines=None):
+        """Select left/right clusters jointly, like the ref brain's lane-width pair gate.
+
+        The row-level fallback picks a cluster for each side independently.  On a
+        multi-lane highway that can combine the intended lane with a neighboring
+        lane marking.  When we have a learned lane width or a fresh two-line
+        reference, score physical left/right pairs by nominal width and temporal
+        continuity so the visual tracker stays attached to one lane.
+        """
+        if not isinstance(side_masks, dict) or len(y_rows) < 2:
+            return None
+        left_mask = side_masks.get('left')
+        right_mask = side_masks.get('right')
+        if not isinstance(left_mask, np.ndarray) or not isinstance(right_mask, np.ndarray):
+            return None
+        if left_mask.size == 0 or right_mask.size == 0:
+            return None
+
+        reliable_width_px, width_source = self._reliable_local_lane_width_px(img_w)
+        has_recent_pair = self._recent_two_line_pair_at_y(y_rows[1]) is not None
+        if reliable_width_px is None and not has_recent_pair:
+            return None
+
+        row_specs = (
+            ('reference', int(y_rows[1])),
+            ('bottom', int(y_rows[0])),
+        )
+        selected = {'left': {}, 'right': {}}
+        info = {
+            'source': 'width_pair',
+            'width_source': width_source,
+            'nominal_width_px': float(reliable_width_px) if reliable_width_px is not None else None,
+            'rows': {},
+        }
+
+        for row_key, y_value in row_specs:
+            left_clusters = self._mask_x_clusters_at_y(left_mask, y_value, search_radius=8, img_w=img_w)
+            right_clusters = self._mask_x_clusters_at_y(right_mask, y_value, search_radius=8, img_w=img_w)
+            if not left_clusters or not right_clusters:
+                return None
+
+            history_pair = self._recent_two_line_pair_at_y(y_value)
+            current_pair = self._current_line_pair_at_y(side_lines, y_value)
+            anchor_pair = history_pair or current_pair
+
+            if history_pair is not None:
+                expected_center = float(history_pair['center_x'])
+                expected_width = float(history_pair['width_px'])
+                center_source = history_pair['source']
+            elif current_pair is not None:
+                expected_center = float(current_pair['center_x'])
+                expected_width = float(current_pair['width_px'])
+                center_source = current_pair['source']
+            else:
+                last_center = self._last_local_lane_pair_center(row_key)
+                expected_center = float(last_center) if last_center is not None else float(img_w) / 2.0
+                expected_width = reliable_width_px
+                center_source = 'last_pair' if last_center is not None else 'frame_center'
+
+            reliable_width = expected_width is not None and float(expected_width) > 1.0
+            width_denom = max(1.0, float(expected_width) if reliable_width else float(img_w) * 0.25)
+            best = None
+            rejected_width = 0
+            candidate_count = 0
+
+            for left_x in left_clusters:
+                for right_x in right_clusters:
+                    gap = float(right_x) - float(left_x)
+                    if gap <= max(3.0, float(img_w) * 0.01):
+                        continue
+                    candidate_count += 1
+                    if reliable_width and (
+                        gap < (0.50 * float(expected_width)) or
+                        gap > (1.80 * float(expected_width))
+                    ):
+                        rejected_width += 1
+                        continue
+
+                    center_x = (float(left_x) + float(right_x)) / 2.0
+                    width_score = (
+                        abs(gap - float(expected_width)) / width_denom
+                        if reliable_width else 0.0
+                    )
+                    center_score = abs(center_x - float(expected_center)) / width_denom
+                    pair_score = 0.0
+                    if anchor_pair is not None:
+                        pair_score = (
+                            abs(float(left_x) - float(anchor_pair['left_x'])) +
+                            abs(float(right_x) - float(anchor_pair['right_x']))
+                        ) / (2.0 * width_denom)
+
+                    score = (2.5 * width_score) + (1.1 * center_score) + (1.4 * pair_score)
+                    if best is None or score < best['score']:
+                        best = {
+                            'left_x': float(left_x),
+                            'right_x': float(right_x),
+                            'center_x': float(center_x),
+                            'width_px': float(gap),
+                            'score': float(score),
+                            'width_score': float(width_score),
+                            'center_score': float(center_score),
+                            'pair_score': float(pair_score),
+                        }
+
+            if best is None:
+                return None
+
+            selected['left'][row_key] = best['left_x']
+            selected['right'][row_key] = best['right_x']
+            info['rows'][row_key] = {
+                'left_clusters': [float(v) for v in left_clusters],
+                'right_clusters': [float(v) for v in right_clusters],
+                'selected_left_x': float(best['left_x']),
+                'selected_right_x': float(best['right_x']),
+                'selected_width_px': float(best['width_px']),
+                'selected_center_x': float(best['center_x']),
+                'score': float(best['score']),
+                'width_score': float(best['width_score']),
+                'center_score': float(best['center_score']),
+                'pair_score': float(best['pair_score']),
+                'center_source': center_source,
+                'candidate_count': int(candidate_count),
+                'rejected_width_count': int(rejected_width),
+            }
+
+        return {
+            'samples': {
+                'left': {
+                    'bottom': selected['left'].get('bottom'),
+                    'reference': selected['left'].get('reference'),
+                },
+                'right': {
+                    'bottom': selected['right'].get('bottom'),
+                    'reference': selected['right'].get('reference'),
+                },
+            },
+            'info': info,
+        }
 
     def _mask_y_bounds(self, mask):
         """Return (top_y, bottom_y) for the active pixels of a binary mask."""
@@ -2247,7 +2598,10 @@ Args:
                 xs = {}
                 for side in ('left', 'right'):
                     bev = bev_masks[side]
-                    # Sample the mean x of active pixels in a band around y_row.
+                    # Sample one physical cluster in the band.  When the car
+                    # oscillates the mask can also include a neighboring lane
+                    # marking; averaging all active pixels would synthesize a
+                    # line between lanes and poison the heading.
                     band_half = max(2, img_h // 40)
                     y0 = max(0, y_row - band_half)
                     y1 = min(img_h, y_row + band_half + 1)
@@ -2255,7 +2609,10 @@ Args:
                     cols = np.where(band > 0)[1]
                     if len(cols) < min_pixels:
                         return None
-                    xs[side] = float(np.mean(cols))
+                    cluster_x = self._select_mask_x_cluster(cols, side=side, img_w=img_w)
+                    if cluster_x is None:
+                        return None
+                    xs[side] = float(cluster_x)
                 return (xs['left'] + xs['right']) / 2.0
 
             mid_bottom = _sample_bev_midpoint_x(bottom_y)
@@ -2330,21 +2687,46 @@ Args:
             'left': {'bottom': None, 'reference': None},
             'right': {'bottom': None, 'reference': None},
         }
+        lane_pair_selection = self._select_local_ai_lane_pair(
+            normalized_masks,
+            y_rows,
+            img_w,
+            side_lines=side_lines,
+        )
         detected_sides = []
-        for side in ('left', 'right'):
-            mask = normalized_masks[side]
-            if mask is None:
-                continue
-            bottom_x, reference_x = self._sample_mask_boundary(mask, y_rows)
-            if reference_x is None:
-                reference_x = bottom_x
-            if bottom_x is None:
-                bottom_x = reference_x
-            if bottom_x is None and reference_x is None:
-                continue
-            samples[side]['bottom'] = float(bottom_x) if bottom_x is not None else None
-            samples[side]['reference'] = float(reference_x) if reference_x is not None else None
-            detected_sides.append(side)
+        if lane_pair_selection is not None:
+            selected_samples = lane_pair_selection.get('samples', {})
+            for side in ('left', 'right'):
+                side_samples = selected_samples.get(side, {})
+                bottom_x = side_samples.get('bottom')
+                reference_x = side_samples.get('reference')
+                if bottom_x is None or reference_x is None:
+                    lane_pair_selection = None
+                    break
+                samples[side]['bottom'] = float(bottom_x)
+                samples[side]['reference'] = float(reference_x)
+                detected_sides.append(side)
+
+        if lane_pair_selection is None:
+            for side in ('left', 'right'):
+                mask = normalized_masks[side]
+                if mask is None:
+                    continue
+                bottom_x, reference_x = self._sample_mask_boundary(
+                    mask,
+                    y_rows,
+                    side=side,
+                    img_w=img_w,
+                )
+                if reference_x is None:
+                    reference_x = bottom_x
+                if bottom_x is None:
+                    bottom_x = reference_x
+                if bottom_x is None and reference_x is None:
+                    continue
+                samples[side]['bottom'] = float(bottom_x) if bottom_x is not None else None
+                samples[side]['reference'] = float(reference_x) if reference_x is not None else None
+                detected_sides.append(side)
 
         if len(detected_sides) == 0:
             return None
@@ -2441,13 +2823,7 @@ Args:
         used_virtual_boundary = False
         if len(detected_sides) == 1:
             missing_side = 'right' if visible_side == 'left' else 'left'
-            if curve_context:
-                virtual_target_factor = max(
-                    0.25,
-                    min(0.50, float(getattr(self, 'single_line_offset_factor', 0.42)))
-                )
-            else:
-                virtual_target_factor = 0.50
+            virtual_target_factor = 0.50
             for row_key in ('bottom', 'reference'):
                 visible_x = samples[visible_side][row_key]
                 if visible_x is None:
@@ -2897,6 +3273,12 @@ Args:
             guidance['single_line_projection_debug'] = single_line_projection_debug
         if narrow_width_collapse is not None:
             guidance['duplicate_line_collapse'] = narrow_width_collapse
+        if lane_pair_selection is not None:
+            guidance['lane_pair_selection'] = lane_pair_selection.get('info', {})
+        if len(detected_sides) >= 2:
+            self._last_local_ai_lane_center_ref_x = float(midpoint_x)
+            self._last_local_ai_lane_center_bottom_x = float(midpoint_bottom_x)
+            self._last_local_ai_lane_pair_ts = time.time()
         return guidance
 
     def _resolve_ambiguous_local_lane(self, line, img_h, img_w, prev_seen_side=None):
@@ -3286,6 +3668,9 @@ Args:
                         f"duplicate_overlap:{guidance_duplicate_collapse.get('resolution_source', 'unknown')}"
                     )
                     debug_info['single_line_resolved_side'] = guidance_duplicate_collapse.get('kept_side')
+                guidance_lane_pair_selection = local_mask_guidance.get('lane_pair_selection')
+                if isinstance(guidance_lane_pair_selection, dict):
+                    debug_info['lane_pair_selection'] = guidance_lane_pair_selection
                 if mask_side_resolution is not None:
                     debug_info['single_line_side_source'] = (
                         f"{mask_side_resolution['source']}:{mask_side_resolution['resolution_source']}"
@@ -5067,8 +5452,8 @@ Args:
 
     @property
     def _needs_debug(self):
-        """Check if debug images are needed (local display or dashboard streaming)."""
-        return self.show_debug or self.stream_debug_view > 0
+        """Check if debug images are needed (local display, dashboard, or campaign recording)."""
+        return self.show_debug or self.stream_debug_view > 0 or self.record_ai_debug_video
 
     def _is_window_enabled(self, window_key):
         """Check if a specific debug window is enabled via DEBUG_WINDOWS config.
@@ -5136,6 +5521,118 @@ Args:
             return  # No streaming active, skip copy
         if image is not None:
             self._debug_images[name] = image.copy()
+
+    def _ensure_ai_debug_video_writer(self, image):
+        """Create the campaign AI-debug video writer on first frame."""
+        if not self.record_ai_debug_video or image is None:
+            return None
+        if self._ai_debug_video_writer is not None:
+            return self._ai_debug_video_writer
+
+        height, width = image.shape[:2]
+        path = os.path.abspath(str(self._ai_debug_video_path))
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
+        fps = max(1.0, float(self._ai_debug_video_fps or 10.0))
+        for codec in ("MJPG", "XVID"):
+            writer = cv2.VideoWriter(
+                path,
+                cv2.VideoWriter_fourcc(*codec),
+                fps,
+                (int(width), int(height)),
+            )
+            if writer is not None and writer.isOpened():
+                self._ai_debug_video_writer = writer
+                self._ai_debug_video_size = (int(width), int(height))
+                return writer
+            try:
+                writer.release()
+            except Exception:
+                pass
+
+        print(
+            f"\033[1;97m[ Line Following ] :\033[0m "
+            f"\033[1;91mAI DEBUG VIDEO\033[0m - could not open writer at {path}"
+        )
+        self.record_ai_debug_video = False
+        return None
+
+    def _release_ai_debug_video_writer(self):
+        writer = getattr(self, "_ai_debug_video_writer", None)
+        if writer is not None:
+            try:
+                writer.release()
+            except Exception:
+                pass
+        self._ai_debug_video_writer = None
+        self._ai_debug_video_size = None
+
+    def _record_ai_debug_frame(self, image):
+        """Persist the exact AI/dashboard preview used for campaign review."""
+        if not self.record_ai_debug_video or image is None:
+            return
+
+        now = time.time()
+        min_interval = 1.0 / max(1.0, float(self._ai_debug_video_fps or 10.0))
+        if (now - float(self._ai_debug_last_record_ts or 0.0)) < min_interval:
+            return
+        self._ai_debug_last_record_ts = now
+
+        frame = image
+        writer = self._ensure_ai_debug_video_writer(frame)
+        expected_size = getattr(self, "_ai_debug_video_size", None)
+        if expected_size is not None:
+            width, height = expected_size
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height))
+        if writer is not None:
+            try:
+                writer.write(frame)
+            except Exception as exc:
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m "
+                    f"\033[1;91mAI DEBUG VIDEO\033[0m - write failed: {exc}"
+                )
+
+        frames_dir = getattr(self, "_ai_debug_frames_dir", None)
+        if frames_dir:
+            try:
+                os.makedirs(frames_dir, exist_ok=True)
+                self._ai_debug_frame_index += 1
+                frame_path = os.path.join(frames_dir, f"frame_{self._ai_debug_frame_index:06d}.jpg")
+                if cv2.imwrite(frame_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 88]):
+                    index_path = getattr(self, "_ai_debug_frame_index_path", None)
+                    if index_path:
+                        ts = getattr(self, "_tracking_state", None)
+                        frame_trace = self._last_frame_trace if isinstance(self._last_frame_trace, dict) else {}
+                        entry = {
+                            "frame": int(self._ai_debug_frame_index),
+                            "wall_time": round(float(now), 6),
+                            "path": frame_path,
+                            "frame_sequence": frame_trace.get("frame_sequence"),
+                            "current_node_id": (
+                                getattr(ts, "current_node_id", None) if ts is not None else None
+                            ),
+                            "upcoming_node_id": (
+                                getattr(ts, "upcoming_node_id", None) if ts is not None else None
+                            ),
+                            "destination_node_id": (
+                                getattr(ts, "destination_node_id", None) if ts is not None else None
+                            ),
+                            "route_progress": (
+                                round(float(getattr(ts, "route_progress", 0.0) or 0.0), 6)
+                                if ts is not None else None
+                            ),
+                        }
+                        with open(index_path, "a", encoding="utf-8") as index_file:
+                            index_file.write(json.dumps(entry, sort_keys=True))
+                            index_file.write("\n")
+            except Exception as exc:
+                print(
+                    f"\033[1;97m[ Line Following ] :\033[0m "
+                    f"\033[1;91mAI DEBUG FRAMES\033[0m - write failed: {exc}"
+                )
 
     def _show_control_panel(self, steering_angle, speed):
         """Show a control panel window with current status."""
@@ -5299,7 +5796,7 @@ Args:
 
         overlay = image
         height, width = overlay.shape[:2]
-        panel_top = max(0, height - 46)
+        panel_top = max(0, height - 62)
         cv2.rectangle(overlay, (0, panel_top), (width, height), (15, 15, 15), -1)
         computed_text = (
             f"Computed: {computed_steering:.1f}deg / {computed_speed:.1f}"
@@ -5314,10 +5811,142 @@ Args:
         else:
             commanded_text = "Commanded: --"
         source_text = f"Source: {command_source}"
+        motor_command = self._last_motor_command_msg if isinstance(self._last_motor_command_msg, dict) else {}
+        if motor_command:
+            try:
+                mpc_steer = float(motor_command.get("steering_deg", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                mpc_steer = 0.0
+            try:
+                mpc_speed = float(motor_command.get("speed_mps", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                mpc_speed = 0.0
+            mpc_valid = bool(motor_command.get("valid", False))
+            mpc_source = str(motor_command.get("source", "") or "")
+            mpc_reason = str(motor_command.get("reason", "") or "")
+            mpc_text = (
+                f"MPC: {mpc_steer:+.1f}deg / {mpc_speed:.2f}mps"
+                f" {'OK' if mpc_valid else 'BLOCK'} {mpc_source}"
+            )
+            if (not mpc_valid) and mpc_reason:
+                mpc_text = f"{mpc_text} {mpc_reason[:28]}"
+        else:
+            mpc_text = "MPC: --"
         cv2.putText(overlay, computed_text, (8, panel_top + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1)
         cv2.putText(overlay, commanded_text, (8, panel_top + 32), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
+        cv2.putText(overlay, mpc_text, (8, panel_top + 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (80, 255, 120), 1)
         cv2.putText(overlay, source_text, (max(8, width - 180), panel_top + 24), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 200, 255), 1)
         return overlay
+
+    def _draw_lanelet_context_overlay(self, image, debug_info=None, y0=70):
+        """Draw route/lanelet context onto the AI debug preview."""
+        if image is None:
+            return
+        debug_info = debug_info if isinstance(debug_info, dict) else {}
+        ts = getattr(self, "_tracking_state", None)
+        if ts is None and not debug_info:
+            return
+
+        snapshot = {}
+        if ts is not None and hasattr(ts, "snapshot"):
+            try:
+                raw_snapshot = ts.snapshot()
+                if isinstance(raw_snapshot, dict):
+                    snapshot = raw_snapshot
+            except Exception:
+                snapshot = {}
+
+        def _read(name, default=None):
+            if name in snapshot:
+                return snapshot.get(name, default)
+            return getattr(ts, name, default) if ts is not None else default
+
+        def _num(name, default=0.0):
+            try:
+                return float(_read(name, default) or 0.0)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _short(value):
+            if value is None:
+                return "--"
+            if isinstance(value, dict):
+                for key in ("id", "lanelet_id", "node_id", "label"):
+                    if value.get(key) is not None:
+                        return str(value.get(key))
+                return "dict"
+            text = str(value)
+            return text if text else "--"
+
+        height, width = image.shape[:2]
+        max_chars = max(42, int((width - 16) / 7.2))
+
+        def _clip(text):
+            text = str(text)
+            if len(text) <= max_chars:
+                return text
+            return text[: max(0, max_chars - 1)] + "~"
+
+        route_queue = list(_read("route_queue", []) or [])
+        queue_ids = [_short(item) for item in route_queue[:6]]
+        if len(route_queue) > 6:
+            queue_ids.append("...")
+        queue_text = ">".join(queue_ids) if queue_ids else "--"
+
+        current_node = _short(_read("current_node_id"))
+        upcoming_node = _short(_read("upcoming_node_id"))
+        destination_node = _short(_read("destination_node_id"))
+        current_attr = int(_read("current_node_attr", 0) or 0)
+        upcoming_attr = int(_read("upcoming_node_attr", 0) or 0)
+        route_progress = _num("route_progress", 0.0)
+        map_match_error = _num("map_match_error_m", 0.0)
+        camera_correction = _num("camera_lateral_correction_m", 0.0)
+        lane_reliable = bool(_read("lane_measurement_reliable", False))
+        route_active = bool(_read("route_active", False))
+
+        local_guidance = debug_info.get("local_mask_guidance")
+        if not isinstance(local_guidance, dict):
+            local_guidance = {}
+        guidance_mode = str(local_guidance.get("guidance_mode", "") or debug_info.get("measurement_mode", "") or "--")
+        detected_sides = local_guidance.get("detected_sides", ())
+        if isinstance(detected_sides, (list, tuple)):
+            detected_sides_text = ",".join(str(side) for side in detected_sides) or "--"
+        else:
+            detected_sides_text = str(detected_sides or "--")
+        pair_info = local_guidance.get("lane_pair_selection") or debug_info.get("lane_pair_selection") or {}
+        pair_source = "--"
+        if isinstance(pair_info, dict):
+            pair_source = str(pair_info.get("source") or pair_info.get("reason") or "--")
+        error_cm = local_guidance.get("error_cm")
+        try:
+            error_text = f"{float(error_cm):+.1f}cm" if error_cm is not None else "--"
+        except (TypeError, ValueError):
+            error_text = "--"
+
+        line1 = (
+            f"Lanelet cur={current_node}({current_attr}) next={upcoming_node}({upcoming_attr}) "
+            f"dest={destination_node} q={queue_text}"
+        )
+        line2 = (
+            f"dbg={int(getattr(self, '_ai_debug_frame_index', 0)) + 1} "
+            f"route={'on' if route_active else 'off'} prog={route_progress:.2f} "
+            f"map_err={map_match_error:.3f}m cam_corr={camera_correction:+.3f}m "
+            f"lane_rel={int(lane_reliable)}"
+        )
+        line3 = (
+            f"AI lanes sides={detected_sides_text} mode={guidance_mode} "
+            f"err={error_text} pair={pair_source}"
+        )
+
+        lines = (_clip(line1), _clip(line2), _clip(line3))
+        text_y = int(max(14, min(height - 10, y0)))
+        for idx, text in enumerate(lines):
+            y = text_y + idx * 14
+            if y >= height - 50:
+                break
+            color = (220, 245, 255) if idx == 0 else ((170, 235, 170) if idx == 1 else (190, 210, 255))
+            cv2.putText(image, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (0, 0, 0), 2)
+            cv2.putText(image, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.34, color, 1)
 
     def _send_debug_stream(self, computed_steering, computed_speed,
                            commanded_steering, commanded_speed, command_source):
@@ -6883,9 +7512,15 @@ Args:
                 # Fallback: lane (35cm) typically spans ~45% of image width at bottom
                 px_per_cm = (img_w * 0.45) / self.lane_width_cm
 
-        # On a fresh 2→1 transition, aim at the full reconstructed center to
-        # avoid a steering jump. Otherwise keep the configured conservative bias.
-        center_scale = 1.0 if prefer_center else max(
+        # AI-local single-line physical mode should reconstruct the geometric
+        # lane center.  Keeping a conservative offset here made the metric
+        # `local_mask_guidance.error_cm` treat a boundary line as a visual
+        # center in highway exits.
+        use_geometric_center = bool(prefer_center) or (
+            bool(physical_projection)
+            and str(getattr(self, "detection_mode", "") or "") == "ai_local"
+        )
+        center_scale = 1.0 if use_geometric_center else max(
             0.0,
             min(1.5, float(getattr(self, 'single_line_offset_factor', 0.5)) / 0.5)
         )
@@ -7295,6 +7930,25 @@ Args:
                 mask_overlay[right_mask > 0] = (0, 200, 255)
             if np.any(mask_overlay):
                 debug = cv2.addWeighted(debug, 1.0, mask_overlay, 0.35, 0)
+            payload = getattr(self, "_last_local_lane_payload", None)
+            lane_side_points = payload.get("lane_side_points") if isinstance(payload, dict) else None
+            if isinstance(lane_side_points, dict):
+                for side, color in (("left", (255, 190, 80)), ("right", (0, 245, 255))):
+                    points = list(lane_side_points.get(side) or [])
+                    stride = max(1, len(points) // 60) if points else 1
+                    for point in points[::stride]:
+                        try:
+                            if isinstance(point, dict):
+                                x_val = point.get("x", point.get("cx", point.get("u")))
+                                y_val = point.get("y", point.get("cy", point.get("v")))
+                            else:
+                                x_val, y_val = point[0], point[1]
+                            px = int(round(float(x_val)))
+                            py = int(round(float(y_val)))
+                        except Exception:
+                            continue
+                        if 0 <= px < w and 0 <= py < h:
+                            cv2.circle(debug, (px, py), 2, color, -1, cv2.LINE_AA)
         elif not is_ai_local_mode:
             # Red lines: only in OpenCV/BFMC mode, never in AI_LOCAL mask mode
             if avg_left is not None:
@@ -7311,7 +7965,8 @@ Args:
             cv2.line(debug, (midpoint_x, midpoint_y), (w // 2, midpoint_y), (0, 165, 255), 2)  # Orange = error
 
         # Header panel
-        header_height = 70 if using_raw_mask else 55
+        has_lanelet_context = getattr(self, "_tracking_state", None) is not None
+        header_height = (112 if using_raw_mask else 96) if has_lanelet_context else (70 if using_raw_mask else 55)
         cv2.rectangle(debug, (0, 0), (w, header_height), (20, 20, 40), -1)
         pipeline_label = debug_info.get('pipeline_label', "OpenCV - BFMC Pipeline")
         cv2.putText(debug, pipeline_label, (8, 18),
@@ -7373,6 +8028,13 @@ Args:
             kalman_y = 66 if using_raw_mask else 52
             cv2.putText(debug, f"K:{k_mode} e={kalman_error:.0f}px a={k_age}", (165, kalman_y),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.3, (180, 255, 180), 1)
+
+        if has_lanelet_context:
+            self._draw_lanelet_context_overlay(
+                debug,
+                debug_info=debug_info,
+                y0=78 if using_raw_mask else 63,
+            )
 
         # === SWEPT PATH VISUALIZATION ===
         swept = self._swept_path_info
@@ -9131,7 +9793,7 @@ Much faster and better for curves than blind sliding window."""
         return normalized
 
     def _single_line_visual_target_factor(self, debug_block):
-        """Mirror the Stanley-era conservative center reconstruction for visual paths."""
+        """Use the geometric lane center for planner visual paths."""
         if not isinstance(debug_block, dict):
             return None
 
@@ -9139,25 +9801,11 @@ Much faster and better for curves than blind sliding window."""
         if not isinstance(local_mask_guidance, dict):
             return None
 
-        detected_sides = tuple(local_mask_guidance.get("detected_sides", ()) or ())
-        if len(detected_sides) != 1:
+        guidance_mode = str(local_mask_guidance.get("guidance_mode", "") or "")
+        if guidance_mode != "single_line_physical":
             return None
 
-        projection_debug = local_mask_guidance.get("single_line_projection_debug")
-        curve_context = False
-        prefer_center = local_mask_guidance.get("single_line_prefer_center")
-        if isinstance(projection_debug, dict):
-            curve_context = bool(projection_debug.get("single_line_curve_context", False))
-            if prefer_center is None:
-                prefer_center = projection_debug.get("single_line_prefer_center")
-
-        if bool(prefer_center) or not curve_context:
-            return 0.50
-
-        return max(
-            0.25,
-            min(0.50, float(getattr(self, "single_line_offset_factor", 0.42))),
-        )
+        return 0.50
 
     def _compute_visual_lane_waypoints_payload(self):
         """Build the visual lane waypoint payload from the latest local AI snapshot.
@@ -9896,6 +10544,23 @@ Much faster and better for curves than blind sliding window."""
             return None
         lane_side_points = payload.get("lane_side_points") or {}
         lane_side_lines = payload.get("lane_side_lines") or {}
+
+        def _compact_points(points, limit=80):
+            compact = []
+            for point in list(points or [])[:limit]:
+                if isinstance(point, dict):
+                    x_val = point.get("x", point.get("cx", point.get("u")))
+                    y_val = point.get("y", point.get("cy", point.get("v")))
+                elif isinstance(point, (list, tuple)) and len(point) >= 2:
+                    x_val, y_val = point[0], point[1]
+                else:
+                    continue
+                try:
+                    compact.append([round(float(x_val), 2), round(float(y_val), 2)])
+                except (TypeError, ValueError):
+                    continue
+            return compact
+
         return {
             "frame_id": payload.get("frame_id"),
             "timestamp": payload.get("timestamp"),
@@ -9917,6 +10582,10 @@ Much faster and better for curves than blind sliding window."""
             "lane_side_point_counts": {
                 "left": len(lane_side_points.get("left", []) or []),
                 "right": len(lane_side_points.get("right", []) or []),
+            },
+            "lane_side_points": {
+                "left": _compact_points(lane_side_points.get("left", []) or []),
+                "right": _compact_points(lane_side_points.get("right", []) or []),
             },
             "lane_side_lines": lane_side_lines,
         }
@@ -10330,6 +10999,7 @@ Much faster and better for curves than blind sliding window."""
                     command_source,
                 )
                 self._store_debug_image('final', debug_frame)
+                self._record_ai_debug_frame(debug_frame)
 
             self._send_debug_stream(
                 computed_steering,
@@ -12008,4 +12678,5 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         ZMQ socket (if any) is GC'd when the worker dies; we don't tear
         it down explicitly to avoid blocking on slow subscribers.
         """
+        self._release_ai_debug_video_writer()
         super(threadLineFollowing, self).stop()

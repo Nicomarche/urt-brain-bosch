@@ -22,6 +22,10 @@ from src.routing.lanelet.attributes import (
 from src.routing.lanelet.from_osm import load_lanelet2_osm
 from src.routing.lanelet.route_path import RoutePath
 
+_XY_DESTINATION_CANDIDATE_RADIUS_M = 0.75
+_XY_DESTINATION_COVER_MARGIN_M = 0.08
+_DENSE_PATH_BRIDGE_MAX_GAP_M = 0.75
+
 
 @dataclass(frozen=True)
 class RouteAnchor:
@@ -331,6 +335,129 @@ class OsmRouteGraph:
         point = _point_at_arclength(lanelet.centerline, arc_m)
         return float(math.hypot(float(x) - float(point[0]), float(y) - float(point[1])))
 
+    def _route_between(self, start_id: str, dest_id: str) -> list[str]:
+        lanelet_ids = self.shortest_path(start_id, dest_id)
+        if not lanelet_ids:
+            lanelet_ids = self.reference_path_between(start_id, dest_id)
+        return lanelet_ids
+
+    def _route_cost(self, lanelet_ids: Iterable[str]) -> float:
+        route_ids = [str(lanelet_id) for lanelet_id in lanelet_ids]
+        if len(route_ids) <= 1:
+            return 0.0
+        cost = 0.0
+        for lanelet_id in route_ids[1:]:
+            lanelet = self.lanelet_map.get_lanelet(str(lanelet_id))
+            if lanelet is None:
+                continue
+            cost += float(lanelet.length_m) * float(
+                ATTR_ROUTE_WEIGHTS.get(int(lanelet.attribute), 1.0)
+            )
+        return float(cost)
+
+    def _xy_destination_candidates(
+        self,
+        x: float,
+        y: float,
+        *,
+        preferred_lanelet_id: str | None = None,
+    ) -> list[tuple[float, str]]:
+        preferred_id = str(preferred_lanelet_id) if preferred_lanelet_id is not None else None
+        candidates: list[tuple[float, str]] = []
+        seen: set[str] = set()
+
+        def _add(candidate_id: str, distance_m: float) -> None:
+            candidate_id = str(candidate_id)
+            if candidate_id in seen or candidate_id not in self.lanelet_map.lanelet_ids:
+                return
+            seen.add(candidate_id)
+            candidates.append((float(distance_m), candidate_id))
+
+        if preferred_id is not None:
+            preferred_distance = self._point_distance_to_lanelet(preferred_id, float(x), float(y))
+            if preferred_distance is not None:
+                _add(preferred_id, preferred_distance)
+
+        for lanelet_id in self.lanelet_map.lanelet_ids:
+            candidate_id = str(lanelet_id)
+            lanelet = self.lanelet_map.get_lanelet(candidate_id)
+            if lanelet is None or lanelet.centerline.shape[0] == 0:
+                continue
+            distance_m = self._point_distance_to_lanelet(candidate_id, float(x), float(y))
+            if distance_m is None:
+                continue
+            covered = _lanelet_covers_point(
+                lanelet,
+                float(x),
+                float(y),
+                margin_m=_XY_DESTINATION_COVER_MARGIN_M,
+            )
+            if covered or distance_m <= float(_XY_DESTINATION_CANDIDATE_RADIUS_M):
+                _add(candidate_id, distance_m)
+
+        candidates.sort(key=lambda item: (item[0], _lanelet_sort_key(item[1])))
+        return candidates
+
+    def _select_reachable_xy_destination(
+        self,
+        start_id: str,
+        x: float,
+        y: float,
+        *,
+        resolved_dest_id: str | None,
+        explicit_dest_id: str | None = None,
+    ) -> tuple[str, list[str], str] | None:
+        preferred_id = str(resolved_dest_id) if resolved_dest_id is not None else None
+        explicit_id = str(explicit_dest_id) if explicit_dest_id is not None else None
+        candidates = self._xy_destination_candidates(
+            float(x),
+            float(y),
+            preferred_lanelet_id=preferred_id,
+        )
+        if not candidates:
+            return None
+
+        best: tuple[tuple, str, list[str]] | None = None
+        explicit_reachable = False
+        skipped_start: tuple[float, str] | None = None
+        for distance_m, candidate_id in candidates:
+            if candidate_id == str(start_id) and candidate_id != explicit_id:
+                skipped_start = (distance_m, candidate_id)
+                continue
+            lanelet_ids = self._route_between(str(start_id), candidate_id)
+            if not lanelet_ids:
+                continue
+            if candidate_id == explicit_id:
+                explicit_reachable = True
+            score = (
+                self._route_cost(lanelet_ids),
+                float(distance_m),
+                _lanelet_sort_key(candidate_id),
+            )
+            if best is None or score < best[0]:
+                best = (score, candidate_id, lanelet_ids)
+
+        if best is None and skipped_start is not None:
+            _distance_m, candidate_id = skipped_start
+            lanelet_ids = self._route_between(str(start_id), candidate_id)
+            if lanelet_ids:
+                best = (
+                    (0.0, float(_distance_m), _lanelet_sort_key(candidate_id)),
+                    candidate_id,
+                    lanelet_ids,
+                )
+
+        if best is None:
+            return None
+
+        _score, selected_id, lanelet_ids = best
+        route_source = "go_to"
+        if explicit_id is not None and selected_id != explicit_id:
+            route_source = "go_to_reachable_xy" if explicit_reachable else "go_to_reachable_fallback"
+        elif explicit_id is None and preferred_id is not None and selected_id != preferred_id:
+            route_source = "go_to_reachable_xy"
+        return selected_id, lanelet_ids, route_source
+
     def _nearest_reachable_lanelet_to_point(
         self,
         start_id: str,
@@ -382,10 +509,27 @@ class OsmRouteGraph:
         dest_id = self.resolve_node_id(dest_spec)
         if start_id is None or dest_id is None:
             return self._empty_route(source="go_to")
-        lanelet_ids = self.shortest_path(start_id, dest_id)
-        if not lanelet_ids:
-            lanelet_ids = self.reference_path_between(start_id, dest_id)
         route_source = "go_to"
+        lanelet_ids: list[str] = []
+        if isinstance(dest_spec, dict) and "x" in dest_spec and "y" in dest_spec:
+            explicit_dest_id = None
+            raw_explicit_id = dest_spec.get("lanelet_id") or dest_spec.get("id")
+            if raw_explicit_id is not None and str(raw_explicit_id) in self.lanelet_map.lanelet_ids:
+                explicit_dest_id = str(raw_explicit_id)
+            try:
+                selected = self._select_reachable_xy_destination(
+                    start_id,
+                    float(dest_spec["x"]),
+                    float(dest_spec["y"]),
+                    resolved_dest_id=dest_id,
+                    explicit_dest_id=explicit_dest_id,
+                )
+            except (TypeError, ValueError):
+                selected = None
+            if selected is not None:
+                dest_id, lanelet_ids, route_source = selected
+        if not lanelet_ids:
+            lanelet_ids = self._route_between(start_id, dest_id)
         if (
             not lanelet_ids
             and isinstance(dest_spec, dict)
@@ -402,9 +546,7 @@ class OsmRouteGraph:
             except (TypeError, ValueError):
                 fallback_dest_id = None
             if fallback_dest_id is not None:
-                lanelet_ids = self.shortest_path(start_id, fallback_dest_id)
-                if not lanelet_ids:
-                    lanelet_ids = self.reference_path_between(start_id, fallback_dest_id)
+                lanelet_ids = self._route_between(start_id, fallback_dest_id)
                 if lanelet_ids:
                     route_source = "go_to_reachable_fallback"
         if not lanelet_ids:
@@ -483,8 +625,20 @@ class OsmRouteGraph:
             cl = np.asarray(lanelet.centerline, dtype=float)
             if idx == 0 and start_pose_xy is not None and not closed_loop:
                 cl = _trim_centerline_from_pose(cl, float(start_pose_xy[0]), float(start_pose_xy[1]))
-            if path_points and np.linalg.norm(path_points[-1] - cl[0]) <= 1e-6:
-                cl = cl[1:]
+            if path_points:
+                gap_m = float(np.linalg.norm(path_points[-1] - cl[0]))
+                if gap_m <= 1e-6:
+                    cl = cl[1:]
+                elif gap_m <= float(_DENSE_PATH_BRIDGE_MAX_GAP_M):
+                    previous_id = route_ids[idx - 1] if idx > 0 else lanelet_id
+                    for point in _bridge_points(path_points[-1], cl[0], step_m=self.step_m):
+                        path_points.append(np.asarray(point, dtype=float))
+                        wp_lanelet_ids.append(str(lanelet_id))
+                        wp_attrs.append(int(lanelet.attribute))
+                        wp_edge_ids.append(
+                            f"{previous_id}->{lanelet_id}" if previous_id != lanelet_id else str(lanelet_id)
+                        )
+                    cl = cl[1:]
             if cl.shape[0] == 0:
                 continue
             next_id = route_ids[(idx + 1) % len(route_ids)] if (closed_loop and route_ids) else (
@@ -840,6 +994,89 @@ def _trim_centerline_from_pose(centerline: np.ndarray, x: float, y: float) -> np
         else:
             pieces = [np.asarray(best_proj, dtype=float), np.asarray(best_proj, dtype=float)]
     return np.vstack(pieces)
+
+
+def _bridge_points(start: np.ndarray, end: np.ndarray, *, step_m: float) -> list[np.ndarray]:
+    start_pt = np.asarray(start, dtype=float)
+    end_pt = np.asarray(end, dtype=float)
+    gap_m = float(np.linalg.norm(end_pt - start_pt))
+    if gap_m <= 1e-9:
+        return []
+    steps = max(1, int(math.ceil(gap_m / max(float(step_m), 1e-3))))
+    return [
+        start_pt + (float(step) / float(steps)) * (end_pt - start_pt)
+        for step in range(1, steps + 1)
+    ]
+
+
+def _lanelet_polygon(lanelet) -> list[tuple[float, float]]:
+    left = np.asarray(getattr(lanelet, "left_boundary", np.empty((0, 2))), dtype=float)
+    right = np.asarray(getattr(lanelet, "right_boundary", np.empty((0, 2))), dtype=float)
+    if left.shape[0] < 2 or right.shape[0] < 2:
+        return []
+    return [
+        (float(point[0]), float(point[1]))
+        for point in np.vstack([left, right[::-1]])
+    ]
+
+
+def _point_in_polygon(x: float, y: float, polygon: list[tuple[float, float]]) -> bool:
+    if len(polygon) < 3:
+        return False
+    inside = False
+    px = float(x)
+    py = float(y)
+    for idx in range(len(polygon)):
+        x0, y0 = polygon[idx]
+        x1, y1 = polygon[(idx + 1) % len(polygon)]
+        if (float(y0) > py) == (float(y1) > py):
+            continue
+        x_cross = float(x0) + (py - float(y0)) * (float(x1) - float(x0)) / (float(y1) - float(y0))
+        if x_cross >= px:
+            inside = not inside
+    return inside
+
+
+def _distance_point_to_segment(
+    x: float,
+    y: float,
+    ax: float,
+    ay: float,
+    bx: float,
+    by: float,
+) -> float:
+    seg_dx = float(bx) - float(ax)
+    seg_dy = float(by) - float(ay)
+    seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy
+    if seg_len_sq <= 1e-12:
+        return math.hypot(float(x) - float(ax), float(y) - float(ay))
+    rel_x = float(x) - float(ax)
+    rel_y = float(y) - float(ay)
+    t = max(0.0, min(1.0, (rel_x * seg_dx + rel_y * seg_dy) / seg_len_sq))
+    qx = float(ax) + t * seg_dx
+    qy = float(ay) + t * seg_dy
+    return math.hypot(float(x) - qx, float(y) - qy)
+
+
+def _distance_point_to_polygon_boundary(x: float, y: float, polygon: list[tuple[float, float]]) -> float:
+    if len(polygon) < 2:
+        return math.inf
+    best = math.inf
+    for idx in range(len(polygon)):
+        ax, ay = polygon[idx]
+        bx, by = polygon[(idx + 1) % len(polygon)]
+        best = min(best, _distance_point_to_segment(x, y, ax, ay, bx, by))
+    return float(best)
+
+
+def _lanelet_covers_point(lanelet, x: float, y: float, *, margin_m: float) -> bool:
+    polygon = _lanelet_polygon(lanelet)
+    if not polygon:
+        return False
+    return (
+        _point_in_polygon(float(x), float(y), polygon)
+        or _distance_point_to_polygon_boundary(float(x), float(y), polygon) <= float(margin_m)
+    )
 
 
 def _point_at_arclength(centerline: np.ndarray, arclength_m: float) -> np.ndarray:

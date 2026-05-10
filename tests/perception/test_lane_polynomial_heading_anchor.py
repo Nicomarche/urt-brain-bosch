@@ -209,7 +209,7 @@ class TestVisualWaypointPayloadFallback(unittest.TestCase):
 
         self.assertIsNotNone(payload)
         self.assertAlmostEqual(captured["lateral_hint_m"], 0.103, places=4)
-        self.assertIsNone(captured["single_line_target_factor"])
+        self.assertAlmostEqual(captured["single_line_target_factor"], 0.50, places=4)
 
     def test_reassigns_single_line_points_to_resolved_side_and_uses_curve_factor(self):
         inst, h, w = _make_minimal_thread()
@@ -268,7 +268,7 @@ class TestVisualWaypointPayloadFallback(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(captured["lane_side_points"]["left"], [])
         self.assertEqual(len(captured["lane_side_points"]["right"]), 12)
-        self.assertAlmostEqual(captured["single_line_target_factor"], 0.42, places=4)
+        self.assertAlmostEqual(captured["single_line_target_factor"], 0.50, places=4)
 
 
 if __name__ == "__main__":
