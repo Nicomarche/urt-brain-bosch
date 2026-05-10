@@ -20,6 +20,8 @@ class LaneObserverTests(unittest.TestCase):
             frame_trace={
                 "debug": {
                     "two_line_direct_error_m": 0.04,
+                    "two_line_D_left_cm": 13.5,
+                    "two_line_D_right_cm": 21.5,
                 }
             },
             candidate=VisualControlCandidate(
@@ -38,6 +40,9 @@ class LaneObserverTests(unittest.TestCase):
         self.assertTrue(lane_observation.direct_error_valid)
         self.assertAlmostEqual(lane_observation.direct_error_m, 0.04, places=4)
         self.assertAlmostEqual(lane_observation.heading_error_rad, 0.12, places=4)
+        self.assertAlmostEqual(lane_observation.left_line_distance_m, 0.135, places=4)
+        self.assertAlmostEqual(lane_observation.right_line_distance_m, 0.215, places=4)
+        self.assertAlmostEqual(lane_observation.line_center_offset_m, 0.04, places=4)
         self.assertEqual(lane_observation.curve_hint, "IN_CURVE")
         self.assertAlmostEqual(lane_observation.camera_yaw_hint_confidence, 0.85, places=4)
         self.assertGreater(lane_observation.quality, 0.9)
@@ -56,6 +61,8 @@ class LaneObserverTests(unittest.TestCase):
                 "debug": {
                     "measurement_mode": "single_line",
                     "sl_direct_error_m": -0.0825,
+                    "sl_D_left_cm": 25.75,
+                    "sl_D_right_cm": 9.25,
                     "control_policy_mode": "ROUTE_TRACKING",
                     "planner_priority_active": True,
                 }
@@ -68,6 +75,9 @@ class LaneObserverTests(unittest.TestCase):
         self.assertEqual(lane_observation.measurement_mode, "single_line")
         self.assertTrue(lane_observation.direct_error_valid)
         self.assertAlmostEqual(lane_observation.direct_error_m, -0.0825, places=4)
+        self.assertAlmostEqual(lane_observation.left_line_distance_m, 0.2575, places=4)
+        self.assertAlmostEqual(lane_observation.right_line_distance_m, 0.0925, places=4)
+        self.assertAlmostEqual(lane_observation.line_center_offset_m, -0.0825, places=4)
         self.assertEqual(lane_observation.control_policy_mode, "ROUTE_TRACKING")
         self.assertTrue(lane_observation.planner_priority_active)
         self.assertAlmostEqual(lane_observation.debug["raw_direct_error_m"], -0.0825, places=4)

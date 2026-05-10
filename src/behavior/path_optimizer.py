@@ -31,6 +31,13 @@ try:
 except Exception:
     _BEHAVIOR_VEHICLE_WIDTH_M = 0.19
 
+try:
+    from config import (
+        BEHAVIOR_ROUTE_VISUAL_REENTRY_ENABLED as _ROUTE_VISUAL_REENTRY_ENABLED,
+    )
+except Exception:
+    _ROUTE_VISUAL_REENTRY_ENABLED = True
+
 _MIN_STEP_M = 0.05
 _SMOOTH_WINDOW = 5
 _PREVIOUS_BLEND_POINTS = 6
@@ -61,7 +68,7 @@ _PRECISION_ROUTE_MANEUVERS = {
 }
 _VISUAL_LANE_REENTRY_MIN_ERROR_M = 0.03
 _VISUAL_LANE_REENTRY_TWO_LINE_MIN_QUALITY = 0.8
-_VISUAL_LANE_REENTRY_GAIN = 0.45
+_VISUAL_LANE_REENTRY_GAIN = 0.60
 _VISUAL_LANE_REENTRY_MAX_SHIFT_M = 0.10
 _VISUAL_LANE_REENTRY_FADE_DISTANCE_M = 0.80
 _VISUAL_LANE_REENTRY_SINGLE_LINE_MIN_QUALITY = 0.6
@@ -178,6 +185,7 @@ class _VisualLaneReentryState:
     quality: float = 0.0
     reason: str = "inactive"
     measurement_mode: str = "none"
+    measurement_source: str = "none"
     gain: float = 0.0
     max_shift_m: float = 0.0
     fade_distance_m: float = 0.0
@@ -783,15 +791,26 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
     if not bool(getattr(lane_observation, "direct_error_valid", False)):
         return _VisualLaneReentryState(active=False, reason="lane_observation_unusable")
     measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
-    measurement = getattr(lane_observation, "direct_error_m", None)
+    measurement_source = "direct_error_m"
+    measurement = getattr(lane_observation, "line_center_offset_m", None)
+    if measurement is not None:
+        measurement_source = "line_center_offset_m"
+    else:
+        measurement = getattr(lane_observation, "direct_error_m", None)
     if measurement is None:
         measurement = getattr(lane_observation, "lateral_offset_m", None)
+        measurement_source = "lateral_offset_m"
     if measurement is None:
         return _VisualLaneReentryState(active=False, reason="no_lateral_measurement")
     try:
         error_m = float(measurement)
     except (TypeError, ValueError):
-        return _VisualLaneReentryState(active=False, reason="invalid_lateral_measurement")
+        return _VisualLaneReentryState(
+            active=False,
+            reason="invalid_lateral_measurement",
+            measurement_mode=measurement_mode,
+            measurement_source=measurement_source,
+        )
     quality = float(getattr(lane_observation, "quality", 0.0) or 0.0)
     detected_sides = tuple(getattr(lane_observation, "detected_sides", ()) or ())
     reason = "unsupported_measurement_mode"
@@ -806,6 +825,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 quality=float(quality),
                 reason="two_line_side_count_mismatch",
                 measurement_mode=measurement_mode,
+                measurement_source=measurement_source,
             )
         if quality < float(_VISUAL_LANE_REENTRY_TWO_LINE_MIN_QUALITY):
             return _VisualLaneReentryState(
@@ -814,6 +834,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 quality=float(quality),
                 reason="two_line_low_quality",
                 measurement_mode=measurement_mode,
+                measurement_source=measurement_source,
             )
         reason = "two_line_reentry"
         gain = float(_VISUAL_LANE_REENTRY_GAIN)
@@ -827,6 +848,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 quality=float(quality),
                 reason="single_line_side_count_mismatch",
                 measurement_mode=measurement_mode,
+                measurement_source=measurement_source,
             )
         if quality < float(_VISUAL_LANE_REENTRY_SINGLE_LINE_MIN_QUALITY):
             return _VisualLaneReentryState(
@@ -835,6 +857,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 quality=float(quality),
                 reason="single_line_low_quality",
                 measurement_mode=measurement_mode,
+                measurement_source=measurement_source,
             )
         if _single_line_direction_conflicts_with_route(ctx):
             return _VisualLaneReentryState(
@@ -843,6 +866,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
                 quality=float(quality),
                 reason="single_line_direction_conflict",
                 measurement_mode=measurement_mode,
+                measurement_source=measurement_source,
             )
         reason = "single_line_physical_reentry"
         gain = float(_VISUAL_LANE_REENTRY_SINGLE_LINE_GAIN)
@@ -855,6 +879,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
             quality=float(quality),
             reason=f"unsupported_measurement_mode:{measurement_mode}",
             measurement_mode=measurement_mode,
+            measurement_source=measurement_source,
         )
     if abs(error_m) < float(_VISUAL_LANE_REENTRY_MIN_ERROR_M):
         return _VisualLaneReentryState(
@@ -863,6 +888,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
             quality=float(quality),
             reason="below_activation_threshold",
             measurement_mode=measurement_mode,
+            measurement_source=measurement_source,
         )
     return _VisualLaneReentryState(
         active=True,
@@ -870,6 +896,7 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
         quality=float(quality),
         reason=reason,
         measurement_mode=measurement_mode,
+        measurement_source=measurement_source,
         gain=gain,
         max_shift_m=max_shift_m,
         fade_distance_m=fade_distance_m,
@@ -883,31 +910,32 @@ def _apply_visual_lane_reentry_bias(
     ctx: PlanningContext,
 ) -> tuple[np.ndarray, dict[str, object]]:
     path_source = _path_note_str(path_plan, "path_source")
-    if path_source == "route_waypoints" and _route_corridor_is_authoritative(ctx):
-        # Cuando hay una ruta OSM activa, el corredor densificado es la
-        # referencia de verdad. El sesgo visual puede ser util como fallback,
-        # pero si se suma encima de route_waypoints termina compitiendo con la
-        # trayectoria esperada en curvas cerradas.
+    route_corridor_authoritative = bool(
+        path_source == "route_waypoints" and _route_corridor_is_authoritative(ctx)
+    )
+    if route_corridor_authoritative and not bool(_ROUTE_VISUAL_REENTRY_ENABLED):
         notes: dict[str, object] = {
             "visual_lane_reentry_active": False,
-            "visual_lane_reentry_reason": "route_corridor_primary",
+            "visual_lane_reentry_reason": "route_visual_reentry_disabled",
             "visual_lane_measurement_mode": "",
             "visual_lane_reentry_applied": False,
             "visual_lane_error_m": 0.0,
             "visual_lane_quality": 0.0,
             "visual_lane_shift_m": 0.0,
             "visual_lane_prefix_samples": 0,
+            "route_corridor_authoritative": True,
         }
         live_log(
             "path_optimizer",
             event="visual_lane_reentry_bias",
             applied=False,
-            reason="route_corridor_primary",
+            reason="route_visual_reentry_disabled",
             error_m=0.0,
             quality=0.0,
             shift_m=0.0,
             prefix_samples=0,
             path_source=path_source,
+            route_corridor_authoritative=True,
         )
         return np.array(sampled_xy, copy=True), notes
     if path_source == "visual_lane_waypoints":
@@ -940,11 +968,13 @@ def _apply_visual_lane_reentry_bias(
         "visual_lane_reentry_active": bool(state.active),
         "visual_lane_reentry_reason": str(state.reason),
         "visual_lane_measurement_mode": str(state.measurement_mode),
+        "visual_lane_measurement_source": str(state.measurement_source),
         "visual_lane_reentry_applied": False,
         "visual_lane_error_m": float(state.error_m),
         "visual_lane_quality": float(state.quality),
         "visual_lane_shift_m": 0.0,
         "visual_lane_prefix_samples": 0,
+        "route_corridor_authoritative": bool(route_corridor_authoritative),
     }
     if sampled_xy.shape[0] <= 1 or not state.active:
         live_log(
@@ -957,6 +987,8 @@ def _apply_visual_lane_reentry_bias(
             shift_m=0.0,
             prefix_samples=0,
             path_source=_path_note_str(path_plan, "path_source"),
+            route_corridor_authoritative=bool(route_corridor_authoritative),
+            measurement_source=str(state.measurement_source),
         )
         return np.array(sampled_xy, copy=True), notes
 
@@ -973,6 +1005,8 @@ def _apply_visual_lane_reentry_bias(
             shift_m=0.0,
             prefix_samples=0,
             path_source=_path_note_str(path_plan, "path_source"),
+            route_corridor_authoritative=bool(route_corridor_authoritative),
+            measurement_source=str(state.measurement_source),
         )
         return np.array(sampled_xy, copy=True), notes
 
@@ -1015,6 +1049,8 @@ def _apply_visual_lane_reentry_bias(
         max_shift_m=float(max_shift_m),
         prefix_samples=int(prefix_samples),
         path_source=_path_note_str(path_plan, "path_source"),
+        route_corridor_authoritative=bool(route_corridor_authoritative),
+        measurement_source=str(state.measurement_source),
     )
     return biased_xy, notes
 

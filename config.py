@@ -622,6 +622,11 @@ TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_M = 0.03
 TRACKING_VISUAL_LANE_RELOCALIZATION_MIN_RAW_ERROR_M = 0.01
 TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
 
+# Route tracking visual assist: keep the OSM route as the global reference, but
+# allow the local MPC target to nudge toward the visually observed lane center
+# when the lanelet map and the simulator texture disagree by a few centimetres.
+BEHAVIOR_ROUTE_VISUAL_REENTRY_ENABLED = True
+
 # Recovery del matcher/ruta a escala BFMC. En un carril de 35 cm no podemos
 # esperar 60-75 cm de error para intentar volver a la ruta.
 TRACKING_ROUTE_RECOVERY_ERROR_M = 0.10

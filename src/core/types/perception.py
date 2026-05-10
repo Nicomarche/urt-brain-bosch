@@ -45,6 +45,9 @@ class LaneObservation:
         del carril (radianes; positivo CCW).
       - `quality ∈ [0, 1]`: cuánto confiar; consumidores pueden ponderar
         el update del EKF con esta calidad.
+      - `left/right_line_distance_m`: distancia visual estimada desde el
+        centro del auto hasta cada línea. `line_center_offset_m` positivo =
+        el auto está más cerca de la línea izquierda.
       - `curve_hint ∈ {"STRAIGHT","LEFT","RIGHT","UNKNOWN"}`.
       - `blind_mode`: si el detector no ve carril, anuncia el modo en el que
         está operando ("lost", "single_line", etc.) para que el planner
@@ -66,6 +69,9 @@ class LaneObservation:
     heading_error_rad: float = 0.0
     direct_error_m: float | None = None
     lane_width_px: float | None = None
+    left_line_distance_m: float | None = None
+    right_line_distance_m: float | None = None
+    line_center_offset_m: float | None = None
     quality: float = 0.0
     curve_hint: str = "STRAIGHT"
     camera_yaw_hint_rad: float | None = None

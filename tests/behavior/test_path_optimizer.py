@@ -176,6 +176,9 @@ def test_path_optimizer_projects_visual_reentry_inside_lanelet_corridor() -> Non
         detected_sides=("left", "right"),
         direct_error_valid=True,
         direct_error_m=0.08,
+        left_line_distance_m=0.095,
+        right_line_distance_m=0.255,
+        line_center_offset_m=0.08,
         quality=1.0,
     )
     ctx_with_corridor = replace(base_ctx, lane_observation=lane_observation)
@@ -202,6 +205,7 @@ def test_path_optimizer_projects_visual_reentry_inside_lanelet_corridor() -> Non
 
     assert out_without_corridor.notes["containment_mode"] == "synthetic_bounds"
     assert out_with_corridor.notes["corridor_source"] == "lanelet_bounds"
+    assert out_with_corridor.notes["visual_lane_measurement_source"] == "line_center_offset_m"
     assert out_with_corridor.notes["corridor_visual_lane_guidance_active"] is True
     assert out_with_corridor.notes["corridor_visual_lane_guidance_mode"] == "two_line"
     assert float(out_without_corridor.target_path[1, 1]) > 0.0
@@ -1660,7 +1664,7 @@ def test_path_optimizer_keeps_straight_hold_prefix_out_of_previous_blend() -> No
     assert out.target_path[2, 1] <= out.target_path[1, 1] + 0.01
 
 
-def test_path_optimizer_keeps_precision_horizon_when_route_suppresses_visual_reentry() -> None:
+def test_path_optimizer_keeps_precision_horizon_with_route_visual_reentry() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
     route = router.go_to("50", {"lanelet_id": "75"})
@@ -1737,9 +1741,12 @@ def test_path_optimizer_keeps_precision_horizon_when_route_suppresses_visual_ree
 
     horizon_distance_m = float(np.linalg.norm(out.target_path[-1, :2] - out.target_path[0, :2]))
     assert 0.45 < horizon_distance_m < 0.55
-    assert out.notes["visual_lane_reentry_active"] is False
-    assert out.notes["visual_lane_reentry_reason"] == "route_corridor_primary"
-    assert out.notes["visual_lane_reentry_applied"] is False
+    assert out.notes["route_corridor_authoritative"] is True
+    assert out.notes["visual_lane_reentry_active"] is True
+    assert out.notes["visual_lane_reentry_reason"] == "two_line_reentry"
+    assert out.notes["visual_lane_reentry_applied"] is True
+    assert out.notes["visual_lane_prefix_samples"] >= 4
+    assert out.notes["corridor_visual_lane_guidance_active"] is True
 
 
 def test_path_optimizer_keeps_future_turn_out_of_low_speed_precision_horizon() -> None:

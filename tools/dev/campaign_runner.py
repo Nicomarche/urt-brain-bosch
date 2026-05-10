@@ -17,6 +17,7 @@ exercising a longer intersection/curve sequence on the current map.
 from __future__ import annotations
 
 import argparse
+import bisect
 import json
 import math
 import os
@@ -452,6 +453,36 @@ def _percentile(values: list[float], p: float) -> float:
     return ordered[lo] * (hi - k) + ordered[hi] * (k - lo)
 
 
+def _finite_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
+
+
+def _summary(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {
+            "samples": 0,
+            "p10": None,
+            "p50": None,
+            "p90": None,
+            "mean": None,
+            "min": None,
+            "max": None,
+        }
+    return {
+        "samples": len(values),
+        "p10": _percentile(values, 10),
+        "p50": _percentile(values, 50),
+        "p90": _percentile(values, 90),
+        "mean": sum(values) / len(values),
+        "min": min(values),
+        "max": max(values),
+    }
+
+
 def _point_to_segment_distance(
     px: float,
     py: float,
@@ -689,17 +720,97 @@ def _compute_metrics(
     else:
         fail_reasons.append("no_ground_truth_samples")
 
-    lane_offsets = [
-        float(ev.get("offset_m"))
+    lane_events = [
+        ev
         for ev in brain_events
         if ev.get("thread") == "lane_observer"
         and ev.get("event") == "lane_obs"
-        and ev.get("offset_m") is not None
         and float(ev.get("quality", 0.0) or 0.0) > 0.5
+    ]
+    lane_offsets = [
+        offset
+        for ev in lane_events
+        for offset in [_finite_float(ev.get("offset_m"))]
+        if offset is not None
     ]
     lane_abs_offsets = [abs(value) for value in lane_offsets]
     lane_p90 = _percentile(lane_abs_offsets, 90) if lane_abs_offsets else None
     lane_max = max(lane_abs_offsets) if lane_abs_offsets else None
+    line_left_distances: list[float] = []
+    line_right_distances: list[float] = []
+    line_gap_distances: list[float] = []
+    line_center_offsets: list[float] = []
+    closer_side_counts = {"left": 0, "right": 0, "balanced": 0}
+    per_lanelet: dict[str, dict[str, list[float]]] = {}
+    route_ts = [float(ev.get("ts", 0.0) or 0.0) for ev in route_updates]
+
+    def lanelet_at(ts: float) -> str | None:
+        if not route_ts:
+            return None
+        idx = bisect.bisect_right(route_ts, ts) - 1
+        if idx < 0:
+            return None
+        lanelet = route_updates[idx].get("current_lanelet_id")
+        return str(lanelet) if lanelet is not None else None
+
+    for ev in lane_events:
+        left_m = _finite_float(ev.get("left_line_distance_m"))
+        right_m = _finite_float(ev.get("right_line_distance_m"))
+        center_offset_m = _finite_float(ev.get("line_center_offset_m"))
+        if center_offset_m is None and left_m is not None and right_m is not None:
+            center_offset_m = 0.5 * (right_m - left_m)
+        if left_m is None or right_m is None:
+            continue
+        line_left_distances.append(left_m)
+        line_right_distances.append(right_m)
+        line_gap_distances.append(left_m + right_m)
+        if center_offset_m is not None:
+            line_center_offsets.append(center_offset_m)
+        if abs(left_m - right_m) < 0.01:
+            closer_side_counts["balanced"] += 1
+        elif left_m < right_m:
+            closer_side_counts["left"] += 1
+        else:
+            closer_side_counts["right"] += 1
+
+        lanelet_id = lanelet_at(float(ev.get("ts", 0.0) or 0.0))
+        if lanelet_id is None:
+            continue
+        bucket = per_lanelet.setdefault(
+            lanelet_id,
+            {
+                "offset_m": [],
+            "left_line_distance_m": [],
+            "right_line_distance_m": [],
+            "line_gap_m": [],
+            "line_center_offset_m": [],
+            "line_center_offset_abs_m": [],
+        },
+        )
+        offset_m = _finite_float(ev.get("offset_m"))
+        if offset_m is not None:
+            bucket["offset_m"].append(offset_m)
+        bucket["left_line_distance_m"].append(left_m)
+        bucket["right_line_distance_m"].append(right_m)
+        bucket["line_gap_m"].append(left_m + right_m)
+        if center_offset_m is not None:
+            bucket["line_center_offset_m"].append(center_offset_m)
+            bucket["line_center_offset_abs_m"].append(abs(center_offset_m))
+
+    per_lanelet_summary: dict[str, Any] = {}
+    for lanelet_id, bucket in sorted(per_lanelet.items(), key=lambda item: item[0]):
+        offsets = bucket["offset_m"]
+        center_offsets = bucket["line_center_offset_m"]
+        per_lanelet_summary[lanelet_id] = {
+            "samples": max(len(values) for values in bucket.values()),
+            "offset_abs_m": _summary([abs(value) for value in offsets]),
+            "offset_signed_m": _summary(offsets),
+            "left_line_distance_m": _summary(bucket["left_line_distance_m"]),
+            "right_line_distance_m": _summary(bucket["right_line_distance_m"]),
+            "line_gap_m": _summary(bucket["line_gap_m"]),
+            "line_center_offset_m": _summary(center_offsets),
+            "line_center_offset_abs_m": _summary(bucket["line_center_offset_abs_m"]),
+        }
     if lane_abs_offsets:
         if lane_p90 is not None and lane_p90 <= max_lane_offset_p90_m:
             pass_reasons.append("visual_lane_offset_p90_ok")
@@ -756,6 +867,14 @@ def _compute_metrics(
                 if lane_offsets
                 else None
             ),
+            "line_distance_samples": len(line_gap_distances),
+            "left_line_distance_m": _summary(line_left_distances),
+            "right_line_distance_m": _summary(line_right_distances),
+            "line_gap_m": _summary(line_gap_distances),
+            "line_center_offset_m": _summary(line_center_offsets),
+            "line_center_offset_abs_m": _summary([abs(value) for value in line_center_offsets]),
+            "closer_side_counts": closer_side_counts,
+            "per_lanelet": per_lanelet_summary,
         },
     }
 

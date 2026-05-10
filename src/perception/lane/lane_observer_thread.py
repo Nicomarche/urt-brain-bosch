@@ -122,6 +122,31 @@ class threadLaneObserver(ThreadWithStop):
         return None
 
     @staticmethod
+    def _line_distance_metrics(snapshot: VisualStateSnapshot) -> tuple[float | None, float | None, float | None]:
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        if not isinstance(debug, dict):
+            return None, None, None
+
+        for prefix in ("two_line", "sl"):
+            left_cm = debug.get(f"{prefix}_D_left_cm")
+            right_cm = debug.get(f"{prefix}_D_right_cm")
+            if left_cm is None or right_cm is None:
+                continue
+            try:
+                left_m = float(left_cm) / 100.0
+                right_m = float(right_cm) / 100.0
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(left_m) and math.isfinite(right_m)):
+                continue
+            # Positivo significa que la distancia derecha es mayor que la
+            # izquierda, o sea: el auto está desplazado hacia la línea izquierda.
+            center_offset_m = 0.5 * (right_m - left_m)
+            return left_m, right_m, center_offset_m
+        return None, None, None
+
+    @staticmethod
     def _direct_error_m(snapshot: VisualStateSnapshot) -> float | None:
         frame_trace = snapshot.frame_trace or {}
         debug = frame_trace.get("debug") or {}
@@ -267,6 +292,7 @@ class threadLaneObserver(ThreadWithStop):
             direct_error_m=raw_direct_error_m,
         )
         direct_error_m = raw_direct_error_m if direct_error_valid else None
+        left_line_distance_m, right_line_distance_m, line_center_offset_m = self._line_distance_metrics(snapshot)
 
         visual_payload = frame_trace.get("visual_lane_waypoints") if isinstance(frame_trace, dict) else None
         center_waypoints_body: tuple[tuple[float, float, float], ...] = ()
@@ -314,6 +340,9 @@ class threadLaneObserver(ThreadWithStop):
             heading_error_rad=float(snapshot.heading_error_rad or 0.0),
             direct_error_m=direct_error_m,
             lane_width_px=self._lane_width_px(snapshot),
+            left_line_distance_m=left_line_distance_m,
+            right_line_distance_m=right_line_distance_m,
+            line_center_offset_m=line_center_offset_m,
             quality=quality,
             curve_hint=str(snapshot.curve_state or "STRAIGHT"),
             camera_yaw_hint_rad=snapshot.camera_yaw_hint_rad,
@@ -380,6 +409,9 @@ class threadLaneObserver(ThreadWithStop):
             blind_mode=lane_observation.blind_mode,
             source_mode=lane_observation.source_mode,
             lane_width_px=lane_observation.lane_width_px,
+            left_line_distance_m=lane_observation.left_line_distance_m,
+            right_line_distance_m=lane_observation.right_line_distance_m,
+            line_center_offset_m=lane_observation.line_center_offset_m,
             measurement_mode=lane_observation.measurement_mode,
             direct_error_valid=bool(lane_observation.direct_error_valid),
             control_policy_mode=lane_observation.control_policy_mode,

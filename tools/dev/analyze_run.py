@@ -175,6 +175,54 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
         if q is not None and q > 0.5 and off is not None:
             offsets.append(abs(off))
 
+    def _finite(value: Any) -> Optional[float]:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        return out if math.isfinite(out) else None
+
+    def _dist_summary(values: List[float]) -> Dict[str, Any]:
+        if not values:
+            return {"samples": 0, "p50_m": 0, "p90_m": 0, "mean_m": 0, "min_m": 0, "max_m": 0}
+        return {
+            "samples": len(values),
+            "p50_m": _percentile(values, 50),
+            "p90_m": _percentile(values, 90),
+            "mean_m": statistics.mean(values),
+            "min_m": min(values),
+            "max_m": max(values),
+        }
+
+    left_distances: List[float] = []
+    right_distances: List[float] = []
+    gaps: List[float] = []
+    center_offsets: List[float] = []
+    center_abs_offsets: List[float] = []
+    closer_side_counts = Counter()
+    for ev in lane_obs:
+        q = ev.get("quality", 0)
+        if q is None or q <= 0.5:
+            continue
+        left_m = _finite(ev.get("left_line_distance_m"))
+        right_m = _finite(ev.get("right_line_distance_m"))
+        if left_m is None or right_m is None:
+            continue
+        center_offset_m = _finite(ev.get("line_center_offset_m"))
+        if center_offset_m is None:
+            center_offset_m = 0.5 * (right_m - left_m)
+        left_distances.append(left_m)
+        right_distances.append(right_m)
+        gaps.append(left_m + right_m)
+        center_offsets.append(center_offset_m)
+        center_abs_offsets.append(abs(center_offset_m))
+        if abs(left_m - right_m) < 0.01:
+            closer_side_counts["balanced"] += 1
+        elif left_m < right_m:
+            closer_side_counts["left"] += 1
+        else:
+            closer_side_counts["right"] += 1
+
     bad_stretches = []  # stretches > 3 s con |offset| > 0.20 m
     if lane_obs:
         sorted_obs = sorted(lane_obs, key=lambda e: e["ts"])
@@ -211,6 +259,13 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
             "p90_m": _percentile(offsets, 90) if offsets else 0,
             "max_m": max(offsets) if offsets else 0,
             "bad_stretches": bad_stretches,
+            "line_distance_samples": len(gaps),
+            "left_line_distance": _dist_summary(left_distances),
+            "right_line_distance": _dist_summary(right_distances),
+            "line_gap": _dist_summary(gaps),
+            "line_center_offset": _dist_summary(center_offsets),
+            "line_center_offset_abs": _dist_summary(center_abs_offsets),
+            "closer_side_counts": dict(closer_side_counts),
         }
 
     return {
@@ -222,6 +277,13 @@ def metric_lane_offset(brain_events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "p90_m": _percentile(offsets, 90),
         "max_m": max(offsets),
         "bad_stretches": bad_stretches,
+        "line_distance_samples": len(gaps),
+        "left_line_distance": _dist_summary(left_distances),
+        "right_line_distance": _dist_summary(right_distances),
+        "line_gap": _dist_summary(gaps),
+        "line_center_offset": _dist_summary(center_offsets),
+        "line_center_offset_abs": _dist_summary(center_abs_offsets),
+        "closer_side_counts": dict(closer_side_counts),
     }
 
 
@@ -452,6 +514,27 @@ def render_report(
         lines.append(f"  p50:            {lane['p50_m']:.3f} m")
         lines.append(f"  p90:            {lane['p90_m']:.3f} m   (target < 0.20)")
         lines.append(f"  max:            {lane['max_m']:.3f} m")
+        if lane.get("line_distance_samples", 0):
+            left = lane["left_line_distance"]
+            right = lane["right_line_distance"]
+            center = lane["line_center_offset"]
+            center_abs = lane["line_center_offset_abs"]
+            gap = lane["line_gap"]
+            closer = lane.get("closer_side_counts", {})
+            lines.append("  visual line distances:")
+            lines.append(
+                f"    left p50/p90:  {left['p50_m']:.3f}/{left['p90_m']:.3f} m"
+                f"    right p50/p90: {right['p50_m']:.3f}/{right['p90_m']:.3f} m"
+            )
+            lines.append(
+                f"    gap mean:      {gap['mean_m']:.3f} m"
+                f"    center bias mean/p90abs: {center['mean_m']:.3f}/{center_abs['p90_m']:.3f} m"
+            )
+            lines.append(
+                "    closer side samples: "
+                f"left={closer.get('left', 0)} right={closer.get('right', 0)} "
+                f"balanced={closer.get('balanced', 0)}"
+            )
         if lane["bad_stretches"]:
             lines.append(f"  BAD STRETCHES (> 3 s con |offset| > 0.20):")
             for s in lane["bad_stretches"]:
