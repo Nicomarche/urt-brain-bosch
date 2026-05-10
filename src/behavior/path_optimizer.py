@@ -2258,9 +2258,7 @@ def _build_lanelet_corridor(ctx: PlanningContext) -> tuple[_CorridorGeometry | N
             "corridor_lanelet_ids": list(lanelet_ids),
             "corridor_missing_lanelet_ids": missing_lanelet_ids,
         }
-    axis = _concat_corridor_parts(axis_parts)
-    left = _concat_corridor_parts(left_parts)
-    right = _concat_corridor_parts(right_parts)
+    axis, left, right = _concat_corridor_triplets(axis_parts, left_parts, right_parts)
     if axis.shape[0] < 2 or left.shape[0] != axis.shape[0] or right.shape[0] != axis.shape[0]:
         return None, {
             "corridor_source": "invalid_lanelet_geometry",
@@ -2325,6 +2323,39 @@ def _concat_corridor_parts(parts: list[np.ndarray]) -> np.ndarray:
     if not combined:
         return np.zeros((0, 2), dtype=float)
     return np.vstack(combined)
+
+
+def _concat_corridor_triplets(
+    axis_parts: list[np.ndarray],
+    left_parts: list[np.ndarray],
+    right_parts: list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    axis_combined: list[np.ndarray] = []
+    left_combined: list[np.ndarray] = []
+    right_combined: list[np.ndarray] = []
+    for axis_part, left_part, right_part in zip(axis_parts, left_parts, right_parts):
+        axis = np.asarray(axis_part, dtype=float)
+        left = np.asarray(left_part, dtype=float)
+        right = np.asarray(right_part, dtype=float)
+        if (
+            axis.ndim != 2
+            or left.ndim != 2
+            or right.ndim != 2
+            or axis.shape[0] == 0
+            or left.shape[0] != axis.shape[0]
+            or right.shape[0] != axis.shape[0]
+        ):
+            continue
+        start_idx = 0
+        if axis_combined and np.linalg.norm(axis_combined[-1][-1] - axis[0]) <= 1e-6:
+            start_idx = 1
+        axis_combined.append(axis[start_idx:])
+        left_combined.append(left[start_idx:])
+        right_combined.append(right[start_idx:])
+    if not axis_combined:
+        empty = np.zeros((0, 2), dtype=float)
+        return empty, empty, empty
+    return np.vstack(axis_combined), np.vstack(left_combined), np.vstack(right_combined)
 
 
 def _resample_polyline_n(polyline: np.ndarray, n_samples: int) -> np.ndarray:
