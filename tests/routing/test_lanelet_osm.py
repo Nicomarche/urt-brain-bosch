@@ -209,6 +209,21 @@ def test_load_lanelet2_osm_prefers_local_xy_tags(tmp_path: Path) -> None:
     assert lanelet_map.at_pose(1.5, 1.5, max_distance_m=0.6) == "100"
 
 
+def test_load_lanelet2_osm_applies_sibling_geometry_offsets(tmp_path: Path) -> None:
+    osm_path = tmp_path / "local_xy_lanelet.osm"
+    osm_path.write_text(_LOCAL_XY_LANELET_OSM, encoding="utf-8")
+    (tmp_path / "lanelet_geometry_offsets.json").write_text(
+        '{"toward_right_boundary_m": {"100": 0.10}}',
+        encoding="utf-8",
+    )
+
+    lanelet_map = load_lanelet2_osm(str(osm_path), step_m=0.20)
+    lanelet = lanelet_map.get_lanelet("100")
+
+    assert lanelet is not None
+    assert float(lanelet.centerline[:, 1].mean()) > 1.55
+
+
 def test_load_lanelet2_osm_keeps_each_lanelet_boundary_geometry(tmp_path: Path) -> None:
     osm_path = tmp_path / "chain_lanelets.osm"
     osm_path.write_text(_LOCAL_XY_CHAIN_OSM, encoding="utf-8")
@@ -337,31 +352,32 @@ def test_repo_sim_map_uses_contiguous_successors_for_reference_loop() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
 
     lanelet_map = load_lanelet2_osm(str(osm_path), step_m=0.05)
-    assert lanelet_map.successors_of("9") == ("22",)
-    assert lanelet_map.successors_of("52") == ("1945",)
-    assert lanelet_map.successors_of("1765") == ("443",)
-    assert "186" in lanelet_map.successors_of("1945")
-    assert "1887" in lanelet_map.successors_of("2202")
-    assert "84" in lanelet_map.successors_of("1887")
-    assert "2201" in lanelet_map.predecessors_of("1887")
+    assert lanelet_map.successors_of("50") == ("55",)
+    assert lanelet_map.successors_of("55") == ("60",)
+    assert lanelet_map.successors_of("60") == ("70",)
+    assert lanelet_map.successors_of("70") == ("75",)
+    assert lanelet_map.successors_of("75") == ("85",)
+    assert "120" in lanelet_map.successors_of("90")
+    assert lanelet_map.successors_of("120") == ("125",)
+    assert lanelet_map.successors_of("125") == ("138",)
+    assert "125" in lanelet_map.predecessors_of("138")
 
-    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
-    assert router.reference_node_ids[:4] == ["9", "22", "33", "1945"]
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
+    assert router.reference_node_ids[:4] == ["50", "55", "60", "70"]
 
 
-def test_repo_sim_map_can_route_to_lanelet_1887_without_fallback() -> None:
+def test_repo_sim_map_can_route_to_lanelet_138_without_fallback() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
 
-    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
-    lanelet = router.lanelet_map.get_lanelet("1887")
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
+    lanelet = router.lanelet_map.get_lanelet("138")
     assert lanelet is not None
     mid = lanelet.centerline[lanelet.centerline.shape[0] // 2]
 
     route = router.go_to(
-        {"lanelet_id": "22"},
-        {"x": float(mid[0]), "y": float(mid[1]), "lanelet_id": "1887"},
+        {"lanelet_id": "50"},
+        {"x": float(mid[0]), "y": float(mid[1]), "lanelet_id": "138"},
     )
 
     assert route.source == "go_to"
-    assert route.node_ids
-    assert route.node_ids[-1] == "1887"
+    assert route.node_ids == ["50", "55", "60", "70", "75", "85", "90", "120", "125", "138"]
