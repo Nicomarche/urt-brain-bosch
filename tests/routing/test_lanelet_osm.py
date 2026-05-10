@@ -209,21 +209,6 @@ def test_load_lanelet2_osm_prefers_local_xy_tags(tmp_path: Path) -> None:
     assert lanelet_map.at_pose(1.5, 1.5, max_distance_m=0.6) == "100"
 
 
-def test_load_lanelet2_osm_applies_sibling_geometry_offsets(tmp_path: Path) -> None:
-    osm_path = tmp_path / "local_xy_lanelet.osm"
-    osm_path.write_text(_LOCAL_XY_LANELET_OSM, encoding="utf-8")
-    (tmp_path / "lanelet_geometry_offsets.json").write_text(
-        '{"toward_right_boundary_m": {"100": 0.10}}',
-        encoding="utf-8",
-    )
-
-    lanelet_map = load_lanelet2_osm(str(osm_path), step_m=0.20)
-    lanelet = lanelet_map.get_lanelet("100")
-
-    assert lanelet is not None
-    assert float(lanelet.centerline[:, 1].mean()) > 1.55
-
-
 def test_load_lanelet2_osm_keeps_each_lanelet_boundary_geometry(tmp_path: Path) -> None:
     osm_path = tmp_path / "chain_lanelets.osm"
     osm_path.write_text(_LOCAL_XY_CHAIN_OSM, encoding="utf-8")

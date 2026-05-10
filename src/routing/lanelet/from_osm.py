@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import json
 import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import numpy as np
 from pyproj import CRS, Transformer
@@ -26,8 +24,6 @@ _PARTIAL_FALLBACK_CENTER_GAP_M = 1.20 * _BFMC_LANE_WIDTH_M
 _PARTIAL_FALLBACK_MARGIN_M = 0.12
 _ZERO_MATCH_CENTER_GAP_M = 0.50 * _BFMC_LANE_WIDTH_M
 _ZERO_MATCH_MARGIN_M = 0.06
-_LANELET_GEOMETRY_OFFSETS_FILENAME = "lanelet_geometry_offsets.json"
-GeometryOffset = float | tuple[tuple[float, float], ...]
 
 
 @dataclass(frozen=True)
@@ -61,61 +57,6 @@ class ParsedOsmMap:
     relations: dict[str, OsmRelation]
 
 
-def _load_lanelet_geometry_offsets(path: str) -> dict[str, GeometryOffset]:
-    offset_path = Path(path).with_name(_LANELET_GEOMETRY_OFFSETS_FILENAME)
-    try:
-        payload = json.loads(offset_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    raw_offsets = payload.get("toward_right_boundary_m", payload)
-    if not isinstance(raw_offsets, dict):
-        return {}
-    offsets: dict[str, GeometryOffset] = {}
-    for lanelet_id, raw_value in raw_offsets.items():
-        value = _parse_geometry_offset(raw_value)
-        if value is not None:
-            offsets[str(lanelet_id)] = value
-    return offsets
-
-
-def _parse_geometry_offset(raw_value: object) -> GeometryOffset | None:
-    try:
-        scalar_value = float(raw_value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        scalar_value = None
-    if scalar_value is not None:
-        return scalar_value if abs(scalar_value) > 1e-6 else None
-
-    if not isinstance(raw_value, list):
-        return None
-    points: list[tuple[float, float]] = []
-    for item in raw_value:
-        if isinstance(item, dict):
-            raw_fraction = item.get("fraction", item.get("s"))
-            raw_offset = item.get("offset_m", item.get("offset"))
-        elif isinstance(item, (list, tuple)) and len(item) >= 2:
-            raw_fraction = item[0]
-            raw_offset = item[1]
-        else:
-            continue
-        try:
-            fraction = float(raw_fraction)
-            offset = float(raw_offset)
-        except (TypeError, ValueError):
-            continue
-        points.append((min(1.0, max(0.0, fraction)), offset))
-    points.sort(key=lambda pair: pair[0])
-    deduped: list[tuple[float, float]] = []
-    for fraction, offset in points:
-        if deduped and abs(deduped[-1][0] - fraction) <= 1e-6:
-            deduped[-1] = (fraction, offset)
-        else:
-            deduped.append((fraction, offset))
-    if not deduped or all(abs(offset) <= 1e-6 for _fraction, offset in deduped):
-        return None
-    return tuple(deduped)
-
-
 def load_lanelet2_osm(path: str, *, step_m: float = 0.50) -> LaneletMap:
     """Carga un mapa Lanelet2 OSM y lo convierte al `LaneletMap` del planner.
 
@@ -143,7 +84,6 @@ def load_lanelet2_osm(path: str, *, step_m: float = 0.50) -> LaneletMap:
         nodes=parsed.nodes,
         regulators=regulators,
         step_m=step_m,
-        geometry_offsets=_load_lanelet_geometry_offsets(path),
     )
 
     from src.routing.lanelet.queries import LaneletKDTreeIndex
@@ -376,7 +316,6 @@ def _build_lanelets(
     nodes: dict[str, OsmNode],
     regulators: dict[str, RegulatoryElement],
     step_m: float,
-    geometry_offsets: dict[str, GeometryOffset] | None = None,
 ) -> dict[str, Lanelet]:
     lanelet_specs: list[dict[str, object]] = []
     for rel in relations.values():
@@ -400,14 +339,6 @@ def _build_lanelets(
         centerline = _centerline_from_bounds(left, right, step_m=step_m)
         if centerline.shape[0] < 2:
             continue
-        geometry_offset = (geometry_offsets or {}).get(str(rel.relation_id))
-        if geometry_offset is not None:
-            centerline, left, right = _shift_lanelet_geometry_toward_right_boundary(
-                centerline=centerline,
-                left_boundary=left,
-                right_boundary=right,
-                offset_m=geometry_offset,
-            )
 
         attr = _attribute_from_lanelet_tags(rel.tags)
         regulatory_ids = tuple(
@@ -712,99 +643,6 @@ def _centerline_from_bounds(left: np.ndarray, right: np.ndarray, *, step_m: floa
     right_rs = _resample_polyline(right, n=n)
     center = 0.5 * (left_rs + right_rs)
     return _densify_polyline(center, step_m=max(0.10, float(step_m)))
-
-
-def _shift_lanelet_geometry_toward_right_boundary(
-    *,
-    centerline: np.ndarray,
-    left_boundary: np.ndarray,
-    right_boundary: np.ndarray,
-    offset_m: GeometryOffset,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Apply a small map-calibration bias toward the relation's right bound.
-
-    The BFMC raster and the Lanelet2 map do not perfectly agree in a few tight
-    simulator curves. We keep the topology intact and translate the affected
-    lanelet geometry toward the visually correct lane center.
-    """
-    centerline = np.asarray(centerline, dtype=float)
-    left_boundary = np.asarray(left_boundary, dtype=float)
-    right_boundary = np.asarray(right_boundary, dtype=float)
-    if centerline.shape[0] < 2 or right_boundary.shape[0] < 2:
-        return centerline, left_boundary, right_boundary
-    right_rs = _resample_polyline(right_boundary, n=centerline.shape[0])
-    vectors = right_rs - centerline
-    norms = np.linalg.norm(vectors, axis=1)
-    valid = norms > 1e-6
-    if not np.any(valid):
-        return centerline, left_boundary, right_boundary
-    unit_vectors = vectors[valid] / norms[valid, None]
-    mean_unit = np.mean(unit_vectors, axis=0)
-    mean_norm = float(np.linalg.norm(mean_unit))
-    if mean_norm <= 1e-9:
-        mean_unit = unit_vectors[0]
-    else:
-        mean_unit = mean_unit / mean_norm
-    if isinstance(offset_m, tuple):
-        local_units = np.tile(mean_unit, (centerline.shape[0], 1))
-        local_units[valid] = vectors[valid] / norms[valid, None]
-        center_fractions = _polyline_fractions(centerline)
-        offsets = _interpolate_offset_profile(offset_m, center_fractions)
-        center_shift = local_units * offsets[:, None]
-        left_shift = _interpolate_vectors_by_fraction(
-            center_fractions,
-            center_shift,
-            _polyline_fractions(left_boundary),
-        )
-        right_shift = _interpolate_vectors_by_fraction(
-            center_fractions,
-            center_shift,
-            _polyline_fractions(right_boundary),
-        )
-        return centerline + center_shift, left_boundary + left_shift, right_boundary + right_shift
-
-    shift = np.asarray(mean_unit, dtype=float) * float(offset_m)
-    return centerline + shift, left_boundary + shift, right_boundary + shift
-
-
-def _polyline_fractions(polyline: np.ndarray) -> np.ndarray:
-    pts = np.asarray(polyline, dtype=float)
-    if pts.shape[0] <= 1:
-        return np.zeros((pts.shape[0],), dtype=float)
-    lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
-    cumulative = np.concatenate(([0.0], np.cumsum(lengths)))
-    total = float(cumulative[-1])
-    if total <= 1e-9:
-        return np.linspace(0.0, 1.0, pts.shape[0])
-    return cumulative / total
-
-
-def _interpolate_offset_profile(
-    profile: tuple[tuple[float, float], ...],
-    fractions: np.ndarray,
-) -> np.ndarray:
-    profile_arr = np.asarray(profile, dtype=float)
-    if profile_arr.shape[0] == 1:
-        return np.full_like(fractions, float(profile_arr[0, 1]), dtype=float)
-    return np.interp(
-        np.asarray(fractions, dtype=float),
-        profile_arr[:, 0],
-        profile_arr[:, 1],
-        left=float(profile_arr[0, 1]),
-        right=float(profile_arr[-1, 1]),
-    )
-
-
-def _interpolate_vectors_by_fraction(
-    source_fractions: np.ndarray,
-    source_vectors: np.ndarray,
-    target_fractions: np.ndarray,
-) -> np.ndarray:
-    if source_vectors.shape[0] == 0:
-        return np.zeros((target_fractions.shape[0], 2), dtype=float)
-    x_values = np.interp(target_fractions, source_fractions, source_vectors[:, 0])
-    y_values = np.interp(target_fractions, source_fractions, source_vectors[:, 1])
-    return np.column_stack((x_values, y_values))
 
 
 def _resample_polyline(polyline: np.ndarray, *, n: int) -> np.ndarray:
