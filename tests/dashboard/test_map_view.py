@@ -5,6 +5,12 @@ from pathlib import Path
 import numpy as np
 
 from src.dashboard.gui.config import settings
+from src.dashboard.gui.widgets._map_alignment import (
+    relative_offset_px,
+    shifted_world_bounds,
+    texture_offset_m,
+    world_bounds_delta_for_visual_offset,
+)
 from src.dashboard.gui.widgets._map_path_overlay import (
     extract_control_path_points,
     extract_nav_route_preview_points,
@@ -124,3 +130,43 @@ def test_extract_control_path_points_hides_invalid_behavior_path() -> None:
     }
 
     assert extract_control_path_points(payload) == []
+
+
+def test_alignment_relative_offset_can_drag_either_layer() -> None:
+    assert relative_offset_px(
+        lanelet_offset_px=(12.0, -3.0),
+        background_offset_px=(0.0, 0.0),
+    ) == (12.0, -3.0)
+    assert relative_offset_px(
+        lanelet_offset_px=(0.0, 0.0),
+        background_offset_px=(-12.0, 3.0),
+    ) == (12.0, -3.0)
+
+
+def test_alignment_world_bounds_delta_matches_non_inverted_dashboard_frame() -> None:
+    visual_px = (10.0, -5.0)
+
+    assert texture_offset_m(visual_px, meters_per_pixel=0.01) == (0.1, -0.05)
+    assert world_bounds_delta_for_visual_offset(
+        visual_px,
+        meters_per_pixel=0.01,
+        y_axis_inverted=False,
+    ) == (-0.1, 0.05)
+    assert shifted_world_bounds(
+        {"x_min": -10.0, "x_max": 10.0, "y_min": -7.0, "y_max": 7.0},
+        dx_m=-0.1,
+        dy_m=0.05,
+    ) == {
+        "x_min": -10.1,
+        "x_max": 9.9,
+        "y_min": -6.95,
+        "y_max": 7.05,
+    }
+
+
+def test_alignment_world_bounds_delta_flips_y_when_axis_is_inverted() -> None:
+    assert world_bounds_delta_for_visual_offset(
+        (0.0, 5.0),
+        meters_per_pixel=0.01,
+        y_axis_inverted=True,
+    ) == (-0.0, 0.05)
