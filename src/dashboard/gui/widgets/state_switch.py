@@ -9,7 +9,7 @@ the on-screen joystick.
 
 Public surface (used by KeyboardHandler and ControlPanel):
 
-* ``current_mode`` — one of ``MODE_STOP/MANUAL/LEGACY/AUTO/PARKING``
+* ``current_mode`` — one of ``MODE_STOP/MANUAL/LEGACY/AUTO/ODOMETRY/PARKING``
 * ``set_mode(name)`` — changes mode (also emits DrivingMode to backend)
 * ``can_drive()`` — True iff manual + KL=30 (gates speed/steer commands)
 * ``increase_speed()`` / ``decrease_speed()`` — clamped, emits SpeedMotor
@@ -280,7 +280,7 @@ class DrivingModel(QObject):
             return
         normalised = mode.lower()
         if normalised in {ev.MODE_STOP, ev.MODE_MANUAL, ev.MODE_LEGACY,
-                          ev.MODE_AUTO, ev.MODE_PARKING}:
+                          ev.MODE_AUTO, ev.MODE_ODOMETRY, ev.MODE_PARKING}:
             self.set_mode(normalised, emit_to_backend=False)
 
 
@@ -288,13 +288,14 @@ class DrivingModel(QObject):
 # UI: a row of buttons, one per mode
 # ----------------------------------------------------------------------
 class StateSwitch(QWidget):
-    """Five-button driving-mode selector backed by a ``DrivingModel``."""
+    """Driving-mode selector backed by a ``DrivingModel``."""
 
     MODES = (
         (ev.MODE_STOP,    "Stop",    "#d9534f"),
         (ev.MODE_MANUAL,  "Manual",  "#f0ad4e"),
         (ev.MODE_LEGACY,  "Legacy",  "#2b8fd1"),
         (ev.MODE_AUTO,    "Auto",    "#5cb85c"),
+        (ev.MODE_ODOMETRY, "Odometry", "#3aa99f"),
         (ev.MODE_PARKING, "Parking", "#a87cff"),
     )
 

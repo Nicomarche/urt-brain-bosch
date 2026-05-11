@@ -122,7 +122,7 @@ class ManeuverManager:
         return True
 
     def _request_parking_mode(self, current_mode: str) -> None:
-        if current_mode != "auto" or self.state_change_sender is None:
+        if current_mode not in {"auto", "odometry"} or self.state_change_sender is None:
             return
         # Test/debug toggle: durante runs automatizados no queremos que un
         # parking sign visto por el detector cambie el state_machine —

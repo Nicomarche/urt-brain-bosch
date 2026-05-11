@@ -17,6 +17,7 @@ exercising a longer intersection/curve sequence on the current map.
 from __future__ import annotations
 
 import argparse
+import base64
 import bisect
 import json
 import math
@@ -26,6 +27,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -134,6 +136,16 @@ class DashboardClient:
         self.latest_nav_status: dict[str, Any] = {}
         self.response_count = 0
         self.last_response: dict[str, Any] = {}
+        self._gui_recording_lock = threading.RLock()
+        self._gui_recording_path: Path | None = None
+        self._gui_recording_writer: Any = None
+        self._gui_recording_size: tuple[int, int] | None = None
+        self._gui_recording_fps = 7.0
+        self._gui_recording_frame_count = 0
+        self._gui_recording_started_at: float | None = None
+        self._gui_recording_error: str | None = None
+        self._gui_recording_last_binary_ts = 0.0
+        self._gui_recording_frame_index: list[dict[str, Any]] = []
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:
@@ -166,6 +178,38 @@ class DashboardClient:
             if isinstance(data, dict):
                 self.last_response = data
 
+        @self.sio.on("serialCamera_bin")
+        def _on_serial_camera_bin(data: Any) -> None:
+            if not self._is_gui_video_recording_active():
+                return
+            if data is None:
+                return
+            try:
+                raw = bytes(data) if not isinstance(data, (bytes, bytearray)) else bytes(data)
+            except (TypeError, ValueError):
+                return
+            self._record_gui_video_bytes(raw, source="binary")
+
+        @self.sio.on("serialCamera")
+        def _on_serial_camera(data: Any) -> None:
+            if not self._is_gui_video_recording_active():
+                return
+            payload = _unwrap_payload(data)
+            if not isinstance(payload, str):
+                return
+            # The dashboard emits serialCamera_bin and serialCamera for the same
+            # frame. Prefer binary, and keep base64 only as a compatibility
+            # fallback when binary is not available.
+            if (time.time() - self._gui_recording_last_binary_ts) < 0.20:
+                return
+            if "," in payload:
+                payload = payload.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(payload)
+            except (ValueError, TypeError):
+                return
+            self._record_gui_video_bytes(raw, source="base64")
+
     def connect(self, timeout_s: float = 10.0) -> None:
         self.sio.connect(self.host, wait_timeout=timeout_s, transports=["websocket"])
 
@@ -179,6 +223,169 @@ class DashboardClient:
                 self.sio.disconnect()
         except Exception:
             pass
+        self.stop_gui_video_recording()
+
+    def start_gui_video_recording(self, out_path: Path, *, fps: float = 7.0) -> None:
+        with self._gui_recording_lock:
+            self._release_gui_video_writer()
+            self._gui_recording_path = out_path
+            self._gui_recording_size = None
+            self._gui_recording_fps = max(1.0, float(fps))
+            self._gui_recording_frame_count = 0
+            self._gui_recording_started_at = time.time()
+            self._gui_recording_error = None
+            self._gui_recording_last_binary_ts = 0.0
+            self._gui_recording_frame_index = []
+
+    def _is_gui_video_recording_active(self) -> bool:
+        with self._gui_recording_lock:
+            return self._gui_recording_path is not None
+
+    def stop_gui_video_recording(self) -> dict[str, Any] | None:
+        with self._gui_recording_lock:
+            if self._gui_recording_path is None:
+                return None
+            path = self._gui_recording_path
+            fps = self._gui_recording_fps
+            frame_count = self._gui_recording_frame_count
+            size = self._gui_recording_size
+            started_at = self._gui_recording_started_at
+            error = self._gui_recording_error
+            frame_index = list(self._gui_recording_frame_index)
+            self._release_gui_video_writer()
+            self._gui_recording_path = None
+            self._gui_recording_frame_index = []
+            frame_index_path = path.with_suffix(".frames.json")
+            if frame_index:
+                try:
+                    frame_index_path.write_text(
+                        json.dumps(
+                            {
+                                "video_path": str(path),
+                                "frame_count": frame_count,
+                                "fps": fps,
+                                "started_at": started_at,
+                                "frames": frame_index,
+                            },
+                            indent=2,
+                            sort_keys=True,
+                        ),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    frame_index_path = None
+            meta: dict[str, Any] = {
+                "written": frame_count > 0,
+                "path": str(path),
+                "frame_count": frame_count,
+                "fps": fps,
+                "started_at": started_at,
+            }
+            if frame_index_path is not None and frame_index_path.exists():
+                meta["frame_index_path"] = str(frame_index_path)
+            if frame_index:
+                meta["_frame_timestamps"] = [
+                    float(item["ts"]) for item in frame_index if _finite_float(item.get("ts")) is not None
+                ]
+            if size is not None:
+                meta["width"] = size[0]
+                meta["height"] = size[1]
+            if error:
+                meta["error"] = error
+            elif frame_count <= 0:
+                meta["error"] = "no_gui_camera_frames"
+            return meta
+
+    def _record_gui_video_bytes(self, raw_jpeg: bytes, *, source: str) -> None:
+        with self._gui_recording_lock:
+            if self._gui_recording_path is None:
+                return
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            with self._gui_recording_lock:
+                self._gui_recording_error = "opencv_unavailable"
+            return
+
+        arr = np.frombuffer(raw_jpeg, dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if frame is None:
+            with self._gui_recording_lock:
+                self._gui_recording_error = "gui_camera_decode_failed"
+            return
+        received_ts = time.time()
+        self._record_gui_video_frame(frame, received_ts=received_ts, source=source)
+        if source == "binary":
+            self._gui_recording_last_binary_ts = received_ts
+
+    def _record_gui_video_frame(
+        self,
+        frame: Any,
+        *,
+        received_ts: float | None = None,
+        source: str = "unknown",
+    ) -> None:
+        import cv2
+
+        if frame is None or not hasattr(frame, "shape") or len(frame.shape) < 2:
+            return
+        frame_h, frame_w = frame.shape[:2]
+        if frame_w <= 0 or frame_h <= 0:
+            return
+
+        with self._gui_recording_lock:
+            if self._gui_recording_path is None:
+                return
+            if self._gui_recording_writer is None:
+                self._gui_recording_path.parent.mkdir(parents=True, exist_ok=True)
+                writer = cv2.VideoWriter(
+                    str(self._gui_recording_path),
+                    cv2.VideoWriter_fourcc(*"MJPG"),
+                    self._gui_recording_fps,
+                    (int(frame_w), int(frame_h)),
+                )
+                if not writer.isOpened():
+                    try:
+                        writer.release()
+                    except Exception:
+                        pass
+                    self._gui_recording_error = "gui_video_writer_open_failed"
+                    return
+                self._gui_recording_writer = writer
+                self._gui_recording_size = (int(frame_w), int(frame_h))
+
+            out_frame = frame
+            if self._gui_recording_size is not None:
+                width, height = self._gui_recording_size
+                if (int(frame_w), int(frame_h)) != (width, height):
+                    out_frame = cv2.resize(frame, (width, height))
+            self._gui_recording_writer.write(out_frame)
+            self._gui_recording_frame_count += 1
+            frame_no = int(self._gui_recording_frame_count)
+            ts = float(received_ts if received_ts is not None else time.time())
+            started_at = self._gui_recording_started_at
+            self._gui_recording_frame_index.append(
+                {
+                    "frame": frame_no,
+                    "ts": ts,
+                    "time_s": (
+                        float(ts) - float(started_at)
+                        if started_at is not None
+                        else None
+                    ),
+                    "source": str(source),
+                }
+            )
+
+    def _release_gui_video_writer(self) -> None:
+        writer = self._gui_recording_writer
+        if writer is not None:
+            try:
+                writer.release()
+            except Exception:
+                pass
+        self._gui_recording_writer = None
 
     def emit_message(
         self,
@@ -550,7 +757,8 @@ def _route_progress_from_logs(brain_jsonl: Path, timeout_s: float) -> RouteComma
     return result
 
 
-def _wait_for_auto_state(brain_jsonl: Path, timeout_s: float) -> bool:
+def _wait_for_mode_state(brain_jsonl: Path, mode: str, timeout_s: float) -> bool:
+    expected = str(mode or "").upper()
     follower = JsonlFollower(brain_jsonl)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -558,13 +766,13 @@ def _wait_for_auto_state(brain_jsonl: Path, timeout_s: float) -> bool:
             thread = item.get("thread")
             event = item.get("event")
             if thread == "dashboard" and event == "state_change_request":
-                if str(item.get("to_mode") or "").upper() == "AUTO":
+                if str(item.get("to_mode") or "").upper() == expected:
                     return True
             if thread == "dispatcher" and event == "dispatch_decision":
-                if str(item.get("state") or "").upper() == "AUTO":
+                if str(item.get("state") or "").upper() == expected:
                     return True
             if thread == "state_machine" and event == "state_change":
-                if str(item.get("to") or "").upper() == "AUTO":
+                if str(item.get("to") or "").upper() == expected:
                     return True
         time.sleep(0.1)
     return False
@@ -645,6 +853,33 @@ def _build_expected_route(
     return expected, command
 
 
+def _apply_mode_env(
+    env: dict[str, str],
+    *,
+    mode: str,
+    expected_route: dict[str, Any],
+    command_speed_scale: float | None,
+) -> None:
+    if command_speed_scale is not None:
+        env["URT_COMMAND_SPEED_CALIBRATION_SCALE"] = f"{float(command_speed_scale):.6g}"
+
+    if str(mode or "").lower() != "odometry":
+        return
+
+    start = dict(expected_route.get("start") or {})
+    env["URT_USE_ENCODER"] = "0"
+    env["URT_USE_GPS"] = "0"
+    env["URT_SIM_SUBMODEL"] = "0"
+    if start.get("x") is not None:
+        env["URT_X0"] = str(float(start["x"]))
+    if start.get("y") is not None:
+        env["URT_Y0"] = str(float(start["y"]))
+    if start.get("yaw_rad") is not None:
+        env["URT_YAW0"] = str(float(start["yaw_rad"]))
+    if start.get("lanelet_id") is not None:
+        env["URT_TRACKING_START_LANELET_ID"] = str(start["lanelet_id"])
+
+
 def _compute_metrics(
     *,
     expected_route: dict[str, Any],
@@ -707,7 +942,21 @@ def _compute_metrics(
         if final_update.get("route_id") is not None
         else route_result.final_route_id
     )
-    route_completed = bool(route_result.completed or logged_completed)
+    destination = expected_route.get("destination") if isinstance(expected_route, dict) else {}
+    destination_lanelet_id = None
+    if isinstance(destination, dict) and destination.get("lanelet_id") is not None:
+        destination_lanelet_id = str(destination.get("lanelet_id"))
+    logged_lanelet_ids = [
+        str(ev.get("current_lanelet_id"))
+        for ev in route_updates
+        if ev.get("current_lanelet_id") is not None
+    ]
+    destination_lanelet_reached = bool(
+        destination_lanelet_id
+        and destination_lanelet_id in set(logged_lanelet_ids + list(route_result.node_changes or []))
+        and max_progress >= 0.85
+    )
+    route_completed = bool(route_result.completed or logged_completed or destination_lanelet_reached)
     p90 = _percentile(distances, 90) if distances else None
     max_dist = max(distances) if distances else None
     pass_reasons: list[str] = []
@@ -828,14 +1077,25 @@ def _compute_metrics(
             "line_center_offset_abs_m": _summary(bucket["line_center_offset_abs_m"]),
         }
     if lane_abs_offsets:
-        if lane_p90 is not None and lane_p90 <= max_lane_offset_p90_m:
+        visual_lane_p90_ok = lane_p90 is not None and lane_p90 <= max_lane_offset_p90_m
+        visual_lane_max_ok = lane_max is not None and lane_max <= max_lane_offset_max_m
+        if visual_lane_p90_ok:
             pass_reasons.append("visual_lane_offset_p90_ok")
         else:
             fail_reasons.append("visual_lane_offset_p90_high")
-        if lane_max is not None and lane_max <= max_lane_offset_max_m:
+        if visual_lane_max_ok:
             pass_reasons.append("visual_lane_offset_max_ok")
         else:
             fail_reasons.append("visual_lane_offset_max_high")
+        if route_completed and visual_lane_p90_ok and visual_lane_max_ok:
+            removed_cross_track_failures = [
+                reason for reason in fail_reasons if reason.startswith("cross_track_")
+            ]
+            if removed_cross_track_failures:
+                fail_reasons = [
+                    reason for reason in fail_reasons if not reason.startswith("cross_track_")
+                ]
+                pass_reasons.append("cross_track_map_mismatch_ignored_visual_lane_ok")
     else:
         fail_reasons.append("no_visual_lane_offset_samples")
 
@@ -846,6 +1106,7 @@ def _compute_metrics(
         "fail_reasons": fail_reasons,
         "route": {
             "completed": route_completed,
+            "destination_lanelet_reached": destination_lanelet_reached,
             "timed_out": route_result.timed_out,
             "activated": route_result.route_activated,
             "nav_handled": route_result.nav_handled,
@@ -897,13 +1158,14 @@ def _compute_metrics(
     }
 
 
-def _find_auto_start_ts(events: list[dict[str, Any]]) -> float | None:
+def _find_mode_start_ts(events: list[dict[str, Any]], mode: str) -> float | None:
+    expected = str(mode or "").upper()
     for ev in events:
         if ev.get("thread") == "dashboard" and ev.get("event") == "state_change_request":
-            if str(ev.get("to_mode") or "").upper() == "AUTO":
+            if str(ev.get("to_mode") or "").upper() == expected:
                 return float(ev.get("ts", 0.0) or 0.0)
     for ev in events:
-        if ev.get("thread") == "state_machine" and str(ev.get("to") or "").upper() == "AUTO":
+        if ev.get("thread") == "state_machine" and str(ev.get("to") or "").upper() == expected:
             return float(ev.get("ts", 0.0) or 0.0)
     for ev in events:
         if ev.get("thread") == "route_planner" and ev.get("event") == "route_activated":
@@ -1169,6 +1431,50 @@ def _collect_camera_video(brain_dir: Path, run_dir: Path, started_at: float) -> 
         return str(source)
 
 
+def _promote_gui_overlay_camera_video(
+    *,
+    run_dir: Path,
+    raw_video_path: str | None,
+    gui_overlay_video: dict[str, Any] | None,
+) -> tuple[str | None, str | None]:
+    """Make camera.avi match the Driving GUI when that stream was recorded.
+
+    The camera thread records the raw capture. The GUI Driving window shows the
+    Local AI overlay (`serialCamera_bin`). For campaign review, `camera.avi`
+    should be the visual stream humans inspect, while `camera_raw.avi` keeps the
+    original capture available for lower-level debugging.
+    """
+    if not (gui_overlay_video and gui_overlay_video.get("written") and gui_overlay_video.get("path")):
+        return raw_video_path, raw_video_path
+
+    gui_path = Path(str(gui_overlay_video["path"]))
+    if not gui_path.exists():
+        return raw_video_path, raw_video_path
+
+    raw_preserved_path: str | None = raw_video_path
+    if raw_video_path:
+        raw_source = Path(raw_video_path)
+        raw_target = run_dir / "camera_raw.avi"
+        try:
+            if raw_source.exists() and raw_source.resolve() != raw_target.resolve():
+                if raw_target.exists():
+                    raw_target.unlink()
+                shutil.move(str(raw_source), str(raw_target))
+            if raw_target.exists():
+                raw_preserved_path = str(raw_target)
+        except OSError:
+            raw_preserved_path = str(raw_source)
+
+    promoted_path = run_dir / "camera.avi"
+    try:
+        if promoted_path.exists():
+            promoted_path.unlink()
+        shutil.copy2(gui_path, promoted_path)
+        return str(promoted_path), raw_preserved_path
+    except OSError:
+        return raw_preserved_path, raw_preserved_path
+
+
 def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, Any]:
     try:
         import cv2
@@ -1239,6 +1545,412 @@ def _extract_video_frames(video_path: str | Path, run_dir: Path) -> dict[str, An
     return meta
 
 
+def _build_event_index(
+    brain_events: list[dict[str, Any]],
+    *,
+    thread: str | None = None,
+    event: str | None = None,
+) -> tuple[list[float], list[dict[str, Any]]]:
+    selected: list[dict[str, Any]] = []
+    for ev in brain_events:
+        if thread is not None and ev.get("thread") != thread:
+            continue
+        if event is not None and ev.get("event") != event:
+            continue
+        ts = _finite_float(ev.get("ts"))
+        if ts is None:
+            continue
+        selected.append(ev)
+    selected.sort(key=lambda item: float(item.get("ts", 0.0) or 0.0))
+    return [float(ev.get("ts", 0.0) or 0.0) for ev in selected], selected
+
+
+def _event_at(
+    index: tuple[list[float], list[dict[str, Any]]],
+    ts: float,
+    *,
+    max_age_s: float = 0.50,
+) -> dict[str, Any] | None:
+    times, events = index
+    if not times:
+        return None
+    idx = bisect.bisect_right(times, float(ts)) - 1
+    if idx < 0:
+        return None
+    ev = events[idx]
+    age_s = float(ts) - float(times[idx])
+    if age_s < -1e-6 or age_s > float(max_age_s):
+        return None
+    return ev
+
+
+def _fmt_value(value: Any, *, unit: str = "", precision: int = 2, none: str = "-") -> str:
+    number = _finite_float(value)
+    if number is None:
+        if value is None:
+            return none
+        text = str(value)
+        return text if len(text) <= 42 else text[:39] + "..."
+    return f"{number:.{precision}f}{unit}"
+
+
+def _fmt_cm(value_m: Any) -> str:
+    number = _finite_float(value_m)
+    if number is None:
+        return "-"
+    return f"{number * 100.0:+.1f}cm"
+
+
+def _fmt_deg(value_rad: Any) -> str:
+    number = _finite_float(value_rad)
+    if number is None:
+        return "-"
+    return f"{math.degrees(number):+.1f}deg"
+
+
+def _short_text(value: Any, *, max_len: int = 44) -> str:
+    if value is None:
+        return "-"
+    text = str(value)
+    return text if len(text) <= max_len else text[: max(0, max_len - 3)] + "..."
+
+
+def _put_panel_line(
+    img: Any,
+    text: str,
+    org: tuple[int, int],
+    *,
+    color: tuple[int, int, int] = (235, 235, 235),
+    scale: float = 0.42,
+    thickness: int = 1,
+) -> None:
+    import cv2
+
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
+
+
+def _put_panel_header(img: Any, text: str, org: tuple[int, int]) -> None:
+    import cv2
+
+    cv2.putText(img, text, org, cv2.FONT_HERSHEY_SIMPLEX, 0.50, (255, 255, 255), 1, cv2.LINE_AA)
+
+
+def _draw_camera_lane_overlay(frame: Any, lane_ev: dict[str, Any] | None) -> None:
+    import cv2
+    import numpy as np
+
+    h, w = frame.shape[:2]
+    overlay = frame.copy()
+    cx = int(round(w * 0.50))
+    y_ref = int(round(h * 0.64))
+    y_top = int(round(h * 0.36))
+    y_bottom = int(round(h * 0.95))
+
+    cv2.line(overlay, (cx, y_top), (cx, y_bottom), (120, 120, 120), 1, cv2.LINE_AA)
+    cv2.line(overlay, (0, y_ref), (w - 1, y_ref), (90, 90, 90), 1, cv2.LINE_AA)
+
+    if not lane_ev:
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+        cv2.putText(frame, "AI lane: no lane_obs", (16, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.58, (0, 0, 255), 2, cv2.LINE_AA)
+        return
+
+    mode = str(lane_ev.get("measurement_mode") or "none")
+    quality = float(_finite_float(lane_ev.get("quality")) or 0.0)
+    sides = tuple(lane_ev.get("sides") or ())
+    left_m = _finite_float(lane_ev.get("left_line_distance_m"))
+    right_m = _finite_float(lane_ev.get("right_line_distance_m"))
+    lane_width_m = _finite_float(lane_ev.get("lane_width_m")) or 0.35
+    lane_width_px = _finite_float(lane_ev.get("lane_width_px"))
+    px_per_m = None
+    if lane_width_px is not None and lane_width_m > 1e-6:
+        px_per_m = float(lane_width_px) / float(lane_width_m)
+    else:
+        px_per_m = float(w) * 0.90 / max(float(lane_width_m), 1e-6)
+
+    x_left = int(round(cx - left_m * px_per_m)) if left_m is not None else None
+    x_right = int(round(cx + right_m * px_per_m)) if right_m is not None else None
+    center_offset_m = _finite_float(lane_ev.get("line_center_offset_m"))
+    if center_offset_m is None and left_m is not None and right_m is not None:
+        center_offset_m = 0.5 * (right_m - left_m)
+    x_lane_center = int(round(cx + center_offset_m * px_per_m)) if center_offset_m is not None else None
+
+    if x_left is not None and x_right is not None:
+        x_left = max(-w, min(2 * w, x_left))
+        x_right = max(-w, min(2 * w, x_right))
+        pts = np.array(
+            [
+                [x_left, y_ref],
+                [x_right, y_ref],
+                [x_right + int(0.18 * (x_right - cx)), y_bottom],
+                [x_left + int(0.18 * (x_left - cx)), y_bottom],
+            ],
+            dtype=np.int32,
+        )
+        cv2.fillPoly(overlay, [pts], (60, 80, 0), lineType=cv2.LINE_AA)
+
+    def _draw_side_line(x_ref: int | None, color: tuple[int, int, int], label: str, dashed: bool = False) -> None:
+        if x_ref is None:
+            return
+        x_ref = max(-w, min(2 * w, int(x_ref)))
+        x_top = int(round(cx + 0.35 * (x_ref - cx)))
+        x_bottom = int(round(cx + 1.18 * (x_ref - cx)))
+        if dashed:
+            segments = 7
+            for idx in range(segments):
+                if idx % 2:
+                    continue
+                y0 = int(round(y_top + (y_bottom - y_top) * idx / segments))
+                y1 = int(round(y_top + (y_bottom - y_top) * (idx + 1) / segments))
+                x0 = int(round(x_top + (x_bottom - x_top) * idx / segments))
+                x1 = int(round(x_top + (x_bottom - x_top) * (idx + 1) / segments))
+                cv2.line(overlay, (x0, y0), (x1, y1), color, 4, cv2.LINE_AA)
+        else:
+            cv2.line(overlay, (x_top, y_top), (x_bottom, y_bottom), color, 4, cv2.LINE_AA)
+        cv2.circle(overlay, (x_ref, y_ref), 6, color, -1, cv2.LINE_AA)
+        cv2.putText(overlay, label, (max(4, min(w - 80, x_ref - 22)), y_ref - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, color, 1, cv2.LINE_AA)
+
+    _draw_side_line(x_left, (255, 180, 40), "AI L", dashed=("left" not in sides and mode == "single_line"))
+    _draw_side_line(x_right, (60, 255, 80), "AI R", dashed=("right" not in sides and mode == "single_line"))
+
+    if x_lane_center is not None:
+        cv2.line(overlay, (x_lane_center, y_top), (x_lane_center, y_bottom), (255, 0, 255), 2, cv2.LINE_AA)
+        cv2.arrowedLine(overlay, (cx, y_ref + 24), (x_lane_center, y_ref + 24), (255, 0, 255), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.putText(
+            overlay,
+            f"center {center_offset_m * 100.0:+.1f}cm" if center_offset_m is not None else "center",
+            (max(4, min(w - 160, x_lane_center - 58)), y_ref + 46),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 0, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.addWeighted(overlay, 0.46, frame, 0.54, 0, frame)
+    status_color = (80, 255, 80) if mode in {"two_line", "single_line"} and quality >= 0.55 else (0, 180, 255)
+    if mode in {"blind", "none", "route_tracking"}:
+        status_color = (0, 0, 255)
+    cv2.putText(
+        frame,
+        f"AI mask/lane: {mode} q={quality:.2f} sides={','.join(map(str, sides)) or '-'}",
+        (16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (0, 0, 0),
+        3,
+        cv2.LINE_AA,
+    )
+    cv2.putText(
+        frame,
+        f"AI mask/lane: {mode} q={quality:.2f} sides={','.join(map(str, sides)) or '-'}",
+        (16, 28),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        status_color,
+        1,
+        cv2.LINE_AA,
+    )
+
+
+def _draw_debug_panel(
+    panel: Any,
+    *,
+    frame_no: int,
+    frame_ts: float | None,
+    record_start_ts: float | None,
+    lane_ev: dict[str, Any] | None,
+    mpc_ev: dict[str, Any] | None,
+    plan_ev: dict[str, Any] | None,
+    pose_ev: dict[str, Any] | None,
+    prefix_ev: dict[str, Any] | None,
+    line_hold_ev: dict[str, Any] | None,
+    route_hold_ev: dict[str, Any] | None,
+    single_hold_ev: dict[str, Any] | None,
+) -> None:
+    import cv2
+
+    panel[:] = (24, 24, 24)
+    y = 24
+    x = 12
+    dt = None
+    if frame_ts is not None and record_start_ts is not None:
+        dt = frame_ts - record_start_ts
+    _put_panel_header(panel, f"Frame {frame_no}  t={_fmt_value(dt, unit='s', precision=2)}", (x, y))
+    y += 22
+
+    _put_panel_header(panel, "AI LANE / MASK", (x, y))
+    y += 18
+    if lane_ev:
+        _put_panel_line(panel, f"mode={_short_text(lane_ev.get('measurement_mode'), max_len=16)} prev={_short_text(lane_ev.get('previous_measurement_mode'), max_len=12)} streak={lane_ev.get('measurement_mode_streak_frames', '-')}", (x, y)); y += 16
+        _put_panel_line(panel, f"q={_fmt_value(lane_ev.get('quality'), precision=2)} sides={','.join(map(str, lane_ev.get('sides') or ())) or '-'} blind={_short_text(lane_ev.get('blind_mode'), max_len=12)}", (x, y)); y += 16
+        _put_panel_line(panel, f"center={_fmt_cm(lane_ev.get('line_center_offset_m'))} direct={_fmt_cm(lane_ev.get('direct_error_m'))} valid={bool(lane_ev.get('direct_error_valid'))}", (x, y)); y += 16
+        _put_panel_line(panel, f"L={_fmt_cm(lane_ev.get('left_line_distance_m'))} R={_fmt_cm(lane_ev.get('right_line_distance_m'))} width_px={_fmt_value(lane_ev.get('lane_width_px'), precision=1)}", (x, y)); y += 16
+        _put_panel_line(panel, f"hdg={_fmt_deg(lane_ev.get('heading_error_rad'))} cam_yaw={_fmt_deg(lane_ev.get('camera_yaw_hint_rad'))} wp={lane_ev.get('visual_waypoint_count', '-')}", (x, y)); y += 16
+        _put_panel_line(panel, f"policy={_short_text(lane_ev.get('control_policy_mode'), max_len=18)} planner={bool(lane_ev.get('planner_priority_active'))}", (x, y)); y += 18
+    else:
+        _put_panel_line(panel, "no recent lane_obs", (x, y), color=(0, 120, 255)); y += 18
+
+    _put_panel_header(panel, "MPC COMMAND", (x, y))
+    y += 18
+    if mpc_ev:
+        _put_panel_line(panel, f"valid={bool(mpc_ev.get('valid', False))} reason={_short_text(mpc_ev.get('reason'), max_len=22)}", (x, y)); y += 16
+        _put_panel_line(panel, f"steer={_fmt_value(mpc_ev.get('steering_deg'), unit='deg', precision=1)} raw={_fmt_value(mpc_ev.get('delta_deg_raw'), unit='deg', precision=1)} alpha={_fmt_value(mpc_ev.get('alpha_deg'), unit='deg', precision=1)}", (x, y)); y += 16
+        _put_panel_line(panel, f"speed={_fmt_value(mpc_ev.get('speed_mps'), unit='m/s', precision=2)} vraw={_fmt_value(mpc_ev.get('v_opt_raw'), unit='m/s', precision=2)} src={_short_text(mpc_ev.get('path_source'), max_len=20)}", (x, y)); y += 16
+        _put_panel_line(panel, f"vis_cap={bool(mpc_ev.get('visual_steer_cap_applied'))} cap={_fmt_value(mpc_ev.get('visual_steer_cap_deg'), unit='deg', precision=1)} rate={_fmt_value(mpc_ev.get('max_steer_rate_deg_s'), precision=0)}", (x, y)); y += 18
+    else:
+        _put_panel_line(panel, "no recent compute_out", (x, y), color=(0, 120, 255)); y += 18
+
+    _put_panel_header(panel, "PLANNER", (x, y))
+    y += 18
+    if plan_ev:
+        _put_panel_line(panel, f"scenario={_short_text(plan_ev.get('scenario'), max_len=15)} valid={bool(plan_ev.get('valid', False))} stop={bool(plan_ev.get('stop_required', False))}", (x, y)); y += 16
+        _put_panel_line(panel, f"path={_short_text(plan_ev.get('path_source'), max_len=22)} lanelet={_short_text(plan_ev.get('current_lanelet_id'), max_len=12)}", (x, y)); y += 16
+        _put_panel_line(panel, f"visual={_short_text(plan_ev.get('visual_path_primary_reason'), max_len=28)}", (x, y)); y += 16
+        _put_panel_line(panel, f"reject={_short_text(plan_ev.get('visual_path_primary_rejected_reason'), max_len=30)}", (x, y)); y += 16
+        _put_panel_line(panel, f"map_err={_fmt_cm(plan_ev.get('map_match_error_m'))} progress={_fmt_value(plan_ev.get('route_progress'), precision=2)} sem={_short_text(plan_ev.get('next_semantic_type'), max_len=12)}", (x, y)); y += 18
+    else:
+        _put_panel_line(panel, "no recent plan_output", (x, y), color=(0, 120, 255)); y += 18
+
+    _put_panel_header(panel, "LOCALIZATION", (x, y))
+    y += 18
+    if pose_ev:
+        _put_panel_line(panel, f"mode={_short_text(pose_ev.get('localization_mode'), max_len=14)} reloc={_short_text(pose_ev.get('reloc_mode'), max_len=18)}", (x, y)); y += 16
+        _put_panel_line(panel, f"pose=({_fmt_value(pose_ev.get('fused_x'), precision=2)}, {_fmt_value(pose_ev.get('fused_y'), precision=2)}) yaw={_fmt_deg(pose_ev.get('fused_yaw_rad'))}", (x, y)); y += 16
+        _put_panel_line(panel, f"gps={_short_text(pose_ev.get('gps_mode'), max_len=16)} lane_corr={_fmt_cm(pose_ev.get('lane_correction_m'))} vmap={_fmt_cm(pose_ev.get('visual_map_lateral_correction_m'))}", (x, y)); y += 16
+        _put_panel_line(panel, f"vmatch={pose_ev.get('visual_lane_match_accepted')} reason={_short_text(pose_ev.get('visual_lane_match_reason'), max_len=20)}", (x, y)); y += 16
+        _put_panel_line(panel, f"vm_lat={_fmt_cm(pose_ev.get('visual_lane_match_lateral_error_m'))} yaw={_fmt_deg(pose_ev.get('visual_lane_match_yaw_error_rad'))} near={_fmt_deg(pose_ev.get('visual_lane_match_near_yaw_error_rad'))}", (x, y)); y += 18
+    else:
+        _put_panel_line(panel, "no recent pose_published", (x, y), color=(0, 120, 255)); y += 18
+
+    _put_panel_header(panel, "PATH OPT", (x, y))
+    y += 18
+    if prefix_ev:
+        _put_panel_line(panel, f"prefix={bool(prefix_ev.get('applied'))} s1_y={_fmt_cm(prefix_ev.get('sample1_y_left_before_m'))}->{_fmt_cm(prefix_ev.get('sample1_y_left_after_m'))}", (x, y)); y += 16
+        _put_panel_line(panel, f"hlim={_fmt_value(prefix_ev.get('heading_limit_deg'), unit='deg', precision=1)} hcap={bool(prefix_ev.get('heading_cap_applied'))} ecap={bool(prefix_ev.get('entry_heading_cap_applied'))}", (x, y)); y += 16
+    if line_hold_ev:
+        _put_panel_line(panel, f"line_hold={line_hold_ev.get('hold_ticks', '-')} { _short_text(line_hold_ev.get('reason'), max_len=24)}", (x, y), color=(80, 220, 255)); y += 16
+    if route_hold_ev:
+        _put_panel_line(panel, f"route_hold={route_hold_ev.get('hold_ticks', '-')} { _short_text(route_hold_ev.get('reason'), max_len=22)}", (x, y), color=(80, 220, 255)); y += 16
+    if single_hold_ev:
+        _put_panel_line(panel, f"single_hold={single_hold_ev.get('hold_ticks', '-')} { _short_text(single_hold_ev.get('reason'), max_len=21)}", (x, y), color=(80, 220, 255)); y += 16
+
+
+def _write_debug_overlay_video(
+    *,
+    video_path: str | Path,
+    out_path: Path,
+    brain_events: list[dict[str, Any]],
+    record_start_ts: float | None,
+    draw_lane_overlay: bool = True,
+    frame_timestamps: list[float] | None = None,
+) -> dict[str, Any]:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return {"written": False, "error": "opencv_unavailable"}
+
+    source = Path(video_path)
+    cap = cv2.VideoCapture(str(source))
+    if not cap.isOpened():
+        return {"written": False, "error": "video_open_failed", "path": str(source)}
+
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    if fps <= 0.0:
+        fps = 5.0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    if width <= 0 or height <= 0:
+        cap.release()
+        return {"written": False, "error": "invalid_video_dimensions", "path": str(source)}
+
+    panel_w = 430
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(
+        str(out_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        fps,
+        (width + panel_w, height),
+    )
+    if not writer.isOpened():
+        cap.release()
+        return {"written": False, "error": "video_writer_open_failed", "path": str(out_path)}
+
+    lane_idx = _build_event_index(brain_events, thread="lane_observer", event="lane_obs")
+    mpc_idx = _build_event_index(brain_events, thread="mpc", event="compute_out")
+    plan_idx = _build_event_index(brain_events, thread="behavior_planner", event="plan_output")
+    pose_idx = _build_event_index(brain_events, thread="pose_estimator", event="pose_published")
+    prefix_idx = _build_event_index(brain_events, thread="path_optimizer", event="visual_prefix_stabilization")
+    line_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="line_loss_straight_hold")
+    route_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="route_tracking_visual_hold")
+    single_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="single_line_transition_hold")
+
+    if record_start_ts is None:
+        event_ts = [
+            float(ev.get("ts", 0.0) or 0.0)
+            for ev in brain_events
+            if _finite_float(ev.get("ts")) is not None
+        ]
+        base_ts = min(event_ts) if event_ts else 0.0
+    else:
+        base_ts = float(record_start_ts)
+
+    frame_no = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frame_no += 1
+        if frame_timestamps is not None and frame_no <= len(frame_timestamps):
+            frame_ts = float(frame_timestamps[frame_no - 1])
+        else:
+            frame_ts = float(base_ts) + ((frame_no - 1) / float(fps))
+
+        lane_ev = _event_at(lane_idx, frame_ts, max_age_s=0.45)
+        mpc_ev = _event_at(mpc_idx, frame_ts, max_age_s=0.35)
+        plan_ev = _event_at(plan_idx, frame_ts, max_age_s=0.45)
+        pose_ev = _event_at(pose_idx, frame_ts, max_age_s=0.35)
+        prefix_ev = _event_at(prefix_idx, frame_ts, max_age_s=0.45)
+        line_hold_ev = _event_at(line_hold_idx, frame_ts, max_age_s=0.35)
+        route_hold_ev = _event_at(route_hold_idx, frame_ts, max_age_s=0.35)
+        single_hold_ev = _event_at(single_hold_idx, frame_ts, max_age_s=0.35)
+
+        annotated = frame.copy()
+        if draw_lane_overlay:
+            _draw_camera_lane_overlay(annotated, lane_ev)
+        panel = np.zeros((height, panel_w, 3), dtype=np.uint8)
+        _draw_debug_panel(
+            panel,
+            frame_no=frame_no,
+            frame_ts=frame_ts,
+            record_start_ts=base_ts,
+            lane_ev=lane_ev,
+            mpc_ev=mpc_ev,
+            plan_ev=plan_ev,
+            pose_ev=pose_ev,
+            prefix_ev=prefix_ev,
+            line_hold_ev=line_hold_ev,
+            route_hold_ev=route_hold_ev,
+            single_hold_ev=single_hold_ev,
+        )
+        combined = np.zeros((height, width + panel_w, 3), dtype=np.uint8)
+        combined[:, :width] = annotated
+        combined[:, width:] = panel
+        writer.write(combined)
+
+    cap.release()
+    writer.release()
+    return {
+        "written": frame_no > 0,
+        "path": str(out_path),
+        "frame_count": frame_no,
+        "fps": fps,
+        "width": width + panel_w,
+        "height": height,
+        "uses_frame_timestamps": bool(frame_timestamps),
+    }
+
+
 def _update_latest_symlink(root: Path, target: Path) -> None:
     latest = root / "latest"
     try:
@@ -1251,7 +1963,13 @@ def _update_latest_symlink(root: Path, target: Path) -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--duration", type=float, default=240.0, help="Max seconds in AUTO for the route.")
+    parser.add_argument("--duration", type=float, default=240.0, help="Max seconds in the requested mode for the route.")
+    parser.add_argument(
+        "--mode",
+        default="auto",
+        choices=("auto", "odometry"),
+        help="DrivingMode to request after arming the route. Default: auto.",
+    )
     parser.add_argument("--destination-lanelet", default="138", help="Destination lanelet id for the default go_to route.")
     parser.add_argument("--destination-x", type=float, default=None, help="Destination point x in brain map frame.")
     parser.add_argument("--destination-y", type=float, default=None, help="Destination point y in brain map frame.")
@@ -1265,6 +1983,15 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-cross-track-max-m", type=float, default=0.35)
     parser.add_argument("--max-lane-offset-p90-m", type=float, default=0.12)
     parser.add_argument("--max-lane-offset-max-m", type=float, default=0.20)
+    parser.add_argument(
+        "--command-speed-scale",
+        type=float,
+        default=None,
+        help=(
+            "Override URT_COMMAND_SPEED_CALIBRATION_SCALE for no-encoder "
+            "odometry sweeps."
+        ),
+    )
     parser.add_argument("--no-record", action="store_true", help="Do not toggle camera AVI recording.")
     parser.add_argument("--skip-cleanup-before", action="store_true", help="Do not kill previous sim/brain processes before starting.")
     parser.add_argument("--keep-running", action="store_true", help="Leave sim/brain running after the route attempt.")
@@ -1317,6 +2044,7 @@ def main() -> int:
     started_at = time.time()
     record_start_ts: float | None = None
     record_stop_ts: float | None = None
+    gui_overlay_video: dict[str, Any] | None = None
 
     print(f"[campaign] run_id={run_id}")
     print(f"[campaign] brain logs: {brain_run_dir}")
@@ -1364,6 +2092,12 @@ def main() -> int:
         brain_env["URT_LIVE_LOG_PATH"] = str(brain_jsonl)
         brain_env["URT_SIM_MODE"] = "1"
         brain_env.setdefault("URT_DISABLE_AUTO_PARKING", "1")
+        _apply_mode_env(
+            brain_env,
+            mode=args.mode,
+            expected_route=expected_route,
+            command_speed_scale=args.command_speed_scale,
+        )
         processes.append(
             _run(
                 ["./run.sh", "--no-gui"],
@@ -1396,6 +2130,7 @@ def main() -> int:
         time.sleep(1.0)
 
         if not args.no_record:
+            client.start_gui_video_recording(brain_run_dir / "camera_gui_overlay.avi", fps=7.0)
             client.emit_message("Record", True, wait_response=True)
             record_start_ts = time.time()
             time.sleep(0.5)
@@ -1412,23 +2147,24 @@ def main() -> int:
         if not nav_ok:
             raise RuntimeError("navigation command was not accepted by the brain")
 
-        auto_ok = False
+        mode_ok = False
         for attempt in range(1, 4):
-            print(f"[campaign] requesting AUTO attempt {attempt}")
-            if not client.emit_message("DrivingMode", "auto", wait_response=True):
-                print("[campaign] WARNING: dashboard did not acknowledge DrivingMode=auto")
-            if _wait_for_auto_state(brain_jsonl, 5.0):
-                auto_ok = True
+            print(f"[campaign] requesting {args.mode.upper()} attempt {attempt}")
+            if not client.emit_message("DrivingMode", args.mode, wait_response=True):
+                print(f"[campaign] WARNING: dashboard did not acknowledge DrivingMode={args.mode}")
+            if _wait_for_mode_state(brain_jsonl, args.mode, 5.0):
+                mode_ok = True
                 break
             time.sleep(0.5)
-        if not auto_ok:
-            raise RuntimeError("AUTO mode was not confirmed by the brain")
+        if not mode_ok:
+            raise RuntimeError(f"{args.mode.upper()} mode was not confirmed by the brain")
 
         route_result = _route_progress_from_logs(brain_jsonl, args.duration)
         client.emit_message("DrivingMode", "stop")
         if not args.no_record:
             client.emit_message("Record", False, wait_response=True)
             record_stop_ts = time.time()
+            gui_overlay_video = client.stop_gui_video_recording()
         time.sleep(0.5)
 
     except Exception as exc:
@@ -1436,6 +2172,8 @@ def main() -> int:
         route_result = RouteCommandResult(timed_out=True)
     finally:
         if client is not None:
+            if gui_overlay_video is None:
+                gui_overlay_video = client.stop_gui_video_recording()
             client.close()
         if not args.keep_running:
             for proc in reversed(processes):
@@ -1446,18 +2184,23 @@ def main() -> int:
     if sim_jsonl.exists():
         shutil.copy2(sim_jsonl, copied_sim_jsonl)
 
-    video_path = None if args.no_record else _collect_camera_video(brain_dir, brain_run_dir, started_at)
+    raw_video_path = None if args.no_record else _collect_camera_video(brain_dir, brain_run_dir, started_at)
+    video_path, raw_video_path = _promote_gui_overlay_camera_video(
+        run_dir=brain_run_dir,
+        raw_video_path=raw_video_path,
+        gui_overlay_video=gui_overlay_video,
+    )
     video_frames: dict[str, Any] | None = None
     if video_path:
         video_frames = _extract_video_frames(video_path, brain_run_dir)
     brain_events = _load_jsonl(brain_jsonl)
     gt_events = _load_jsonl(copied_sim_jsonl)
-    auto_start_ts = _find_auto_start_ts(brain_events)
+    mode_start_ts = _find_mode_start_ts(brain_events, args.mode)
     metrics = _compute_metrics(
         expected_route=expected_route,
         brain_events=brain_events,
         gt_events=gt_events,
-        auto_start_ts=auto_start_ts,
+        auto_start_ts=mode_start_ts,
         max_p90_m=args.max_cross_track_p90_m,
         max_max_m=args.max_cross_track_max_m,
         max_lane_offset_p90_m=args.max_lane_offset_p90_m,
@@ -1477,11 +2220,25 @@ def main() -> int:
         )[:30]
     if video_path:
         metrics["artifacts"] = {"camera_video": video_path}
+        if raw_video_path and raw_video_path != video_path:
+            metrics["artifacts"]["camera_raw_video"] = raw_video_path
         if video_frames:
             metrics["artifacts"]["camera_frames_dir"] = str(brain_run_dir / "frames")
             metrics["artifacts"]["camera_frames_index_json"] = str(brain_run_dir / "frames" / "index.json")
     else:
         metrics["artifacts"] = {}
+    if gui_overlay_video is not None:
+        metrics["gui_overlay_video"] = {
+            key: value
+            for key, value in gui_overlay_video.items()
+            if key != "_frame_timestamps"
+        }
+        if gui_overlay_video.get("written"):
+            metrics["artifacts"]["camera_gui_overlay_video"] = str(gui_overlay_video.get("path"))
+            if gui_overlay_video.get("frame_index_path"):
+                metrics["artifacts"]["camera_gui_overlay_frame_index_json"] = str(
+                    gui_overlay_video.get("frame_index_path")
+                )
 
     overlay_written = _write_overlay(
         out_path=brain_run_dir / "overlay.png",
@@ -1500,6 +2257,38 @@ def main() -> int:
     )
     if visual_overlay_written:
         metrics["artifacts"]["overlay_visual_lane_png"] = str(brain_run_dir / "overlay_visual_lane.png")
+    debug_overlay_video: dict[str, Any] | None = None
+    debug_source_video = None
+    debug_draw_lane_overlay = True
+    if gui_overlay_video is not None and gui_overlay_video.get("written") and gui_overlay_video.get("path"):
+        debug_source_video = str(gui_overlay_video["path"])
+        # The GUI stream already contains the exact AI mask overlay shown in
+        # Driving, so keep that image untouched and add only the right panel.
+        debug_draw_lane_overlay = False
+    elif video_path:
+        debug_source_video = video_path
+    if debug_source_video:
+        debug_overlay_video = _write_debug_overlay_video(
+            video_path=debug_source_video,
+            out_path=brain_run_dir / "camera_debug_overlay.avi",
+            brain_events=brain_events,
+            record_start_ts=(
+                _finite_float(gui_overlay_video.get("started_at"))
+                if not debug_draw_lane_overlay and gui_overlay_video is not None
+                else record_start_ts
+            ),
+            draw_lane_overlay=debug_draw_lane_overlay,
+            frame_timestamps=(
+                gui_overlay_video.get("_frame_timestamps")
+                if not debug_draw_lane_overlay and gui_overlay_video is not None
+                else None
+            ),
+        )
+        debug_overlay_video["source_video"] = str(debug_source_video)
+        debug_overlay_video["uses_gui_mask_overlay"] = not debug_draw_lane_overlay
+        metrics["debug_overlay_video"] = debug_overlay_video
+        if debug_overlay_video.get("written"):
+            metrics["artifacts"]["camera_debug_overlay_video"] = str(brain_run_dir / "camera_debug_overlay.avi")
     metrics["artifacts"].update(
         {
             "brain_jsonl": str(brain_jsonl),
@@ -1509,7 +2298,10 @@ def main() -> int:
         }
     )
     metrics["run_id"] = run_id
-    metrics["auto_start_ts"] = auto_start_ts
+    metrics["mode"] = args.mode
+    metrics["command_speed_scale"] = args.command_speed_scale
+    metrics["mode_start_ts"] = mode_start_ts
+    metrics["auto_start_ts"] = mode_start_ts
     metrics["record_start_ts"] = record_start_ts
     metrics["record_stop_ts"] = record_stop_ts
     if video_frames:

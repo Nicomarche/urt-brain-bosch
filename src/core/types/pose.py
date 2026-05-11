@@ -32,6 +32,25 @@ class Pose2D:
 
 
 @dataclass(frozen=True)
+class VisualLaneMatch:
+    """Resultado del matcher visual 2D contra la ruta/lanelets esperados."""
+
+    lanelet_id: str | None = None
+    lateral_error_m: float = 0.0
+    yaw_error_rad: float = 0.0
+    near_lateral_error_m: float = 0.0
+    near_yaw_error_rad: float = 0.0
+    max_abs_lateral_error_m: float = 0.0
+    max_abs_yaw_error_rad: float = 0.0
+    sample_count: int = 0
+    score: float = 1.0
+    confidence: float = 0.0
+    accepted: bool = False
+    reason: str = "unchecked"
+    source: str = "visual_lane_route_match"
+
+
+@dataclass(frozen=True)
 class PoseEstimate:
     """Salida pública del localizador.
 
@@ -76,3 +95,4 @@ class PoseEstimate:
     #     EKF descartó el GPS por outlier en los últimos updates.
     localization_mode: str = "dead_reckoning"
     gps_fix_quality: float = 0.0
+    visual_lane_match: VisualLaneMatch | None = None

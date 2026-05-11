@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 
+import cv2
 import numpy as np
 
 from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEngine
@@ -380,6 +381,81 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(guidance["guidance_mode"], "single_line_physical")
         self.assertFalse(guidance["single_line_prefer_center"])
         self.assertEqual(guidance["single_line_streak"], 5)
+
+    def test_build_local_mask_guidance_rejects_single_line_jump_after_two_line(self):
+        self.detector._last_local_ai_lane_width_px = 36.0
+        self.detector._last_local_mask_two_line_error_m = 0.0
+        self.detector._last_local_mask_two_line_error_monotonic = time.monotonic()
+        right_mask = self._mask_from_points([(50, 95), (50, 85), (50, 75), (50, 65), (50, 55)])
+
+        guidance = self.detector._build_local_mask_guidance(
+            {"left": None, "right": right_mask},
+            100,
+            100,
+            side_lines={"right": np.array([[50, 95, 50, 55]], dtype=np.int32)},
+        )
+
+        self.assertIsNone(guidance)
+        self.assertIn(
+            "single_line_error_jump_from_two_line",
+            self.detector._last_local_ai_mask_reject_reason,
+        )
+        self.assertGreater(
+            self.detector._last_local_ai_mask_reject_debug["transition_delta_m"],
+            0.05,
+        )
+
+    def test_detect_with_local_ai_does_not_fallback_after_transversal_guard(self):
+        self.detector._last_local_ai_lane_width_px = 36.0
+        self.detector._last_local_mask_two_line_error_m = 0.0
+        self.detector._last_local_mask_two_line_error_monotonic = time.monotonic()
+        right_mask = self._mask_from_points([(50, 95), (50, 85), (50, 75), (50, 65), (50, 55)])
+        self.detector._last_local_lane_payload = {
+            "lane_points": [],
+            "lane_side_points": {"left": [], "right": [[50, 95], [50, 85], [50, 75], [50, 65], [50, 55]]},
+            "lane_side_lines": {"right": [50, 95, 50, 55]},
+            "lane_side_sources": {"right": "guessed_single"},
+            "side_masks": {"left": None, "right": right_mask},
+            "lane_mask": right_mask.copy(),
+            "inference_time_ms": 12.0,
+            "frame_id": 18,
+            "timestamp": time.time(),
+            "model_ready": True,
+        }
+
+        avg_left, avg_right, _, _, returned_mask, debug_info = self.detector._detect_with_local_ai(
+            np.zeros((100, 100, 3), dtype=np.uint8)
+        )
+
+        self.assertIsNone(avg_left)
+        self.assertIsNone(avg_right)
+        self.assertNotIn("local_mask_guidance", debug_info)
+        self.assertEqual(debug_info["control_mode"], "mask_rejected")
+        self.assertEqual(debug_info["measurement_mode"], "none")
+        self.assertIn("single_line_transversal_guard", debug_info["mask_reject_reason"])
+        self.assertFalse(np.any(returned_mask))
+
+    def test_visual_lane_waypoints_are_not_built_after_transversal_guard(self):
+        self.detector._last_frame_size = (100, 100)
+        self.detector._last_local_lane_payload = {
+            "lane_side_points": {"left": [], "right": [[50, 95], [50, 85], [50, 75], [50, 65]]},
+            "frame_height": 100,
+            "frame_width": 100,
+        }
+        self.detector._last_frame_trace = {
+            "debug": {
+                "control_mode": "mask_rejected",
+                "measurement_mode": "none",
+                "mask_reject_reason": "single_line_transversal_guard:single_line_error_jump_from_two_line",
+            }
+        }
+        self.detector._extract_lane_polynomials_and_waypoints = lambda *args, **kwargs: self.fail(
+            "rejected mask must not become visual waypoints"
+        )
+
+        payload = self.detector._compute_visual_lane_waypoints_payload()
+
+        self.assertIsNone(payload)
 
     def test_detect_with_local_ai_prefers_raw_masks_when_enabled(self):
         left_mask = self._mask_from_points([(30, 95), (29, 85), (28, 75), (26, 65), (24, 55)])
@@ -945,6 +1021,203 @@ class AILocalLaneSideMappingTests(unittest.TestCase):
         self.assertEqual(guarded, 3.0)
 
 class LocalPerceptionEngineLaneGeometryTests(unittest.TestCase):
+    def test_build_lane_geometry_discards_horizontal_segment_only(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(mask, (35, 119), (70, 35), 255, 7)
+        cv2.line(mask, (70, 35), (128, 36), 255, 7)
+        side_candidates = {
+            "left": [
+                {
+                    "mask": mask,
+                    "x_center": 58.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "right": [],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, _, lane_mask = engine._build_lane_geometry(
+            side_candidates
+        )
+
+        cleaned = side_masks["left"]
+        self.assertIsNotNone(cleaned)
+        self.assertFalse(np.any(cleaned[30:43, 92:132]))
+        self.assertTrue(np.any(cleaned[82:119, 32:55]))
+        self.assertTrue(lane_points)
+        self.assertTrue(lane_side_points["left"])
+        self.assertTrue(lane_side_lines["left"])
+        self.assertTrue(np.array_equal(lane_mask, cleaned))
+
+    def test_build_lane_geometry_discards_shallow_transversal_segment_only(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(mask, (35, 119), (70, 35), 255, 7)
+        cv2.line(mask, (70, 35), (128, 65), 255, 7)
+        side_candidates = {
+            "left": [
+                {
+                    "mask": mask,
+                    "x_center": 58.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "right": [],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, _, lane_mask = engine._build_lane_geometry(
+            side_candidates
+        )
+
+        cleaned = side_masks["left"]
+        self.assertIsNotNone(cleaned)
+        self.assertLess(np.count_nonzero(cleaned[45:72, 92:132]), 5)
+        self.assertTrue(np.any(cleaned[82:119, 32:55]))
+        self.assertTrue(lane_points)
+        self.assertTrue(lane_side_points["left"])
+        self.assertTrue(lane_side_lines["left"])
+        self.assertTrue(np.array_equal(lane_mask, cleaned))
+
+    def test_build_lane_geometry_discards_far_oblique_transversal_segment_only(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(mask, (35, 119), (70, 35), 255, 7)
+        cv2.line(mask, (70, 35), (128, 75), 255, 7)
+        side_candidates = {
+            "left": [
+                {
+                    "mask": mask,
+                    "x_center": 58.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "right": [],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, _, lane_mask = engine._build_lane_geometry(
+            side_candidates
+        )
+
+        cleaned = side_masks["left"]
+        self.assertIsNotNone(cleaned)
+        self.assertLess(np.count_nonzero(cleaned[50:82, 92:132]), 10)
+        self.assertTrue(np.any(cleaned[82:119, 32:55]))
+        self.assertTrue(lane_points)
+        self.assertTrue(lane_side_points["left"])
+        self.assertTrue(lane_side_lines["left"])
+        self.assertTrue(np.array_equal(lane_mask, cleaned))
+
+    def test_build_lane_geometry_keeps_near_oblique_lane_segment(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(mask, (45, 119), (112, 82), 255, 7)
+        side_candidates = {
+            "right": [
+                {
+                    "mask": mask,
+                    "x_center": 86.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "left": [],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, _, lane_mask = engine._build_lane_geometry(
+            side_candidates
+        )
+
+        cleaned = side_masks["right"]
+        self.assertIsNotNone(cleaned)
+        self.assertGreater(np.count_nonzero(cleaned), np.count_nonzero(mask) * 0.85)
+        self.assertTrue(lane_points)
+        self.assertTrue(lane_side_points["right"])
+        self.assertTrue(lane_side_lines["right"])
+        self.assertTrue(np.array_equal(lane_mask, cleaned))
+
+    def test_build_lane_geometry_rejects_crossing_transversal_pair(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        left_mask = np.zeros((120, 160), dtype=np.uint8)
+        right_mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(left_mask, (34, 119), (78, 52), 255, 7)
+        cv2.line(right_mask, (134, 119), (62, 42), 255, 7)
+        side_candidates = {
+            "left": [
+                {
+                    "mask": left_mask,
+                    "x_center": 56.0,
+                    "confidence": 0.95,
+                    "side_source": "guessed_single",
+                }
+            ],
+            "right": [
+                {
+                    "mask": right_mask,
+                    "x_center": 98.0,
+                    "confidence": 0.95,
+                    "side_source": "guessed_single",
+                }
+            ],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = (
+            engine._build_lane_geometry(side_candidates)
+        )
+
+        self.assertIsNotNone(side_masks["left"])
+        self.assertIsNone(side_masks["right"])
+        self.assertEqual(len(lane_points), 1)
+        self.assertTrue(lane_side_points["left"])
+        self.assertEqual(lane_side_points["right"], [])
+        self.assertTrue(lane_side_lines["left"])
+        self.assertEqual(lane_side_lines["right"], [])
+        self.assertEqual(lane_side_sources["right"], "rejected_crossing_pair")
+        self.assertTrue(np.array_equal(lane_mask, side_masks["left"]))
+
+    def test_build_lane_geometry_keeps_converging_non_crossing_pair(self):
+        engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
+        left_mask = np.zeros((120, 160), dtype=np.uint8)
+        right_mask = np.zeros((120, 160), dtype=np.uint8)
+        cv2.line(left_mask, (35, 119), (68, 45), 255, 7)
+        cv2.line(right_mask, (128, 119), (94, 45), 255, 7)
+        side_candidates = {
+            "left": [
+                {
+                    "mask": left_mask,
+                    "x_center": 52.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+            "right": [
+                {
+                    "mask": right_mask,
+                    "x_center": 111.0,
+                    "confidence": 0.95,
+                    "side_source": "explicit_class",
+                }
+            ],
+        }
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = (
+            engine._build_lane_geometry(side_candidates)
+        )
+
+        self.assertIsNotNone(side_masks["left"])
+        self.assertIsNotNone(side_masks["right"])
+        self.assertEqual(len(lane_points), 2)
+        self.assertTrue(lane_side_points["left"])
+        self.assertTrue(lane_side_points["right"])
+        self.assertTrue(lane_side_lines["left"])
+        self.assertTrue(lane_side_lines["right"])
+        self.assertEqual(lane_side_sources["left"], "explicit_class")
+        self.assertEqual(lane_side_sources["right"], "explicit_class")
+        self.assertTrue(np.any(lane_mask))
+
     def test_build_lane_geometry_collapses_overlapping_sides_to_single_lane(self):
         engine = LocalPerceptionEngine.__new__(LocalPerceptionEngine)
         duplicate_mask = AILocalLaneSideMappingTests._mask_from_points(

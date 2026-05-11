@@ -18,7 +18,7 @@ Categories:
 
 # ---- Outgoing (GUI → backend), wrapped as {"Name": <CMD>, "Value": ...} ----
 CMD_KLEM = "Klem"                            # "0" / "15" / "30"
-CMD_DRIVING_MODE = "DrivingMode"             # "stop" / "manual" / "legacy" / "auto" / "parking"
+CMD_DRIVING_MODE = "DrivingMode"             # "stop" / "manual" / "legacy" / "auto" / "odometry" / "parking"
 CMD_SPEED = "SpeedMotor"                     # int -50..+50
 CMD_STEER = "SteerMotor"                     # int (tenths of deg) -600..+600 in sim, ±250 hw
 CMD_BRAKE = "Brake"                          # bool
@@ -77,6 +77,7 @@ MODE_STOP = "stop"
 MODE_MANUAL = "manual"
 MODE_LEGACY = "legacy"
 MODE_AUTO = "auto"
+MODE_ODOMETRY = "odometry"
 MODE_PARKING = "parking"
 
 # ---- KL switch positions --------------------------------------------------

@@ -9,6 +9,58 @@ import os as _os, sys as _sys
 # disable cv2 GUI windows that crash with the headless pip-installed OpenCV.
 _SIM_MODE = _os.environ.get("URT_SIM_MODE", "1" if _sys.platform == "darwin" else "0") == "1"
 
+
+def _argv_value(*names: str):
+    """Read simple ROS-style/config-style CLI overrides from sys.argv."""
+    normalized = {str(name).strip().lstrip("-") for name in names if str(name).strip()}
+    argv = list(getattr(_sys, "argv", []) or [])
+    for idx, arg in enumerate(argv[1:]):
+        item = str(arg)
+        if ":=" in item:
+            key, value = item.split(":=", 1)
+            if key.strip().lstrip("-") in normalized:
+                return value
+        if item.startswith("--") and "=" in item:
+            key, value = item[2:].split("=", 1)
+            if key.strip() in normalized:
+                return value
+        if item.startswith("--") and item[2:].strip() in normalized and idx + 2 < len(argv):
+            return argv[idx + 2]
+    return None
+
+
+def _setting_raw(*names: str, env: tuple[str, ...] = ()):
+    arg_value = _argv_value(*names)
+    if arg_value is not None:
+        return arg_value
+    for key in env:
+        if key in _os.environ:
+            return _os.environ[key]
+    return None
+
+
+def _setting_bool(default: bool, *names: str, env: tuple[str, ...] = ()) -> bool:
+    raw = _setting_raw(*names, env=env)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _setting_float(default, *names: str, env: tuple[str, ...] = ()):
+    raw = _setting_raw(*names, env=env)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+_REAL_ARG = _argv_value("real")
+if _REAL_ARG is not None:
+    _SIM_MODE = str(_REAL_ARG).strip().lower() not in {"1", "true", "yes", "on"}
+SIM_SUBMODEL = _setting_bool(True, "subModel", env=("URT_SIM_SUBMODEL",))
+
 # ===================== PHYSICAL DIMENSIONS =====================
 # Lane and road geometry (BFMC spec)
 LANE_WIDTH_CM = 35.0           # carril: distancia entre bordes interiores de líneas
@@ -25,6 +77,23 @@ LANE_VISUAL_MIN_POLY_POINTS = 8                 # mínimo de muestras por línea
 LANE_VISUAL_POLY_DEGREE_HIGH = 3                # grado del polinomio con ≥12 muestras
 LANE_VISUAL_POLY_DEGREE_LOW = 2                 # grado con <12 muestras (evita overshoot)
 LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH = 0.55 # quality mínima para usar waypoints como path
+LANE_VISUAL_TWO_LINE_PRIMARY_MIN_POINTS = 4      # two-line confiable no debe caer a mapa por baja densidad temporal
+LANE_VISUAL_PRIMARY_ENABLED = _setting_bool(
+    True,
+    "lane_visual_primary",
+    env=("LANE_VISUAL_PRIMARY_ENABLED", "URT_LANE_VISUAL_PRIMARY"),
+)
+LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY = 0.75
+LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_STREAK_FRAMES = 6
+LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_ENABLED = True
+LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_MIN_QUALITY = 0.82
+LANE_VISUAL_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M = 0.05
+LANE_VISUAL_TWO_LINE_ERROR_MEMORY_MAX_AGE_S = 0.75
+LANE_VISUAL_SINGLE_LINE_SIDE_MEMORY_MAX_AGE_S = 0.85
+LANE_VISUAL_SINGLE_LINE_MAX_PREFIX_ABS_Y_M = (LANE_WIDTH_CM / 200.0) + 0.08
+LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG = 32.0
+LANE_VISUAL_SINGLE_LINE_REQUIRE_MAP_MATCH_WITH_ROUTE = True
+LANE_VISUAL_PRIMARY_PRECISION_ZONE_M = 0.45
 
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
@@ -371,11 +440,66 @@ TRACKING_INTERSECTION_LOOKAHEAD_M = 0.40
 # jumping into the next curve before the car actually reaches the node.
 TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 
+# Default localization profile used by Auto.
+#
+# Auto keeps the classic behavior: use encoder/CurrentSpeed when available and
+# accept GPS after validation. The UI Odometry mode overrides these at runtime:
+# no GPS and no encoder, advancing from SpeedMotor command + IMU yaw.
+#
+# Overrides:
+#   URT_USE_ENCODER=0 / use_encoder:=false
+#   URT_USE_GPS=0     / use_gps:=false
+TRACKING_USE_ENCODER = _setting_bool(
+    True,
+    "use_encoder",
+    env=("URT_USE_ENCODER", "TRACKING_USE_ENCODER"),
+)
+TRACKING_USE_GPS = _setting_bool(
+    True,
+    "use_gps",
+    env=("URT_USE_GPS", "TRACKING_USE_GPS", "GPS_ENABLED"),
+)
+
+# Initial pose override for no-GPS starts. Values are in the same map/world
+# frame used by the OSM route graph; yaw is radians. These mirror the ROS launch
+# style names for convenience:
+#   x0:=3.83 y0:=0.376 yaw0:=3.14159
+TRACKING_START_X = _setting_float(None, "x0", env=("URT_X0", "URT_START_X"))
+TRACKING_START_Y = _setting_float(None, "y0", env=("URT_Y0", "URT_START_Y"))
+TRACKING_START_YAW_RAD = _setting_float(
+    None,
+    "yaw0",
+    env=("URT_YAW0", "URT_START_YAW_RAD"),
+)
+TRACKING_START_YAW_DEG = _setting_float(
+    None,
+    "yaw0_deg",
+    env=("URT_YAW0_DEG", "URT_START_YAW_DEG"),
+)
+
 # Speed scale applied to the encoder reading before dead-reckoning integration.
 # 1.0 = use encoder speed as-is.  If the virtual car advances faster than the
 # real one, reduce this value (e.g. 0.85).  If it lags behind, increase it.
 # Typical range: 0.7 – 1.0 (wheel slip, encoder calibration, actuator lag).
 TRACKING_DR_SPEED_SCALE = 1.0
+
+# Speed scale applied only when odometry uses the commanded SpeedMotor value.
+# Calibration routine:
+#   1) command 0.20 m/s for 5 s, measure real distance
+#   2) command 0.25 m/s for 5 s, measure real distance
+#   3) command 0.30 m/s for 5 s, measure real distance
+#   factor = mean(real_distance / (commanded_speed * 5.0))
+# Then set URT_COMMAND_SPEED_CALIBRATION_SCALE=<factor>.
+TRACKING_COMMAND_SPEED_CALIBRATION_SCALE = _setting_float(
+    1.0,
+    "command_speed_scale",
+    "velocity_command_scale",
+    env=(
+        "URT_COMMAND_SPEED_CALIBRATION_SCALE",
+        "URT_VELOCITY_COMMAND_SCALE",
+        "TRACKING_COMMAND_SPEED_CALIBRATION_SCALE",
+    ),
+)
 
 # Steering gain used by dead reckoning.  1.0 = trust the measured steering
 # angle directly; values > 1.0 amplify the effective wheel angle.
@@ -510,7 +634,7 @@ LOCSYS_DEVICE_ID     = 1               # ID del coche en la red BFMC (1–4)
 SIM_LOCSYS_HOST      = "localhost"
 SIM_LOCSYS_PORT      = 4691
 
-GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
+GPS_ENABLED          = TRACKING_USE_GPS # habilitar threadLocSys (sim + competencia)
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
 
 # DEPRECATED: el bridge nativo ahora hace toda la conversión `brain_map ↔ gz`
@@ -578,6 +702,24 @@ BEHAVIOR_MAX_SPEED_RATE_MPS2 = 0.25
 # A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~8 ticks (0.4 s).
 # Bajar si el auto sigue oscilando; subir si es demasiado lento en curvas.
 BEHAVIOR_MAX_STEER_RATE_DEG_S = 60.0
+
+# Cuando el path primario viene de la cámara, el control lateral debe entrar
+# como corrección fina, no como giro máximo hacia el centro visual instantáneo.
+BEHAVIOR_VISUAL_PRIMARY_MAX_STEER_DEG = 10.0
+BEHAVIOR_VISUAL_PRIMARY_RECOVERY_MAX_STEER_DEG = 16.0
+BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_START_M = 0.10
+BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_FULL_M = 0.15
+BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_DEG = 16.0
+BEHAVIOR_VISUAL_PRIMARY_CURVE_STEER_FULL_DEG = 16.0
+BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_RATE_DEG_S = 60.0
+BEHAVIOR_VISUAL_PRIMARY_MAX_STEER_RATE_DEG_S = 35.0
+BEHAVIOR_VISUAL_PRIMARY_RECOVERY_MAX_STEER_RATE_DEG_S = 60.0
+BEHAVIOR_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS = 24
+BEHAVIOR_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M = 0.12
+BEHAVIOR_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED = True
+BEHAVIOR_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M = 20.0
+BEHAVIOR_VISUAL_ABSURD_CORRIDOR_VIOLATION_M = 0.50
+BEHAVIOR_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M = 0.08
 
 # Lookahead del PurePursuitSolver (fallback sin acados).
 # Con el piso reglamentario de 20 cm/s, 30 cm de lookahead abre demasiado la
@@ -675,11 +817,53 @@ TRACKING_VISUAL_STOPLINE_MAX_VISIBLE_STREAK = 6
 
 TRACKING_SPEED_FEEDBACK_TIMEOUT_S = 0.35
 TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
-TRACKING_COMMAND_SPEED_FALLBACK_SCALE = 1.0
+TRACKING_COMMAND_SPEED_FALLBACK_SCALE = TRACKING_COMMAND_SPEED_CALIBRATION_SCALE
 # True = si falta encoder reciente, el pose estimator puede propagar la pose con
 # el último comando de velocidad fresco en lugar de congelar el DR.
 TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = True
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
+
+# GPS is optional and never authoritative by default. When enabled, the pose
+# estimator accepts a locsys fix only after several nearby samples and after
+# checking it against the current dead-reckoning pose.
+LOCALIZATION_GPS_AUTHORITY = (
+    _setting_raw(
+        "localization_gps_authority",
+        "gps_authority",
+        env=("LOCALIZATION_GPS_AUTHORITY", "URT_GPS_AUTHORITY"),
+    )
+    or "init_recovery_soft"
+)
+TRACKING_GPS_VALIDATION_ENABLED = True
+TRACKING_GPS_SAMPLE_WINDOW = 5
+TRACKING_GPS_MIN_SAMPLES = 3
+TRACKING_GPS_ZERO_EPS_M = 1e-3
+TRACKING_GPS_OUTLIER_DISTANCE_M = 0.60
+TRACKING_GPS_MAX_JUMP_M = 1.00
+TRACKING_GPS_MAX_EXPECTED_ERROR_M = 0.75
+TRACKING_GPS_SOFT_GAIN = 0.25
+TRACKING_GPS_SOFT_MAX_STEP_M = 0.020
+TRACKING_GPS_RECOVERY_MAX_STEP_M = 0.050
+TRACKING_GPS_RECOVERY_ERROR_M = 0.30
+TRACKING_GPS_SOFT_LATERAL_GAIN = 0.20
+TRACKING_GPS_VISUAL_LATERAL_BLOCK_M = 0.05
+TRACKING_GPS_VISUAL_PROTECT_QUALITY = 0.55
+
+# Mini-YabLoc 2D: compara la curva visual del carril contra la ventana de ruta
+# activa. No aplica offsets fijos por escenario; solo produce una medición con
+# confianza para telemetría/gating.
+VISUAL_MAP_MATCH_ENABLED = True
+VISUAL_MAP_MATCH_MIN_CONFIDENCE = 0.45
+VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M = float(LANE_WIDTH_CM) / 200.0
+VISUAL_MAP_MATCH_MAX_YAW_ERROR_DEG = 6.0
+VISUAL_MAP_MATCH_MAX_SAMPLE_YAW_ERROR_DEG = 8.0
+VISUAL_MAP_MATCH_PRIMARY_MAX_YAW_ERROR_DEG = 15.0
+VISUAL_MAP_MATCH_PRIMARY_MAX_SAMPLE_YAW_ERROR_DEG = 20.0
+VISUAL_MAP_MATCH_CORRECTION_GAIN = 0.20
+VISUAL_MAP_MATCH_CORRECTION_STEP_MAX_M = 0.008
+VISUAL_MAP_MATCH_CORRECTION_COOLDOWN_S = 0.10
+VISUAL_MAP_MATCH_YAW_CORRECTION_GAIN = 0.10
+VISUAL_MAP_MATCH_YAW_CORRECTION_STEP_MAX_DEG = 0.50
 
 # Graph node attr that represents a physical stopline. Graph guidance is only
 # allowed to take authority in this exact node type.
@@ -945,6 +1129,17 @@ LOCAL_AI_MAX_RESULT_AGE = 0.35
 # Filtro post-proceso para evitar explosiones de cajas en engines TensorRT.
 LOCAL_AI_NMS_IOU = 0.45
 LOCAL_AI_MAX_DETECTIONS = 80
+# Guarda post-proceso: si la segmentacion de carril se pega a una linea
+# transversal/horizontal, borrar solo ese tramo antes de calcular geometria.
+LOCAL_AI_DISCARD_HORIZONTAL_LANE_SEGMENTS = True
+LOCAL_AI_HORIZONTAL_SEGMENT_MAX_ANGLE_DEG = 22.0
+LOCAL_AI_HORIZONTAL_SEGMENT_FAR_MAX_ANGLE_DEG = 40.0
+LOCAL_AI_HORIZONTAL_SEGMENT_FAR_Y_MAX_RATIO = 0.60
+LOCAL_AI_HORIZONTAL_SEGMENT_MIN_LENGTH_RATIO = 0.12
+LOCAL_AI_HORIZONTAL_SEGMENT_ERASE_THICKNESS_PX = 11
+LOCAL_AI_REJECT_CROSSING_LANE_PAIRS = True
+LOCAL_AI_CROSSING_LANE_MIN_CROSS_PX = 5.0
+LOCAL_AI_CROSSING_LANE_Y_MAX_RATIO = 0.70
 # Señales: umbral y limites de salida/debug.
 LOCAL_AI_SIGN_MIN_CONFIDENCE = 0.55
 LOCAL_AI_SIGN_MAX_DETECTIONS = 20

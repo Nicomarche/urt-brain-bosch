@@ -150,6 +150,100 @@ def test_path_optimizer_clamps_route_back_inside_lanelet_corridor() -> None:
     assert np.all(out.target_path[1:, 1] >= out.drivable_right_bound[1:, 1] - 1e-6)
 
 
+def test_path_optimizer_stabilizes_route_prefix_zigzag() -> None:
+    ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        horizon_n=8,
+        dt=0.05,
+        lanelet_map=None,
+        nominal_speed_mps=0.20,
+    )
+    raw_path = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [-0.010, 0.004, 0.0],
+            [0.010, -0.004, 0.0],
+            [0.035, -0.030, 0.0],
+            [0.080, -0.055, 0.0],
+            [0.160, -0.070, 0.0],
+        ],
+        dtype=float,
+    )
+
+    out = PathOptimizer().optimize(
+        BehaviorPathPlan(
+            timestamp=ctx.now_s,
+            raw_path=raw_path,
+            base_speed_profile=np.full(ctx.horizon_n, 0.20, dtype=float),
+            scenario_name=ScenarioName.INTERSECTION.value,
+            valid=True,
+            notes={"path_source": "route_waypoints"},
+        ),
+        ctx,
+    )
+
+    assert out.notes["route_prefix_stabilization_applied"] is True
+    assert out.notes["route_prefix_sample1_x_fwd_after_m"] > 0.0
+    for idx in range(1, min(5, out.target_path.shape[0])):
+        body_x, body_y = path_optimizer_module._world_to_body_xy(
+            point_xy=out.target_path[idx, :2],
+            pose_x=ctx.pose.fused_pose.x,
+            pose_y=ctx.pose.fused_pose.y,
+            pose_yaw=ctx.pose.fused_pose.yaw,
+        )
+        assert body_x > 0.0
+        assert abs(body_y) <= math.tan(math.radians(25.0)) * body_x + 1e-6
+
+
+def test_path_optimizer_stabilizes_route_prefix_by_forward_progress() -> None:
+    ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        horizon_n=10,
+        dt=0.05,
+        lanelet_map=None,
+        nominal_speed_mps=0.20,
+    )
+    raw_path = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.09, -0.30, 0.0],
+            [0.14, -0.29, 0.0],
+            [0.22, -0.24, 0.0],
+            [0.38, -0.14, 0.0],
+            [0.55, -0.06, 0.0],
+        ],
+        dtype=float,
+    )
+
+    out = PathOptimizer().optimize(
+        BehaviorPathPlan(
+            timestamp=ctx.now_s,
+            raw_path=raw_path,
+            base_speed_profile=np.full(ctx.horizon_n, 0.20, dtype=float),
+            scenario_name=ScenarioName.INTERSECTION.value,
+            valid=True,
+            notes={"path_source": "route_waypoints"},
+        ),
+        ctx,
+    )
+
+    assert out.notes["route_prefix_stabilization_applied"] is True
+    assert out.notes["route_prefix_stabilization_points"] >= 2
+    for idx in range(1, min(8, out.target_path.shape[0])):
+        body_x, body_y = path_optimizer_module._world_to_body_xy(
+            point_xy=out.target_path[idx, :2],
+            pose_x=ctx.pose.fused_pose.x,
+            pose_y=ctx.pose.fused_pose.y,
+            pose_yaw=ctx.pose.fused_pose.yaw,
+        )
+        assert body_x > 0.0
+        assert abs(body_y) <= math.tan(math.radians(25.0)) * body_x + 1e-6
+
+
 def test_path_optimizer_projects_visual_reentry_inside_lanelet_corridor() -> None:
     lanelet_map = from_track_graph(
         _build_track_graph(
@@ -276,12 +370,179 @@ def test_path_optimizer_preserves_visual_path_priority_inside_lanelet_corridor(
 
     out = PathOptimizer().optimize(plan, ctx)
 
-    assert out.notes["corridor_source"] == "lanelet_bounds"
     assert out.notes["corridor_visual_lane_guidance_active"] is True
     assert out.notes["corridor_visual_path_priority_active"] is True
-    assert out.notes["corridor_visual_lane_guidance_max_limit_m"] > 0.085
-    assert float(out.target_path[1, 1]) < -0.085
-    assert float(out.target_path[1, 1]) > -0.11
+    assert out.notes["visual_lane_error_m"] == pytest.approx(0.12, abs=1e-6)
+    assert out.notes["visual_lane_quality"] == pytest.approx(quality, abs=1e-6)
+    if measurement_mode == "two_line":
+        assert out.notes["containment_mode"] == "visual_two_line_corridor_override"
+        assert out.notes["corridor_source"] == "visual_two_line_override"
+        assert out.notes["visual_primary_corridor_override_active"] is True
+        assert float(out.target_path[1, 1]) == pytest.approx(-0.12, abs=1e-6)
+    else:
+        assert out.notes["corridor_source"] == "lanelet_bounds"
+        assert out.notes["corridor_visual_lane_guidance_max_limit_m"] > 0.085
+        assert float(out.target_path[1, 1]) < -0.085
+        assert float(out.target_path[1, 1]) > -0.11
+
+
+def test_path_optimizer_holds_previous_visual_path_on_absurd_two_line_corridor_jump() -> None:
+    lanelet_map = from_track_graph(
+        _build_track_graph(
+            [("n1", 0.0, 0.0, 0), ("n2", 1.0, 0.0, 0), ("n3", 2.0, 0.0, 0)]
+        ),
+        step_m=0.20,
+    )
+    optimizer = PathOptimizer()
+    ctx = _with_route_signature(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            horizon_n=12,
+            dt=0.1,
+            lanelet_map=lanelet_map,
+            nominal_speed_mps=0.10,
+            current_lanelet_id="n1->n2",
+            next_lanelet_ids=("n2->n3",),
+        ),
+        route_id="route-visual-absurd",
+        current_lanelet_id="n1->n2",
+        next_lanelet_ids=("n2->n3",),
+    )
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            measurement_mode="two_line",
+            detected_sides=("left", "right"),
+            direct_error_valid=True,
+            direct_error_m=0.08,
+            quality=1.0,
+            planner_priority_active=True,
+            control_policy_mode="VISUAL_ASSIST",
+        ),
+    )
+    good_plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, -0.08, 0.0],
+                [0.5, -0.08, 0.0],
+                [1.0, -0.08, 0.0],
+                [1.5, -0.08, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    good_out = optimizer.optimize(good_plan, ctx)
+    assert good_out.notes["containment_mode"] == "visual_two_line_corridor_override"
+
+    bad_plan = BehaviorPathPlan(
+        timestamp=ctx.now_s + 0.1,
+        raw_path=np.array(
+            [
+                [0.0, 50.0, 0.0],
+                [0.5, 50.0, 0.0],
+                [1.0, 50.0, 0.0],
+                [1.5, 50.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    bad_out = optimizer.optimize(bad_plan, ctx)
+
+    assert bad_out.notes["containment_mode"] == "visual_two_line_previous_hold"
+    assert bad_out.notes["visual_primary_previous_hold_active"] is True
+    assert bad_out.notes["used_prev_safe_path"] is True
+    np.testing.assert_allclose(bad_out.target_path[:3, :2], good_out.target_path[:3, :2], atol=1e-6)
+
+
+def test_path_optimizer_holds_previous_visual_path_on_absurd_single_line_corridor_jump() -> None:
+    lanelet_map = from_track_graph(
+        _build_track_graph(
+            [("n1", 0.0, 0.0, 0), ("n2", 1.0, 0.0, 0), ("n3", 2.0, 0.0, 0)]
+        ),
+        step_m=0.20,
+    )
+    optimizer = PathOptimizer()
+    ctx = _with_route_signature(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            horizon_n=12,
+            dt=0.1,
+            lanelet_map=lanelet_map,
+            nominal_speed_mps=0.10,
+            current_lanelet_id="n1->n2",
+            next_lanelet_ids=("n2->n3",),
+            map_match_error_m=0.0,
+        ),
+        route_id="route-single-line-absurd",
+        current_lanelet_id="n1->n2",
+        next_lanelet_ids=("n2->n3",),
+    )
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            measurement_mode="single_line",
+            detected_sides=("right",),
+            direct_error_valid=True,
+            direct_error_m=0.02,
+            quality=0.85,
+            planner_priority_active=True,
+            control_policy_mode="ROUTE_TRACKING",
+            lane_width_m=0.35,
+        ),
+    )
+    good_plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.02, 0.0],
+                [0.5, 0.02, 0.0],
+                [1.0, 0.02, 0.0],
+                [1.5, 0.02, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    good_out = optimizer.optimize(good_plan, ctx)
+
+    bad_plan = BehaviorPathPlan(
+        timestamp=ctx.now_s + 0.1,
+        raw_path=np.array(
+            [
+                [0.0, 50.0, 0.0],
+                [0.5, 50.0, 0.0],
+                [1.0, 50.0, 0.0],
+                [1.5, 50.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    bad_out = optimizer.optimize(bad_plan, ctx)
+
+    assert bad_out.notes["containment_mode"] == "visual_single_line_previous_hold"
+    assert bad_out.notes["visual_primary_previous_hold_active"] is True
+    assert bad_out.notes["used_prev_safe_path"] is True
+    np.testing.assert_allclose(bad_out.target_path[:3, :2], good_out.target_path[:3, :2], atol=1e-6)
 
 
 def test_path_optimizer_keeps_single_line_visual_path_when_route_match_is_far_off() -> None:
@@ -510,7 +771,7 @@ def test_single_line_visual_corridor_flip_override_keeps_visual_direction() -> N
     assert override.notes["single_line_visual_corridor_flip_clamped_heading_delta_deg"] > 6.0
 
 
-def test_path_optimizer_holds_previous_visual_path_when_route_tracking_jumps_behind_ego() -> None:
+def test_path_optimizer_holds_previous_curve_when_route_tracking_loses_lines_after_visual() -> None:
     optimizer = PathOptimizer()
 
     visual_pose = SimpleNamespace(x=5.722363642841962, y=5.525636788346178, yaw=-0.43400371594302667)
@@ -602,10 +863,18 @@ def test_path_optimizer_holds_previous_visual_path_when_route_tracking_jumps_beh
 
     route_out = optimizer.optimize(route_plan, route_ctx)
 
-    assert route_out.notes["route_tracking_visual_hold_applied"] is True
-    assert route_out.notes["route_tracking_visual_hold_reason"] == "route_sample1_behind_ego"
-    assert route_out.notes["containment_mode"] == "route_tracking_visual_hold"
-    np.testing.assert_allclose(route_out.target_path[:3, :2], visual_out.target_path[:3, :2], atol=1e-6)
+    assert route_out.notes["line_loss_straight_hold_applied"] is True
+    assert route_out.notes["line_loss_straight_hold_reason"] == "line_loss_after_visual"
+    assert route_out.notes["line_loss_hold_path_kind"] == "previous_visual_path"
+    assert route_out.notes["containment_mode"] == "line_loss_straight_hold"
+    body_x, body_y = path_optimizer_module._world_to_body_xy(
+        point_xy=route_out.target_path[1, :2],
+        pose_x=route_pose.x,
+        pose_y=route_pose.y,
+        pose_yaw=route_pose.yaw,
+    )
+    assert body_x > 0.0
+    assert body_y > 0.01
 
 
 def test_path_optimizer_holds_previous_visual_path_when_route_tracking_flips_heading_from_visual() -> None:
@@ -678,6 +947,279 @@ def test_path_optimizer_holds_previous_visual_path_when_route_tracking_flips_hea
     assert route_out.notes["route_tracking_visual_hold_route_heading_delta_deg"] > 6.0
     assert route_out.notes["route_tracking_visual_hold_visual_heading_delta_deg"] < -5.0
     np.testing.assert_allclose(route_out.target_path[:3, :2], visual_target_path[:3, :2], atol=1e-6)
+
+
+def test_path_optimizer_holds_straight_when_lines_are_temporarily_lost() -> None:
+    optimizer = PathOptimizer()
+    visual_ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=8,
+            dt=0.05,
+            lanelet_map=None,
+            nominal_speed_mps=0.20,
+            current_lanelet_id="lanelet-a",
+            next_lanelet_ids=("lanelet-b",),
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.0,
+            direct_error_valid=True,
+            quality=1.0,
+            measurement_mode="two_line",
+            planner_priority_active=True,
+        ),
+    )
+    visual_plan = BehaviorPathPlan(
+        timestamp=visual_ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.05, 0.00, 0.0],
+                [0.10, 0.00, 0.0],
+                [0.15, 0.00, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(visual_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    optimizer.optimize(visual_plan, visual_ctx)
+
+    route_ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=8,
+            dt=0.05,
+            lanelet_map=None,
+            nominal_speed_mps=0.20,
+            current_lanelet_id="lanelet-a",
+            next_lanelet_ids=("lanelet-b",),
+            map_match_error_m=0.0,
+        ),
+        lane_observation=LaneObservation(
+            quality=0.0,
+            measurement_mode="none",
+            direct_error_valid=False,
+        ),
+    )
+    route_plan = BehaviorPathPlan(
+        timestamp=route_ctx.now_s + 0.05,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.03, 0.18, 0.0],
+                [0.06, 0.28, 0.0],
+                [0.12, 0.35, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(route_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    route_out = optimizer.optimize(route_plan, route_ctx)
+
+    assert route_out.notes["line_loss_straight_hold_applied"] is True
+    assert route_out.notes["line_loss_straight_hold_reason"] == "line_loss_after_visual"
+    assert route_out.notes["containment_mode"] == "line_loss_straight_hold"
+    assert route_out.target_path[1, 0] > 0.0
+    assert abs(float(route_out.target_path[1, 1])) < 1e-6
+    assert abs(float(route_out.target_path[2, 1])) < 1e-6
+
+
+def test_path_optimizer_releases_line_loss_hold_when_route_ahead_requires_turn() -> None:
+    optimizer = PathOptimizer()
+    visual_ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=8,
+            dt=0.05,
+            nominal_speed_mps=0.20,
+            current_lanelet_id="lanelet-a",
+            next_lanelet_ids=("lanelet-b",),
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.0,
+            direct_error_valid=True,
+            quality=1.0,
+            measurement_mode="two_line",
+            planner_priority_active=True,
+        ),
+    )
+    visual_plan = BehaviorPathPlan(
+        timestamp=visual_ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.05, 0.00, 0.0],
+                [0.10, 0.00, 0.0],
+                [0.15, 0.00, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(visual_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    optimizer.optimize(visual_plan, visual_ctx)
+
+    route_base_ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=8,
+            dt=0.05,
+            nominal_speed_mps=0.20,
+            current_lanelet_id="lanelet-a",
+            next_lanelet_ids=("lanelet-b",),
+            map_match_error_m=0.0,
+        ),
+        lane_observation=LaneObservation(
+            quality=0.0,
+            measurement_mode="none",
+            direct_error_valid=False,
+        ),
+    )
+    route_ctx = replace(
+        route_base_ctx,
+        route=replace(route_base_ctx.route, heading_rad=math.radians(16.0)),
+    )
+    route_plan = BehaviorPathPlan(
+        timestamp=route_ctx.now_s + 0.05,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.04, 0.00, 0.0],
+                [0.10, 0.05, math.radians(18.0)],
+                [0.18, 0.12, math.radians(28.0)],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(route_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    route_out = None
+    for _ in range(path_optimizer_module._LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS + 1):
+        route_out = optimizer.optimize(route_plan, route_ctx)
+
+    assert route_out is not None
+    assert route_out.notes.get("line_loss_straight_hold_applied") is not True
+    assert route_out.notes.get("containment_mode") != "line_loss_straight_hold"
+    assert float(route_out.target_path[2, 1]) > 0.01
+
+
+def test_path_optimizer_defers_line_loss_route_turn_when_map_match_is_untrusted() -> None:
+    optimizer = PathOptimizer()
+    visual_ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=8,
+            dt=0.05,
+            nominal_speed_mps=0.20,
+            current_lanelet_id="lanelet-a",
+            next_lanelet_ids=("lanelet-b",),
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.0,
+            direct_error_valid=True,
+            quality=1.0,
+            measurement_mode="two_line",
+            planner_priority_active=True,
+        ),
+    )
+    visual_plan = BehaviorPathPlan(
+        timestamp=visual_ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.05, 0.00, 0.0],
+                [0.10, 0.00, 0.0],
+                [0.15, 0.00, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(visual_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+    optimizer.optimize(visual_plan, visual_ctx)
+
+    base_ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        speed_mps=0.20,
+        horizon_n=8,
+        dt=0.05,
+        nominal_speed_mps=0.20,
+        current_lanelet_id="lanelet-a",
+        next_lanelet_ids=("lanelet-b",),
+        map_match_error_m=0.25,
+    )
+    route_ctx = replace(
+        base_ctx,
+        lane_observation=LaneObservation(
+            quality=0.0,
+            measurement_mode="none",
+            direct_error_valid=False,
+        ),
+        route=replace(
+            base_ctx.route,
+            heading_rad=math.radians(16.0),
+            map_match_error_m=0.25,
+        ),
+    )
+    route_plan = BehaviorPathPlan(
+        timestamp=route_ctx.now_s + 0.05,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.04, 0.00, 0.0],
+                [0.10, 0.05, math.radians(18.0)],
+                [0.18, 0.12, math.radians(28.0)],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(route_ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    route_out = None
+    for _ in range(path_optimizer_module._LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS + 1):
+        route_out = optimizer.optimize(route_plan, route_ctx)
+
+    assert route_out is not None
+    assert route_out.notes.get("line_loss_straight_hold_applied") is True
+    assert route_out.notes.get("containment_mode") == "line_loss_straight_hold"
+    assert float(route_out.target_path[2, 1]) == pytest.approx(0.0, abs=1e-6)
 
 
 def test_path_optimizer_holds_previous_path_on_two_line_to_single_line_heading_jump() -> None:
@@ -962,8 +1504,73 @@ def test_path_optimizer_biases_prefix_back_toward_visual_lane_center() -> None:
     assert out.notes["visual_lane_reentry_active"] is True
     assert out.notes["visual_lane_reentry_applied"] is True
     assert out.notes["visual_lane_prefix_samples"] >= 4
-    assert out.target_path[1, 1] > 0.04
+    assert out.notes["visual_lane_shift_smoothing"] == "raw"
+    assert abs(float(out.notes["visual_lane_filtered_shift_m"])) <= 0.021
+    assert out.target_path[1, 1] > 0.015
     assert out.target_path[3, 1] > out.target_path[8, 1]
+
+
+def test_path_optimizer_requires_confirmed_visual_reentry_sign_flip() -> None:
+    optimizer = PathOptimizer()
+    base_ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        speed_mps=0.04,
+        horizon_n=12,
+        dt=0.05,
+        current_lanelet_id="lanelet-a",
+        nominal_speed_mps=0.1,
+    )
+    plan = BehaviorPathPlan(
+        timestamp=base_ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(base_ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    def with_lane_offset(offset_m: float) -> PlanningContext:
+        return replace(
+            base_ctx,
+            lane_observation=LaneObservation(
+                detected_sides=("left", "right"),
+                direct_error_m=offset_m,
+                line_center_offset_m=offset_m,
+                quality=1.0,
+                measurement_mode="two_line",
+                direct_error_valid=True,
+                control_policy_mode="ROUTE_TRACKING",
+            ),
+        )
+
+    initial = optimizer.optimize(plan, with_lane_offset(0.12))
+    weak_opposite = optimizer.optimize(plan, with_lane_offset(-0.05))
+    pending_1 = optimizer.optimize(plan, with_lane_offset(-0.12))
+    pending_2 = optimizer.optimize(plan, with_lane_offset(-0.12))
+    zero_hold_1 = optimizer.optimize(plan, with_lane_offset(-0.12))
+    zero_hold_2 = optimizer.optimize(plan, with_lane_offset(-0.12))
+    confirmed = optimizer.optimize(plan, with_lane_offset(-0.12))
+
+    assert float(initial.notes["visual_lane_filtered_shift_m"]) > 0.0
+    assert weak_opposite.notes["visual_lane_shift_smoothing"] == "weak_sign_flip_to_zero"
+    assert float(weak_opposite.notes["visual_lane_filtered_shift_m"]) == 0.0
+    assert pending_1.notes["visual_lane_shift_smoothing"] == "opposite_sign_pending"
+    assert pending_2.notes["visual_lane_shift_smoothing"] == "opposite_sign_pending"
+    assert zero_hold_1.notes["visual_lane_shift_smoothing"] == "opposite_sign_zero_hold"
+    assert zero_hold_2.notes["visual_lane_shift_smoothing"] == "opposite_sign_zero_hold"
+    assert float(zero_hold_2.notes["visual_lane_filtered_shift_m"]) == 0.0
+    assert confirmed.notes["visual_lane_shift_smoothing"] == "opposite_sign_confirmed"
+    assert float(confirmed.notes["visual_lane_filtered_shift_m"]) < 0.0
 
 
 def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measurement() -> None:
@@ -1011,7 +1618,8 @@ def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measuremen
     assert out.notes["visual_lane_measurement_mode"] == "single_line"
     assert out.notes["visual_lane_reentry_reason"] == "single_line_physical_reentry"
     assert out.notes["visual_lane_reentry_applied"] is True
-    assert out.target_path[1, 1] > 0.02
+    assert abs(float(out.notes["visual_lane_filtered_shift_m"])) <= 0.021
+    assert out.target_path[1, 1] > 0.015
     assert out.target_path[1, 1] < 0.08
     assert out.target_path[3, 1] > out.target_path[8, 1]
 
@@ -1119,6 +1727,62 @@ def test_path_optimizer_caps_single_line_visual_prefix_heading_when_error_is_sma
         dx = float(out.target_path[idx, 0] - out.target_path[idx - 1, 0])
         dy = float(out.target_path[idx, 1] - out.target_path[idx - 1, 1])
         assert abs(math.degrees(math.atan2(dy, dx))) <= limit_deg + 0.2
+
+
+def test_path_optimizer_caps_two_line_visual_prefix_heading_across_lookahead() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.20,
+            horizon_n=16,
+            dt=0.05,
+            nominal_speed_mps=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.01,
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            planner_priority_active=True,
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.00, 0.00, 0.0],
+                [0.04, -0.030, 0.0],
+                [0.10, -0.080, 0.0],
+                [0.18, -0.140, 0.0],
+                [0.30, -0.220, 0.0],
+                [0.48, -0.300, 0.0],
+                [0.70, -0.350, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    limit_deg = float(out.notes["visual_prefix_heading_limit_deg"])
+    assert limit_deg == pytest.approx(5.0, abs=1e-6)
+    assert out.notes["visual_prefix_heading_cap_applied"] is True
+    for idx in range(1, min(10, out.target_path.shape[0])):
+        body_x, body_y = path_optimizer_module._world_to_body_xy(
+            point_xy=out.target_path[idx, :2],
+            pose_x=ctx.pose.fused_pose.x,
+            pose_y=ctx.pose.fused_pose.y,
+            pose_yaw=ctx.pose.fused_pose.yaw,
+        )
+        assert body_x > 0.0
+        assert abs(body_y) <= math.tan(math.radians(limit_deg)) * body_x + 1e-6
 
 
 def test_path_optimizer_blends_prefix_for_same_corridor() -> None:
@@ -1953,6 +2617,62 @@ def test_path_optimizer_stabilizes_visual_prefix_when_path_starts_lateral() -> N
     assert x_fwd > 0.03
     assert abs(y_left) < 0.08
     assert _heading_tangent_error_deg(out.target_path, 1) < 45.0
+
+
+def test_path_optimizer_ramps_no_connect_visual_prefix_lateral_offset() -> None:
+    pose = SimpleNamespace(x=0.0, y=0.0, yaw=0.0)
+    ctx = make_context(
+        pose_x=pose.x,
+        pose_y=pose.y,
+        pose_yaw=pose.yaw,
+        speed_mps=0.2,
+        horizon_n=20,
+        dt=0.05,
+        lanelet_map=None,
+        nominal_speed_mps=0.2,
+    )
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=-0.08,
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+        ),
+    )
+    raw_path = np.array(
+        [
+            [0.03, -0.12, 0.0],
+            [0.08, -0.12, 0.0],
+            [0.13, -0.115, 0.0],
+            [0.20, -0.11, 0.0],
+            [0.30, -0.10, 0.0],
+        ],
+        dtype=float,
+    )
+
+    out = PathOptimizer().optimize(
+        BehaviorPathPlan(
+            timestamp=ctx.now_s,
+            raw_path=raw_path,
+            base_speed_profile=np.full(ctx.horizon_n, 0.2, dtype=float),
+            scenario_name=ScenarioName.LANE_KEEP.value,
+            valid=True,
+            notes={"path_source": "visual_lane_waypoints"},
+        ),
+        ctx,
+    )
+
+    assert out.notes["visual_prefix_starts_at_ego"] is False
+    assert out.notes["visual_prefix_entry_heading_cap_applied"] is True
+    before = abs(float(out.notes["visual_prefix_sample1_y_left_before_m"]))
+    after = abs(float(out.notes["visual_prefix_sample1_y_left_after_m"]))
+    x_after = abs(float(out.notes["visual_prefix_sample1_x_fwd_after_m"]))
+    assert after < before
+    assert after <= math.tan(math.radians(8.0)) * x_after + 1e-6
 
 
 def test_path_optimizer_keeps_route_precision_after_semantic_distance_jump() -> None:

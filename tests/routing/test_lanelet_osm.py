@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.routing.lanelet.from_osm import load_lanelet2_osm
+from src.routing.lanelet.attributes import ATTR_INTERSECTION, ATTR_NORMAL
 from src.routing.route_planner import PathManager
 
 
@@ -189,7 +190,19 @@ def test_load_lanelet2_osm_builds_lanelets_and_topology(tmp_path: Path) -> None:
     assert lanelet_map.get_lanelet("100") is not None
     assert lanelet_map.get_lanelet("200") is not None
     assert "200" in lanelet_map.successors_of("100")
-    assert lanelet_map.get_lanelet("200").attribute != 0
+    assert lanelet_map.get_lanelet("200").attribute == ATTR_INTERSECTION
+
+
+def test_turn_direction_alone_does_not_mark_lanelet_as_intersection(tmp_path: Path) -> None:
+    osm_path = tmp_path / "turn_direction_only_lanelet.osm"
+    osm_path.write_text(
+        _MINI_LANELET_OSM.replace('    <tag k="location" v="intersection"/>\n', ""),
+        encoding="utf-8",
+    )
+
+    lanelet_map = load_lanelet2_osm(str(osm_path), step_m=0.20)
+
+    assert lanelet_map.get_lanelet("200").attribute == ATTR_NORMAL
 
 
 def test_load_lanelet2_osm_prefers_local_xy_tags(tmp_path: Path) -> None:

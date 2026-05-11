@@ -182,6 +182,30 @@ class TestBuildTargetPathFromVisualTransform:
         assert x_fwd > 0.0
         assert path[1, 0] > path[0, 0]
 
+    def test_skips_near_lateral_prefix_when_visual_path_is_not_connected_to_ego(self):
+        # Para carril de 35 cm, un punto a sólo 3-8 cm adelante pero 13 cm al
+        # costado no es un lookahead útil: genera una referencia casi lateral.
+        # Se recorta hasta que el avance longitudinal sea comparable al offset.
+        wpts = (
+            (0.03, 0.13, 0.0),
+            (0.08, 0.13, 0.0),
+            (0.13, 0.13, 0.0),
+            (0.18, 0.125, 0.0),
+            (0.24, 0.12, 0.0),
+            (0.32, 0.11, 0.0),
+        )
+        path = build_target_path_from_visual(
+            center_waypoints_body=wpts,
+            ego_pose=_make_pose(0.0, 0.0, 0.0),
+            target_speed_mps=0.2,
+            horizon_n=10,
+            dt=0.05,
+            connect_from_ego_pose=False,
+        )
+
+        assert path[0, 0] >= 0.12
+        assert path[0, 1] == pytest.approx(-0.13, abs=1e-6)
+
 
 class TestBuildTargetPathFromVisualExtension:
     """Validan el comportamiento cuando los waypoints no cubren el horizonte."""

@@ -46,6 +46,7 @@ class TransitionTable:
     _TRANSITIONS: Dict[SystemMode, Dict[str, SystemMode]] = {
         SystemMode.DEFAULT: {
             "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP
@@ -54,10 +55,19 @@ class TransitionTable:
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP,
-            "dashboard_auto_button" : SystemMode.AUTO # this is a special case, because the auto button is always available
+            "dashboard_auto_button" : SystemMode.AUTO, # this is a special case, because the auto button is always available
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
+        },
+        SystemMode.ODOMETRY: {
+            "dashboard_manual_button" : SystemMode.MANUAL,
+            "dashboard_legacy_button" : SystemMode.LEGACY,
+            "dashboard_stop_button" : SystemMode.STOP,
+            "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
         },
         SystemMode.MANUAL: {    
             "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP,
             "dashboard_manual_button" : SystemMode.MANUAL, # this is a special case, because the manual button is always available
@@ -67,17 +77,20 @@ class TransitionTable:
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_stop_button" : SystemMode.STOP,
             "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_parking_button" : SystemMode.PARKING, # idempotent
         },
         SystemMode.LEGACY: {
             "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_stop_button" : SystemMode.STOP,
             "dashboard_legacy_button" : SystemMode.LEGACY # this is a special case, because the legacy button is always available
         },
         SystemMode.STOP: {
             "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_odometry_button" : SystemMode.ODOMETRY,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP # this is a special case, because the stop button is always available

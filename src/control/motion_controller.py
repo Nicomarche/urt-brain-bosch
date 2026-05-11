@@ -766,11 +766,63 @@ class MotionController(IMotionController):
             self._min_moving_speed_mps: float = float(
                 getattr(_cfg, "BEHAVIOR_MIN_SPEED_MPS", 0.20)
             )
+            self._visual_primary_max_steer_deg: float = float(
+                getattr(_cfg, "BEHAVIOR_VISUAL_PRIMARY_MAX_STEER_DEG", 10.0)
+            )
+            self._visual_primary_recovery_max_steer_deg: float = float(
+                getattr(_cfg, "BEHAVIOR_VISUAL_PRIMARY_RECOVERY_MAX_STEER_DEG", self._visual_primary_max_steer_deg)
+            )
+            self._visual_primary_recovery_error_start_m: float = float(
+                getattr(_cfg, "BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_START_M", 0.10)
+            )
+            self._visual_primary_recovery_error_full_m: float = float(
+                getattr(_cfg, "BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_FULL_M", 0.15)
+            )
+            self._visual_primary_curve_max_steer_deg: float = float(
+                getattr(
+                    _cfg,
+                    "BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_DEG",
+                    self._visual_primary_recovery_max_steer_deg,
+                )
+            )
+            self._visual_primary_curve_steer_full_deg: float = float(
+                getattr(
+                    _cfg,
+                    "BEHAVIOR_VISUAL_PRIMARY_CURVE_STEER_FULL_DEG",
+                    self._visual_primary_curve_max_steer_deg,
+                )
+            )
+            self._visual_primary_max_steer_rate_deg_s: float = float(
+                getattr(_cfg, "BEHAVIOR_VISUAL_PRIMARY_MAX_STEER_RATE_DEG_S", 35.0)
+            )
+            self._visual_primary_recovery_max_steer_rate_deg_s: float = float(
+                getattr(
+                    _cfg,
+                    "BEHAVIOR_VISUAL_PRIMARY_RECOVERY_MAX_STEER_RATE_DEG_S",
+                    self._max_steer_rate_deg_s,
+                )
+            )
+            self._visual_primary_curve_max_steer_rate_deg_s: float = float(
+                getattr(
+                    _cfg,
+                    "BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_RATE_DEG_S",
+                    self._visual_primary_recovery_max_steer_rate_deg_s,
+                )
+            )
         except Exception:
             self._max_steer_rate_deg_s = 60.0
             self._max_speed_rate_mps2 = 0.15
             self._steer_dt_s = 0.05
             self._min_moving_speed_mps = 0.20
+            self._visual_primary_max_steer_deg = 10.0
+            self._visual_primary_recovery_max_steer_deg = 10.0
+            self._visual_primary_recovery_error_start_m = 0.10
+            self._visual_primary_recovery_error_full_m = 0.15
+            self._visual_primary_curve_max_steer_deg = 10.0
+            self._visual_primary_curve_steer_full_deg = 10.0
+            self._visual_primary_max_steer_rate_deg_s = 35.0
+            self._visual_primary_curve_max_steer_rate_deg_s = 60.0
+            self._visual_primary_recovery_max_steer_rate_deg_s = 60.0
 
     # ------------------------------------------------------------------
     # IMotionController
@@ -901,6 +953,8 @@ class MotionController(IMotionController):
         input_refs = np.zeros((n, 2), dtype=np.float64)
         input_refs[:, 0] = speed_profile  # v_ref
         # input_refs[:, 1] = 0  # delta_ref (steering ref siempre 0)
+        notes = getattr(behavior_output, "notes", None)
+        path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
 
         # 5. Llamar al solver. Si devuelve None, el OCP no resolvió.
         result = self._solver.compute(
@@ -912,12 +966,79 @@ class MotionController(IMotionController):
             return self._invalid("mpc_solver_failure", backend=self._backend_name)
 
         v_opt, delta_deg = result
+        solver_delta_deg = float(delta_deg)
 
         # 6. Sanity check de bordes mecánicos. AcadosMPC ya clampa, pero
         #    defensivo: cualquier NaN/inf por solver inestable se atrapa
         #    acá y se traduce a inválido (mejor parar que mover absurdo).
         if not (math.isfinite(v_opt) and math.isfinite(delta_deg)):
             return self._invalid("mpc_nonfinite_output", backend=self._backend_name)
+
+        visual_steer_cap_applied = False
+        visual_steer_rate_limit_applied = False
+        visual_cap_deg_for_log = float(self._visual_primary_max_steer_deg)
+        visual_recovery_progress = 0.0
+        visual_curve_progress = 0.0
+        if path_source == "visual_lane_waypoints":
+            visual_cap_target_deg = float(self._visual_primary_max_steer_deg)
+            if isinstance(notes, dict):
+                try:
+                    visual_error_m = abs(float(notes.get("visual_lane_error_m") or 0.0))
+                except (TypeError, ValueError):
+                    visual_error_m = 0.0
+                recovery_start_m = max(0.0, float(self._visual_primary_recovery_error_start_m))
+                recovery_full_m = max(
+                    recovery_start_m + 1e-6,
+                    float(self._visual_primary_recovery_error_full_m),
+                )
+                if visual_error_m > recovery_start_m:
+                    visual_recovery_progress = max(
+                        0.0,
+                        min(1.0, (visual_error_m - recovery_start_m) / (recovery_full_m - recovery_start_m)),
+                    )
+                    visual_cap_target_deg = (
+                        float(self._visual_primary_max_steer_deg)
+                        + visual_recovery_progress
+                        * (
+                            float(self._visual_primary_recovery_max_steer_deg)
+                            - float(self._visual_primary_max_steer_deg)
+                        )
+                    )
+            curve_full_deg = max(
+                float(self._visual_primary_max_steer_deg) + 1e-6,
+                float(self._visual_primary_curve_steer_full_deg),
+            )
+            solver_delta_abs_deg = abs(float(solver_delta_deg))
+            if solver_delta_abs_deg > float(self._visual_primary_max_steer_deg):
+                visual_curve_progress = max(
+                    0.0,
+                    min(
+                        1.0,
+                        (
+                            solver_delta_abs_deg
+                            - float(self._visual_primary_max_steer_deg)
+                        )
+                        / (
+                            curve_full_deg
+                            - float(self._visual_primary_max_steer_deg)
+                        ),
+                    ),
+                )
+                curve_cap_target_deg = (
+                    float(self._visual_primary_max_steer_deg)
+                    + visual_curve_progress
+                    * (
+                        float(self._visual_primary_curve_max_steer_deg)
+                        - float(self._visual_primary_max_steer_deg)
+                    )
+                )
+                visual_cap_target_deg = max(visual_cap_target_deg, curve_cap_target_deg)
+            visual_cap_deg = max(0.0, min(self.max_steering_deg, float(visual_cap_target_deg)))
+            visual_cap_deg_for_log = float(visual_cap_deg)
+            capped_delta_deg = max(-visual_cap_deg, min(visual_cap_deg, float(delta_deg)))
+            if abs(capped_delta_deg - float(delta_deg)) > 1e-6:
+                visual_steer_cap_applied = True
+            delta_deg = capped_delta_deg
 
         requested_speed_mps = max(0.0, float(speed_profile[0]))
 
@@ -932,8 +1053,6 @@ class MotionController(IMotionController):
         speed_mps = min(max(0.0, float(v_opt)), requested_speed_mps)
         forward_recovery_reason = ""
         forward_recovery_hint: dict[str, float] | None = None
-        notes = getattr(behavior_output, "notes", None)
-        path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
         if (
             speed_mps <= 1e-6
             and float(v_opt) < 0.0
@@ -987,7 +1106,24 @@ class MotionController(IMotionController):
         )
 
         # Rate limiter de steering — independiente del solver.
-        max_steer_step = self._max_steer_rate_deg_s * self._steer_dt_s
+        max_steer_rate_deg_s = float(self._max_steer_rate_deg_s)
+        if path_source == "visual_lane_waypoints":
+            visual_rate_progress = max(float(visual_recovery_progress), float(visual_curve_progress))
+            visual_rate_ceiling_deg_s = max(
+                float(self._visual_primary_recovery_max_steer_rate_deg_s),
+                float(self._visual_primary_curve_max_steer_rate_deg_s),
+            )
+            visual_rate_target_deg_s = (
+                float(self._visual_primary_max_steer_rate_deg_s)
+                + visual_rate_progress
+                * (
+                    visual_rate_ceiling_deg_s
+                    - float(self._visual_primary_max_steer_rate_deg_s)
+                )
+            )
+            max_steer_rate_deg_s = min(max_steer_rate_deg_s, float(visual_rate_target_deg_s))
+            visual_steer_rate_limit_applied = True
+        max_steer_step = max_steer_rate_deg_s * self._steer_dt_s
         steering_deg = max(
             self._prev_steer_deg - max_steer_step,
             min(self._prev_steer_deg + max_steer_step, steering_deg),
@@ -1011,11 +1147,20 @@ class MotionController(IMotionController):
             "mpc", event="compute_out",
             valid=True, reason="",
             v_opt_raw=float(v_opt), speed_mps=float(speed_mps),
-            delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
+            delta_deg_raw=float(solver_delta_deg),
+            delta_deg_after_visual_cap=float(delta_deg),
+            steering_deg=float(steering_deg),
             scenario=behavior_output.scenario_name,
             requested_speed_mps=float(requested_speed_mps),
             speed_recovery_reason=forward_recovery_reason,
             speed_recovery_hint=forward_recovery_hint,
+            path_source=path_source,
+            visual_steer_cap_applied=bool(visual_steer_cap_applied),
+            visual_steer_cap_deg=float(visual_cap_deg_for_log),
+            visual_steer_rate_limit_applied=bool(visual_steer_rate_limit_applied),
+            visual_steer_curve_progress=float(visual_curve_progress),
+            visual_steer_recovery_progress=float(visual_recovery_progress),
+            max_steer_rate_deg_s=float(max_steer_rate_deg_s),
             backend=self._backend_name,
             **solver_debug,
         )

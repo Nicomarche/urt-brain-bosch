@@ -56,6 +56,8 @@ _ROUTE_LOCAL_RECENTER_TAIL_M = 0.60
 _CONNECTOR_NEAR_CORRIDOR_GAP_M = 0.04
 _CONNECTOR_MAX_YAW_DELTA_DEG = 30.0
 _VISUAL_PREFIX_MIN_FORWARD_M = 0.02
+_VISUAL_PREFIX_MIN_LOOKAHEAD_M = 0.12
+_VISUAL_PREFIX_MAX_LATERAL_RATIO = 1.20
 _VISUAL_PREFIX_NEAR_ORIGIN_M = 0.02
 _VISUAL_PREFIX_MIN_TANGENT_X_M = -0.001
 
@@ -570,7 +572,10 @@ def _visual_prefix_is_forward(body_xy: np.ndarray) -> bool:
         return True
     first = np.asarray(body_xy[0], dtype=float)
     if float(first[0]) >= _VISUAL_PREFIX_MIN_FORWARD_M:
-        return True
+        if float(first[0]) >= _VISUAL_PREFIX_MIN_LOOKAHEAD_M:
+            return True
+        lateral_ratio = abs(float(first[1])) / max(abs(float(first[0])), 1e-6)
+        return bool(lateral_ratio <= float(_VISUAL_PREFIX_MAX_LATERAL_RATIO))
     if body_xy.shape[0] < 2:
         return False
     first_gap_m = float(np.linalg.norm(first))

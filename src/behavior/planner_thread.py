@@ -233,8 +233,8 @@ class threadBehaviorPlanner(ThreadWithStop):
         except Exception:
             pass
 
-        # Fuera de AUTO no planear ni correr el MPC.
-        if self._current_mode != "AUTO":
+        # Fuera de modos autónomos no planear ni correr el MPC.
+        if self._current_mode not in {"AUTO", "ODOMETRY"}:
             self._current_speed_mps = 0.0
             self._publish_empty(reason="mode_not_auto")
             return
@@ -331,6 +331,14 @@ class threadBehaviorPlanner(ThreadWithStop):
                         if isinstance(plan.notes, dict) else None)
         path_source = (plan.notes.get("path_source")
                        if isinstance(plan.notes, dict) else None)
+        visual_path_primary_reason = (
+            plan.notes.get("visual_path_primary_reason")
+            if isinstance(plan.notes, dict) else None
+        )
+        visual_path_primary_rejected_reason = (
+            plan.notes.get("visual_path_primary_rejected_reason")
+            if isinstance(plan.notes, dict) else None
+        )
         sp0 = float(plan.speed_profile[0]) if len(plan.speed_profile) > 0 else 0.0
         live_log(
             "behavior_planner", event="plan_output",
@@ -344,6 +352,23 @@ class threadBehaviorPlanner(ThreadWithStop):
             sp_first3=sp_first3,
             tp_first3=tp_first3,
             notes_reason=notes_reason,
+            visual_path_primary_reason=visual_path_primary_reason,
+            visual_path_primary_rejected_reason=visual_path_primary_rejected_reason,
+            visual_lane_waypoint_count=(
+                int(plan.notes.get("visual_lane_waypoint_count", 0) or 0)
+                if isinstance(plan.notes, dict)
+                else 0
+            ),
+            visual_lane_quality=(
+                float(plan.notes.get("visual_lane_quality", 0.0) or 0.0)
+                if isinstance(plan.notes, dict)
+                else 0.0
+            ),
+            visual_lane_error_m=(
+                float(plan.notes.get("visual_lane_error_m", 0.0) or 0.0)
+                if isinstance(plan.notes, dict)
+                else 0.0
+            ),
             route_id=ctx.route.route_id,
             route_source=ctx.route.route_source,
             current_lanelet_id=ctx.route.current_lanelet_id,

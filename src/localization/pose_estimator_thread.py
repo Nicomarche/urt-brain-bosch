@@ -6,7 +6,11 @@ import time
 from types import SimpleNamespace
 
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
-from src.core.types.perception import lane_observation_supports_lateral_relocalization
+from src.core.types.perception import (
+    lane_observation_has_visual_path,
+    lane_observation_supports_lateral_relocalization,
+)
+from src.localization.visual_lane_matcher import match_visual_lane_to_route
 from src.utils.live_log import live_log
 from src.utils.sim_start_pose import resolve_saved_start_pose
 from src.localization.relocalization_thread import (
@@ -14,6 +18,14 @@ from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_GAIN,
     _CAMERA_LATERAL_CORRECTION_MAX_M,
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M,
+    _GPS_MAX_EXPECTED_ERROR_M,
+    _GPS_MAX_JUMP_M,
+    _GPS_MIN_SAMPLES,
+    _GPS_OUTLIER_DISTANCE_M,
+    _GPS_SAMPLE_WINDOW,
+    _GPS_VALIDATION_ENABLED,
+    _GPS_ZERO_EPS_M,
+    _DR_SPEED_SCALE,
     _IMU_STEER_INHIBIT_DEG,
     _IMU_YAW_SIGN,
     _MAX_INTEGRATION_DT,
@@ -43,6 +55,55 @@ _WAYPOINT_TWO_LINE_LATERAL_RELOCALIZATION_SPEED_MIN_MPS = 0.02
 _SINGLE_LINE_ROUTE_STRAIGHT_TOL_RAD = math.radians(6.0)
 _SINGLE_LINE_ROUTE_DIRECTION_MARGIN_RAD = math.radians(10.0)
 _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD = math.radians(18.0)
+# sim_bridge keeps the previous IMU payload fresh for up to one second; after
+# teleporting we wait past that window before using yaw for a new offset.
+_SIM_RELOCALIZE_IMU_SETTLE_S = 1.10
+
+try:
+    import config as _config
+except Exception:  # pragma: no cover - test/import fallback
+    _config = SimpleNamespace()
+
+_LANE_WIDTH_M = max(0.01, float(getattr(_config, "LANE_WIDTH_CM", 35.0) or 35.0) / 100.0)
+_LANE_HALF_WIDTH_M = 0.5 * _LANE_WIDTH_M
+_LOCALIZATION_GPS_AUTHORITY = str(
+    getattr(_config, "LOCALIZATION_GPS_AUTHORITY", "init_recovery_soft") or "init_recovery_soft"
+).strip().lower()
+_GPS_SOFT_GAIN = float(getattr(_config, "TRACKING_GPS_SOFT_GAIN", 0.25) or 0.25)
+_GPS_SOFT_MAX_STEP_M = float(getattr(_config, "TRACKING_GPS_SOFT_MAX_STEP_M", 0.020) or 0.020)
+_GPS_RECOVERY_MAX_STEP_M = float(getattr(_config, "TRACKING_GPS_RECOVERY_MAX_STEP_M", 0.050) or 0.050)
+_GPS_RECOVERY_ERROR_M = float(getattr(_config, "TRACKING_GPS_RECOVERY_ERROR_M", 0.30) or 0.30)
+_GPS_SOFT_LATERAL_GAIN = float(getattr(_config, "TRACKING_GPS_SOFT_LATERAL_GAIN", 0.20) or 0.20)
+_GPS_VISUAL_LATERAL_BLOCK_M = float(getattr(_config, "TRACKING_GPS_VISUAL_LATERAL_BLOCK_M", 0.05) or 0.05)
+_GPS_VISUAL_PROTECT_QUALITY = float(getattr(_config, "TRACKING_GPS_VISUAL_PROTECT_QUALITY", 0.55) or 0.55)
+_VISUAL_MAP_MATCH_ENABLED = bool(getattr(_config, "VISUAL_MAP_MATCH_ENABLED", True))
+_VISUAL_MAP_MATCH_MIN_CONFIDENCE = float(
+    getattr(_config, "VISUAL_MAP_MATCH_MIN_CONFIDENCE", 0.45) or 0.45
+)
+_VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M = float(
+    getattr(_config, "VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M", _LANE_HALF_WIDTH_M) or _LANE_HALF_WIDTH_M
+)
+_VISUAL_MAP_MATCH_MAX_YAW_ERROR_RAD = math.radians(
+    float(getattr(_config, "VISUAL_MAP_MATCH_MAX_YAW_ERROR_DEG", 6.0) or 6.0)
+)
+_VISUAL_MAP_MATCH_MAX_SAMPLE_YAW_ERROR_RAD = math.radians(
+    float(getattr(_config, "VISUAL_MAP_MATCH_MAX_SAMPLE_YAW_ERROR_DEG", 8.0) or 8.0)
+)
+_VISUAL_MAP_MATCH_CORRECTION_GAIN = float(
+    getattr(_config, "VISUAL_MAP_MATCH_CORRECTION_GAIN", 0.20) or 0.20
+)
+_VISUAL_MAP_MATCH_CORRECTION_STEP_MAX_M = float(
+    getattr(_config, "VISUAL_MAP_MATCH_CORRECTION_STEP_MAX_M", 0.008) or 0.008
+)
+_VISUAL_MAP_MATCH_CORRECTION_COOLDOWN_S = float(
+    getattr(_config, "VISUAL_MAP_MATCH_CORRECTION_COOLDOWN_S", 0.10) or 0.10
+)
+_VISUAL_MAP_MATCH_YAW_CORRECTION_GAIN = float(
+    getattr(_config, "VISUAL_MAP_MATCH_YAW_CORRECTION_GAIN", 0.10) or 0.10
+)
+_VISUAL_MAP_MATCH_YAW_CORRECTION_STEP_MAX_RAD = math.radians(
+    float(getattr(_config, "VISUAL_MAP_MATCH_YAW_CORRECTION_STEP_MAX_DEG", 0.50) or 0.50)
+)
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -96,6 +157,35 @@ def _single_line_direction_conflicts_with_route(
     return abs(_wrap_angle(float(heading_hint) - float(route_delta))) > _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD
 
 
+def _lane_observation_has_local_authority(lane_observation: LaneObservation | None) -> bool:
+    if lane_observation is None:
+        return False
+    if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(_GPS_VISUAL_PROTECT_QUALITY):
+        return False
+    if lane_observation_supports_lateral_relocalization(lane_observation, min_quality=0.70):
+        return True
+    return lane_observation_has_visual_path(
+        lane_observation,
+        min_quality=float(_GPS_VISUAL_PROTECT_QUALITY),
+        min_points=int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8) or 8),
+    )
+
+
+def _route_reference_yaw(route_context: RouteContext | None, fallback_yaw: float) -> float:
+    if route_context is None:
+        return float(fallback_yaw)
+    for value in (
+        getattr(route_context, "path_psi", None),
+        getattr(getattr(route_context, "matched_pose", None), "yaw", None),
+    ):
+        try:
+            if value is not None and math.isfinite(float(value)):
+                return float(value)
+        except (TypeError, ValueError):
+            continue
+    return float(fallback_yaw)
+
+
 class threadPoseEstimator(threadTracking):
     """Dead-reckoning pose estimator with visual and semantic corrections."""
 
@@ -117,8 +207,13 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
         self._last_camera_lateral_correction_monotonic = 0.0
+        self._last_visual_map_match_correction_monotonic = 0.0
         self._last_absolute_yaw_fix_monotonic = 0.0
         self._last_absolute_yaw_fix_source = None
+        self._ignore_imu_until_monotonic = 0.0
+        self._gps_fix_samples: list[tuple[float, float]] = []
+        self._last_accepted_gps_pose: tuple[float, float] | None = None
+        self._last_gps_fix_quality = 0.0
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
@@ -138,19 +233,49 @@ class threadPoseEstimator(threadTracking):
         if self._graph is None:
             return None
         default_pose = self._graph.get_start_pose()
+        configured_pose = self._resolve_configured_start_pose(default_pose)
+        if configured_pose is not None:
+            return configured_pose
         if not self._sim_start_pose_enabled():
             return default_pose
         return resolve_saved_start_pose(self._graph, default=default_pose)
+
+    @staticmethod
+    def _resolve_configured_start_pose(
+        default_pose: tuple[float, float, float] | None,
+    ) -> tuple[float, float, float] | None:
+        try:
+            import config as cfg
+        except ImportError:
+            return None
+
+        x0 = getattr(cfg, "TRACKING_START_X", None)
+        y0 = getattr(cfg, "TRACKING_START_Y", None)
+        yaw0 = getattr(cfg, "TRACKING_START_YAW_RAD", None)
+        yaw0_deg = getattr(cfg, "TRACKING_START_YAW_DEG", None)
+        if x0 is None or y0 is None:
+            return None
+        if yaw0 is None and yaw0_deg is not None:
+            yaw0 = math.radians(float(yaw0_deg))
+        if yaw0 is None and default_pose is not None:
+            yaw0 = float(default_pose[2])
+        if yaw0 is None:
+            yaw0 = 0.0
+        try:
+            return float(x0), float(y0), float(yaw0)
+        except (TypeError, ValueError):
+            return None
 
     def _apply_start_pose_override(self) -> None:
         if self._dr is None or self._startup_world_pose is None:
             return
         x0, y0, yaw0 = self._startup_world_pose
         self._dr.reset(float(x0), float(y0), float(yaw0))
-        self._start_yaw_rad = float(yaw0)
-        self._last_yaw_rad = float(yaw0)
-        self._yaw_offset = 0.0
-        self._yaw_offset_calibrated = False
+        self._reset_imu_yaw_alignment(
+            float(yaw0),
+            source="startup_pose",
+            settle_s=0.0,
+        )
 
     def _send_sim_relocalize_pose(
         self,
@@ -176,6 +301,11 @@ class threadPoseEstimator(threadTracking):
             "yaw_rad": float(yaw_rad),
             "z": float(GZ_SPAWN_Z),
         })
+        self._reset_imu_yaw_alignment(
+            float(yaw_rad),
+            source=f"sim_relocalize:{source}",
+            settle_s=_SIM_RELOCALIZE_IMU_SETTLE_S,
+        )
         print(
             f"\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
             f" - SIM: {source} → ({float(x_m):.3f}, {float(y_m):.3f})"
@@ -186,6 +316,36 @@ class threadPoseEstimator(threadTracking):
         return (
             self._last_absolute_yaw_fix_monotonic > 0.0
             and (now - self._last_absolute_yaw_fix_monotonic) < float(freshness_s)
+        )
+
+    def _reset_imu_yaw_alignment(
+        self,
+        yaw_rad: float,
+        *,
+        source: str,
+        settle_s: float = 0.15,
+    ) -> None:
+        """Force the next fresh IMU sample to define the map-frame yaw offset."""
+        now = time.monotonic()
+        self._start_yaw_rad = float(yaw_rad)
+        self._last_yaw_rad = float(yaw_rad)
+        self._yaw_offset = 0.0
+        self._yaw_offset_calibrated = False
+        self._last_imu_t = None
+        self._last_absolute_yaw_fix_monotonic = now
+        self._last_absolute_yaw_fix_source = str(source)
+        if float(settle_s) > 0.0:
+            self._ignore_imu_until_monotonic = max(
+                float(getattr(self, "_ignore_imu_until_monotonic", 0.0) or 0.0),
+                now + float(settle_s),
+            )
+        live_log(
+            "pose_estimator",
+            event="imu_yaw_alignment_reset",
+            source=str(source),
+            yaw_rad=float(yaw_rad),
+            yaw_deg=float(math.degrees(float(yaw_rad))),
+            ignore_imu_until_mono=float(getattr(self, "_ignore_imu_until_monotonic", 0.0) or 0.0),
         )
 
     def _send_sim_relocalize(self) -> None:
@@ -291,6 +451,16 @@ class threadPoseEstimator(threadTracking):
         )
         if not supports_lateral_relocalization:
             return raw_x, raw_y, raw_yaw, 0.0, False
+        if (
+            bool(_VISUAL_MAP_MATCH_ENABLED)
+            and bool(getattr(route_context, "route_active", False))
+            and lane_observation_has_visual_path(
+                lane_observation,
+                min_quality=float(getattr(_config, "LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH", 0.55) or 0.55),
+                min_points=int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8) or 8),
+            )
+        ):
+            return raw_x, raw_y, raw_yaw, 0.0, True
         min_speed_mps = float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS)
         if bool(route_context.waypoint_mode_active):
             min_speed_mps = min(
@@ -337,6 +507,54 @@ class threadPoseEstimator(threadTracking):
         self._last_camera_lateral_correction_monotonic = now
         new_x, new_y, new_yaw = self._dr.get_state()
         return new_x, new_y, new_yaw, float(correction_m), True
+
+    def _apply_visual_lane_match_update(
+        self,
+        route_context: RouteContext | None,
+        visual_lane_match,
+        now: float,
+    ) -> tuple[float, float, float, float, float, bool]:
+        if self._dr is None or route_context is None or visual_lane_match is None:
+            raw_x, raw_y, raw_yaw = self._dr.get_state() if self._dr is not None else (0.0, 0.0, 0.0)
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0, False
+        if not bool(getattr(visual_lane_match, "accepted", False)):
+            raw_x, raw_y, raw_yaw = self._dr.get_state()
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0, False
+        if (now - getattr(self, "_last_visual_map_match_correction_monotonic", 0.0)) < float(
+            _VISUAL_MAP_MATCH_CORRECTION_COOLDOWN_S
+        ):
+            raw_x, raw_y, raw_yaw = self._dr.get_state()
+            return raw_x, raw_y, raw_yaw, 0.0, 0.0, True
+
+        lateral_error_m = float(getattr(visual_lane_match, "lateral_error_m", 0.0) or 0.0)
+        yaw_error_rad = float(getattr(visual_lane_match, "yaw_error_rad", 0.0) or 0.0)
+        lateral_correction_m = lateral_error_m * float(_VISUAL_MAP_MATCH_CORRECTION_GAIN)
+        max_step_m = abs(float(_VISUAL_MAP_MATCH_CORRECTION_STEP_MAX_M))
+        if max_step_m > 0.0:
+            lateral_correction_m = max(-max_step_m, min(max_step_m, lateral_correction_m))
+        yaw_correction_rad = yaw_error_rad * float(_VISUAL_MAP_MATCH_YAW_CORRECTION_GAIN)
+        max_yaw_step = abs(float(_VISUAL_MAP_MATCH_YAW_CORRECTION_STEP_MAX_RAD))
+        if max_yaw_step > 0.0:
+            yaw_correction_rad = max(-max_yaw_step, min(max_yaw_step, yaw_correction_rad))
+
+        applied = False
+        if abs(lateral_correction_m) > 1e-9:
+            self._dr.correct_lateral(lateral_correction_m, float(route_context.matched_pose.yaw))
+            applied = True
+        if abs(yaw_correction_rad) > 1e-9:
+            self._dr.correct_yaw(yaw_correction_rad)
+            applied = True
+        if applied:
+            self._last_visual_map_match_correction_monotonic = float(now)
+        raw_x, raw_y, raw_yaw = self._dr.get_state()
+        return (
+            raw_x,
+            raw_y,
+            raw_yaw,
+            float(lateral_correction_m if applied else 0.0),
+            float(yaw_correction_rad if applied else 0.0),
+            True,
+        )
 
     def _apply_semantic_reset(self, route_context: RouteContext | None, now: float) -> tuple[bool, tuple[str, float] | None]:
         if route_context is None or self._dr is None:
@@ -409,7 +627,167 @@ class threadPoseEstimator(threadTracking):
         source = f"stopline_visual:{stopline_observation.expected_node_id or 'matched_pose'}"
         return True, (source, float(correction_m))
 
-    def _apply_localisation_fix(self, current_yaw: float):
+    @staticmethod
+    def _localisation_is_manual(payload: dict, meta: dict) -> bool:
+        source = str(meta.get("source") or payload.get("source") or "").lower()
+        return bool(meta.get("manual")) or source.startswith("manual")
+
+    @staticmethod
+    def _median(values: list[float]) -> float:
+        ordered = sorted(float(v) for v in values)
+        n = len(ordered)
+        mid = n // 2
+        if n % 2:
+            return float(ordered[mid])
+        return 0.5 * (float(ordered[mid - 1]) + float(ordered[mid]))
+
+    def _validate_gps_fix(
+        self,
+        *,
+        x: float,
+        y: float,
+        expected_x: float,
+        expected_y: float,
+    ) -> tuple[bool, str, float, float]:
+        if not _GPS_VALIDATION_ENABLED:
+            return True, "validation_disabled", float(x), float(y)
+
+        x = float(x)
+        y = float(y)
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return False, "non_finite", x, y
+        if math.hypot(x, y) <= float(_GPS_ZERO_EPS_M):
+            return False, "zero_fix", x, y
+
+        samples = list(getattr(self, "_gps_fix_samples", []) or [])
+        samples.append((x, y))
+        max_window = max(1, int(_GPS_SAMPLE_WINDOW))
+        samples = samples[-max_window:]
+        self._gps_fix_samples = samples
+
+        min_samples = max(1, int(_GPS_MIN_SAMPLES))
+        if len(samples) < min_samples:
+            return False, "collecting_samples", x, y
+
+        median_x = self._median([sx for sx, _ in samples])
+        median_y = self._median([sy for _, sy in samples])
+        inliers = [
+            (sx, sy)
+            for sx, sy in samples
+            if math.hypot(float(sx) - median_x, float(sy) - median_y)
+            <= float(_GPS_OUTLIER_DISTANCE_M)
+        ]
+        if len(inliers) < min_samples:
+            return False, "outlier_window", x, y
+
+        filtered_x = sum(sx for sx, _ in inliers) / float(len(inliers))
+        filtered_y = sum(sy for _, sy in inliers) / float(len(inliers))
+
+        last_accepted = getattr(self, "_last_accepted_gps_pose", None)
+        if last_accepted is not None:
+            jump_m = math.hypot(
+                filtered_x - float(last_accepted[0]),
+                filtered_y - float(last_accepted[1]),
+            )
+            if jump_m > float(_GPS_MAX_JUMP_M):
+                return False, "large_jump", filtered_x, filtered_y
+
+        expected_error_m = math.hypot(filtered_x - float(expected_x), filtered_y - float(expected_y))
+        if (
+            float(_GPS_MAX_EXPECTED_ERROR_M) > 0.0
+            and expected_error_m > float(_GPS_MAX_EXPECTED_ERROR_M)
+        ):
+            self._last_gps_fix_quality = 0.0
+            return False, "expected_pose_mismatch", filtered_x, filtered_y
+
+        self._last_accepted_gps_pose = (float(filtered_x), float(filtered_y))
+        quality_den = max(float(_GPS_MAX_EXPECTED_ERROR_M), 1e-6)
+        self._last_gps_fix_quality = max(0.0, min(1.0, 1.0 - (expected_error_m / quality_den)))
+        return True, "accepted", float(filtered_x), float(filtered_y)
+
+    @staticmethod
+    def _localisation_has_explicit_yaw(payload: dict) -> bool:
+        return payload.get("yaw_rad") is not None or payload.get("yaw_deg") is not None
+
+    def _apply_gps_soft_update(
+        self,
+        *,
+        gps_x: float,
+        gps_y: float,
+        gps_yaw: float,
+        current_yaw: float,
+        route_context: RouteContext | None,
+        lane_observation: LaneObservation | None,
+        source: str,
+        explicit_yaw: bool,
+    ) -> tuple[bool, dict]:
+        old_x, old_y, old_yaw = self._dr.get_state()
+        dx = float(gps_x) - float(old_x)
+        dy = float(gps_y) - float(old_y)
+        raw_error_m = math.hypot(dx, dy)
+        ref_yaw = _route_reference_yaw(route_context, current_yaw)
+        tx = math.cos(ref_yaw)
+        ty = math.sin(ref_yaw)
+        nx = math.cos(ref_yaw + math.pi / 2.0)
+        ny = math.sin(ref_yaw + math.pi / 2.0)
+        longitudinal_m = (dx * tx) + (dy * ty)
+        lateral_m = (dx * nx) + (dy * ny)
+
+        visual_protected = _lane_observation_has_local_authority(lane_observation)
+        lateral_gain = float(_GPS_SOFT_LATERAL_GAIN)
+        lateral_blocked = False
+        if visual_protected and abs(lateral_m) >= float(_GPS_VISUAL_LATERAL_BLOCK_M):
+            lateral_update_m = 0.0
+            lateral_blocked = True
+        else:
+            lateral_update_m = lateral_m * lateral_gain
+        longitudinal_update_m = longitudinal_m
+
+        gain = max(0.0, min(1.0, float(_GPS_SOFT_GAIN)))
+        step_dx = gain * ((longitudinal_update_m * tx) + (lateral_update_m * nx))
+        step_dy = gain * ((longitudinal_update_m * ty) + (lateral_update_m * ny))
+        max_step_m = float(_GPS_RECOVERY_MAX_STEP_M if raw_error_m >= float(_GPS_RECOVERY_ERROR_M) else _GPS_SOFT_MAX_STEP_M)
+        step_norm = math.hypot(step_dx, step_dy)
+        if max_step_m > 0.0 and step_norm > max_step_m:
+            scale = max_step_m / max(step_norm, 1e-9)
+            step_dx *= scale
+            step_dy *= scale
+            step_norm = max_step_m
+
+        new_yaw = float(old_yaw)
+        yaw_update_rad = 0.0
+        if explicit_yaw and not visual_protected:
+            yaw_delta = _wrap_angle(float(gps_yaw) - float(old_yaw))
+            yaw_update_rad = max(
+                -math.radians(2.0),
+                min(math.radians(2.0), 0.15 * yaw_delta),
+            )
+            new_yaw = _wrap_angle(float(old_yaw) + yaw_update_rad)
+
+        if step_norm > 1e-9 or abs(yaw_update_rad) > 1e-9:
+            self._dr.reset(float(old_x) + step_dx, float(old_y) + step_dy, new_yaw)
+            self._last_yaw_rad = new_yaw
+
+        mode = "gps_recovery_soft" if raw_error_m >= float(_GPS_RECOVERY_ERROR_M) else "gps_soft"
+        if lateral_blocked:
+            mode = f"{mode}_visual_lateral_blocked"
+        return True, {
+            "mode": mode,
+            "source": source,
+            "error_m": float(raw_error_m),
+            "applied_step_m": float(step_norm),
+            "lateral_error_m": float(lateral_m),
+            "longitudinal_error_m": float(longitudinal_m),
+            "visual_lateral_blocked": bool(lateral_blocked),
+            "hard_reset": False,
+        }
+
+    def _apply_localisation_fix(
+        self,
+        current_yaw: float,
+        route_context: RouteContext | None = None,
+        lane_observation: LaneObservation | None = None,
+    ):
         if self._dr is None or self._graph is None:
             return False, None
         payload = self._localisation_fix_sub.receive()
@@ -419,6 +797,14 @@ class threadPoseEstimator(threadTracking):
         meta = payload.get("meta")
         if not isinstance(meta, dict):
             meta = {}
+        is_manual = self._localisation_is_manual(payload, meta)
+        if not is_manual and not self._use_gps_for_localization():
+            live_log(
+                "pose_estimator",
+                event="gps_fix_rejected",
+                reason="gps_disabled",
+            )
+            return False, None
 
         old_x, old_y, _ = self._dr.get_state()
         pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
@@ -426,14 +812,26 @@ class threadPoseEstimator(threadTracking):
             return False, None
 
         x, y, yaw = pose
-        self._dr.reset(float(x), float(y), float(yaw))
-        self._last_yaw_rad = float(yaw)
-        self._yaw_ekf_p = _YAW_EKF_P_INIT
-        if payload.get("yaw_rad") is not None or payload.get("yaw_deg") is not None:
-            self._last_absolute_yaw_fix_monotonic = time.monotonic()
-            self._last_absolute_yaw_fix_source = str(meta.get("source") or payload.get("source") or "gps_localisation")
-        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
-            self.tracking_state.set_lane_measurement_state(False, 0.0)
+        if not is_manual:
+            accepted, reason, filtered_x, filtered_y = self._validate_gps_fix(
+                x=float(x),
+                y=float(y),
+                expected_x=float(old_x),
+                expected_y=float(old_y),
+            )
+            if not accepted:
+                live_log(
+                    "pose_estimator",
+                    event="gps_fix_rejected",
+                    reason=str(reason),
+                    gps_x=float(filtered_x),
+                    gps_y=float(filtered_y),
+                    expected_x=float(old_x),
+                    expected_y=float(old_y),
+                    error_m=float(math.hypot(float(filtered_x) - float(old_x), float(filtered_y) - float(old_y))),
+                )
+                return False, None
+            x, y = float(filtered_x), float(filtered_y)
 
         default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
         source = str(meta.get("source") or payload.get("source") or default_source)
@@ -442,11 +840,34 @@ class threadPoseEstimator(threadTracking):
             source = f"{source}:{resolved_node_id}"
         if bool(meta.get("manual")):
             self._send_sim_relocalize_pose(float(x), float(y), float(yaw), source=source)
+
+        authority = str(_LOCALIZATION_GPS_AUTHORITY or "init_recovery_soft").strip().lower()
+        if not is_manual and authority not in {"hard", "reset", "authoritative"}:
+            return self._apply_gps_soft_update(
+                gps_x=float(x),
+                gps_y=float(y),
+                gps_yaw=float(yaw),
+                current_yaw=float(current_yaw),
+                route_context=route_context,
+                lane_observation=lane_observation,
+                source=source,
+                explicit_yaw=self._localisation_has_explicit_yaw(payload),
+            )
+
+        self._dr.reset(float(x), float(y), float(yaw))
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        if payload.get("yaw_rad") is not None or payload.get("yaw_deg") is not None:
+            self._reset_imu_yaw_alignment(float(yaw), source=source, settle_s=0.20)
+        else:
+            self._last_yaw_rad = float(yaw)
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
         error_m = math.hypot(float(x) - float(old_x), float(y) - float(old_y))
         return True, {
-            "mode": "gps_fix",
+            "mode": "manual_fix" if is_manual else "gps_fix",
             "source": source,
             "error_m": float(error_m),
+            "hard_reset": True,
         }
 
     def _build_pose_estimate(
@@ -461,6 +882,9 @@ class threadPoseEstimator(threadTracking):
         relocalization_source: str,
         relocalization_error_m: float,
         route_context: RouteContext | None,
+        lane_observation: LaneObservation | None = None,
+        gps_match: dict | None = None,
+        visual_lane_match=None,
         wall_timestamp: float | None = None,
     ) -> PoseEstimate:
         # ``now`` is monotonic and used internally for *age* deltas (must be
@@ -473,8 +897,22 @@ class threadPoseEstimator(threadTracking):
         # ``pose_stale`` fallback. See safety_gate.py:135.
         map_match_error_m = float(route_context.map_match_error_m or 0.0) if route_context is not None else 0.5
         route_conf = max(0.0, min(1.0, 1.0 - (map_match_error_m / 0.5)))
-        lane_bonus = 0.2 if lane_measurement_reliable else 0.0
+        visual_has_path = lane_observation_has_visual_path(
+            lane_observation,
+            min_quality=float(getattr(_config, "LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH", 0.55) or 0.55),
+            min_points=int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8) or 8),
+        )
+        lane_bonus = 0.35 if visual_has_path else (0.2 if lane_measurement_reliable else 0.0)
         localization_confidence = max(0.0, min(1.0, route_conf + lane_bonus))
+        gps_applied = isinstance(gps_match, dict) and str(gps_match.get("mode") or "").startswith("gps")
+        if visual_has_path:
+            localization_mode = "VISUAL_PRIMARY"
+        elif gps_applied and float(gps_match.get("error_m") or 0.0) >= float(_GPS_RECOVERY_ERROR_M):
+            localization_mode = "GPS_RECOVERY"
+        elif localization_confidence < 0.35:
+            localization_mode = "DEGRADED"
+        else:
+            localization_mode = "OK"
         speed_feedback_age_s = (now - self._last_speed_t) if self._last_speed_t is not None else None
         speed_command_age_s = (now - self._last_cmd_speed_t) if self._last_cmd_speed_t is not None else None
         published_ts = float(wall_timestamp) if wall_timestamp is not None else time.time()
@@ -496,6 +934,9 @@ class threadPoseEstimator(threadTracking):
             lane_measurement_reliable=bool(lane_measurement_reliable),
             camera_lateral_correction_m=float(camera_lateral_correction_m or 0.0),
             imu_received=bool(self._imu_received),
+            localization_mode=str(localization_mode),
+            gps_fix_quality=float(getattr(self, "_last_gps_fix_quality", 0.0) or 0.0),
+            visual_lane_match=visual_lane_match,
         )
 
     def thread_work(self):
@@ -519,32 +960,48 @@ class threadPoseEstimator(threadTracking):
             try:
                 imu_dict = ast.literal_eval(str(imu_raw))
                 self._last_raw_imu = imu_dict
-                prev_imu_t = self._last_imu_t
-                self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 yaw_raw_rad = _IMU_YAW_SIGN * math.radians(yaw_deg)
-                if not self._yaw_offset_calibrated:
+                ignore_until = float(getattr(self, "_ignore_imu_until_monotonic", 0.0) or 0.0)
+                if now < ignore_until:
+                    pass
+                elif not self._yaw_offset_calibrated:
                     self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
                     self._yaw_offset_calibrated = True
+                    self._last_imu_t = now
+                    live_log(
+                        "pose_estimator",
+                        event="imu_yaw_calibrated",
+                        raw_yaw_deg=float(yaw_deg),
+                        start_yaw_deg=float(math.degrees(self._start_yaw_rad)),
+                        offset_deg=float(math.degrees(self._yaw_offset)),
+                    )
                 elif not self._has_fresh_absolute_yaw_fix(now):
+                    prev_imu_t = self._last_imu_t
+                    self._last_imu_t = now
                     # EKF correction: fuse IMU absolute heading with kinematic prediction.
                     # R scales with steer²: large steer → servo EMI biases magnetometer
                     # → kinematic model trusted more. Smooth transition, no hard cutoff.
                     yaw_imu = yaw_raw_rad + self._yaw_offset
-                    dt_imu = (now - prev_imu_t) if prev_imu_t is not None else 0.05
-                    innov = yaw_imu - self._last_yaw_rad
-                    while innov > math.pi:
-                        innov -= 2.0 * math.pi
-                    while innov < -math.pi:
-                        innov += 2.0 * math.pi
-                    # Rate-limit innovation to reject servo-EMI step spikes
-                    max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                    innov = max(-max_innov, min(max_innov, innov))
-                    # Kalman gain: R grows with steer² → IMU less reliable when turning
-                    R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
-                    K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
-                    self._last_yaw_rad += K * innov
-                    self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
+                    use_encoder = self._use_encoder_for_localization()
+                    if not use_encoder:
+                        self._last_yaw_rad = yaw_imu
+                        self._yaw_ekf_p = _YAW_EKF_P_INIT
+                    else:
+                        dt_imu = (now - prev_imu_t) if prev_imu_t is not None else 0.05
+                        innov = yaw_imu - self._last_yaw_rad
+                        while innov > math.pi:
+                            innov -= 2.0 * math.pi
+                        while innov < -math.pi:
+                            innov += 2.0 * math.pi
+                        # Rate-limit innovation to reject servo-EMI step spikes
+                        max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                        innov = max(-max_innov, min(max_innov, innov))
+                        # Kalman gain: R grows with steer² → IMU less reliable when turning
+                        R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
+                        K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
+                        self._last_yaw_rad += K * innov
+                        self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
                 self._imu_received = True
             except Exception:
                 pass
@@ -559,11 +1016,17 @@ class threadPoseEstimator(threadTracking):
         )
         eff_steer_rad = self._steer_filtered_rad
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
+        use_encoder = self._use_encoder_for_localization()
+        speed_for_dr = (
+            float(self._last_speed) * float(_DR_SPEED_SCALE)
+            if use_encoder else float(self._last_speed)
+        )
+        steer_for_dr = float(eff_steer_rad) if use_encoder else 0.0
         self._dr.update(
-            self._last_speed,
+            speed_for_dr,
             self._last_yaw_rad,
             dr_dt,
-            steer_rad=eff_steer_rad,
+            steer_rad=steer_for_dr,
             wheelbase_m=_WHEELBASE_M,
         )
         raw_x, raw_y, raw_yaw = self._dr.get_state()
@@ -583,8 +1046,13 @@ class threadPoseEstimator(threadTracking):
         if not isinstance(stopline_observation, StoplineObservation):
             stopline_observation = None
 
-        gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw)
-        if gps_relocalized:
+        gps_relocalized, gps_match = self._apply_localisation_fix(
+            raw_yaw,
+            route_context=route_context,
+            lane_observation=lane_observation,
+        )
+        gps_hard_reset = bool(isinstance(gps_match, dict) and gps_match.get("hard_reset"))
+        if gps_hard_reset:
             raw_x, raw_y, raw_yaw = self._dr.get_state()
             raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
             yaw_correction_rad = 0.0
@@ -596,6 +1064,8 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized = False
             stopline_match = None
         else:
+            if gps_relocalized:
+                raw_x, raw_y, raw_yaw = self._dr.get_state()
             yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, route_context, lane_observation)
             if abs(yaw_correction_rad) > 1e-9:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
@@ -629,10 +1099,48 @@ class threadPoseEstimator(threadTracking):
             if stopline_relocalized:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
 
+        visual_lane_match = match_visual_lane_to_route(
+            route_context,
+            lane_observation,
+            Pose2D(float(raw_x), float(raw_y), float(raw_yaw)),
+            enabled=bool(_VISUAL_MAP_MATCH_ENABLED),
+            min_quality=float(getattr(_config, "LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH", 0.55) or 0.55),
+            min_points=int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8) or 8),
+            lane_half_width_m=float(_LANE_HALF_WIDTH_M),
+            max_lateral_error_m=float(_VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M),
+            max_yaw_error_rad=float(_VISUAL_MAP_MATCH_MAX_YAW_ERROR_RAD),
+            max_sample_yaw_error_rad=float(_VISUAL_MAP_MATCH_MAX_SAMPLE_YAW_ERROR_RAD),
+            min_confidence=float(_VISUAL_MAP_MATCH_MIN_CONFIDENCE),
+        )
+        (
+            raw_x,
+            raw_y,
+            raw_yaw,
+            visual_map_lateral_correction_m,
+            visual_map_yaw_correction_rad,
+            visual_map_match_update_available,
+        ) = self._apply_visual_lane_match_update(route_context, visual_lane_match, now)
+        if visual_map_match_update_available:
+            fused_pose_for_match = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
+            visual_lane_match = match_visual_lane_to_route(
+                route_context,
+                lane_observation,
+                fused_pose_for_match,
+                enabled=bool(_VISUAL_MAP_MATCH_ENABLED),
+                min_quality=float(getattr(_config, "LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH", 0.55) or 0.55),
+                min_points=int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8) or 8),
+                lane_half_width_m=float(_LANE_HALF_WIDTH_M),
+                max_lateral_error_m=float(_VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M),
+                max_yaw_error_rad=float(_VISUAL_MAP_MATCH_MAX_YAW_ERROR_RAD),
+                max_sample_yaw_error_rad=float(_VISUAL_MAP_MATCH_MAX_SAMPLE_YAW_ERROR_RAD),
+                min_confidence=float(_VISUAL_MAP_MATCH_MIN_CONFIDENCE),
+            )
+        raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
+
         relocalization_mode = "dead_reckoning"
         relocalization_source = "dead_reckoning"
         relocalization_error_m = 0.0
-        if gps_relocalized and isinstance(gps_match, dict):
+        if gps_hard_reset and isinstance(gps_match, dict):
             relocalization_mode = str(gps_match.get("mode") or "gps_fix")
             relocalization_source = str(gps_match.get("source") or "gps_localisation")
             relocalization_error_m = float(gps_match.get("error_m") or 0.0)
@@ -650,6 +1158,17 @@ class threadPoseEstimator(threadTracking):
             relocalization_mode = "lane_relocalization"
             relocalization_source = "lane_center"
             relocalization_error_m = abs(float(lane_relocalization_m))
+        elif abs(visual_map_lateral_correction_m) > 1e-9 or abs(visual_map_yaw_correction_rad) > 1e-9:
+            relocalization_mode = "visual_lane_match"
+            relocalization_source = "mini_yabloc_2d"
+            relocalization_error_m = max(
+                abs(float(visual_map_lateral_correction_m)),
+                abs(float(visual_map_yaw_correction_rad)),
+            )
+        elif gps_relocalized and isinstance(gps_match, dict):
+            relocalization_mode = str(gps_match.get("mode") or "gps_soft")
+            relocalization_source = str(gps_match.get("source") or "gps_localisation")
+            relocalization_error_m = float(gps_match.get("error_m") or 0.0)
 
         fused_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
         pose_estimate = self._build_pose_estimate(
@@ -663,6 +1182,9 @@ class threadPoseEstimator(threadTracking):
             relocalization_source=relocalization_source,
             relocalization_error_m=relocalization_error_m,
             route_context=route_context,
+            lane_observation=lane_observation,
+            gps_match=gps_match if isinstance(gps_match, dict) else None,
+            visual_lane_match=visual_lane_match,
             wall_timestamp=wall_now,
         )
         self.pose_estimate_buffer.write(pose_estimate, timestamp=pose_estimate.timestamp)
@@ -680,8 +1202,48 @@ class threadPoseEstimator(threadTracking):
             reloc_mode=relocalization_mode,
             reloc_source=relocalization_source,
             reloc_error_m=float(relocalization_error_m or 0.0),
+            localization_mode=str(pose_estimate.localization_mode),
+            gps_fix_quality=float(pose_estimate.gps_fix_quality or 0.0),
+            gps_mode=str(gps_match.get("mode", "none") if isinstance(gps_match, dict) else "none"),
             lane_correction_m=float(lane_relocalization_m or 0.0),
             lane_reliable=bool(lane_measurement_reliable),
+            visual_lane_match_confidence=(
+                float(visual_lane_match.confidence)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_accepted=(
+                bool(visual_lane_match.accepted)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_lateral_error_m=(
+                float(visual_lane_match.lateral_error_m)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_yaw_error_rad=(
+                float(visual_lane_match.yaw_error_rad)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_near_yaw_error_rad=(
+                float(visual_lane_match.near_yaw_error_rad)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_max_abs_yaw_error_rad=(
+                float(visual_lane_match.max_abs_yaw_error_rad)
+                if visual_lane_match is not None
+                else None
+            ),
+            visual_lane_match_reason=(
+                str(visual_lane_match.reason)
+                if visual_lane_match is not None
+                else "none"
+            ),
+            visual_map_lateral_correction_m=float(visual_map_lateral_correction_m or 0.0),
+            visual_map_yaw_correction_rad=float(visual_map_yaw_correction_rad or 0.0),
             lane_measurement_mode=(
                 str(lane_observation.measurement_mode or "none")
                 if lane_observation is not None

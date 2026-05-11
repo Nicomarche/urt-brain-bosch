@@ -30,7 +30,7 @@
 #     firmware Nucleo (décimas de grado, cm/s × 10). Esto vive ACÁ
 #     porque es un detalle del transporte.
 #   - State gate: si el dashboard puso al sistema en estado distinto de
-#     {AUTO, PARKING}, no escribimos al motor (handover a control manual
+#     {AUTO, ODOMETRY, PARKING}, no escribimos al motor (handover a control manual
 #     o pause). El gate sigue activo, solo no se manda.
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             queuesList, StateChange, "lastOnly", True
         )
         # Estado del sistema (controlado por el dashboard). Solo en
-        # {AUTO, PARKING} se mandan comandos al motor; en DEFAULT/MANUAL
+        # {AUTO, ODOMETRY, PARKING} se mandan comandos al motor; en DEFAULT/MANUAL
         # se respeta al operador.
         self._current_state: str = "DEFAULT"
 
@@ -153,7 +153,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             steering_deg=float(cmd.steering_deg),
             behavior_age_s=(now_t - behavior_ts) if behavior_ts else None,
             pose_age_s=(now_t - pose_ts) if pose_ts else None,
-            dispatched=(self._current_state in {"AUTO", "PARKING"}),
+            dispatched=(self._current_state in {"AUTO", "ODOMETRY", "PARKING"}),
             had_motor_cmd=isinstance(motor_cmd, MotorCommand),
         )
 
@@ -175,7 +175,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
 
         # Si el estado no es operativo, no escribimos. El gate sigue
         # corriendo (logging continúa para diagnóstico).
-        if self._current_state not in {"AUTO", "PARKING"}:
+        if self._current_state not in {"AUTO", "ODOMETRY", "PARKING"}:
             return
 
         self._send(cmd)
@@ -201,7 +201,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         # Color según si vamos a despachar realmente (state operativo y
         # speed!=0). Rojo = bloqueado por state, amarillo = state OK pero
         # gate metió fallback, verde = pipeline produciendo movimiento.
-        if self._current_state not in {"AUTO", "PARKING"}:
+        if self._current_state not in {"AUTO", "ODOMETRY", "PARKING"}:
             color = "\033[1;91m"  # rojo
         elif abs(self._stats_last_speed) < 1e-3:
             color = "\033[1;93m"  # amarillo

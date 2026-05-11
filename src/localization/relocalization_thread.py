@@ -72,6 +72,15 @@ try:
     # `_STEER_SIGN_DR` queda como override de compatibilidad ADEMÁS de esa
     # inversión fija; en la configuración normal debe quedarse en +1.0.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
+    _USE_ENCODER       = bool(getattr(cfg, "TRACKING_USE_ENCODER", False))
+    _USE_GPS           = bool(getattr(cfg, "TRACKING_USE_GPS", False))
+    _COMMAND_SPEED_CALIBRATION_SCALE = float(
+        getattr(
+            cfg,
+            "TRACKING_COMMAND_SPEED_CALIBRATION_SCALE",
+            getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_SCALE", 1.0),
+        ) or 1.0
+    )
     # Sign applied to raw IMU yaw before EKF fusion.
     # +1.0 for sim (sim_bridge right-turn → yaw increases, matches the OSM tangent convention).
     # -1.0 for real hardware (BNO055 CCW-positive = right-turn → yaw decreases).
@@ -162,6 +171,19 @@ try:
     _STEER_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
     )
+    _GPS_VALIDATION_ENABLED = bool(
+        getattr(cfg, "TRACKING_GPS_VALIDATION_ENABLED", True)
+    )
+    _GPS_SAMPLE_WINDOW = int(getattr(cfg, "TRACKING_GPS_SAMPLE_WINDOW", 5) or 5)
+    _GPS_MIN_SAMPLES = int(getattr(cfg, "TRACKING_GPS_MIN_SAMPLES", 3) or 3)
+    _GPS_ZERO_EPS_M = float(getattr(cfg, "TRACKING_GPS_ZERO_EPS_M", 1e-3) or 1e-3)
+    _GPS_OUTLIER_DISTANCE_M = float(
+        getattr(cfg, "TRACKING_GPS_OUTLIER_DISTANCE_M", 0.60) or 0.60
+    )
+    _GPS_MAX_JUMP_M = float(getattr(cfg, "TRACKING_GPS_MAX_JUMP_M", 1.00) or 1.00)
+    _GPS_MAX_EXPECTED_ERROR_M = float(
+        getattr(cfg, "TRACKING_GPS_MAX_EXPECTED_ERROR_M", 0.75) or 0.75
+    )
 except Exception:
     _OSM_PATH = "lanelet2_map.osm"
     _START_LANELET_ID = None
@@ -178,8 +200,12 @@ except Exception:
     _LOOKAHEAD_TIME_S  = 0.6
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
+    _DR_SPEED_SCALE    = 1.0
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
+    _USE_ENCODER       = False
+    _USE_GPS           = False
+    _COMMAND_SPEED_CALIBRATION_SCALE = 1.0
     _IMU_YAW_SIGN      = -1.0   # fallback: real hardware (CCW-positive IMU)
     _IS_SIM            = False
     _STEER_LAG_ALPHA   = 1.0
@@ -213,6 +239,13 @@ except Exception:
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
     _COMMAND_SPEED_FALLBACK_ENABLED = True
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
+    _GPS_VALIDATION_ENABLED = True
+    _GPS_SAMPLE_WINDOW = 5
+    _GPS_MIN_SAMPLES = 3
+    _GPS_ZERO_EPS_M = 1e-3
+    _GPS_OUTLIER_DISTANCE_M = 0.60
+    _GPS_MAX_JUMP_M = 1.00
+    _GPS_MAX_EXPECTED_ERROR_M = 0.75
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -1196,18 +1229,29 @@ class threadTracking(ThreadWithStop):
             feedback_fresh=bool(feedback_fresh),
         )
 
+    def _odometry_mode_active(self) -> bool:
+        return str(getattr(self, "_current_state_message", "") or "").upper() == "ODOMETRY"
+
+    def _use_encoder_for_localization(self) -> bool:
+        return bool(_USE_ENCODER) and not self._odometry_mode_active()
+
+    def _use_gps_for_localization(self) -> bool:
+        return bool(_USE_GPS) and not self._odometry_mode_active()
+
     def _resolve_speed_mps(self, now: float) -> float:
         current_state_message = str(
             getattr(self, "_current_state_message", "DEFAULT") or "DEFAULT"
         ).upper()
+        use_encoder = self._use_encoder_for_localization()
         speed_raw = self._speed_sub.receive()
         if speed_raw is not None:
             self._last_raw_speed = speed_raw
-            self._last_speed_t = now
-            parsed_speed = self._parse_speed_mps(speed_raw)
-            if parsed_speed is not None:
-                self._last_speed = float(parsed_speed)
-                self._last_speed_source = "encoder"
+            if use_encoder:
+                self._last_speed_t = now
+                parsed_speed = self._parse_speed_mps(speed_raw)
+                if parsed_speed is not None:
+                    self._last_speed = float(parsed_speed)
+                    self._last_speed_source = "encoder"
 
         speed_cmd_raw = self._speed_cmd_sub.receive()
         if speed_cmd_raw is not None:
@@ -1230,6 +1274,21 @@ class threadTracking(ThreadWithStop):
             self._last_cmd_speed_t is not None and
             (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S)
         )
+        if not use_encoder:
+            if _cmd_fresh:
+                cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
+                if cmd_speed is not None:
+                    self._last_speed = (
+                        float(cmd_speed) * float(_COMMAND_SPEED_CALIBRATION_SCALE)
+                    )
+                    self._last_speed_source = (
+                        "command_odometry" if self._odometry_mode_active() else "command_no_encoder"
+                    )
+                    return float(self._last_speed)
+            self._last_speed = 0.0
+            self._last_speed_source = "none"
+            return 0.0
+
         if (
             current_state_message == "MANUAL" and
             _cmd_fresh and
@@ -1237,7 +1296,9 @@ class threadTracking(ThreadWithStop):
         ):
             cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
             if cmd_speed is not None:
-                self._last_speed = float(cmd_speed)
+                self._last_speed = (
+                    float(cmd_speed) * float(_COMMAND_SPEED_CALIBRATION_SCALE)
+                )
                 self._last_speed_source = "manual_command_hold"
                 return float(self._last_speed)
 
@@ -1249,7 +1310,7 @@ class threadTracking(ThreadWithStop):
             if (now - self._last_cmd_speed_t) <= float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S):
                 cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
                 if cmd_speed is not None:
-                    scale = float(getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_SCALE", 1.0) or 1.0)
+                    scale = float(_COMMAND_SPEED_CALIBRATION_SCALE)
                     self._last_speed = float(cmd_speed) * scale
                     self._last_speed_source = "command"
                     return float(self._last_speed)
@@ -1372,20 +1433,25 @@ class threadTracking(ThreadWithStop):
                     #   steer ≈ 25° → R ≈ 10 rad²   (large) → K ≈ 0 → trust kinematics
                     # The transition is smooth, not a hard cutoff.
                     yaw_imu = yaw_raw_rad + self._yaw_offset
-                    dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
-                    innov = yaw_imu - self._last_yaw_rad
-                    while innov > math.pi:
-                        innov -= 2.0 * math.pi
-                    while innov < -math.pi:
-                        innov += 2.0 * math.pi
-                    # Rate-limit innovation to reject servo-EMI step spikes
-                    max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                    innov = max(-max_innov, min(max_innov, innov))
-                    # Kalman gain: R grows with steer² → IMU less reliable when turning
-                    R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
-                    K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
-                    self._last_yaw_rad += K * innov
-                    self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
+                    use_encoder = self._use_encoder_for_localization()
+                    if not use_encoder:
+                        self._last_yaw_rad = yaw_imu
+                        self._yaw_ekf_p = _YAW_EKF_P_INIT
+                    else:
+                        dt_imu = (now - _prev_imu_t) if _prev_imu_t is not None else 0.05
+                        innov = yaw_imu - self._last_yaw_rad
+                        while innov > math.pi:
+                            innov -= 2.0 * math.pi
+                        while innov < -math.pi:
+                            innov += 2.0 * math.pi
+                        # Rate-limit innovation to reject servo-EMI step spikes
+                        max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
+                        innov = max(-max_innov, min(max_innov, innov))
+                        # Kalman gain: R grows with steer² → IMU less reliable when turning
+                        R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
+                        K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
+                        self._last_yaw_rad += K * innov
+                        self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
 
                 self._imu_received = True
             except Exception:
@@ -1407,8 +1473,14 @@ class threadTracking(ThreadWithStop):
         # Passing a yaw that was already advanced by another integration step was
         # exaggerating both curvature and displacement in the preview.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(self._last_speed * _DR_SPEED_SCALE, self._last_yaw_rad, dr_dt,
-                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
+        use_encoder = self._use_encoder_for_localization()
+        speed_for_dr = (
+            float(self._last_speed) * float(_DR_SPEED_SCALE)
+            if use_encoder else float(self._last_speed)
+        )
+        steer_for_dr = float(_eff_steer_rad) if use_encoder else 0.0
+        self._dr.update(speed_for_dr, self._last_yaw_rad, dr_dt,
+                        steer_rad=steer_for_dr, wheelbase_m=_WHEELBASE_M)
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
         # EKF process noise: covariance grows over time as kinematic drift accumulates

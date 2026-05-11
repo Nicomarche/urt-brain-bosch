@@ -58,6 +58,7 @@ _SAFE_HALF_WIDTH_M = max(
 _CONTAINMENT_INFEASIBLE_STOP_TICKS = 4
 _BLEND_SAMPLE1_MAX_GAP_M = 0.10
 _BLEND_SAMPLE1_MAX_HEADING_DELTA_DEG = 12.0
+_VISUAL_BLEND_SAMPLE1_MAX_HEADING_DELTA_DEG = 70.0
 _STRAIGHT_HOLD_BRIDGE_MODE = "straight_hold"
 _PRECISION_ROUTE_MIN_STEP_M = 0.005
 _PRECISION_ROUTE_WAYPOINT_MIN_STEP_M = 0.0125
@@ -78,6 +79,13 @@ _VISUAL_LANE_REENTRY_TWO_LINE_MIN_QUALITY = 0.8
 _VISUAL_LANE_REENTRY_GAIN = 0.60
 _VISUAL_LANE_REENTRY_MAX_SHIFT_M = 0.10
 _VISUAL_LANE_REENTRY_FADE_DISTANCE_M = 0.80
+_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M = 0.004
+_VISUAL_LANE_REENTRY_SHIFT_MAX_STEP_M = 0.020
+_VISUAL_LANE_REENTRY_SHIFT_DECAY_STEP_M = 0.008
+_VISUAL_LANE_REENTRY_SIGN_FLIP_CONFIRM_M = 0.060
+_VISUAL_LANE_REENTRY_SIGN_FLIP_CONFIRM_TICKS = 3
+_VISUAL_LANE_REENTRY_SIGN_FLIP_ZERO_HOLD_TICKS = 2
+_VISUAL_LANE_REENTRY_DECAY_HOLD_TICKS = 12
 _VISUAL_LANE_REENTRY_SINGLE_LINE_MIN_QUALITY = 0.6
 _VISUAL_LANE_REENTRY_SINGLE_LINE_GAIN = 0.40
 _VISUAL_LANE_REENTRY_SINGLE_LINE_MAX_SHIFT_M = 0.07
@@ -102,12 +110,20 @@ _VISUAL_ROUTE_BLEND_SINGLE_LINE_MIN_SHIFT_M = 0.005
 _VISUAL_LANE_REENTRY_RELAXED_MAP_MATCH_ERROR_M = 0.10
 _VISUAL_PATH_PRIORITY_TWO_LINE_BLEND = 0.35
 _VISUAL_PATH_PRIORITY_SINGLE_LINE_BLEND = 0.20
-_VISUAL_PREFIX_STABILIZE_DISTANCE_M = 0.30
+_VISUAL_PREFIX_STABILIZE_DISTANCE_M = 0.65
 _VISUAL_PREFIX_MIN_FORWARD_M = 0.035
+_VISUAL_PREFIX_EGO_START_TOL_M = 0.025
 _VISUAL_PREFIX_FORWARD_PROGRESS_RATIO = 0.60
 _VISUAL_PREFIX_MAX_LATERAL_RATIO = 0.75
 _VISUAL_PREFIX_MIN_LATERAL_LIMIT_M = 0.05
 _VISUAL_PREFIX_FORWARD_STEP_EPS_M = 0.015
+_VISUAL_PREFIX_LATERAL_RAMP_DISTANCE_M = 0.65
+_VISUAL_PREFIX_MAX_ENTRY_HEADING_DEG = 5.0
+_VISUAL_PREFIX_TWO_LINE_MAX_HEADING_DEG = 5.0
+_ROUTE_PREFIX_STABILIZE_DISTANCE_M = 0.45
+_ROUTE_PREFIX_MIN_FORWARD_M = 0.025
+_ROUTE_PREFIX_FORWARD_STEP_EPS_M = 0.012
+_ROUTE_PREFIX_MAX_ENTRY_HEADING_DEG = 25.0
 _SINGLE_LINE_VISUAL_PREFIX_MIN_HEADING_DEG = 6.0
 _SINGLE_LINE_VISUAL_PREFIX_MAX_HEADING_DEG = 20.0
 _SINGLE_LINE_VISUAL_ROUTE_OVERRIDE_MAP_MATCH_ERROR_M = max(0.15, _LANE_HALF_WIDTH_M + 0.02)
@@ -127,6 +143,86 @@ _ROUTE_TRACKING_VISUAL_HOLD_MAX_LATERAL_M = max(0.18, _LANE_HALF_WIDTH_M + 0.08)
 _ROUTE_TRACKING_VISUAL_HOLD_HEADING_FLIP_MIN_MAP_MATCH_ERROR_M = 0.05
 _ROUTE_TRACKING_VISUAL_HOLD_HEADING_FLIP_MAX_FORWARD_M = 0.08
 _ROUTE_TRACKING_VISUAL_HOLD_HEADING_FLIP_MIN_HEADING_DEG = 5.0
+_LINE_LOSS_STRAIGHT_HOLD_MAX_TICKS = 80
+_LINE_LOSS_STRAIGHT_HOLD_MODES = frozenset({"single_line", "route_tracking", "blind", "none"})
+_LINE_LOSS_STRAIGHT_HOLD_BLOCKING_SEMANTICS = frozenset({
+    "intersection",
+    "roundabout",
+    "stopline",
+    "crosswalk",
+    "parking",
+    "parking_spot",
+    "traffic_light",
+    "stop",
+})
+_LINE_LOSS_STRAIGHT_HOLD_BLOCK_DISTANCE_M = 0.45
+try:
+    from config import (
+        BEHAVIOR_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS as _CONFIG_LINE_LOSS_ROUTE_ESCAPE_MIN_TICKS,
+    )
+except Exception:
+    _CONFIG_LINE_LOSS_ROUTE_ESCAPE_MIN_TICKS = 24
+
+try:
+    from config import (
+        BEHAVIOR_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M as _CONFIG_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M,
+    )
+except Exception:
+    _CONFIG_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M = 0.12
+
+try:
+    from config import (
+        BEHAVIOR_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED as _CONFIG_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED,
+    )
+except Exception:
+    _CONFIG_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED = True
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M as _CONFIG_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M,
+    )
+except Exception:
+    _CONFIG_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M = 20.0
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_ABSURD_CORRIDOR_VIOLATION_M as _CONFIG_VISUAL_ABSURD_CORRIDOR_VIOLATION_M,
+    )
+except Exception:
+    _CONFIG_VISUAL_ABSURD_CORRIDOR_VIOLATION_M = 0.50
+
+try:
+    from config import (
+        BEHAVIOR_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M as _CONFIG_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M,
+    )
+except Exception:
+    _CONFIG_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M = 0.08
+
+_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS = int(
+    max(1, _CONFIG_LINE_LOSS_ROUTE_ESCAPE_MIN_TICKS)
+)
+_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M = float(
+    max(0.0, _CONFIG_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M)
+)
+_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED = bool(_CONFIG_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED)
+_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M = float(
+    max(0.0, _CONFIG_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M)
+)
+_VISUAL_ABSURD_CORRIDOR_VIOLATION_M = float(
+    max(0.0, _CONFIG_VISUAL_ABSURD_CORRIDOR_VIOLATION_M)
+)
+_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M = float(
+    max(0.0, _CONFIG_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M)
+)
+_VISUAL_HOLD_PATH_SOURCES = frozenset({
+    "visual_lane_waypoints",
+    "line_loss_visual_hold",
+    "route_tracking_visual_hold",
+})
+_LINE_LOSS_STRAIGHT_HOLD_ROUTE_HEADING_MAX_RAD = math.radians(10.0)
+_LINE_LOSS_STRAIGHT_HOLD_ROUTE_PATH_HEADING_MAX_RAD = math.radians(11.0)
+_LINE_LOSS_STRAIGHT_HOLD_ROUTE_KAPPA_MAX = 0.30
+_LINE_LOSS_STRAIGHT_HOLD_ROUTE_LOOKAHEAD_MIN_M = 0.08
 _SINGLE_LINE_TRANSITION_HOLD_MAX_TICKS = 6
 _SINGLE_LINE_TRANSITION_HOLD_MAX_DIRECT_ERROR_M = 0.06
 _SINGLE_LINE_TRANSITION_HOLD_MAX_SAMPLE1_GAP_M = 0.06
@@ -197,6 +293,14 @@ class _RouteTrackingVisualHoldResult:
 
 
 @dataclass(frozen=True)
+class _LineLossStraightHoldResult:
+    target_path: np.ndarray
+    left_bound: np.ndarray
+    right_bound: np.ndarray
+    notes: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class _SingleLineTransitionHoldResult:
     target_xy: np.ndarray
     notes: dict[str, Any] = field(default_factory=dict)
@@ -223,6 +327,14 @@ def _visual_lane_reentry_base_shift_m(state: _VisualLaneReentryState) -> float:
     ))
     quality_scale = max(0.0, min(1.0, float(state.quality)))
     return float(base_shift_m * quality_scale)
+
+
+def _visual_lane_shift_sign(value_m: float) -> int:
+    if float(value_m) > float(_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M):
+        return 1
+    if float(value_m) < -float(_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M):
+        return -1
+    return 0
 
 
 def _route_context_allows_derived_single_line_reentry(ctx: PlanningContext) -> bool:
@@ -321,8 +433,16 @@ class PathOptimizer:
         self._prev_safe_path_source: str | None = None
         self._containment_infeasible_ticks: int = 0
         self._route_tracking_visual_hold_ticks: int = 0
+        self._line_loss_straight_hold_ticks: int = 0
         self._single_line_transition_hold_ticks: int = 0
         self._prev_lane_measurement_mode: str | None = None
+        self._visual_lane_reentry_shift_m: float = 0.0
+        self._visual_lane_reentry_decay_ticks: int = 0
+        self._visual_lane_reentry_route_id: str | None = None
+        self._visual_lane_reentry_anchor_sign: int = 0
+        self._visual_lane_reentry_opposite_sign: int = 0
+        self._visual_lane_reentry_opposite_ticks: int = 0
+        self._visual_lane_reentry_zero_hold_ticks: int = 0
 
     def optimize(
         self,
@@ -335,6 +455,8 @@ class PathOptimizer:
             base_speed_profile=path_plan.base_speed_profile,
             fallback_speed_mps=ctx.nominal_speed_mps,
         )
+        path_source = _path_note_str(path_plan, "path_source")
+        path_source_visual = path_source == "visual_lane_waypoints"
         step_arc = _infer_step_arc(
             base_speed_profile=path_plan.base_speed_profile,
             horizon_n=ctx.horizon_n,
@@ -346,6 +468,7 @@ class PathOptimizer:
             ref_speed_mps=ref_speed_mps,
             raw_path=raw_path,
             ctx=ctx,
+            path_source=path_source,
         )
         bridge_mode = _path_note_str(path_plan, "bridge_mode")
         protected_prefix_m = _path_note_float(path_plan, "protected_prefix_m")
@@ -389,7 +512,6 @@ class PathOptimizer:
         # crearía una "L" entre sample[0] y sample[1] que el MPC interpreta
         # como giro brusco. En ese caso dejamos el path tal como vino y el
         # MPC penaliza la deviación naturalmente (paradigma urt-ref).
-        path_source_visual = _path_note_str(path_plan, "path_source") == "visual_lane_waypoints"
         if not path_source_visual:
             sampled_xy[0] = pose_xy
         if protected_prefix_xy is not None:
@@ -413,9 +535,14 @@ class PathOptimizer:
                     blend_reason = "sample1_gap"
                 else:
                     sample1_heading_delta_deg = _sample_heading_delta_deg(sampled_xy, previous_xy)
+                    max_heading_delta_deg = (
+                        float(_VISUAL_BLEND_SAMPLE1_MAX_HEADING_DELTA_DEG)
+                        if path_source_visual
+                        else float(_BLEND_SAMPLE1_MAX_HEADING_DELTA_DEG)
+                    )
                     if (
                         sample1_heading_delta_deg is not None
-                        and sample1_heading_delta_deg > _BLEND_SAMPLE1_MAX_HEADING_DELTA_DEG
+                        and sample1_heading_delta_deg > max_heading_delta_deg
                     ):
                         blend_reason = "sample1_heading_delta"
                     else:
@@ -435,10 +562,22 @@ class PathOptimizer:
             if not path_source_visual:
                 sampled_xy[0] = pose_xy
 
+        (
+            visual_lane_state,
+            visual_lane_shift_m,
+            visual_lane_smoothing_notes,
+        ) = self._smooth_visual_lane_reentry_shift(
+            state=_visual_lane_reentry_state(ctx),
+            path_source=_path_note_str(path_plan, "path_source"),
+            blend_signature=blend_signature,
+        )
         sampled_xy, visual_lane_notes = _apply_visual_lane_reentry_bias(
             sampled_xy=sampled_xy,
             path_plan=path_plan,
             ctx=ctx,
+            state_override=visual_lane_state,
+            base_shift_override_m=visual_lane_shift_m,
+            smoothing_notes=visual_lane_smoothing_notes,
         )
 
         sampled_xy, visual_route_blend_notes = _maybe_blend_route_with_visual_waypoints(
@@ -541,6 +680,7 @@ class PathOptimizer:
             prev_safe_target_path=self._prev_safe_target_path,
             prev_safe_left_bound=self._prev_safe_left_bound,
             prev_safe_right_bound=self._prev_safe_right_bound,
+            prev_safe_path_source=self._prev_safe_path_source,
             prev_safe_signature=self._prev_safe_blend_signature,
         )
         single_line_flip_override = _maybe_override_single_line_visual_corridor_flip(
@@ -552,18 +692,48 @@ class PathOptimizer:
         if single_line_flip_override is not None:
             containment = single_line_flip_override
         sampled_xy = containment.target_xy
-        route_tracking_visual_hold = _maybe_hold_previous_visual_path_on_route_tracking(
-            sampled_xy=sampled_xy,
+        route_prefix_notes: dict[str, object] = {}
+        line_loss_straight_hold = _maybe_hold_straight_on_line_loss(
             path_plan=path_plan,
             ctx=ctx,
+            prev_lane_measurement_mode=self._prev_lane_measurement_mode,
             prev_target_path=self._prev_target_path,
             prev_target_path_source=self._prev_target_path_source,
-            prev_safe_target_path=self._prev_safe_target_path,
-            prev_safe_left_bound=self._prev_safe_left_bound,
-            prev_safe_right_bound=self._prev_safe_right_bound,
-            prev_safe_path_source=self._prev_safe_path_source,
-            hold_ticks=self._route_tracking_visual_hold_ticks,
+            hold_ticks=self._line_loss_straight_hold_ticks,
+            step_arc=step_arc,
         )
+        route_tracking_visual_hold = None
+        if line_loss_straight_hold is not None:
+            target_path = np.array(line_loss_straight_hold.target_path, copy=True)
+            left_bound = np.array(line_loss_straight_hold.left_bound, copy=True)
+            right_bound = np.array(line_loss_straight_hold.right_bound, copy=True)
+            self._line_loss_straight_hold_ticks += 1
+            self._route_tracking_visual_hold_ticks = 0
+            live_log(
+                "path_optimizer",
+                event="line_loss_straight_hold",
+                applied=True,
+                hold_ticks=int(self._line_loss_straight_hold_ticks),
+                reason=str(line_loss_straight_hold.notes.get("line_loss_straight_hold_reason", "unknown")),
+                measurement_mode=line_loss_straight_hold.notes.get("line_loss_measurement_mode"),
+                previous_measurement_mode=line_loss_straight_hold.notes.get("line_loss_previous_measurement_mode"),
+                step_arc_m=line_loss_straight_hold.notes.get("line_loss_straight_hold_step_arc_m"),
+                hold_path_kind=line_loss_straight_hold.notes.get("line_loss_hold_path_kind"),
+            )
+        else:
+            self._line_loss_straight_hold_ticks = 0
+            route_tracking_visual_hold = _maybe_hold_previous_visual_path_on_route_tracking(
+                sampled_xy=sampled_xy,
+                path_plan=path_plan,
+                ctx=ctx,
+                prev_target_path=self._prev_target_path,
+                prev_target_path_source=self._prev_target_path_source,
+                prev_safe_target_path=self._prev_safe_target_path,
+                prev_safe_left_bound=self._prev_safe_left_bound,
+                prev_safe_right_bound=self._prev_safe_right_bound,
+                prev_safe_path_source=self._prev_safe_path_source,
+                hold_ticks=self._route_tracking_visual_hold_ticks,
+            )
         if route_tracking_visual_hold is not None:
             target_path = np.array(route_tracking_visual_hold.target_path, copy=True)
             left_bound = np.array(route_tracking_visual_hold.left_bound, copy=True)
@@ -580,8 +750,13 @@ class PathOptimizer:
                 map_match_error_m=route_tracking_visual_hold.notes.get("route_tracking_visual_hold_map_match_error_m"),
                 previous_path_source=route_tracking_visual_hold.notes.get("route_tracking_visual_hold_previous_path_source"),
             )
-        else:
+        elif line_loss_straight_hold is None:
             self._route_tracking_visual_hold_ticks = 0
+            sampled_xy, route_prefix_notes = _stabilize_route_path_prefix(
+                sampled_xy=sampled_xy,
+                path_plan=path_plan,
+                ctx=ctx,
+            )
             headings = _compute_headings(sampled_xy, initial_yaw=float(ctx.pose.fused_pose.yaw))
             target_path = np.column_stack([sampled_xy, headings])
         heading_consistency = _heading_consistency_metrics(target_path, sample_count=3)
@@ -594,10 +769,14 @@ class PathOptimizer:
             sample3_heading_vs_tangent_error_deg=heading_consistency["sample3_error_deg"],
             max_heading_vs_tangent_error_deg=heading_consistency["max_error_deg"],
         )
-        if route_tracking_visual_hold is None and containment.corridor_available:
+        if (
+            line_loss_straight_hold is None
+            and route_tracking_visual_hold is None
+            and containment.corridor_available
+        ):
             left_bound = np.asarray(containment.left_bound, dtype=float)
             right_bound = np.asarray(containment.right_bound, dtype=float)
-        elif route_tracking_visual_hold is None:
+        elif line_loss_straight_hold is None and route_tracking_visual_hold is None:
             left_bound, right_bound = _build_drivable_bounds(target_path, half_width_m=_DRIVABLE_HALF_WIDTH_M)
 
         if containment.corridor_available:
@@ -613,10 +792,15 @@ class PathOptimizer:
         optimizer_notes.update(dict(visual_prefix_notes))
         if single_line_transition_hold is not None:
             optimizer_notes.update(dict(single_line_transition_hold.notes))
+        optimizer_notes.update(dict(route_prefix_notes))
         optimizer_notes.update(dict(containment.notes))
+        if line_loss_straight_hold is not None:
+            optimizer_notes.update(dict(line_loss_straight_hold.notes))
         if route_tracking_visual_hold is not None:
             optimizer_notes.update(dict(route_tracking_visual_hold.notes))
         optimizer_notes.setdefault("containment_mode", containment.mode)
+        if line_loss_straight_hold is not None:
+            optimizer_notes["containment_mode"] = "line_loss_straight_hold"
         if route_tracking_visual_hold is not None:
             optimizer_notes["containment_mode"] = "route_tracking_visual_hold"
         optimizer_notes["corridor_violation_m"] = float(containment.max_violation_m)
@@ -648,7 +832,14 @@ class PathOptimizer:
 
         self._prev_target_path = np.array(target_path, copy=True)
         self._prev_blend_signature = blend_signature
-        if route_tracking_visual_hold is not None:
+        if line_loss_straight_hold is not None:
+            self._prev_target_path_source = str(
+                line_loss_straight_hold.notes.get(
+                    "line_loss_hold_path_source",
+                    "line_loss_straight_hold",
+                )
+            )
+        elif route_tracking_visual_hold is not None:
             self._prev_target_path_source = str(
                 route_tracking_visual_hold.notes.get(
                     "route_tracking_visual_hold_previous_path_source",
@@ -673,6 +864,167 @@ class PathOptimizer:
             drivable_right_bound=right_bound,
             notes=optimizer_notes,
         )
+
+    def _smooth_visual_lane_reentry_shift(
+        self,
+        *,
+        state: "_VisualLaneReentryState",
+        path_source: str,
+        blend_signature: "_BlendSignature",
+    ) -> tuple["_VisualLaneReentryState", float, dict[str, object]]:
+        route_id = str(blend_signature.route_id or "")
+        if path_source != "route_waypoints" or route_id != str(self._visual_lane_reentry_route_id or ""):
+            self._visual_lane_reentry_shift_m = 0.0
+            self._visual_lane_reentry_decay_ticks = 0
+            self._visual_lane_reentry_route_id = route_id
+            self._visual_lane_reentry_anchor_sign = 0
+            self._visual_lane_reentry_opposite_sign = 0
+            self._visual_lane_reentry_opposite_ticks = 0
+            self._visual_lane_reentry_zero_hold_ticks = 0
+
+        previous_shift_m = float(self._visual_lane_reentry_shift_m)
+        raw_shift_m = _visual_lane_reentry_base_shift_m(state) if state.active else 0.0
+        target_shift_m = float(raw_shift_m)
+        smoothing_reason = "raw"
+        applying_state = state
+        max_step_m = float(_VISUAL_LANE_REENTRY_SHIFT_MAX_STEP_M)
+        previous_sign = _visual_lane_shift_sign(previous_shift_m)
+        raw_sign = _visual_lane_shift_sign(raw_shift_m)
+        if self._visual_lane_reentry_anchor_sign == 0 and previous_sign != 0:
+            self._visual_lane_reentry_anchor_sign = int(previous_sign)
+
+        if state.active:
+            self._visual_lane_reentry_decay_ticks = 0
+            anchor_sign = int(self._visual_lane_reentry_anchor_sign)
+            if raw_sign == 0:
+                target_shift_m = 0.0
+                smoothing_reason = "raw_below_deadband"
+                self._visual_lane_reentry_opposite_sign = 0
+                self._visual_lane_reentry_opposite_ticks = 0
+                self._visual_lane_reentry_zero_hold_ticks = 0
+            elif anchor_sign == 0:
+                self._visual_lane_reentry_anchor_sign = int(raw_sign)
+                self._visual_lane_reentry_opposite_sign = 0
+                self._visual_lane_reentry_opposite_ticks = 0
+                self._visual_lane_reentry_zero_hold_ticks = 0
+            elif raw_sign == anchor_sign:
+                self._visual_lane_reentry_opposite_sign = 0
+                self._visual_lane_reentry_opposite_ticks = 0
+                self._visual_lane_reentry_zero_hold_ticks = 0
+            else:
+                if abs(raw_shift_m) >= float(_VISUAL_LANE_REENTRY_SIGN_FLIP_CONFIRM_M):
+                    if self._visual_lane_reentry_opposite_sign == raw_sign:
+                        self._visual_lane_reentry_opposite_ticks += 1
+                    else:
+                        self._visual_lane_reentry_opposite_sign = int(raw_sign)
+                        self._visual_lane_reentry_opposite_ticks = 1
+                        self._visual_lane_reentry_zero_hold_ticks = 0
+                else:
+                    self._visual_lane_reentry_opposite_sign = int(raw_sign)
+                    self._visual_lane_reentry_opposite_ticks = 0
+                    self._visual_lane_reentry_zero_hold_ticks = 0
+                target_shift_m = 0.0
+                if abs(raw_shift_m) < float(_VISUAL_LANE_REENTRY_SIGN_FLIP_CONFIRM_M):
+                    smoothing_reason = "weak_sign_flip_to_zero"
+                elif self._visual_lane_reentry_opposite_ticks < int(
+                    _VISUAL_LANE_REENTRY_SIGN_FLIP_CONFIRM_TICKS
+                ):
+                    smoothing_reason = "opposite_sign_pending"
+                elif abs(previous_shift_m) > float(_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M):
+                    smoothing_reason = "opposite_sign_confirmed_decelerate"
+                elif self._visual_lane_reentry_zero_hold_ticks < int(
+                    _VISUAL_LANE_REENTRY_SIGN_FLIP_ZERO_HOLD_TICKS
+                ):
+                    self._visual_lane_reentry_zero_hold_ticks += 1
+                    smoothing_reason = "opposite_sign_zero_hold"
+                else:
+                    self._visual_lane_reentry_anchor_sign = int(raw_sign)
+                    self._visual_lane_reentry_opposite_sign = 0
+                    self._visual_lane_reentry_opposite_ticks = 0
+                    self._visual_lane_reentry_zero_hold_ticks = 0
+                    target_shift_m = float(raw_shift_m)
+                    smoothing_reason = "opposite_sign_confirmed"
+        elif (
+            path_source == "route_waypoints"
+            and abs(previous_shift_m) > float(_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M)
+            and self._visual_lane_reentry_decay_ticks < int(_VISUAL_LANE_REENTRY_DECAY_HOLD_TICKS)
+        ):
+            self._visual_lane_reentry_decay_ticks += 1
+            self._visual_lane_reentry_opposite_sign = 0
+            self._visual_lane_reentry_opposite_ticks = 0
+            self._visual_lane_reentry_zero_hold_ticks = 0
+            target_shift_m = 0.0
+            max_step_m = float(_VISUAL_LANE_REENTRY_SHIFT_DECAY_STEP_M)
+            smoothing_reason = "measurement_lost_decay"
+            applying_state = _VisualLaneReentryState(
+                active=True,
+                error_m=0.0,
+                quality=1.0,
+                reason="filtered_decay",
+                measurement_mode="filtered",
+                measurement_source="filtered_shift",
+                gain=0.0,
+                max_shift_m=0.0,
+                fade_distance_m=float(_VISUAL_LANE_REENTRY_FADE_DISTANCE_M),
+            )
+        elif (
+            path_source == "route_waypoints"
+            and self._visual_lane_reentry_anchor_sign != 0
+            and self._visual_lane_reentry_decay_ticks < int(_VISUAL_LANE_REENTRY_DECAY_HOLD_TICKS)
+        ):
+            self._visual_lane_reentry_decay_ticks += 1
+            self._visual_lane_reentry_shift_m = 0.0
+            self._visual_lane_reentry_opposite_sign = 0
+            self._visual_lane_reentry_opposite_ticks = 0
+            self._visual_lane_reentry_zero_hold_ticks = 0
+            return state, 0.0, {
+                "visual_lane_raw_shift_m": float(raw_shift_m),
+                "visual_lane_filtered_shift_m": 0.0,
+                "visual_lane_shift_smoothing": "measurement_lost_memory",
+                "visual_lane_previous_shift_m": float(previous_shift_m),
+                "visual_lane_anchor_sign": int(self._visual_lane_reentry_anchor_sign),
+                "visual_lane_opposite_sign": int(self._visual_lane_reentry_opposite_sign),
+                "visual_lane_opposite_ticks": int(self._visual_lane_reentry_opposite_ticks),
+                "visual_lane_zero_hold_ticks": int(self._visual_lane_reentry_zero_hold_ticks),
+            }
+        else:
+            self._visual_lane_reentry_shift_m = 0.0
+            self._visual_lane_reentry_decay_ticks = 0
+            self._visual_lane_reentry_anchor_sign = 0
+            self._visual_lane_reentry_opposite_sign = 0
+            self._visual_lane_reentry_opposite_ticks = 0
+            self._visual_lane_reentry_zero_hold_ticks = 0
+            return state, 0.0, {
+                "visual_lane_raw_shift_m": float(raw_shift_m),
+                "visual_lane_filtered_shift_m": 0.0,
+                "visual_lane_shift_smoothing": "inactive",
+                "visual_lane_previous_shift_m": float(previous_shift_m),
+                "visual_lane_anchor_sign": 0,
+                "visual_lane_opposite_sign": 0,
+                "visual_lane_opposite_ticks": 0,
+                "visual_lane_zero_hold_ticks": 0,
+            }
+
+        delta_m = float(target_shift_m) - float(previous_shift_m)
+        delta_m = max(-max_step_m, min(max_step_m, delta_m))
+        filtered_shift_m = float(previous_shift_m) + float(delta_m)
+        if abs(filtered_shift_m) <= float(_VISUAL_LANE_REENTRY_SHIFT_DEADBAND_M):
+            filtered_shift_m = 0.0
+
+        filtered_sign = _visual_lane_shift_sign(filtered_shift_m)
+        if self._visual_lane_reentry_anchor_sign == 0 and filtered_sign != 0:
+            self._visual_lane_reentry_anchor_sign = int(filtered_sign)
+        self._visual_lane_reentry_shift_m = float(filtered_shift_m)
+        return applying_state, float(filtered_shift_m), {
+            "visual_lane_raw_shift_m": float(raw_shift_m),
+            "visual_lane_filtered_shift_m": float(filtered_shift_m),
+            "visual_lane_shift_smoothing": str(smoothing_reason),
+            "visual_lane_previous_shift_m": float(previous_shift_m),
+            "visual_lane_anchor_sign": int(self._visual_lane_reentry_anchor_sign),
+            "visual_lane_opposite_sign": int(self._visual_lane_reentry_opposite_sign),
+            "visual_lane_opposite_ticks": int(self._visual_lane_reentry_opposite_ticks),
+            "visual_lane_zero_hold_ticks": int(self._visual_lane_reentry_zero_hold_ticks),
+        }
 
 
 def _build_blend_signature(
@@ -741,6 +1093,7 @@ def _refine_step_arc_for_precision_route(
     ref_speed_mps: float,
     raw_path: np.ndarray,
     ctx: PlanningContext,
+    path_source: str | None = None,
 ) -> tuple[float, dict[str, object]]:
     route = getattr(ctx, "route", None)
     visual_lane_reentry = _visual_lane_reentry_state(ctx)
@@ -765,6 +1118,9 @@ def _refine_step_arc_for_precision_route(
     }
     if route is None or not bool(getattr(route, "route_active", False)):
         meta["reason"] = "route_inactive"
+        return float(step_arc), meta
+    if str(path_source or "") == "visual_lane_waypoints":
+        meta["reason"] = "visual_primary_path"
         return float(step_arc), meta
 
     next_semantic_type = str(getattr(route, "next_semantic_type", "") or "")
@@ -901,6 +1257,8 @@ def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:
             measurement_source = "line_center_offset_m"
         else:
             measurement = getattr(lane_observation, "direct_error_m", None)
+            if measurement is not None:
+                measurement_source = "direct_error_m"
     elif measurement_mode == "single_line":
         measurement = _single_line_visual_waypoint_error_m(ctx, lane_observation)
         if measurement is not None:
@@ -1027,6 +1385,9 @@ def _apply_visual_lane_reentry_bias(
     sampled_xy: np.ndarray,
     path_plan: BehaviorPathPlan,
     ctx: PlanningContext,
+    state_override: _VisualLaneReentryState | None = None,
+    base_shift_override_m: float | None = None,
+    smoothing_notes: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, dict[str, object]]:
     path_source = _path_note_str(path_plan, "path_source")
     route_corridor_authoritative = bool(
@@ -1060,13 +1421,18 @@ def _apply_visual_lane_reentry_bias(
     if path_source == "visual_lane_waypoints":
         # La corrección visual ya está horneada en los waypoints — un sesgo
         # perpendicular adicional sería doble corrección (paradigma urt-ref).
+        # Aun así propagamos el error/quality visual real: el MotionController
+        # lo usa para abrir temporalmente el cap/rate de steering cuando el
+        # coche ya está cerca del borde físico del carril.
+        state = _visual_lane_reentry_state(ctx)
         notes: dict[str, object] = {
-            "visual_lane_reentry_active": False,
+            "visual_lane_reentry_active": bool(state.active),
             "visual_lane_reentry_reason": "path_source_visual_waypoints",
-            "visual_lane_measurement_mode": "",
+            "visual_lane_measurement_mode": str(state.measurement_mode),
+            "visual_lane_measurement_source": str(state.measurement_source),
             "visual_lane_reentry_applied": False,
-            "visual_lane_error_m": 0.0,
-            "visual_lane_quality": 0.0,
+            "visual_lane_error_m": float(state.error_m),
+            "visual_lane_quality": float(state.quality),
             "visual_lane_shift_m": 0.0,
             "visual_lane_prefix_samples": 0,
         }
@@ -1075,14 +1441,14 @@ def _apply_visual_lane_reentry_bias(
             event="visual_lane_reentry_bias",
             applied=False,
             reason="path_source_visual_waypoints",
-            error_m=0.0,
-            quality=0.0,
+            error_m=float(state.error_m),
+            quality=float(state.quality),
             shift_m=0.0,
             prefix_samples=0,
             path_source=path_source,
         )
         return np.array(sampled_xy, copy=True), notes
-    state = _visual_lane_reentry_state(ctx)
+    state = state_override if state_override is not None else _visual_lane_reentry_state(ctx)
     notes: dict[str, object] = {
         "visual_lane_reentry_active": bool(state.active),
         "visual_lane_reentry_reason": str(state.reason),
@@ -1095,6 +1461,8 @@ def _apply_visual_lane_reentry_bias(
         "visual_lane_prefix_samples": 0,
         "route_corridor_authoritative": bool(route_corridor_authoritative),
     }
+    if smoothing_notes:
+        notes.update(smoothing_notes)
     if sampled_xy.shape[0] <= 1 or not state.active:
         live_log(
             "path_optimizer",
@@ -1108,10 +1476,15 @@ def _apply_visual_lane_reentry_bias(
             path_source=_path_note_str(path_plan, "path_source"),
             route_corridor_authoritative=bool(route_corridor_authoritative),
             measurement_source=str(state.measurement_source),
+            **dict(smoothing_notes or {}),
         )
         return np.array(sampled_xy, copy=True), notes
 
-    base_shift_m = _visual_lane_reentry_base_shift_m(state)
+    base_shift_m = (
+        float(base_shift_override_m)
+        if base_shift_override_m is not None
+        else _visual_lane_reentry_base_shift_m(state)
+    )
     if abs(base_shift_m) < 1e-6:
         notes["visual_lane_reentry_reason"] = "zero_shift_after_scaling"
         live_log(
@@ -1126,6 +1499,7 @@ def _apply_visual_lane_reentry_bias(
             path_source=_path_note_str(path_plan, "path_source"),
             route_corridor_authoritative=bool(route_corridor_authoritative),
             measurement_source=str(state.measurement_source),
+            **dict(smoothing_notes or {}),
         )
         return np.array(sampled_xy, copy=True), notes
 
@@ -1170,6 +1544,7 @@ def _apply_visual_lane_reentry_bias(
         path_source=_path_note_str(path_plan, "path_source"),
         route_corridor_authoritative=bool(route_corridor_authoritative),
         measurement_source=str(state.measurement_source),
+        **dict(smoothing_notes or {}),
     )
     return biased_xy, notes
 
@@ -1341,12 +1716,14 @@ def _stabilize_visual_path_prefix(
 ) -> tuple[np.ndarray, dict[str, object]]:
     path_source = _path_note_str(path_plan, "path_source")
     lane_observation = getattr(ctx, "lane_observation", None)
+    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    visual_heading_limit_deg = 0.0
+    visual_heading_limit_rad = None
     single_line_heading_limit_deg = 0.0
-    single_line_heading_limit_rad = None
-    if (
-        lane_observation is not None
-        and str(getattr(lane_observation, "measurement_mode", "none") or "none") == "single_line"
-    ):
+    if measurement_mode == "two_line":
+        visual_heading_limit_deg = float(_VISUAL_PREFIX_TWO_LINE_MAX_HEADING_DEG)
+        visual_heading_limit_rad = math.radians(visual_heading_limit_deg)
+    elif measurement_mode == "single_line":
         error_mag_m = None
         if bool(getattr(lane_observation, "direct_error_valid", False)):
             try:
@@ -1372,7 +1749,8 @@ def _stabilize_visual_path_prefix(
                 * progress
             )
         )
-        single_line_heading_limit_rad = math.radians(single_line_heading_limit_deg)
+        visual_heading_limit_deg = float(single_line_heading_limit_deg)
+        visual_heading_limit_rad = math.radians(visual_heading_limit_deg)
     notes: dict[str, object] = {
         "visual_prefix_stabilization_applied": False,
         "visual_prefix_stabilization_points": 0,
@@ -1380,6 +1758,11 @@ def _stabilize_visual_path_prefix(
         "visual_prefix_sample1_y_left_before_m": 0.0,
         "visual_prefix_sample1_x_fwd_after_m": 0.0,
         "visual_prefix_sample1_y_left_after_m": 0.0,
+        "visual_prefix_starts_at_ego": False,
+        "visual_prefix_entry_heading_limit_deg": float(_VISUAL_PREFIX_MAX_ENTRY_HEADING_DEG),
+        "visual_prefix_entry_heading_cap_applied": False,
+        "visual_prefix_heading_limit_deg": float(visual_heading_limit_deg),
+        "visual_prefix_heading_cap_applied": False,
         "visual_prefix_single_line_heading_limit_deg": float(single_line_heading_limit_deg),
         "visual_prefix_single_line_heading_cap_applied": False,
     }
@@ -1390,24 +1773,46 @@ def _stabilize_visual_path_prefix(
     pose_y = float(ctx.pose.fused_pose.y)
     pose_yaw = float(ctx.pose.fused_pose.yaw)
     stabilized_xy = np.array(sampled_xy, copy=True)
+    first_body_x, first_body_y = _world_to_body_xy(
+        point_xy=stabilized_xy[0],
+        pose_x=pose_x,
+        pose_y=pose_y,
+        pose_yaw=pose_yaw,
+    )
+    visual_starts_at_ego = bool(
+        math.hypot(float(first_body_x), float(first_body_y)) <= float(_VISUAL_PREFIX_EGO_START_TOL_M)
+        or float(first_body_x) <= float(_VISUAL_PREFIX_EGO_START_TOL_M)
+    )
     cumulative_arc_m = 0.0
     stabilized_points = 0
-    prev_body_x = 0.0
-    prev_body_y = 0.0
+    prev_body_x = 0.0 if visual_starts_at_ego else float(first_body_x)
+    prev_body_y = 0.0 if visual_starts_at_ego else float(first_body_y)
     heading_cap_applied = False
+    entry_heading_cap_applied = False
     sample1_before: tuple[float, float] | None = None
     sample1_after: tuple[float, float] | None = None
+    start_idx = 1 if visual_starts_at_ego else 0
 
-    for idx in range(1, stabilized_xy.shape[0]):
-        cumulative_arc_m += float(np.linalg.norm(stabilized_xy[idx] - stabilized_xy[idx - 1]))
-        if cumulative_arc_m > float(_VISUAL_PREFIX_STABILIZE_DISTANCE_M):
-            break
+    for idx in range(start_idx, stabilized_xy.shape[0]):
+        if idx == 0:
+            cumulative_arc_m = math.hypot(float(first_body_x), float(first_body_y))
+        else:
+            cumulative_arc_m += float(np.linalg.norm(stabilized_xy[idx] - stabilized_xy[idx - 1]))
         body_x, body_y = _world_to_body_xy(
             point_xy=stabilized_xy[idx],
             pose_x=pose_x,
             pose_y=pose_y,
             pose_yaw=pose_yaw,
         )
+        if (
+            visual_starts_at_ego
+            and idx > start_idx
+            and float(body_x) > float(_VISUAL_PREFIX_STABILIZE_DISTANCE_M)
+            and float(prev_body_x) >= float(_VISUAL_PREFIX_STABILIZE_DISTANCE_M)
+        ):
+            break
+        if (not visual_starts_at_ego) and float(body_x) > float(_VISUAL_PREFIX_LATERAL_RAMP_DISTANCE_M):
+            break
         if idx == 1:
             sample1_before = (float(body_x), float(body_y))
 
@@ -1417,18 +1822,32 @@ def _stabilize_visual_path_prefix(
         )
         min_progress_x = (
             float(min_forward_m)
-            if idx == 1
+            if idx == start_idx
             else max(float(min_forward_m), float(prev_body_x) + float(_VISUAL_PREFIX_FORWARD_STEP_EPS_M))
         )
         adjusted_x = max(float(body_x), min_progress_x)
-        max_abs_lateral_m = max(
-            float(_VISUAL_PREFIX_MIN_LATERAL_LIMIT_M),
-            float(adjusted_x) * float(_VISUAL_PREFIX_MAX_LATERAL_RATIO),
-        )
-        adjusted_y = float(np.clip(float(body_y), -max_abs_lateral_m, max_abs_lateral_m))
-        if single_line_heading_limit_rad is not None:
+        adjusted_y = float(body_y)
+        if visual_starts_at_ego:
+            max_abs_lateral_m = max(
+                float(_VISUAL_PREFIX_MIN_LATERAL_LIMIT_M),
+                float(adjusted_x) * float(_VISUAL_PREFIX_MAX_LATERAL_RATIO),
+            )
+            adjusted_y = float(np.clip(float(body_y), -max_abs_lateral_m, max_abs_lateral_m))
+        else:
+            max_abs_lateral_m = max(
+                0.0,
+                math.tan(math.radians(float(_VISUAL_PREFIX_MAX_ENTRY_HEADING_DEG))) * max(
+                    float(adjusted_x),
+                    float(_VISUAL_PREFIX_MIN_FORWARD_M),
+                ),
+            )
+            capped_y = float(np.clip(float(body_y), -max_abs_lateral_m, max_abs_lateral_m))
+            if abs(capped_y - float(body_y)) > 1e-6:
+                entry_heading_cap_applied = True
+            adjusted_y = capped_y
+        if visual_heading_limit_rad is not None and (visual_starts_at_ego or idx > start_idx):
             delta_x = max(float(adjusted_x) - float(prev_body_x), 1e-6)
-            max_delta_y = float(math.tan(single_line_heading_limit_rad)) * float(delta_x)
+            max_delta_y = float(math.tan(visual_heading_limit_rad)) * float(delta_x)
             capped_y = float(
                 prev_body_y
                 + np.clip(float(adjusted_y) - float(prev_body_y), -max_delta_y, max_delta_y)
@@ -1465,19 +1884,129 @@ def _stabilize_visual_path_prefix(
     notes["visual_prefix_sample1_y_left_before_m"] = float(sample1_before[1])
     notes["visual_prefix_sample1_x_fwd_after_m"] = float(sample1_after[0])
     notes["visual_prefix_sample1_y_left_after_m"] = float(sample1_after[1])
-    notes["visual_prefix_single_line_heading_cap_applied"] = bool(heading_cap_applied)
+    notes["visual_prefix_starts_at_ego"] = bool(visual_starts_at_ego)
+    notes["visual_prefix_entry_heading_cap_applied"] = bool(entry_heading_cap_applied)
+    notes["visual_prefix_heading_cap_applied"] = bool(heading_cap_applied)
+    notes["visual_prefix_single_line_heading_cap_applied"] = bool(
+        measurement_mode == "single_line" and heading_cap_applied
+    )
     live_log(
         "path_optimizer",
         event="visual_prefix_stabilization",
+        applied=bool(stabilized_points > 0),
+        stabilized_points=int(stabilized_points),
+        starts_at_ego=bool(visual_starts_at_ego),
+        entry_heading_limit_deg=float(_VISUAL_PREFIX_MAX_ENTRY_HEADING_DEG),
+        entry_heading_cap_applied=bool(entry_heading_cap_applied),
+        sample1_x_fwd_before_m=float(sample1_before[0]),
+        sample1_y_left_before_m=float(sample1_before[1]),
+        sample1_x_fwd_after_m=float(sample1_after[0]),
+        sample1_y_left_after_m=float(sample1_after[1]),
+        heading_limit_deg=float(visual_heading_limit_deg),
+        heading_cap_applied=bool(heading_cap_applied),
+        single_line_heading_limit_deg=float(single_line_heading_limit_deg),
+        single_line_heading_cap_applied=bool(
+            measurement_mode == "single_line" and heading_cap_applied
+        ),
+        path_source=path_source,
+    )
+    return stabilized_xy, notes
+
+
+def _stabilize_route_path_prefix(
+    *,
+    sampled_xy: np.ndarray,
+    path_plan: BehaviorPathPlan,
+    ctx: PlanningContext,
+) -> tuple[np.ndarray, dict[str, object]]:
+    notes: dict[str, object] = {
+        "route_prefix_stabilization_applied": False,
+        "route_prefix_stabilization_points": 0,
+        "route_prefix_entry_heading_limit_deg": float(_ROUTE_PREFIX_MAX_ENTRY_HEADING_DEG),
+        "route_prefix_sample1_x_fwd_before_m": 0.0,
+        "route_prefix_sample1_y_left_before_m": 0.0,
+        "route_prefix_sample1_x_fwd_after_m": 0.0,
+        "route_prefix_sample1_y_left_after_m": 0.0,
+    }
+    if _path_note_str(path_plan, "path_source") != "route_waypoints" or sampled_xy.shape[0] <= 1:
+        return np.array(sampled_xy, copy=True), notes
+
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    stabilized_xy = np.array(sampled_xy, copy=True)
+    max_heading_rad = math.radians(float(_ROUTE_PREFIX_MAX_ENTRY_HEADING_DEG))
+    prev_body_x = 0.0
+    prev_body_y = 0.0
+    stabilized_points = 0
+    sample1_before: tuple[float, float] | None = None
+    sample1_after: tuple[float, float] | None = None
+
+    for idx in range(1, stabilized_xy.shape[0]):
+        body_x, body_y = _world_to_body_xy(
+            point_xy=stabilized_xy[idx],
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=pose_yaw,
+        )
+        if idx > 1 and float(body_x) > float(_ROUTE_PREFIX_STABILIZE_DISTANCE_M) and (
+            float(prev_body_x) >= float(_ROUTE_PREFIX_STABILIZE_DISTANCE_M)
+        ):
+            break
+        if idx == 1:
+            sample1_before = (float(body_x), float(body_y))
+
+        min_x = max(
+            float(_ROUTE_PREFIX_MIN_FORWARD_M),
+            float(prev_body_x) + float(_ROUTE_PREFIX_FORWARD_STEP_EPS_M),
+        )
+        adjusted_x = max(float(body_x), float(min_x))
+        delta_x = max(float(adjusted_x) - float(prev_body_x), 1e-6)
+        max_delta_y = math.tan(max_heading_rad) * delta_x
+        adjusted_y = float(
+            prev_body_y
+            + np.clip(float(body_y) - float(prev_body_y), -max_delta_y, max_delta_y)
+        )
+
+        if (
+            abs(adjusted_x - float(body_x)) > 1e-6
+            or abs(adjusted_y - float(body_y)) > 1e-6
+        ):
+            stabilized_xy[idx] = _body_to_world_xy(
+                x_fwd_m=adjusted_x,
+                y_left_m=adjusted_y,
+                pose_x=pose_x,
+                pose_y=pose_y,
+                pose_yaw=pose_yaw,
+            )
+            stabilized_points = idx
+        prev_body_x = float(adjusted_x)
+        prev_body_y = float(adjusted_y)
+        if idx == 1:
+            sample1_after = (float(adjusted_x), float(adjusted_y))
+
+    if sample1_before is None:
+        sample1_before = (0.0, 0.0)
+    if sample1_after is None:
+        sample1_after = sample1_before
+
+    notes["route_prefix_stabilization_applied"] = bool(stabilized_points > 0)
+    notes["route_prefix_stabilization_points"] = int(stabilized_points)
+    notes["route_prefix_sample1_x_fwd_before_m"] = float(sample1_before[0])
+    notes["route_prefix_sample1_y_left_before_m"] = float(sample1_before[1])
+    notes["route_prefix_sample1_x_fwd_after_m"] = float(sample1_after[0])
+    notes["route_prefix_sample1_y_left_after_m"] = float(sample1_after[1])
+    live_log(
+        "path_optimizer",
+        event="route_prefix_stabilization",
         applied=bool(stabilized_points > 0),
         stabilized_points=int(stabilized_points),
         sample1_x_fwd_before_m=float(sample1_before[0]),
         sample1_y_left_before_m=float(sample1_before[1]),
         sample1_x_fwd_after_m=float(sample1_after[0]),
         sample1_y_left_after_m=float(sample1_after[1]),
-        single_line_heading_limit_deg=float(single_line_heading_limit_deg),
-        single_line_heading_cap_applied=bool(heading_cap_applied),
-        path_source=path_source,
+        entry_heading_limit_deg=float(_ROUTE_PREFIX_MAX_ENTRY_HEADING_DEG),
+        path_source=_path_note_str(path_plan, "path_source"),
     )
     return stabilized_xy, notes
 
@@ -1772,11 +2301,20 @@ def _maybe_hold_previous_path_on_single_line_transition(
     if int(hold_ticks) > 0:
         if int(hold_ticks) >= int(_SINGLE_LINE_TRANSITION_HOLD_MAX_TICKS):
             return None
-        if sample1_gap_m > float(_SINGLE_LINE_TRANSITION_HOLD_MAX_SAMPLE1_GAP_M):
+        if sample1_gap_m > max(
+            float(_SINGLE_LINE_TRANSITION_HOLD_MAX_SAMPLE1_GAP_M),
+            float(_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M),
+        ):
             return None
         if heading_delta_deg < float(_SINGLE_LINE_TRANSITION_HOLD_RELEASE_HEADING_DELTA_DEG):
             return None
         hold_reason = "active_hold"
+    elif (
+        str(prev_lane_measurement_mode or "none") in {"two_line", "single_line"}
+        and float(_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M) > 0.0
+        and sample1_gap_m >= float(_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M)
+    ):
+        hold_reason = "single_line_path_lateral_jump"
     elif (
         str(prev_lane_measurement_mode or "none") == "two_line"
         and sample1_gap_m <= float(_SINGLE_LINE_TRANSITION_HOLD_MAX_SAMPLE1_GAP_M)
@@ -1796,6 +2334,267 @@ def _maybe_hold_previous_path_on_single_line_transition(
             "single_line_transition_hold_heading_delta_deg": float(heading_delta_deg),
             "single_line_transition_hold_direct_error_m": float(direct_error_m),
             "single_line_transition_hold_previous_path_source": str(candidate_source),
+        },
+    )
+
+
+def _route_semantics_allow_line_loss_straight_hold(ctx: PlanningContext) -> bool:
+    route = getattr(ctx, "route", None)
+    if route is None:
+        return True
+    semantic_values = {
+        str(getattr(route, "expected_control_type", "") or "").lower(),
+        str(getattr(route, "next_semantic_type", "") or "").lower(),
+    }
+    blocking = semantic_values.intersection(_LINE_LOSS_STRAIGHT_HOLD_BLOCKING_SEMANTICS)
+    if not blocking:
+        return True
+    try:
+        distance_m = float(getattr(route, "next_semantic_distance_m", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        distance_m = 0.0
+    return distance_m > float(_LINE_LOSS_STRAIGHT_HOLD_BLOCK_DISTANCE_M)
+
+
+def _line_loss_route_turn_reason(ctx: PlanningContext, path_plan: BehaviorPathPlan) -> str | None:
+    route = getattr(ctx, "route", None)
+    if route is not None:
+        for key in ("heading_rad", "path_heading_change_rad"):
+            try:
+                value = float(getattr(route, key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if math.isfinite(value) and abs(value) >= float(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_HEADING_MAX_RAD):
+                return key
+        try:
+            path_kappa = float(getattr(route, "path_kappa", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            path_kappa = 0.0
+        if math.isfinite(path_kappa) and abs(path_kappa) >= float(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_KAPPA_MAX):
+            return "path_kappa"
+
+    raw_path = getattr(path_plan, "raw_path", None)
+    try:
+        samples = np.asarray(raw_path, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if samples.ndim != 2 or samples.shape[0] < 2 or samples.shape[1] < 2:
+        return None
+
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    max_heading = float(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_PATH_HEADING_MAX_RAD)
+    min_lookahead = float(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_LOOKAHEAD_MIN_M)
+
+    for point in samples[1 : min(samples.shape[0], 8), :2]:
+        x_fwd, y_left = _world_to_body_xy(
+            point_xy=point,
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=pose_yaw,
+        )
+        distance = math.hypot(float(x_fwd), float(y_left))
+        if distance < min_lookahead or x_fwd < 0.0:
+            continue
+        body_heading = math.atan2(float(y_left), max(1e-6, float(x_fwd)))
+        if abs(body_heading) >= max_heading:
+            return "route_raw_path_body_heading"
+
+    if samples.shape[1] >= 3:
+        for idx in range(1, min(samples.shape[0], 6)):
+            try:
+                route_yaw = float(samples[idx, 2])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(route_yaw) and abs(_wrap_angle(route_yaw - pose_yaw)) >= max_heading:
+                return "route_raw_path_yaw"
+
+    return None
+
+
+def _build_straight_hold_path_from_pose(
+    *,
+    ctx: PlanningContext,
+    step_arc: float,
+) -> np.ndarray:
+    horizon_n = max(1, int(getattr(ctx, "horizon_n", 1) or 1))
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    step_m = max(0.02, float(step_arc) if math.isfinite(float(step_arc)) else _MIN_STEP_M)
+    distances = np.arange(horizon_n + 1, dtype=float) * step_m
+    cos_y = math.cos(pose_yaw)
+    sin_y = math.sin(pose_yaw)
+    x = pose_x + (distances * cos_y)
+    y = pose_y + (distances * sin_y)
+    yaw = np.full(horizon_n + 1, pose_yaw, dtype=float)
+    return np.column_stack([x, y, yaw])
+
+
+def _build_previous_visual_hold_path_from_pose(
+    *,
+    ctx: PlanningContext,
+    prev_target_path: np.ndarray | None,
+    prev_target_path_source: str | None,
+    step_arc: float,
+) -> np.ndarray | None:
+    if not bool(_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED):
+        return None
+    if str(prev_target_path_source or "") not in _VISUAL_HOLD_PATH_SOURCES:
+        return None
+    try:
+        previous = np.asarray(prev_target_path, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if previous.ndim != 2 or previous.shape[0] < 2 or previous.shape[1] < 2:
+        return None
+
+    horizon_n = max(1, int(getattr(ctx, "horizon_n", 1) or 1))
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    step_m = max(0.02, float(step_arc) if math.isfinite(float(step_arc)) else _MIN_STEP_M)
+    ahead_rows: list[np.ndarray] = []
+    for row in previous:
+        if row.shape[0] < 2:
+            continue
+        x_fwd, _ = _world_to_body_xy(
+            point_xy=row[:2],
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=pose_yaw,
+        )
+        if x_fwd >= -0.02:
+            ahead_rows.append(np.asarray(row, dtype=float))
+    if len(ahead_rows) < 2:
+        return None
+
+    xy_rows = [row[:2].astype(float, copy=True) for row in ahead_rows[: horizon_n + 1]]
+    if len(xy_rows) < 2:
+        return None
+    while len(xy_rows) < horizon_n + 1:
+        if len(xy_rows) >= 2:
+            dx = float(xy_rows[-1][0] - xy_rows[-2][0])
+            dy = float(xy_rows[-1][1] - xy_rows[-2][1])
+            norm = math.hypot(dx, dy)
+            if norm < 1e-6:
+                heading = pose_yaw
+            else:
+                heading = math.atan2(dy, dx)
+        else:
+            heading = pose_yaw
+        xy_rows.append(
+            np.array(
+                [
+                    float(xy_rows[-1][0]) + step_m * math.cos(heading),
+                    float(xy_rows[-1][1]) + step_m * math.sin(heading),
+                ],
+                dtype=float,
+            )
+        )
+    xy = np.vstack(xy_rows[: horizon_n + 1])
+    headings = _compute_headings(xy, initial_yaw=pose_yaw)
+    return np.column_stack([xy, headings])
+
+
+def _maybe_hold_straight_on_line_loss(
+    *,
+    path_plan: BehaviorPathPlan,
+    ctx: PlanningContext,
+    prev_lane_measurement_mode: str | None,
+    prev_target_path: np.ndarray | None,
+    prev_target_path_source: str | None,
+    hold_ticks: int,
+    step_arc: float,
+) -> _LineLossStraightHoldResult | None:
+    path_source = _path_note_str(path_plan, "path_source")
+    if path_source not in {"route_waypoints", "lanelet_centerline"}:
+        return None
+    lane_observation = getattr(ctx, "lane_observation", None)
+    if lane_observation is None:
+        return None
+    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    if measurement_mode not in _LINE_LOSS_STRAIGHT_HOLD_MODES:
+        return None
+    if int(hold_ticks) >= int(_LINE_LOSS_STRAIGHT_HOLD_MAX_TICKS):
+        return None
+    previous_mode = str(prev_lane_measurement_mode or "none")
+    just_lost_line = previous_mode in {"two_line", "single_line"}
+    active_hold = int(hold_ticks) > 0
+    if not (just_lost_line or active_hold):
+        return None
+    if not _route_semantics_allow_line_loss_straight_hold(ctx):
+        return None
+    route_turn_reason = _line_loss_route_turn_reason(ctx, path_plan)
+    route = getattr(ctx, "route", None)
+    try:
+        route_map_match_error_m = abs(float(getattr(route, "map_match_error_m", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        route_map_match_error_m = 0.0
+    route_turn_trusted = route_map_match_error_m <= float(_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M)
+    if (
+        route_turn_reason is not None
+        and int(hold_ticks) >= int(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS)
+        and route_turn_trusted
+    ):
+        live_log(
+            "behavior",
+            event="line_loss_straight_hold_blocked",
+            reason="route_requires_turn",
+            route_turn_reason=str(route_turn_reason),
+            hold_ticks=int(hold_ticks),
+            measurement_mode=measurement_mode,
+            previous_measurement_mode=previous_mode,
+            map_match_error_m=float(route_map_match_error_m),
+            map_match_error_limit_m=float(_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M),
+        )
+        return None
+    if (
+        route_turn_reason is not None
+        and int(hold_ticks) >= int(_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS)
+        and not route_turn_trusted
+    ):
+        live_log(
+            "behavior",
+            event="line_loss_route_turn_deferred",
+            reason="map_match_error_high",
+            route_turn_reason=str(route_turn_reason),
+            hold_ticks=int(hold_ticks),
+            measurement_mode=measurement_mode,
+            previous_measurement_mode=previous_mode,
+            map_match_error_m=float(route_map_match_error_m),
+            map_match_error_limit_m=float(_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M),
+        )
+
+    target_path = _build_previous_visual_hold_path_from_pose(
+        ctx=ctx,
+        prev_target_path=prev_target_path,
+        prev_target_path_source=prev_target_path_source,
+        step_arc=step_arc,
+    )
+    hold_path_kind = "previous_visual_path" if target_path is not None else "straight_pose"
+    hold_path_source = "line_loss_visual_hold" if target_path is not None else "line_loss_straight_hold"
+    if target_path is None:
+        target_path = _build_straight_hold_path_from_pose(ctx=ctx, step_arc=step_arc)
+    left_bound, right_bound = _build_drivable_bounds(target_path, half_width_m=_DRIVABLE_HALF_WIDTH_M)
+    reason = "line_loss_after_visual" if just_lost_line else "active_line_loss_hold"
+    return _LineLossStraightHoldResult(
+        target_path=target_path,
+        left_bound=left_bound,
+        right_bound=right_bound,
+        notes={
+            "line_loss_straight_hold_applied": True,
+            "line_loss_straight_hold_reason": reason,
+            "line_loss_hold_path_kind": str(hold_path_kind),
+            "line_loss_hold_path_source": str(hold_path_source),
+            "line_loss_straight_hold_ticks": int(hold_ticks) + 1,
+            "line_loss_measurement_mode": measurement_mode,
+            "line_loss_previous_measurement_mode": previous_mode,
+            "line_loss_straight_hold_step_arc_m": float(
+                max(0.02, float(step_arc) if math.isfinite(float(step_arc)) else _MIN_STEP_M)
+            ),
+            "line_loss_straight_hold_max_ticks": int(_LINE_LOSS_STRAIGHT_HOLD_MAX_TICKS),
         },
     )
 
@@ -1838,24 +2637,24 @@ def _maybe_hold_previous_visual_path_on_route_tracking(
     candidate_source = None
     if (
         prev_safe_target_path is not None
-        and str(prev_safe_path_source or "") == "visual_lane_waypoints"
+        and str(prev_safe_path_source or "") in _VISUAL_HOLD_PATH_SOURCES
         and prev_safe_left_bound is not None
         and prev_safe_right_bound is not None
     ):
         candidate_target_path = np.array(prev_safe_target_path, copy=True)
         candidate_left_bound = np.array(prev_safe_left_bound, copy=True)
         candidate_right_bound = np.array(prev_safe_right_bound, copy=True)
-        candidate_source = "visual_lane_waypoints"
+        candidate_source = str(prev_safe_path_source or "visual_lane_waypoints")
     elif (
         prev_target_path is not None
-        and str(prev_target_path_source or "") == "visual_lane_waypoints"
+        and str(prev_target_path_source or "") in _VISUAL_HOLD_PATH_SOURCES
     ):
         candidate_target_path = np.array(prev_target_path, copy=True)
         candidate_left_bound, candidate_right_bound = _build_drivable_bounds(
             candidate_target_path,
             half_width_m=_DRIVABLE_HALF_WIDTH_M,
         )
-        candidate_source = "visual_lane_waypoints"
+        candidate_source = str(prev_target_path_source or "visual_lane_waypoints")
     else:
         return None
 
@@ -2216,6 +3015,7 @@ def _contain_path_within_corridor(
     prev_safe_target_path: np.ndarray | None,
     prev_safe_left_bound: np.ndarray | None,
     prev_safe_right_bound: np.ndarray | None,
+    prev_safe_path_source: str | None,
     prev_safe_signature: _BlendSignature | None,
 ) -> _ContainmentResult:
     corridor, corridor_build_notes = _build_lanelet_corridor(ctx)
@@ -2288,6 +3088,160 @@ def _contain_path_within_corridor(
         else 0.0
     )
     route_map_match_error_m = abs(float(getattr(getattr(ctx, "route", None), "map_match_error_m", 0.0) or 0.0))
+    lane_observation = getattr(ctx, "lane_observation", None)
+    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    detected_sides = tuple(getattr(lane_observation, "detected_sides", ()) or ())
+
+    def _visual_corridor_metrics(samples_xy: np.ndarray) -> tuple[float, float, bool]:
+        visual_max_abs_offset_m = float(corridor_reference_error_m)
+        visual_max_violation_m = 0.0
+        visual_touches_bound = False
+        for point in samples_xy:
+            projection = _project_point_to_corridor(corridor, point)
+            if projection is None:
+                continue
+            limit_half_width_m = _corridor_offset_limit_m(
+                projection.width_m,
+                visual_path_priority_active=True,
+                visual_requested_shift_m=visual_lane_base_shift_m,
+            )
+            offset_m = abs(float(projection.center_offset_m))
+            visual_max_abs_offset_m = max(visual_max_abs_offset_m, offset_m)
+            visual_max_violation_m = max(visual_max_violation_m, max(0.0, offset_m - limit_half_width_m))
+            if limit_half_width_m > 1e-6 and offset_m >= max(0.0, limit_half_width_m - 1e-3):
+                visual_touches_bound = True
+        return float(visual_max_abs_offset_m), float(visual_max_violation_m), bool(visual_touches_bound)
+
+    def _previous_visual_hold_result(
+        *,
+        reason: str,
+        mode: str,
+        violation_m: float,
+        max_abs_offset_m: float,
+        touches_bound_value: bool,
+        limit_m: float,
+    ) -> _ContainmentResult | None:
+        if (
+            prev_safe_target_path is None
+            or str(prev_safe_path_source or "") not in _VISUAL_HOLD_PATH_SOURCES
+            or prev_safe_target_path.shape[0] < sampled_xy.shape[0]
+            or prev_safe_target_path.shape[1] < 2
+        ):
+            return None
+        held_xy = np.asarray(prev_safe_target_path[: sampled_xy.shape[0], :2], dtype=float).copy()
+        if (
+            prev_safe_left_bound is not None
+            and prev_safe_right_bound is not None
+            and prev_safe_left_bound.shape[0] >= sampled_xy.shape[0]
+            and prev_safe_right_bound.shape[0] >= sampled_xy.shape[0]
+        ):
+            held_left_bound = np.asarray(prev_safe_left_bound[: sampled_xy.shape[0]], dtype=float).copy()
+            held_right_bound = np.asarray(prev_safe_right_bound[: sampled_xy.shape[0]], dtype=float).copy()
+        else:
+            held_left_bound, held_right_bound = _synthetic_bounds_from_xy(
+                held_xy,
+                half_width_m=_DRIVABLE_HALF_WIDTH_M,
+            )
+        return _ContainmentResult(
+            target_xy=held_xy,
+            left_bound=held_left_bound,
+            right_bound=held_right_bound,
+            corridor_available=True,
+            infeasible=False,
+            used_prev_safe_path=True,
+            first_infeasible_index=None,
+            max_violation_m=float(violation_m),
+            max_abs_offset_m=float(max_abs_offset_m),
+            ego_corridor_error_m=float(corridor_reference_error_m),
+            touches_bound=bool(touches_bound_value),
+            mode=str(mode),
+            notes={
+                "corridor_source": str(mode),
+                "reference_corridor_source": corridor.source,
+                "corridor_lanelet_ids": list(corridor.lanelet_ids),
+                "corridor_required": bool(_requires_real_corridor(ctx)),
+                "corridor_required_missing": False,
+                "corridor_visual_lane_guidance_active": bool(corridor_visual_lane_guidance_active),
+                "corridor_visual_lane_guidance_reason": str(visual_lane_state.reason),
+                "corridor_visual_lane_guidance_mode": str(visual_lane_state.measurement_mode),
+                "corridor_visual_lane_guidance_shift_m": float(visual_lane_base_shift_m),
+                "corridor_visual_lane_guidance_prefix_samples": 0,
+                "corridor_visual_lane_guidance_max_shift_m": 0.0,
+                "corridor_visual_lane_guidance_max_limit_m": 0.0,
+                "corridor_visual_path_priority_active": True,
+                "visual_primary_corridor_override_active": False,
+                "visual_primary_corridor_override_rejected_reason": str(reason),
+                "visual_primary_corridor_absurd_violation_m": float(violation_m),
+                "visual_primary_corridor_absurd_limit_m": float(limit_m),
+                "visual_primary_previous_hold_active": True,
+                "visual_primary_previous_hold_source": str(prev_safe_path_source or ""),
+                "visual_primary_corridor_reference_error_m": float(corridor_reference_error_m),
+                "visual_primary_corridor_map_match_error_m": float(route_map_match_error_m),
+            },
+        )
+
+    visual_two_line_override_active = (
+        bool(path_source_visual)
+        and measurement_mode == "two_line"
+        and len(detected_sides) == 2
+        and float(getattr(lane_observation, "quality", 0.0) or 0.0)
+        >= float(_VISUAL_LANE_REENTRY_TWO_LINE_MIN_QUALITY)
+    )
+    if visual_two_line_override_active:
+        visual_max_abs_offset_m, visual_max_violation_m, visual_touches_bound = _visual_corridor_metrics(sampled_xy)
+        absurd_limit_m = float(_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M)
+        visual_violation_absurd = (
+            float(absurd_limit_m) > 0.0
+            and visual_max_violation_m >= float(absurd_limit_m)
+        )
+        if visual_violation_absurd:
+            held = _previous_visual_hold_result(
+                reason="absurd_corridor_violation",
+                mode="visual_two_line_previous_hold",
+                violation_m=visual_max_violation_m,
+                max_abs_offset_m=visual_max_abs_offset_m,
+                touches_bound_value=visual_touches_bound,
+                limit_m=absurd_limit_m,
+            )
+            if held is not None:
+                return held
+        left_bound, right_bound = _synthetic_bounds_from_xy(
+            sampled_xy,
+            half_width_m=_DRIVABLE_HALF_WIDTH_M,
+        )
+        return _ContainmentResult(
+            target_xy=np.array(sampled_xy, copy=True),
+            left_bound=left_bound,
+            right_bound=right_bound,
+            corridor_available=True,
+            infeasible=False,
+            used_prev_safe_path=False,
+            first_infeasible_index=None,
+            max_violation_m=float(visual_max_violation_m),
+            max_abs_offset_m=float(visual_max_abs_offset_m),
+            ego_corridor_error_m=float(corridor_reference_error_m),
+            touches_bound=bool(visual_touches_bound),
+            mode="visual_two_line_corridor_override",
+            notes={
+                "corridor_source": "visual_two_line_override",
+                "reference_corridor_source": corridor.source,
+                "corridor_lanelet_ids": list(corridor.lanelet_ids),
+                "corridor_required": bool(_requires_real_corridor(ctx)),
+                "corridor_required_missing": False,
+                "corridor_visual_lane_guidance_active": bool(corridor_visual_lane_guidance_active),
+                "corridor_visual_lane_guidance_reason": str(visual_lane_state.reason),
+                "corridor_visual_lane_guidance_mode": str(visual_lane_state.measurement_mode),
+                "corridor_visual_lane_guidance_shift_m": float(visual_lane_base_shift_m),
+                "corridor_visual_lane_guidance_prefix_samples": 0,
+                "corridor_visual_lane_guidance_max_shift_m": 0.0,
+                "corridor_visual_lane_guidance_max_limit_m": 0.0,
+                "corridor_visual_path_priority_active": True,
+                "visual_primary_corridor_override_active": True,
+                "visual_primary_corridor_override_reason": "two_line_visual_primary",
+                "visual_primary_corridor_reference_error_m": float(corridor_reference_error_m),
+                "visual_primary_corridor_map_match_error_m": float(route_map_match_error_m),
+            },
+        )
     single_line_visual_override_reason = "route_map_match"
     if corridor_reference_error_m >= route_map_match_error_m:
         single_line_visual_override_reason = "corridor_pose_mismatch"
@@ -2299,13 +3253,30 @@ def _contain_path_within_corridor(
     )
     single_line_visual_override_active = (
         bool(path_source_visual)
-        and str(getattr(ctx.lane_observation, "measurement_mode", "none") or "none") == "single_line"
-        and bool(getattr(ctx.lane_observation, "planner_priority_active", False))
+        and measurement_mode == "single_line"
+        and bool(getattr(lane_observation, "planner_priority_active", False))
         and (
             single_line_route_override_map_match_trigger
             or single_line_route_override_corridor_trigger
         )
     )
+    if bool(path_source_visual) and measurement_mode == "single_line":
+        visual_max_abs_offset_m, visual_max_violation_m, visual_touches_bound = _visual_corridor_metrics(sampled_xy)
+        if (
+            float(_VISUAL_ABSURD_CORRIDOR_VIOLATION_M) > 0.0
+            and visual_max_violation_m >= float(_VISUAL_ABSURD_CORRIDOR_VIOLATION_M)
+        ):
+            held = _previous_visual_hold_result(
+                reason="absurd_single_line_corridor_violation",
+                mode="visual_single_line_previous_hold",
+                violation_m=visual_max_violation_m,
+                max_abs_offset_m=visual_max_abs_offset_m,
+                touches_bound_value=visual_touches_bound,
+                limit_m=float(_VISUAL_ABSURD_CORRIDOR_VIOLATION_M),
+            )
+            if held is not None:
+                return held
+            single_line_visual_override_active = False
     if single_line_visual_override_active:
         active_threshold_m = (
             float(_SINGLE_LINE_VISUAL_ROUTE_OVERRIDE_EGO_CORRIDOR_ERROR_M)

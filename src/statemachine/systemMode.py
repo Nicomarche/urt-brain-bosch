@@ -91,6 +91,39 @@ class SystemMode(Enum):
         }
     }
 
+    ODOMETRY = {
+        "mode": "odometry",
+        "camera": {
+            "process": {
+                "enabled": True,
+            },
+            "thread": {
+                "resolution": "1080p",
+            },
+            "lineFollowing": {
+                "enabled": True,
+            },
+            "signDetection": {
+                "enabled": True,
+            }
+        },
+        "serial_handler": {
+            "process": {
+                "enabled": True,
+            }
+        },
+        "semaphore": {
+            "process": {
+                "enabled": False,
+            }
+        },
+        "traffic_com": {
+            "process": {
+                "enabled": False,
+            }
+        }
+    }
+
     MANUAL = {
         "mode": "manual",
         "camera": {

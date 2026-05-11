@@ -684,14 +684,13 @@ def _densify_polyline(polyline: np.ndarray, *, step_m: float) -> np.ndarray:
 def _attribute_from_lanelet_tags(tags: dict[str, str]) -> int:
     subtype = str(tags.get("subtype") or "").lower()
     location = str(tags.get("location") or "").lower()
-    turn_direction = str(tags.get("turn_direction") or "").lower()
     if subtype == "crosswalk":
         return ATTR_CROSSWALK
     if subtype in {"stop_line", "stopline"}:
         return ATTR_STOPLINE
     if subtype == "roundabout" or location == "roundabout":
         return ATTR_ROUNDABOUT
-    if location == "intersection" or turn_direction in {"left", "right", "straight"}:
+    if location == "intersection":
         return ATTR_INTERSECTION
     return ATTR_NORMAL
 

@@ -353,6 +353,85 @@ class LocalPerceptionEngine:
             combined = cv2.bitwise_or(combined, mask)
         return combined
 
+    def _discard_horizontal_lane_segments(self, mask):
+        """Remove transversal lane-mask fragments while preserving the rest."""
+        if mask is None or mask.size == 0 or not np.any(mask):
+            return mask
+        if not bool(getattr(config, "LOCAL_AI_DISCARD_HORIZONTAL_LANE_SEGMENTS", True)):
+            return mask
+
+        mask_2d = mask if mask.ndim == 2 else mask[..., 0]
+        if mask_2d.ndim != 2:
+            return mask
+
+        height, width = mask_2d.shape[:2]
+        cleaned = np.array(mask_2d, copy=True, dtype=np.uint8)
+        max_angle_deg = max(
+            1.0,
+            float(getattr(config, "LOCAL_AI_HORIZONTAL_SEGMENT_MAX_ANGLE_DEG", 15.0)),
+        )
+        far_max_angle_deg = max(
+            max_angle_deg,
+            float(getattr(config, "LOCAL_AI_HORIZONTAL_SEGMENT_FAR_MAX_ANGLE_DEG", max_angle_deg)),
+        )
+        far_y_max_ratio = min(
+            1.0,
+            max(0.0, float(getattr(config, "LOCAL_AI_HORIZONTAL_SEGMENT_FAR_Y_MAX_RATIO", 0.70))),
+        )
+        far_y_max = int(round(height * far_y_max_ratio))
+        min_length_ratio = max(
+            0.02,
+            float(getattr(config, "LOCAL_AI_HORIZONTAL_SEGMENT_MIN_LENGTH_RATIO", 0.12)),
+        )
+        min_length_px = max(8, int(round(width * min_length_ratio)))
+        hough_threshold = max(8, int(round(min_length_px * 0.45)))
+        max_line_gap = max(3, int(round(width * 0.018)))
+        erase_thickness_px = int(
+            getattr(config, "LOCAL_AI_HORIZONTAL_SEGMENT_ERASE_THICKNESS_PX", 11)
+        )
+        if erase_thickness_px <= 0:
+            erase_thickness_px = max(3, int(round(max(height, width) * 0.018)))
+        erase_thickness_px = max(3, erase_thickness_px)
+
+        lines = cv2.HoughLinesP(
+            cleaned,
+            1,
+            np.pi / 180.0,
+            threshold=hough_threshold,
+            minLineLength=min_length_px,
+            maxLineGap=max_line_gap,
+        )
+        if lines is None:
+            return cleaned
+
+        removed_count = 0
+        for line in lines.reshape(-1, 4):
+            x1, y1, x2, y2 = [int(value) for value in line]
+            dx = float(x2 - x1)
+            dy = float(y2 - y1)
+            length = math.hypot(dx, dy)
+            if length < min_length_px:
+                continue
+            angle_deg = abs(math.degrees(math.atan2(dy, dx)))
+            angle_deg = min(angle_deg, 180.0 - angle_deg)
+            mid_y = (float(y1) + float(y2)) * 0.5
+            angle_limit_deg = far_max_angle_deg if mid_y <= far_y_max else max_angle_deg
+            if angle_deg > angle_limit_deg:
+                continue
+            cv2.line(
+                cleaned,
+                (x1, y1),
+                (x2, y2),
+                0,
+                erase_thickness_px,
+                cv2.LINE_8,
+            )
+            removed_count += 1
+
+        if removed_count <= 0:
+            return cleaned
+        return cleaned if np.any(cleaned) else None
+
     def _mask_bbox(self, mask):
         ys, xs = np.where(mask > 0)
         if xs.size == 0 or ys.size == 0:
@@ -638,6 +717,124 @@ class LocalPerceptionEngine:
         lane_points = [merged_points] if merged_points else []
         return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
 
+    def _rebuild_lane_geometry_from_side_masks(
+        self,
+        side_masks,
+        lane_side_sources,
+    ):
+        lane_points = []
+        lane_side_points = {"left": [], "right": []}
+        lane_side_lines = {"left": [], "right": []}
+
+        for side in ("left", "right"):
+            mask = side_masks.get(side)
+            if mask is None or not np.any(mask):
+                side_masks[side] = None
+                lane_side_points[side] = []
+                lane_side_lines[side] = []
+                if str(lane_side_sources.get(side, "none") or "none") != "none":
+                    lane_side_sources[side] = "none"
+                continue
+
+            points = self._extract_lane_points(mask)
+            lane_side_points[side] = [[int(point[0]), int(point[1])] for point in points]
+            line = self._extract_lane_line(mask)
+            lane_side_lines[side] = line[0] if line is not None else []
+            if points:
+                lane_points.append(points)
+
+        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+    def _reject_crossing_lane_pair(
+        self,
+        side_masks,
+        lane_points,
+        lane_side_points,
+        lane_side_lines,
+        lane_side_sources,
+    ):
+        """Drop lane pairs that cross in the mid/far field.
+
+        A stop line or dashed transversal mark can be segmented as the right lane.
+        In perspective it often looks plausible near the car, but its fitted
+        "right" line crosses to the left of the fitted left line ahead. Real lane
+        borders may converge, but they should not swap ordering in the usable ROI.
+        """
+        if not bool(getattr(config, "LOCAL_AI_REJECT_CROSSING_LANE_PAIRS", True)):
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        left_mask = side_masks.get("left")
+        right_mask = side_masks.get("right")
+        if left_mask is None or right_mask is None:
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+        if not np.any(left_mask) or not np.any(right_mask):
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        left_line = self._coerce_lane_line_values(lane_side_lines.get("left"))
+        right_line = self._coerce_lane_line_values(lane_side_lines.get("right"))
+        if left_line is None or right_line is None:
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        height, width = left_mask.shape[:2]
+        top_y = max(
+            int(round(height * 0.35)),
+            int(math.ceil(max(min(left_line[1], left_line[3]), min(right_line[1], right_line[3])))),
+        )
+        bottom_y = min(
+            height - 1,
+            int(math.floor(min(max(left_line[1], left_line[3]), max(right_line[1], right_line[3])))),
+        )
+        if bottom_y - top_y < max(8, int(round(height * 0.08))):
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        y_max_ratio = min(
+            1.0,
+            max(0.35, float(getattr(config, "LOCAL_AI_CROSSING_LANE_Y_MAX_RATIO", 0.70))),
+        )
+        y_max = int(round(height * y_max_ratio))
+        min_cross_px = max(
+            2.0,
+            float(getattr(config, "LOCAL_AI_CROSSING_LANE_MIN_CROSS_PX", 5.0)),
+        )
+
+        crossing_samples = []
+        for y_value in np.linspace(top_y, bottom_y, num=9):
+            row = int(round(float(y_value)))
+            if row > y_max:
+                continue
+            left_x = self._line_x_at_y(left_line, row)
+            right_x = self._line_x_at_y(right_line, row)
+            if left_x is None or right_x is None:
+                continue
+            gap = float(right_x) - float(left_x)
+            if gap < -min_cross_px:
+                crossing_samples.append((row, float(left_x), float(right_x), gap))
+
+        if not crossing_samples:
+            return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
+        # Pick the side whose far projection has moved to the wrong half of the
+        # image. In the usual stop-line failure, the "right" mask crosses into
+        # the left half; the symmetric case handles a bad left-side transversal.
+        row, left_x, right_x, gap = crossing_samples[0]
+        drop_side = "right"
+        if left_x > (float(width) * 0.50) and right_x > (float(width) * 0.50):
+            drop_side = "left"
+        elif right_x < (float(width) * 0.50) and left_x < (float(width) * 0.50):
+            drop_side = "right"
+        elif left_x > (float(width) * 0.50):
+            drop_side = "left"
+        elif right_x < (float(width) * 0.50):
+            drop_side = "right"
+
+        side_masks[drop_side] = None
+        lane_side_sources[drop_side] = "rejected_crossing_pair"
+        side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources = (
+            self._rebuild_lane_geometry_from_side_masks(side_masks, lane_side_sources)
+        )
+        lane_side_sources[drop_side] = "rejected_crossing_pair"
+        return side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources
+
     def _build_box_payload(self, x1, y1, x2, y2, frame_shape):
         height, width = frame_shape
         return [
@@ -836,6 +1033,7 @@ class LocalPerceptionEngine:
 
         for side in ("left", "right"):
             merged_mask = self._combine_masks([entry["mask"] for entry in side_candidates[side]])
+            merged_mask = self._discard_horizontal_lane_segments(merged_mask)
             side_masks[side] = merged_mask
             if side_candidates[side]:
                 lane_side_sources[side] = str(side_candidates[side][0].get("side_source", "none") or "none")
@@ -845,6 +1043,16 @@ class LocalPerceptionEngine:
             lane_side_lines[side] = line[0] if line is not None else []
             if points:
                 lane_points.append(points)
+
+        side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources = (
+            self._reject_crossing_lane_pair(
+                side_masks,
+                lane_points,
+                lane_side_points,
+                lane_side_lines,
+                lane_side_sources,
+            )
+        )
 
         side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources = (
             self._collapse_duplicate_lane_sides(

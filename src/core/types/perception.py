@@ -33,6 +33,38 @@ _LATERAL_RELOCALIZATION_BLOCKED_CONTROL_MODES = frozenset({
 })
 
 
+def _lane_observation_two_line_geometry_valid(observation: "LaneObservation") -> bool:
+    if str(getattr(observation, "measurement_mode", "none") or "none") != "two_line":
+        return True
+    left_m = getattr(observation, "left_line_distance_m", None)
+    right_m = getattr(observation, "right_line_distance_m", None)
+    if left_m is None or right_m is None:
+        return True
+    try:
+        left = float(left_m)
+        right = float(right_m)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(left) and math.isfinite(right)):
+        return False
+    lane_width = getattr(observation, "lane_width_m", None)
+    try:
+        width = float(lane_width) if lane_width is not None else 0.35
+    except (TypeError, ValueError):
+        width = 0.35
+    width = max(0.01, width)
+    negative_slack = min(0.008, width * 0.025)
+    upper_slack = max(0.025, width * 0.08)
+    width_slack = max(0.025, width * 0.10)
+    return (
+        left >= -negative_slack
+        and right >= -negative_slack
+        and left <= width + upper_slack
+        and right <= width + upper_slack
+        and abs((left + right) - width) <= width_slack
+    )
+
+
 @dataclass(frozen=True)
 class LaneObservation:
     """Medición de carril emitida por el detector visual frame-a-frame.
@@ -77,6 +109,11 @@ class LaneObservation:
     camera_yaw_hint_rad: float | None = None
     camera_yaw_hint_confidence: float = 0.0
     measurement_mode: str = "none"
+    measurement_mode_streak_frames: int = 0
+    previous_measurement_mode: str | None = None
+    transition_reference_error_m: float | None = None
+    transition_error_delta_m: float | None = None
+    transition_error_coherent: bool = True
     direct_error_valid: bool = False
     control_policy_mode: str | None = None
     planner_priority_active: bool = False
@@ -110,6 +147,8 @@ def lane_observation_has_visual_path(
         return False
     if float(observation.quality or 0.0) < float(min_quality):
         return False
+    if not _lane_observation_two_line_geometry_valid(observation):
+        return False
     for x, y, psi in waypoints:
         if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(psi)):
             return False
@@ -133,6 +172,8 @@ def lane_observation_supports_lateral_relocalization(
     if float(observation.quality or 0.0) < float(min_quality):
         return False
     if str(observation.control_policy_mode or "") in _LATERAL_RELOCALIZATION_BLOCKED_CONTROL_MODES:
+        return False
+    if not _lane_observation_two_line_geometry_valid(observation):
         return False
     return (
         observation.direct_error_m is not None

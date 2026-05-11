@@ -1000,6 +1000,11 @@ Args:
         self._last_local_perception_status = None
         self._last_actuator_status = None
         self._last_local_ai_lane_width_px = None
+        self._last_local_mask_two_line_error_m = None
+        self._last_local_mask_two_line_error_monotonic = 0.0
+        self._single_line_transition_reject_until_monotonic = 0.0
+        self._single_line_transition_reject_side = None
+        self._last_local_ai_mask_reject_debug = None
         self._last_two_line_left = None
         self._last_two_line_right = None
         self._last_two_line_ts = 0.0
@@ -2273,6 +2278,7 @@ Args:
     def _build_local_mask_guidance(self, side_masks, img_h, img_w, side_lines=None):
         """Build direct steering guidance from the raw local-AI lane masks."""
         self._last_local_ai_mask_reject_reason = None
+        self._last_local_ai_mask_reject_debug = None
         if not isinstance(side_masks, dict):
             return None
 
@@ -2855,11 +2861,118 @@ Args:
         # real lateral offset without breaking the existing Stanley k tuning
         # (which operates on perspective pixels via error_px).
         _error_cm = None
-        _bev_cm_per_px = float(getattr(self, 'bev_cm_per_px', 0.0) or 0.0)
         _lane_width_cm = float(getattr(self, 'lane_width_cm', 35.0) or 35.0)
-        if _bev_cm_per_px > 0.0 and lane_width_px > 0.0 and _lane_width_cm > 0.0:
+        if lane_width_px > 0.0 and _lane_width_cm > 0.0:
             _px_to_cm = _lane_width_cm / max(1.0, lane_width_px)
             _error_cm = float(error_px) * _px_to_cm
+
+        now_mono = time.monotonic()
+        if len(detected_sides) >= 2 and _error_cm is not None:
+            try:
+                self._last_local_mask_two_line_error_m = float(_error_cm) / 100.0
+                self._last_local_mask_two_line_error_monotonic = float(now_mono)
+            except (TypeError, ValueError):
+                pass
+
+        single_line_transition_reject = None
+        if len(detected_sides) == 1 and _error_cm is not None:
+            single_error_m = float(_error_cm) / 100.0
+            lane_width_m = max(0.01, float(self.lane_width_cm) / 100.0)
+            max_delta_m = max(
+                0.02,
+                float(
+                    getattr(
+                        _config,
+                        "LANE_VISUAL_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M",
+                        0.05,
+                    )
+                    or 0.05
+                ),
+            )
+            memory_max_age_s = max(
+                0.05,
+                float(
+                    getattr(
+                        _config,
+                        "LANE_VISUAL_TWO_LINE_ERROR_MEMORY_MAX_AGE_S",
+                        0.75,
+                    )
+                    or 0.75
+                ),
+            )
+            reject_hold_s = max(
+                memory_max_age_s,
+                float(
+                    getattr(
+                        _config,
+                        "LANE_MASK_SINGLE_LINE_REJECT_HOLD_S",
+                        2.0,
+                    )
+                    or 2.0
+                ),
+            )
+            hard_abs_limit_m = max(
+                lane_width_m * 0.50 + 0.010,
+                float(
+                    getattr(
+                        _config,
+                        "LANE_MASK_SINGLE_LINE_MAX_ABS_ERROR_M",
+                        lane_width_m * 0.50 + 0.010,
+                    )
+                    or (lane_width_m * 0.50 + 0.010)
+                ),
+            )
+            last_error = getattr(self, "_last_local_mask_two_line_error_m", None)
+            last_ts = float(getattr(self, "_last_local_mask_two_line_error_monotonic", 0.0) or 0.0)
+            memory_age_s = (float(now_mono) - last_ts) if last_ts > 0.0 else None
+            memory_fresh = (
+                last_error is not None
+                and memory_age_s is not None
+                and memory_age_s <= memory_max_age_s
+            )
+            active_latched_reject = (
+                str(getattr(self, "_single_line_transition_reject_side", "") or "") == str(visible_side)
+                and float(now_mono) <= float(
+                    getattr(self, "_single_line_transition_reject_until_monotonic", 0.0) or 0.0
+                )
+            )
+            transition_delta_m = (
+                abs(single_error_m - float(last_error))
+                if memory_fresh and last_error is not None
+                else None
+            )
+            if active_latched_reject:
+                single_line_transition_reject = "latched_transversal_single_line"
+            elif transition_delta_m is not None and transition_delta_m > max_delta_m:
+                single_line_transition_reject = "single_line_error_jump_from_two_line"
+            elif memory_fresh and abs(single_error_m) > hard_abs_limit_m:
+                single_line_transition_reject = "single_line_error_outside_lane_half"
+
+            if single_line_transition_reject:
+                self._single_line_transition_reject_until_monotonic = float(now_mono) + reject_hold_s
+                self._single_line_transition_reject_side = str(visible_side)
+                self._last_local_ai_mask_reject_reason = (
+                    f"single_line_transversal_guard:{single_line_transition_reject}"
+                )
+                self._last_local_ai_mask_reject_debug = {
+                    "visible_side": str(visible_side),
+                    "single_error_m": float(single_error_m),
+                    "last_two_line_error_m": (
+                        float(last_error) if last_error is not None else None
+                    ),
+                    "transition_delta_m": (
+                        float(transition_delta_m) if transition_delta_m is not None else None
+                    ),
+                    "max_delta_m": float(max_delta_m),
+                    "hard_abs_limit_m": float(hard_abs_limit_m),
+                    "memory_age_s": float(memory_age_s) if memory_age_s is not None else None,
+                    "memory_max_age_s": float(memory_max_age_s),
+                    "reject_hold_s": float(reject_hold_s),
+                    "guidance_mode": str(guidance_mode),
+                    "raw_error_px": float(raw_error_px),
+                    "lane_width_px": float(lane_width_px),
+                }
+                return None
 
         guidance = {
             'midpoint_x': float(midpoint_x),
@@ -3309,6 +3422,9 @@ Args:
                 reject_reason = getattr(self, '_last_local_ai_mask_reject_reason', None)
                 if reject_reason:
                     debug_info['mask_reject_reason'] = reject_reason
+                    reject_debug = getattr(self, '_last_local_ai_mask_reject_debug', None)
+                    if isinstance(reject_debug, dict):
+                        debug_info['mask_reject_debug'] = reject_debug
                 debug_info['left_lines'] = []
                 debug_info['right_lines'] = []
                 if mask_side_resolution is not None:
@@ -3323,6 +3439,10 @@ Args:
                     )
                     debug_info['single_line_resolved_side'] = duplicate_collapse.get('kept_side')
                 debug_info['render_side_masks'] = render_side_masks
+                if str(reject_reason or "").startswith("single_line_transversal_guard:"):
+                    debug_info['control_mode'] = 'mask_rejected'
+                    debug_info['measurement_mode'] = 'none'
+                    return None, None, height, width, empty_mask, debug_info
                 has_line_fallback = any(
                     isinstance(prepared_side_lines.get(side), np.ndarray)
                     and prepared_side_lines.get(side).ndim == 2
@@ -9159,6 +9279,58 @@ Much faster and better for curves than blind sliding window."""
             min(0.50, float(getattr(self, "single_line_offset_factor", 0.42))),
         )
 
+    def _visual_lane_waypoints_payload_reject_reason(self, visual_payload, debug_block):
+        if not isinstance(visual_payload, dict):
+            return "missing_visual_payload"
+        if not isinstance(debug_block, dict):
+            return None
+        measurement_mode = str(debug_block.get("measurement_mode", "") or "")
+        if measurement_mode != "single_line":
+            return None
+        waypoints = visual_payload.get("center_waypoints_body") or ()
+        if len(waypoints) < 2:
+            return None
+        try:
+            lane_width_m = float(visual_payload.get("lane_width_m") or (float(self.lane_width_cm) / 100.0))
+        except (TypeError, ValueError):
+            lane_width_m = float(getattr(self, "lane_width_cm", 35.0) or 35.0) / 100.0
+        lateral_limit_m = max(
+            (lane_width_m * 0.5) + 0.05,
+            float(
+                getattr(
+                    _config,
+                    "LANE_VISUAL_SINGLE_LINE_MAX_PREFIX_ABS_Y_M",
+                    (lane_width_m * 0.5) + 0.08,
+                )
+            ),
+        )
+        yaw_limit_rad = math.radians(
+            max(5.0, float(getattr(_config, "LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG", 32.0)))
+        )
+        prefix = waypoints[: min(len(waypoints), 8)]
+        try:
+            xs = [float(item[0]) for item in prefix]
+            ys = [float(item[1]) for item in prefix]
+            psis = [float(item[2]) for item in prefix]
+        except (TypeError, ValueError, IndexError):
+            return "single_line_waypoint_non_numeric"
+        if not all(math.isfinite(value) for value in (*xs, *ys, *psis)):
+            return "single_line_waypoint_non_finite"
+        if any(x < -0.02 for x in xs):
+            return "single_line_waypoint_behind_ego"
+        if len(xs) >= 3:
+            diffs = [xs[i + 1] - xs[i] for i in range(len(xs) - 1)]
+            if any(diff < -0.005 for diff in diffs):
+                return "single_line_waypoint_non_monotonic"
+            if (xs[-1] - xs[0]) < 0.04:
+                return "single_line_waypoint_low_forward_span"
+        if max(abs(y) for y in ys) > lateral_limit_m:
+            return "single_line_waypoint_lateral_out_of_lane"
+        near_yaw = max(abs(math.atan2(math.sin(psi), math.cos(psi))) for psi in psis[: min(4, len(psis))])
+        if near_yaw > yaw_limit_rad:
+            return "single_line_waypoint_yaw_outlier"
+        return None
+
     def _compute_visual_lane_waypoints_payload(self):
         """Build the visual lane waypoint payload from the latest local AI snapshot.
 
@@ -9175,6 +9347,19 @@ Much faster and better for curves than blind sliding window."""
         if not isinstance(lane_side_points, dict):
             return None
         debug_block = self._last_frame_trace.get("debug") if isinstance(self._last_frame_trace, dict) else None
+        if isinstance(debug_block, dict):
+            control_mode = str(debug_block.get("control_mode", "") or "")
+            measurement_mode = str(debug_block.get("measurement_mode", "") or "")
+            mask_reject_reason = str(debug_block.get("mask_reject_reason", "") or "")
+            if control_mode == "mask_rejected" or mask_reject_reason.startswith("single_line_transversal_guard:"):
+                return None
+            if measurement_mode in {"none", "blind", "route_tracking"}:
+                return None
+            local_mask_guidance = debug_block.get("local_mask_guidance")
+            if isinstance(local_mask_guidance, dict):
+                guidance_mode = str(local_mask_guidance.get("guidance_mode", "") or "")
+                if guidance_mode == "transversal_recovery":
+                    return None
         lane_side_points = self._resolve_visual_lane_side_points(lane_side_points, debug_block)
         if not any(lane_side_points.get(side) for side in ("left", "right")):
             return None
@@ -9201,17 +9386,40 @@ Much faster and better for curves than blind sliding window."""
         # polinomio sub-corrige el offset y el coche se va del carril.
         lateral_hint_m = None
         if isinstance(debug_block, dict):
-            for key in ("two_line_direct_error_m", "sl_direct_error_m"):
-                value = debug_block.get(key)
-                if value is None:
-                    continue
+            measurement_mode = str(debug_block.get("measurement_mode", "") or "")
+            if measurement_mode == "two_line":
                 try:
-                    val = float(value)
+                    left_cm = float(debug_block.get("two_line_D_left_cm"))
+                    right_cm = float(debug_block.get("two_line_D_right_cm"))
                 except (TypeError, ValueError):
-                    continue
-                if math.isfinite(val):
-                    lateral_hint_m = -val  # direct_error_m → body y_left
-                    break
+                    left_cm = None
+                    right_cm = None
+                if (
+                    left_cm is not None
+                    and right_cm is not None
+                    and math.isfinite(left_cm)
+                    and math.isfinite(right_cm)
+                ):
+                    # Path/localization need the lane centre, not the safety-
+                    # margin steering error. The legacy direct error can be
+                    # inflated when the car is near a painted line; using it as
+                    # a waypoint anchor makes the MPC chase a guardrail command
+                    # instead of the geometric centre.
+                    center_error_m = 0.5 * (right_cm - left_cm) / 100.0
+                    lateral_hint_m = -center_error_m
+                    debug_block["two_line_center_error_for_visual_path_m"] = round(center_error_m, 4)
+            if lateral_hint_m is None:
+                for key in ("two_line_direct_error_m", "sl_direct_error_m"):
+                    value = debug_block.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        val = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(val):
+                        lateral_hint_m = -val  # direct_error_m → body y_left
+                        break
             if lateral_hint_m is None:
                 local_mask_guidance = debug_block.get("local_mask_guidance")
                 if isinstance(local_mask_guidance, dict):
@@ -9230,7 +9438,7 @@ Much faster and better for curves than blind sliding window."""
                             lateral_hint_m = -error_m
         single_line_target_factor = self._single_line_visual_target_factor(debug_block)
         try:
-            return self._extract_lane_polynomials_and_waypoints(
+            visual_payload = self._extract_lane_polynomials_and_waypoints(
                 lane_side_points,
                 img_h,
                 img_w,
@@ -9238,6 +9446,15 @@ Much faster and better for curves than blind sliding window."""
                 lateral_hint_m=lateral_hint_m,
                 single_line_target_factor=single_line_target_factor,
             )
+            reject_reason = self._visual_lane_waypoints_payload_reject_reason(visual_payload, debug_block)
+            if reject_reason is not None:
+                if isinstance(debug_block, dict):
+                    debug_block["visual_waypoint_reject_reason"] = str(reject_reason)
+                    debug_block["visual_waypoint_geometry_valid"] = False
+                return None
+            if isinstance(debug_block, dict):
+                debug_block.setdefault("visual_waypoint_geometry_valid", True)
+            return visual_payload
         except Exception as exc:
             if getattr(self, "show_debug", False):
                 print(
@@ -11743,7 +11960,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     self.is_line_following_active = True
                     self._last_inactive_log = False  # Reset inactive log flag
                     self._manual_run_log_enabled = False  # Stop manual log when entering active mode
-                    if str(message) == "AUTO":
+                    if str(message) in {"AUTO", "ODOMETRY"}:
                         self._reset_auto_run_log(message)
                         self._reset_pid_state()
                         self._last_good_steering = 0.0

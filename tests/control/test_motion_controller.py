@@ -109,6 +109,9 @@ def _pose() -> PoseEstimate:
 def _disable_rate_limits(mc: MotionController) -> MotionController:
     mc._max_speed_rate_mps2 = 1e6
     mc._max_steer_rate_deg_s = 1e6
+    mc._visual_primary_max_steer_rate_deg_s = 1e6
+    mc._visual_primary_recovery_max_steer_rate_deg_s = 1e6
+    mc._visual_primary_curve_max_steer_rate_deg_s = 1e6
     return mc
 
 
@@ -241,6 +244,63 @@ def test_steering_clamped_to_max() -> None:
     ))
     cmd = mc.compute(_bo(), _pose())
     assert cmd.steering_deg == pytest.approx(25.0)
+
+
+def test_visual_primary_steering_is_capped_before_output() -> None:
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.20, 25.0))))
+    mc._visual_primary_max_steer_deg = 10.0
+    mc._visual_primary_curve_max_steer_deg = 10.0
+    mc._visual_primary_curve_steer_full_deg = 10.0
+
+    cmd = mc.compute(_bo(notes={"path_source": "visual_lane_waypoints"}), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(10.0)
+
+
+def test_visual_primary_curve_request_opens_steer_cap() -> None:
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.20, 14.0))))
+    mc._visual_primary_max_steer_deg = 10.0
+    mc._visual_primary_curve_max_steer_deg = 16.0
+    mc._visual_primary_curve_steer_full_deg = 16.0
+
+    cmd = mc.compute(_bo(notes={"path_source": "visual_lane_waypoints"}), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(14.0)
+
+
+def test_visual_primary_uses_slower_steer_rate_limit() -> None:
+    mc = MotionController(solver=_FakeSolver(result=(0.20, 10.0)))
+    mc._max_steer_rate_deg_s = 60.0
+    mc._visual_primary_max_steer_rate_deg_s = 20.0
+    mc._visual_primary_recovery_max_steer_rate_deg_s = 60.0
+    mc._steer_dt_s = 0.05
+
+    cmd = mc.compute(_bo(notes={"path_source": "visual_lane_waypoints"}), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(1.0)
+
+
+def test_visual_primary_recovery_error_opens_steer_cap_and_rate() -> None:
+    mc = MotionController(solver=_FakeSolver(result=(0.20, 25.0)), max_steering_deg=25.0)
+    mc._max_steer_rate_deg_s = 60.0
+    mc._visual_primary_max_steer_deg = 8.0
+    mc._visual_primary_recovery_max_steer_deg = 12.0
+    mc._visual_primary_recovery_error_start_m = 0.10
+    mc._visual_primary_recovery_error_full_m = 0.15
+    mc._visual_primary_max_steer_rate_deg_s = 20.0
+    mc._visual_primary_recovery_max_steer_rate_deg_s = 60.0
+    mc._steer_dt_s = 0.05
+
+    cmd = mc.compute(
+        _bo(notes={"path_source": "visual_lane_waypoints", "visual_lane_error_m": 0.15}),
+        _pose(),
+    )
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(3.0)
 
 
 def test_solver_speed_is_capped_to_current_planner_request() -> None:

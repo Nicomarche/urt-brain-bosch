@@ -5,6 +5,7 @@ import unittest
 
 from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
 from src.localization.dead_reckoning import DeadReckoning
+import src.localization.relocalization_thread as relocalization
 from src.localization.relocalization_thread import threadTracking
 
 
@@ -40,21 +41,56 @@ class _FakeSub:
 
 
 class TrackingRelocalizationTests(unittest.TestCase):
-    def test_speed_command_fallback_is_used_when_encoder_feedback_is_missing(self):
+    def _make_speed_tracker(self, *, speed_values, command_values):
         tracker = threadTracking.__new__(threadTracking)
-        tracker._speed_sub = _FakeSub([None])
-        tracker._speed_cmd_sub = _FakeSub(["108"])
+        tracker._speed_sub = _FakeSub(speed_values)
+        tracker._speed_cmd_sub = _FakeSub(command_values)
         tracker._last_raw_speed = None
         tracker._last_speed_t = None
         tracker._last_speed = 0.0
         tracker._last_speed_source = "none"
         tracker._last_cmd_speed_raw = 0.0
         tracker._last_cmd_speed_t = None
+        tracker._current_state_message = "DEFAULT"
+        return tracker
 
-        speed_mps = tracker._resolve_speed_mps(now=10.0)
+    def test_speed_command_fallback_is_used_when_encoder_feedback_is_missing(self):
+        tracker = self._make_speed_tracker(speed_values=[None], command_values=["108"])
+        old_use_encoder = relocalization._USE_ENCODER
+        try:
+            relocalization._USE_ENCODER = True
+            speed_mps = tracker._resolve_speed_mps(now=10.0)
+        finally:
+            relocalization._USE_ENCODER = old_use_encoder
 
         self.assertAlmostEqual(speed_mps, 0.108, places=4)
         self.assertEqual(tracker._last_speed_source, "command")
+
+    def test_no_encoder_mode_ignores_fresh_encoder_feedback(self):
+        tracker = self._make_speed_tracker(speed_values=["500"], command_values=["200"])
+        old_use_encoder = relocalization._USE_ENCODER
+        try:
+            relocalization._USE_ENCODER = False
+            speed_mps = tracker._resolve_speed_mps(now=10.0)
+        finally:
+            relocalization._USE_ENCODER = old_use_encoder
+
+        self.assertAlmostEqual(speed_mps, 0.200, places=4)
+        self.assertEqual(tracker._last_speed_source, "command_no_encoder")
+
+    def test_command_speed_uses_calibration_scale_in_no_encoder_mode(self):
+        tracker = self._make_speed_tracker(speed_values=[None], command_values=["200"])
+        old_scale = relocalization._COMMAND_SPEED_CALIBRATION_SCALE
+        old_use_encoder = relocalization._USE_ENCODER
+        try:
+            relocalization._USE_ENCODER = False
+            relocalization._COMMAND_SPEED_CALIBRATION_SCALE = 0.85
+            speed_mps = tracker._resolve_speed_mps(now=10.0)
+        finally:
+            relocalization._COMMAND_SPEED_CALIBRATION_SCALE = old_scale
+            relocalization._USE_ENCODER = old_use_encoder
+
+        self.assertAlmostEqual(speed_mps, 0.170, places=4)
 
     def test_current_steer_feedback_is_preferred_over_command(self):
         tracker = threadTracking.__new__(threadTracking)

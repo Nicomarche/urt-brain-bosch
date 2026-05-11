@@ -21,7 +21,7 @@
 # `from src.core.types import PoseEstimate` y no tengan que conocer el
 # layout interno de archivos.
 
-from src.core.types.pose import Pose2D, PoseEstimate
+from src.core.types.pose import Pose2D, PoseEstimate, VisualLaneMatch
 from src.core.types.perception import (
     LaneObservation,
     StoplineObservation,
@@ -34,6 +34,7 @@ from src.core.types.control import ControlDecision
 __all__ = [
     "Pose2D",
     "PoseEstimate",
+    "VisualLaneMatch",
     "LaneObservation",
     "StoplineObservation",
     "VisualControlCandidate",

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import pytest
 
 from src.behavior.scenarios.base import BaseScenario
-from src.core.types.behavior import BehaviorOutput
+from src.core.types.behavior import BehaviorOutput, ScenarioName
 from src.core.types.perception import LaneObservation
+from src.core.types.pose import VisualLaneMatch
 from src.routing.lanelet.lanelet_map import from_track_graph
 from tests.behavior.conftest import _build_track_graph, make_context
 
@@ -34,6 +36,38 @@ def _lookahead_visual_waypoints(n: int = 20, start_m: float = 0.20, density: flo
     return tuple((start_m + (density * i), 0.0, 0.0) for i in range(n))
 
 
+def _with_visual_match(
+    ctx,
+    *,
+    yaw_deg: float = 0.0,
+    accepted: bool = True,
+    lateral_error_m: float = 0.0,
+    reason: str | None = None,
+):
+    yaw_rad = math.radians(float(yaw_deg))
+    match_reason = reason or ("accepted" if accepted else "median_yaw_error")
+    return replace(
+        ctx,
+        pose=replace(
+            ctx.pose,
+            visual_lane_match=VisualLaneMatch(
+                lanelet_id=ctx.route.current_lanelet_id,
+                lateral_error_m=float(lateral_error_m),
+                yaw_error_rad=yaw_rad,
+                near_lateral_error_m=float(lateral_error_m),
+                near_yaw_error_rad=yaw_rad,
+                max_abs_lateral_error_m=abs(float(lateral_error_m)),
+                max_abs_yaw_error_rad=abs(yaw_rad),
+                sample_count=4,
+                score=0.0,
+                confidence=0.95,
+                accepted=bool(accepted),
+                reason=match_reason,
+            ),
+        ),
+    )
+
+
 def test_constant_speed_plan_keeps_route_waypoints_when_alignment_degrades_but_route_is_active(
 ) -> None:
     scenario = _ConstantSpeedScenario()
@@ -59,6 +93,7 @@ def test_constant_speed_plan_keeps_route_waypoints_when_alignment_degrades_but_r
         matched_pose=(0.0, 0.0, 0.0),
         map_match_error_m=0.25,
     )
+    ctx = _with_visual_match(ctx)
 
     plan = scenario.plan(ctx)
 
@@ -96,6 +131,7 @@ def test_constant_speed_plan_does_not_cap_or_stop_for_visual_lane_drift_inputs()
             control_policy_mode="ROUTE_TRACKING",
         ),
     )
+    ctx = _with_visual_match(ctx)
 
     plan = scenario.plan(ctx)
 
@@ -104,7 +140,7 @@ def test_constant_speed_plan_does_not_cap_or_stop_for_visual_lane_drift_inputs()
     assert plan.speed_profile[0] == pytest.approx(0.4, abs=1e-6)
 
 
-def test_constant_speed_plan_prefers_active_route_over_single_line_visual_path() -> None:
+def test_constant_speed_plan_prefers_reliable_single_line_visual_path_over_active_route() -> None:
     scenario = _ConstantSpeedScenario()
     pose_x = 0.02
     pose_y = 0.05
@@ -127,6 +163,7 @@ def test_constant_speed_plan_prefers_active_route_over_single_line_visual_path()
             detected_sides=("left",),
             quality=0.85,
             measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
             direct_error_valid=True,
             direct_error_m=0.05,
             control_policy_mode="ROUTE_TRACKING",
@@ -136,17 +173,271 @@ def test_constant_speed_plan_prefers_active_route_over_single_line_visual_path()
             lane_width_m=0.35,
         ),
     )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
+    assert plan.notes["visual_path_connected_from_ego_pose"] is False
+    assert plan.target_path[0, 0] > pose_x
+    assert plan.target_path[0, 1] == pytest.approx(pose_y, abs=1e-6)
+
+
+def test_constant_speed_plan_keeps_fresh_single_line_transition_as_assist_over_route() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=2,
+            previous_measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.05,
+            transition_error_coherent=True,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
 
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
     assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "route_corridor_primary"
-    assert plan.target_path[0, 0] == pytest.approx(pose_x, abs=1e-6)
+    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_transition_assist"
+
+
+def test_constant_speed_plan_rejects_single_line_transition_error_jump() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
+            direct_error_valid=True,
+            direct_error_m=-0.18,
+            transition_error_coherent=False,
+            transition_reference_error_m=-0.04,
+            transition_error_delta_m=0.14,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_transition_error_jump"
+
+
+def test_constant_speed_plan_promotes_reliable_single_line_assist_to_primary_path() -> None:
+    scenario = _ConstantSpeedScenario()
+    pose_x = 0.02
+    pose_y = 0.05
+    ctx = replace(
+        make_context(
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
+            direct_error_valid=False,
+            control_policy_mode="VISUAL_ASSIST",
+            planner_priority_active=False,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_assist_primary_over_route_path_only"
+    assert plan.target_path[0, 0] > pose_x
     assert plan.target_path[0, 1] == pytest.approx(pose_y, abs=1e-6)
 
 
-def test_constant_speed_plan_prefers_active_route_over_two_line_visual_path() -> None:
+def test_constant_speed_plan_keeps_weak_single_line_assist_out_of_primary_path() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.78,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
+            direct_error_valid=False,
+            control_policy_mode="VISUAL_ASSIST",
+            planner_priority_active=False,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_visual_assist_only"
+
+
+def test_constant_speed_plan_uses_single_line_visual_path_without_direct_error_when_waypoints_are_reliable() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route_path_only"
+
+
+def test_constant_speed_plan_rejects_single_line_visual_path_when_map_match_rejects() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("right",),
+            quality=0.85,
+            measurement_mode="single_line",
+            measurement_mode_streak_frames=8,
+            direct_error_valid=True,
+            direct_error_m=0.03,
+            transition_error_coherent=True,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="left",
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(
+        ctx,
+        accepted=False,
+        lateral_error_m=0.42,
+        reason="median_lateral_error",
+    )
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_visual_map_lateral_mismatch"
+
+
+def test_constant_speed_plan_prefers_reliable_two_line_visual_path_over_active_route() -> None:
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -175,12 +466,253 @@ def test_constant_speed_plan_prefers_active_route_over_two_line_visual_path() ->
             lane_width_m=0.35,
         ),
     )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+    assert plan.notes["visual_path_connected_from_ego_pose"] is False
+
+
+def test_constant_speed_plan_keeps_sparse_two_line_visual_path_over_active_route() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.35,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=-0.01,
+            control_policy_mode="VISUAL_ASSIST",
+            planner_priority_active=True,
+            center_waypoints_body=_straight_visual_waypoints(n=4),
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+    assert plan.notes["visual_lane_waypoint_count"] == 4
+
+
+def test_constant_speed_plan_allows_visual_primary_during_waypoint_mode_hint() -> None:
+    scenario = _ConstantSpeedScenario()
+    base_ctx = make_context(
+        pose_x=0.02,
+        pose_y=0.05,
+        pose_yaw=0.0,
+        current_lanelet_id="n1->n2",
+        route_waypoints=[
+            [0.0, 0.0, 0.0],
+            [0.4, 0.0, 0.0],
+            [0.8, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+        ],
+        matched_pose=(0.0, 0.0, 0.0),
+        map_match_error_m=0.20,
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(
+            base_ctx.route,
+            waypoint_mode_active=True,
+            next_semantic_type="intersection",
+            next_semantic_distance_m=0.15,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.04,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+
+
+def test_constant_speed_plan_allows_visual_primary_in_intersection_scenario_when_not_precision_gated() -> None:
+    scenario = _ConstantSpeedScenario()
+    scenario_name = ScenarioName.INTERSECTION.value
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.04,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx)
+
+    plan = scenario._build_constant_speed_plan(
+        ctx,
+        target_speed_mps=0.4,
+        scenario_name=scenario_name,
+    )
+
+    assert plan.valid is True
+    assert plan.scenario_name == scenario_name
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+
+
+def test_constant_speed_plan_keeps_two_line_visual_path_when_map_yaw_disagrees() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.10,
+            line_center_offset_m=0.10,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx, yaw_deg=8.5, accepted=False)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+
+
+def test_constant_speed_plan_keeps_two_line_visual_path_on_large_local_yaw_disagreement() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.10,
+            line_center_offset_m=0.10,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
+    ctx = _with_visual_match(ctx, yaw_deg=18.0, accepted=False)
+
+    plan = scenario.plan(ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "two_line_visual_primary_over_route"
+
+
+def test_constant_speed_plan_keeps_route_primary_in_precision_context() -> None:
+    scenario = _ConstantSpeedScenario()
+    base_ctx = make_context(
+        pose_x=0.02,
+        pose_y=0.05,
+        pose_yaw=0.0,
+        current_lanelet_id="n1->n2",
+        route_waypoints=[
+            [0.0, 0.0, 0.0],
+            [0.4, 0.0, 0.0],
+            [0.8, 0.0, 0.0],
+            [1.2, 0.0, 0.0],
+        ],
+        matched_pose=(0.0, 0.0, 0.0),
+        map_match_error_m=0.20,
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(base_ctx.route, expected_control_type="intersection"),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.10,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
 
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
     assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "route_corridor_primary"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "route_precision_context:intersection"
 
 
 def test_constant_speed_plan_keeps_visual_primary_path_without_route_corridor() -> None:

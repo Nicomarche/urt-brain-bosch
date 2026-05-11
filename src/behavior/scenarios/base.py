@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -118,12 +119,12 @@ class BaseScenario(ABC):
             lane_observation=lane_obs,
             min_quality=min_visual_quality,
             min_points=min_visual_points,
+            scenario_name=scenario_name,
             route_corridor_available=route_corridor_available,
             lanelet_corridor_available=lanelet_corridor_available,
         )
         if use_visual_path:
-            visual_measurement_mode = str(getattr(lane_obs, "measurement_mode", "none") or "none")
-            connect_visual_path_from_ego = visual_measurement_mode != "single_line"
+            connect_visual_path_from_ego = False
             target_path = build_target_path_from_visual(
                 center_waypoints_body=lane_obs.center_waypoints_body,
                 ego_pose=ctx.pose.fused_pose,
@@ -230,25 +231,198 @@ def _select_visual_primary_path(
     lane_observation,
     min_quality: float,
     min_points: int,
+    scenario_name: str,
     route_corridor_available: bool,
     lanelet_corridor_available: bool,
 ) -> tuple[bool, str]:
+    if not bool(getattr(_config, "LANE_VISUAL_PRIMARY_ENABLED", True)):
+        return False, "visual_primary_disabled"
+    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    visual_min_points = int(min_points)
+    if measurement_mode == "two_line":
+        visual_min_points = min(
+            visual_min_points,
+            max(
+                2,
+                int(getattr(_config, "LANE_VISUAL_TWO_LINE_PRIMARY_MIN_POINTS", 4)),
+            ),
+        )
     if not lane_observation_has_visual_path(
         lane_observation,
         min_quality=min_quality,
-        min_points=min_points,
+        min_points=visual_min_points,
     ):
         return False, "visual_path_gate_rejected"
 
-    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    if str(scenario_name or "") in {
+        ScenarioName.CROSSWALK.value,
+        ScenarioName.PARKING.value,
+        ScenarioName.ROUNDABOUT.value,
+    }:
+        return False, f"scenario_uses_route:{scenario_name}"
 
-    if route_corridor_available:
-        return False, "route_corridor_primary"
+    precision_context = _route_precision_context(ctx)
+    if precision_context is not None:
+        return False, precision_context
 
     if measurement_mode == "two_line":
-        return True, "two_line_primary"
+        reason = "two_line_primary"
+        if route_corridor_available or lanelet_corridor_available:
+            reason = "two_line_visual_primary_over_route"
+        return True, reason
 
     if measurement_mode == "single_line":
-        return True, "single_line_primary"
+        min_single_quality = float(
+            getattr(_config, "LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY", 0.75)
+        )
+        min_single_streak = int(
+            getattr(_config, "LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_STREAK_FRAMES", 6)
+        )
+        planner_priority = bool(getattr(lane_observation, "planner_priority_active", False))
+        if not bool(getattr(lane_observation, "transition_error_coherent", True)):
+            return False, "single_line_transition_error_jump"
+        quality = float(getattr(lane_observation, "quality", 0.0) or 0.0)
+        if quality < min_single_quality:
+            return False, "single_line_quality_below_primary"
+        single_line_streak = int(
+            getattr(lane_observation, "measurement_mode_streak_frames", 0) or 0
+        )
+        if (
+            route_corridor_available or lanelet_corridor_available
+        ) and single_line_streak < max(1, min_single_streak):
+            return False, "single_line_transition_assist"
+        visual_map_match_gate = _visual_map_match_primary_gate(
+            ctx,
+            measurement_mode=measurement_mode,
+            route_corridor_available=route_corridor_available,
+            lanelet_corridor_available=lanelet_corridor_available,
+        )
+        if visual_map_match_gate is not None:
+            return False, visual_map_match_gate
+        assist_primary = False
+        if not planner_priority:
+            assist_primary_enabled = bool(
+                getattr(_config, "LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_ENABLED", True)
+            )
+            assist_min_quality = float(
+                getattr(
+                    _config,
+                    "LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_MIN_QUALITY",
+                    max(0.82, min_single_quality),
+                )
+            )
+            control_policy = str(
+                getattr(lane_observation, "control_policy_mode", "") or ""
+            ).upper()
+            assist_primary = (
+                assist_primary_enabled
+                and quality >= assist_min_quality
+                and control_policy in {"VISUAL_ASSIST", "ROUTE_TRACKING", "LANE_KEEP", ""}
+            )
+            if not assist_primary:
+                return False, "single_line_visual_assist_only"
+        if not bool(getattr(lane_observation, "direct_error_valid", False)):
+            reason = "single_line_primary_path_only"
+            if route_corridor_available or lanelet_corridor_available:
+                reason = "single_line_visual_primary_over_route_path_only"
+            if assist_primary:
+                reason = "single_line_visual_assist_primary_over_route_path_only"
+            return True, reason
+        reason = "single_line_primary"
+        if route_corridor_available or lanelet_corridor_available:
+            reason = "single_line_visual_primary_over_route"
+        if assist_primary:
+            reason = "single_line_visual_assist_primary_over_route"
+        return True, reason
 
     return False, f"unsupported_measurement_mode:{measurement_mode}"
+
+
+def _route_precision_context(ctx: PlanningContext) -> str | None:
+    route = getattr(ctx, "route", None)
+    if route is None:
+        return None
+    semantic = str(
+        getattr(route, "expected_control_type", None)
+        or ""
+    ).lower()
+    if semantic in {"intersection", "stopline", "crosswalk", "parking", "roundabout"}:
+        return f"route_precision_context:{semantic}"
+    return None
+
+
+def _visual_map_match_primary_gate(
+    ctx: PlanningContext,
+    *,
+    measurement_mode: str,
+    route_corridor_available: bool,
+    lanelet_corridor_available: bool,
+) -> str | None:
+    if not (route_corridor_available or lanelet_corridor_available):
+        return None
+    if not bool(getattr(_config, "VISUAL_MAP_MATCH_ENABLED", True)):
+        return None
+    if (
+        str(measurement_mode or "none") != "single_line"
+        or not bool(getattr(_config, "LANE_VISUAL_SINGLE_LINE_REQUIRE_MAP_MATCH_WITH_ROUTE", True))
+    ):
+        return None
+    match = getattr(getattr(ctx, "pose", None), "visual_lane_match", None)
+    if match is None:
+        return "single_line_visual_map_match_missing"
+
+    near_yaw = getattr(match, "near_yaw_error_rad", None)
+    if near_yaw is None:
+        near_yaw = getattr(match, "yaw_error_rad", 0.0)
+    try:
+        near_yaw_abs = abs(float(near_yaw or 0.0))
+    except (TypeError, ValueError):
+        return "single_line_visual_map_match_invalid_yaw"
+
+    max_sample_yaw = getattr(match, "max_abs_yaw_error_rad", None)
+    try:
+        max_sample_yaw_abs = abs(float(max_sample_yaw or near_yaw_abs))
+    except (TypeError, ValueError):
+        return "single_line_visual_map_match_invalid_sample_yaw"
+    lateral_error = getattr(match, "lateral_error_m", 0.0)
+    max_sample_lateral = getattr(match, "max_abs_lateral_error_m", None)
+    try:
+        lateral_abs = abs(float(lateral_error or 0.0))
+        max_sample_lateral_abs = abs(float(max_sample_lateral if max_sample_lateral is not None else lateral_abs))
+    except (TypeError, ValueError):
+        return "single_line_visual_map_match_invalid_lateral"
+
+    primary_yaw_limit = math.radians(
+        float(getattr(_config, "VISUAL_MAP_MATCH_PRIMARY_MAX_YAW_ERROR_DEG", 5.0) or 5.0)
+    )
+    primary_sample_yaw_limit = math.radians(
+        float(
+            getattr(
+                _config,
+                "VISUAL_MAP_MATCH_PRIMARY_MAX_SAMPLE_YAW_ERROR_DEG",
+                math.degrees(primary_yaw_limit),
+            )
+            or math.degrees(primary_yaw_limit)
+        )
+    )
+    lateral_limit = float(
+        getattr(
+            _config,
+            "VISUAL_MAP_MATCH_MAX_LATERAL_ERROR_M",
+            float(getattr(_config, "LANE_WIDTH_CM", 35.0)) / 200.0,
+        )
+        or 0.175
+    )
+    sample_lateral_limit = max(lateral_limit, lateral_limit * 1.35)
+    if near_yaw_abs > primary_yaw_limit:
+        return "single_line_visual_map_yaw_mismatch"
+    if max_sample_yaw_abs > primary_sample_yaw_limit:
+        return "single_line_visual_map_sample_yaw_mismatch"
+    if lateral_abs > lateral_limit:
+        return "single_line_visual_map_lateral_mismatch"
+    if max_sample_lateral_abs > sample_lateral_limit:
+        return "single_line_visual_map_sample_lateral_mismatch"
+    if not bool(getattr(match, "accepted", False)):
+        reason = str(getattr(match, "reason", "rejected") or "rejected")
+        return f"single_line_visual_map_match_rejected:{reason}"
+    return None

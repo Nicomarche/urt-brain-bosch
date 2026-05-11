@@ -21,15 +21,12 @@ from typing import Optional
 import time as _time
 
 from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
+from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
-    QButtonGroup,
-    QDoubleSpinBox,
     QFileDialog,
     QGraphicsEllipseItem,
     QGraphicsItem,
-    QGraphicsItemGroup,
     QGraphicsLineItem,
     QGraphicsPathItem,
     QGraphicsPixmapItem,
@@ -51,17 +48,6 @@ from ._map_path_overlay import (
     extract_nav_route_preview_points,
 )
 from ._map_click_routing import resolve_click_destination_lanelet
-from ._map_alignment import (
-    adjusted_map_transform,
-    map_to_texture_point,
-    offset_is_effectively_zero,
-    relative_layer_adjustment_px,
-    scale_is_effectively_one,
-    shifted_world_bounds,
-    texture_offset_m,
-    texture_to_map_point,
-    world_bounds_delta_for_visual_offset,
-)
 from ._pannable_view import PannableZoomableView
 from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
@@ -85,14 +71,11 @@ class MapData:
     def __init__(self, map_dir: Path):
         self.map_dir = Path(map_dir)
         self.meters_per_pixel: float = 0.01
-        self.meters_per_pixel_x: float = 0.01
-        self.meters_per_pixel_y: float = 0.01
         self.img_w: int = 2000
         self.img_h: int = 1333
         self.y_axis_inverted: bool = True
         self.x_min_m: float = 0.0
         self.y_min_m: float = 0.0
-        self.map_to_texture_transform: dict[str, object] = {}
         self.background: Optional[QPixmap] = None
         self.map_source: str = "none"
         self._meta_loaded: bool = False
@@ -112,15 +95,10 @@ class MapData:
     def _load_meta(self) -> None:
         meta_path = self.map_dir / "track_meta.json"
         meta = persistence.load_json(meta_path, default={}) or {}
-        base_mpp = float(meta.get("metersPerPixel", 0.01))
-        self.meters_per_pixel = base_mpp
-        self.meters_per_pixel_x = float(meta.get("metersPerPixelX", base_mpp))
-        self.meters_per_pixel_y = float(meta.get("metersPerPixelY", base_mpp))
+        self.meters_per_pixel = float(meta.get("metersPerPixel", 0.01))
         self.img_w = int(meta.get("imgW", 2000))
         self.img_h = int(meta.get("imgH", 1333))
         self.y_axis_inverted = bool(meta.get("y_axis_inverted", True))
-        transform = meta.get("map_to_texture") or {}
-        self.map_to_texture_transform = dict(transform) if isinstance(transform, dict) else {}
         self._meta_loaded = bool(meta)
         bounds = meta.get("world_bounds") or {}
         try:
@@ -132,9 +110,6 @@ class MapData:
 
     def _load_background(self) -> None:
         # Prefer rasterising the SVG (sharper), fall back to PNG.
-        # SVGs are rendered directly in their own image frame: black canvas,
-        # no dashboard-side Y flip. Alignment previews should show the source
-        # art exactly as authored.
         svg = self.map_dir / "track.svg"
         png = self.map_dir / "track.png"
         if svg.exists():
@@ -142,11 +117,12 @@ class MapData:
                 renderer = QSvgRenderer(str(svg))
                 if renderer.isValid():
                     img = QImage(self.img_w, self.img_h, QImage.Format_ARGB32)
-                    img.fill(QColor("#000000"))
+                    img.fill(Qt.white)
                     painter = QPainter(img)
                     renderer.render(painter)
                     painter.end()
                     self.background = QPixmap.fromImage(img)
+                    self._maybe_flip_background()
                     return
             except Exception as exc:
                 _logger.warning("SVG rasterisation failed: %s", exc)
@@ -155,9 +131,9 @@ class MapData:
             self._maybe_flip_background()
 
     def _maybe_flip_background(self) -> None:
-        """Flippea verticalmente el PNG fallback cuando ``y_axis_inverted=False``.
+        """Flippea verticalmente el track image cuando ``y_axis_inverted=False``.
 
-        Razón: el PNG fue rasterizado con la convención de imagen estándar (origen
+        Razón: el SVG/PNG fue rasterizado con la convención SVG estándar (origen
         top-left, +Y hacia abajo). Con ``y_axis_inverted=True`` el render
         compensaba ese flip al transformar mapa→pixel — pero entonces la
         orientación visual del dashboard quedaba opuesta a la del gz GUI
@@ -205,10 +181,7 @@ class MapData:
             return
         if not self._meta_loaded:
             try:
-                base_mpp = float(map_metadata.get("meters_per_pixel", self.meters_per_pixel))
-                self.meters_per_pixel = base_mpp
-                self.meters_per_pixel_x = base_mpp
-                self.meters_per_pixel_y = base_mpp
+                self.meters_per_pixel = float(map_metadata.get("meters_per_pixel", self.meters_per_pixel))
             except (TypeError, ValueError):
                 pass
             try:
@@ -337,29 +310,22 @@ class MapData:
 
     def world_to_pixel(self, x_m: float, y_m: float) -> tuple[float, float]:
         """Convert world meters → image pixels (top-left origin)."""
-        texture_x_m, texture_y_m = map_to_texture_point(
-            (float(x_m), float(y_m)),
-            self.map_to_texture_transform,
-        )
-        local_x = texture_x_m - float(self.x_min_m)
-        local_y = texture_y_m - float(self.y_min_m)
-        px = local_x / self.meters_per_pixel_x
+        local_x = float(x_m) - float(self.x_min_m)
+        local_y = float(y_m) - float(self.y_min_m)
+        px = local_x / self.meters_per_pixel
         if self.y_axis_inverted:
-            py = self.img_h - (local_y / self.meters_per_pixel_y)
+            py = self.img_h - (local_y / self.meters_per_pixel)
         else:
-            py = local_y / self.meters_per_pixel_y
+            py = local_y / self.meters_per_pixel
         return px, py
 
     def pixel_to_world(self, px: float, py: float) -> tuple[float, float]:
-        texture_x_m = float(self.x_min_m) + px * self.meters_per_pixel_x
+        x_m = float(self.x_min_m) + px * self.meters_per_pixel
         if self.y_axis_inverted:
-            texture_y_m = float(self.y_min_m) + (self.img_h - py) * self.meters_per_pixel_y
+            y_m = float(self.y_min_m) + (self.img_h - py) * self.meters_per_pixel
         else:
-            texture_y_m = float(self.y_min_m) + py * self.meters_per_pixel_y
-        return texture_to_map_point(
-            (texture_x_m, texture_y_m),
-            self.map_to_texture_transform,
-        )
+            y_m = float(self.y_min_m) + py * self.meters_per_pixel
+        return x_m, y_m
 
     def scene_rect(self) -> QRectF:
         if self.background is not None:
@@ -409,45 +375,17 @@ def _build_world_path(
 # ----------------------------------------------------------------------
 class _MapScene(QGraphicsScene):
     map_clicked = pyqtSignal(float, float)  # world_x, world_y
-    alignment_dragged = pyqtSignal(float, float)  # scene dx_px, dy_px
-    alignment_drag_finished = pyqtSignal()
 
     def __init__(self, data: MapData, parent=None):
         super().__init__(parent)
         self._data = data
-        self.alignment_enabled = False
-        self._alignment_dragging = False
-        self._alignment_last_pos = QPointF()
 
     def mousePressEvent(self, event):  # noqa: N802
-        if self.alignment_enabled and event.button() == Qt.LeftButton:
-            self._alignment_dragging = True
-            self._alignment_last_pos = event.scenePos()
-            event.accept()
-            return
         if event.button() == Qt.LeftButton:
             sp = event.scenePos()
             x_m, y_m = self._data.pixel_to_world(sp.x(), sp.y())
             self.map_clicked.emit(x_m, y_m)
         super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):  # noqa: N802
-        if self._alignment_dragging:
-            sp = event.scenePos()
-            delta = sp - self._alignment_last_pos
-            self._alignment_last_pos = sp
-            self.alignment_dragged.emit(float(delta.x()), float(delta.y()))
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):  # noqa: N802
-        if self._alignment_dragging and event.button() == Qt.LeftButton:
-            self._alignment_dragging = False
-            self.alignment_drag_finished.emit()
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
 
 
 # ----------------------------------------------------------------------
@@ -537,20 +475,6 @@ class MapView(QWidget):
         self._view = PannableZoomableView(self._scene, self)
         self._view.setBackgroundBrush(QBrush(QColor("#0c0c0c")))
         self._lanelet_fill_items: dict[str, QGraphicsPolygonItem] = {}
-        self._background_layer_items: list[QGraphicsItem] = []
-        self._lanelet_layer_items: list[QGraphicsItem] = []
-        self._background_layer_group: QGraphicsItemGroup | None = None
-        self._lanelet_layer_group: QGraphicsItemGroup | None = None
-        self._alignment_offsets_px: dict[str, tuple[float, float]] = {
-            "background": (0.0, 0.0),
-            "lanelets": (0.0, 0.0),
-        }
-        self._alignment_scales_xy: dict[str, tuple[float, float]] = {
-            "background": (1.0, 1.0),
-            "lanelets": (1.0, 1.0),
-        }
-        self._alignment_target = "lanelets"
-        self._alignment_mode = False
         self._active_current_lanelet_id: str | None = None
         self._active_next_lanelet_ids: tuple[str, ...] = ()
         self._has_centered_on_ego = False
@@ -600,55 +524,6 @@ class MapView(QWidget):
             clear_route_btn = QPushButton("Clear route")
             clear_route_btn.clicked.connect(self._clear_route)
             self._clear_route_btn = clear_route_btn
-            self._align_btn = QToolButton()
-            self._align_btn.setText("Align")
-            self._align_btn.setCheckable(True)
-            self._align_btn.setToolTip(
-                "Turn on map alignment mode. Left-drag moves the selected "
-                "visual layer instead of sending map clicks."
-            )
-            self._align_btn.toggled.connect(self._on_alignment_toggled)
-            self._align_lanelets_btn = QToolButton()
-            self._align_lanelets_btn.setText("Lanelets")
-            self._align_lanelets_btn.setCheckable(True)
-            self._align_lanelets_btn.setChecked(True)
-            self._align_lanelets_btn.setToolTip("Drag the Lanelet2/OSM overlay.")
-            self._align_svg_btn = QToolButton()
-            self._align_svg_btn.setText("SVG/sim")
-            self._align_svg_btn.setCheckable(True)
-            self._align_svg_btn.setToolTip("Drag the track SVG/simulator background layer.")
-            self._align_layer_group = QButtonGroup(self)
-            self._align_layer_group.setExclusive(True)
-            self._align_layer_group.addButton(self._align_lanelets_btn)
-            self._align_layer_group.addButton(self._align_svg_btn)
-            self._align_lanelets_btn.clicked.connect(lambda _checked=False: self._set_alignment_target("lanelets"))
-            self._align_svg_btn.clicked.connect(lambda _checked=False: self._set_alignment_target("background"))
-            self._align_scale_x = QDoubleSpinBox()
-            self._align_scale_x.setRange(0.5, 1.5)
-            self._align_scale_x.setDecimals(5)
-            self._align_scale_x.setSingleStep(0.001)
-            self._align_scale_x.setPrefix("X ")
-            self._align_scale_x.setValue(1.0)
-            self._align_scale_x.setToolTip("Scale X for the selected alignment layer.")
-            self._align_scale_x.valueChanged.connect(self._on_alignment_scale_x_changed)
-            self._align_scale_y = QDoubleSpinBox()
-            self._align_scale_y.setRange(0.5, 1.5)
-            self._align_scale_y.setDecimals(5)
-            self._align_scale_y.setSingleStep(0.001)
-            self._align_scale_y.setPrefix("Y ")
-            self._align_scale_y.setValue(1.0)
-            self._align_scale_y.setToolTip("Scale Y for the selected alignment layer.")
-            self._align_scale_y.valueChanged.connect(self._on_alignment_scale_y_changed)
-            self._align_reset_btn = QPushButton("Reset align")
-            self._align_reset_btn.clicked.connect(self._reset_alignment_offsets)
-            self._align_apply_btn = QPushButton("Apply meta")
-            self._align_apply_btn.setToolTip(
-                "Apply the relative Lanelets-vs-SVG/simulator offset to "
-                "track_meta.json."
-            )
-            self._align_apply_btn.clicked.connect(self._apply_alignment_to_track_meta)
-            self._align_label = QLabel()
-            self._align_label.setStyleSheet("color:#777; font-size: 10pt;")
 
             hint = QLabel("Wheel/pinch: zoom · Right-drag or two-finger: pan")
             hint.setStyleSheet("color:#666; font-size: 10pt;")
@@ -658,15 +533,6 @@ class MapView(QWidget):
             toolbar.addWidget(clear_route_btn)
             toolbar.addWidget(self._relocate_btn)
             toolbar.addWidget(self._save_start_btn)
-            toolbar.addSpacing(10)
-            toolbar.addWidget(self._align_btn)
-            toolbar.addWidget(self._align_lanelets_btn)
-            toolbar.addWidget(self._align_svg_btn)
-            toolbar.addWidget(self._align_scale_x)
-            toolbar.addWidget(self._align_scale_y)
-            toolbar.addWidget(self._align_reset_btn)
-            toolbar.addWidget(self._align_apply_btn)
-            toolbar.addWidget(self._align_label)
             toolbar.addStretch(1)
             toolbar.addWidget(hint)
             toolbar.addSpacing(12)
@@ -700,8 +566,6 @@ class MapView(QWidget):
         # ---- Wire signals ----
         if not self._compact:
             self._scene.map_clicked.connect(self._on_map_click)
-            self._scene.alignment_dragged.connect(self._on_alignment_dragged)
-            self._scene.alignment_drag_finished.connect(self._on_alignment_drag_finished)
         self._client.location_signal.connect(self._on_location)
         self._client.cars_signal.connect(self._on_cars)
         self._client.semaphores_signal.connect(self._on_semaphores)
@@ -711,8 +575,6 @@ class MapView(QWidget):
         self._client.gps_fix_signal.connect(self._on_gps_fix)
         self._mode = ev.MODE_STOP
         self._relocate_mode = False
-        self._refresh_alignment_controls()
-        self._update_alignment_status()
         self._refresh_manual_pose_controls()
         self._fit_view()
 
@@ -743,28 +605,18 @@ class MapView(QWidget):
     def _build_scene(self) -> None:
         self._scene.clear()
         self._lanelet_fill_items.clear()
-        self._background_layer_items.clear()
-        self._lanelet_layer_items.clear()
         self._has_centered_on_ego = False
-        self._background_layer_group = QGraphicsItemGroup()
-        self._background_layer_group.setZValue(0)
-        self._scene.addItem(self._background_layer_group)
-        self._lanelet_layer_group = QGraphicsItemGroup()
-        self._lanelet_layer_group.setZValue(1)
-        self._scene.addItem(self._lanelet_layer_group)
 
         if self._data.background is not None:
             bg = QGraphicsPixmapItem(self._data.background)
             bg.setZValue(0)
-            self._background_layer_group.addToGroup(bg)
-            self._background_layer_items.append(bg)
+            self._scene.addItem(bg)
         self._scene.setSceneRect(self._data.scene_rect())
 
         self._render_lanelet_map()
 
         # Semantic highlights (intersection rings, etc).
         self._render_semantics()
-        self._apply_alignment_offsets()
 
         # Persistent overlay items (pre-create so we can update in place).
         # Halo first (lower z) so the triangle sits on top.
@@ -810,11 +662,7 @@ class MapView(QWidget):
             item.setPen(QPen(Qt.NoPen))
             item.setZValue(0.5)
             item.setToolTip(f"Lanelet {lanelet_id}\n{tags.get('subtype', 'road')}")
-            if self._lanelet_layer_group is not None:
-                self._lanelet_layer_group.addToGroup(item)
-            else:
-                self._scene.addItem(item)
-            self._lanelet_layer_items.append(item)
+            self._scene.addItem(item)
             self._lanelet_fill_items[str(lanelet_id)] = item
 
         for boundary_id, points, tags in self._data.lanelet_boundaries:
@@ -831,11 +679,7 @@ class MapView(QWidget):
             item.setPen(dashed_boundary_pen if subtype in {"dashed", "dash"} else boundary_pen)
             item.setZValue(1.0)
             item.setToolTip(boundary_id)
-            if self._lanelet_layer_group is not None:
-                self._lanelet_layer_group.addToGroup(item)
-            else:
-                self._scene.addItem(item)
-            self._lanelet_layer_items.append(item)
+            self._scene.addItem(item)
 
         for lanelet_id, centerline_pts, tags in self._data.lanelet_centerlines:
             if len(centerline_pts) < 2:
@@ -850,11 +694,7 @@ class MapView(QWidget):
             item.setPen(center_pen)
             item.setZValue(1.4)
             item.setToolTip(f"Centerline {lanelet_id}\n{tags.get('location', 'road')}")
-            if self._lanelet_layer_group is not None:
-                self._lanelet_layer_group.addToGroup(item)
-            else:
-                self._scene.addItem(item)
-            self._lanelet_layer_items.append(item)
+            self._scene.addItem(item)
 
     def _apply_lanelet_highlights(
         self,
@@ -899,338 +739,12 @@ class MapView(QWidget):
             ring.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 32)))
             ring.setZValue(3)
             ring.setToolTip(f"{kind}: {label}\n{marker_id}")
-            if self._lanelet_layer_group is not None:
-                self._lanelet_layer_group.addToGroup(ring)
-            else:
-                self._scene.addItem(ring)
-            self._lanelet_layer_items.append(ring)
+            self._scene.addItem(ring)
 
     def _fit_view(self) -> None:
         if self._scene.sceneRect().isEmpty():
             return
         self._view.fitInView(self._scene.sceneRect(), Qt.KeepAspectRatio)
-
-    def _alignment_relative_adjustment(self) -> tuple[tuple[float, float], tuple[float, float]]:
-        return relative_layer_adjustment_px(
-            lanelet_offset_px=self._alignment_offsets_px.get("lanelets", (0.0, 0.0)),
-            background_offset_px=self._alignment_offsets_px.get("background", (0.0, 0.0)),
-            lanelet_scale_xy=self._alignment_scales_xy.get("lanelets", (1.0, 1.0)),
-            background_scale_xy=self._alignment_scales_xy.get("background", (1.0, 1.0)),
-        )
-
-    def _alignment_has_adjustment(self) -> bool:
-        rel_offset, rel_scale = self._alignment_relative_adjustment()
-        return (
-            not offset_is_effectively_zero(rel_offset)
-            or not scale_is_effectively_one(rel_scale)
-        )
-
-    def _alignment_anchor_px(self) -> tuple[float, float]:
-        return (self._data.img_w * 0.5, self._data.img_h * 0.5)
-
-    def _layer_alignment_transform(self, layer: str) -> QTransform:
-        sx, sy = self._alignment_scales_xy.get(layer, (1.0, 1.0))
-        dx, dy = self._alignment_offsets_px.get(layer, (0.0, 0.0))
-        anchor_x, anchor_y = self._alignment_anchor_px()
-        return QTransform(
-            float(sx),
-            0.0,
-            0.0,
-            float(sy),
-            anchor_x * (1.0 - float(sx)) + float(dx),
-            anchor_y * (1.0 - float(sy)) + float(dy),
-        )
-
-    def _sync_alignment_scale_controls(self) -> None:
-        if self._compact or not hasattr(self, "_align_scale_x"):
-            return
-        sx, sy = self._alignment_scales_xy.get(self._alignment_target, (1.0, 1.0))
-        self._align_scale_x.blockSignals(True)
-        self._align_scale_y.blockSignals(True)
-        self._align_scale_x.setValue(float(sx))
-        self._align_scale_y.setValue(float(sy))
-        self._align_scale_x.blockSignals(False)
-        self._align_scale_y.blockSignals(False)
-
-    def _set_alignment_scale(self, *, axis: str, value: float) -> None:
-        if not self._alignment_mode or self._alignment_target not in self._alignment_scales_xy:
-            return
-        sx, sy = self._alignment_scales_xy[self._alignment_target]
-        if axis == "x":
-            sx = float(value)
-        elif axis == "y":
-            sy = float(value)
-        else:
-            return
-        self._alignment_scales_xy[self._alignment_target] = (sx, sy)
-        self._apply_alignment_offsets()
-
-    def _on_alignment_scale_x_changed(self, value: float) -> None:
-        self._set_alignment_scale(axis="x", value=value)
-
-    def _on_alignment_scale_y_changed(self, value: float) -> None:
-        self._set_alignment_scale(axis="y", value=value)
-
-    def _set_alignment_target(self, target: str) -> None:
-        if target not in {"lanelets", "background"}:
-            return
-        self._alignment_target = target
-        self._sync_alignment_scale_controls()
-        self._update_alignment_status()
-
-    def _on_alignment_toggled(self, checked: bool) -> None:
-        self._alignment_mode = bool(checked)
-        self._scene.alignment_enabled = bool(checked)
-        if checked and getattr(self, "_relocate_mode", False):
-            self._relocate_btn.blockSignals(True)
-            self._relocate_btn.setChecked(False)
-            self._relocate_btn.blockSignals(False)
-            self._on_relocate_toggled(False)
-        self._refresh_alignment_controls()
-        self._refresh_manual_pose_controls()
-        self._update_alignment_status()
-
-    def _refresh_alignment_controls(self) -> None:
-        if self._compact or not hasattr(self, "_align_btn"):
-            return
-        active = bool(self._alignment_mode)
-        self._scene.alignment_enabled = active
-        self._align_lanelets_btn.setEnabled(active)
-        self._align_svg_btn.setEnabled(active)
-        self._align_reset_btn.setEnabled(active)
-        self._align_scale_x.setEnabled(active)
-        self._align_scale_y.setEnabled(active)
-        self._sync_alignment_scale_controls()
-        self._align_apply_btn.setEnabled(active and self._alignment_has_adjustment())
-        if active:
-            self._align_btn.setStyleSheet(
-                "QToolButton { background:#355d9b; color:white; "
-                "padding:4px 10px; border-radius:4px; font-weight:600; }"
-            )
-            self._view.viewport().setCursor(Qt.OpenHandCursor)
-        else:
-            self._align_btn.setStyleSheet("")
-            if not getattr(self, "_relocate_mode", False):
-                self._view.viewport().unsetCursor()
-
-    def _apply_alignment_offsets(self) -> None:
-        bg_transform = self._layer_alignment_transform("background")
-        if self._background_layer_group is not None:
-            self._background_layer_group.setPos(0.0, 0.0)
-            self._background_layer_group.setTransform(bg_transform)
-        lane_transform = self._layer_alignment_transform("lanelets")
-        if self._lanelet_layer_group is not None:
-            self._lanelet_layer_group.setPos(0.0, 0.0)
-            self._lanelet_layer_group.setTransform(lane_transform)
-        self._refresh_scene_rect_for_alignment()
-        self._refresh_alignment_controls()
-        self._update_alignment_status()
-
-    def _refresh_scene_rect_for_alignment(self) -> None:
-        rect = QRectF(self._data.scene_rect())
-        items_rect = self._scene.itemsBoundingRect()
-        if not items_rect.isNull() and not items_rect.isEmpty():
-            rect = rect.united(items_rect)
-        self._scene.setSceneRect(rect.adjusted(-80.0, -80.0, 80.0, 80.0))
-
-    def _on_alignment_dragged(self, dx_px: float, dy_px: float) -> None:
-        if not self._alignment_mode:
-            return
-        old_dx, old_dy = self._alignment_offsets_px.get(self._alignment_target, (0.0, 0.0))
-        self._alignment_offsets_px[self._alignment_target] = (
-            float(old_dx) + float(dx_px),
-            float(old_dy) + float(dy_px),
-        )
-        self._apply_alignment_offsets()
-
-    def _on_alignment_drag_finished(self) -> None:
-        if self._compact:
-            return
-        (rel_dx_px, rel_dy_px), rel_scale = self._alignment_relative_adjustment()
-        rel_dx_m, rel_dy_m = texture_offset_m(
-            (rel_dx_px, rel_dy_px),
-            meters_per_pixel_x=self._data.meters_per_pixel_x,
-            meters_per_pixel_y=self._data.meters_per_pixel_y,
-        )
-        self._location_label.setText(
-            "Align offset lanelets-SVG/sim: "
-            f"{rel_dx_px:+.1f}px x, {rel_dy_px:+.1f}px y "
-            f"({rel_dx_m:+.3f}m right, {rel_dy_m:+.3f}m down), "
-            f"scale {rel_scale[0]:.5f}x/{rel_scale[1]:.5f}y"
-        )
-
-    def _reset_alignment_offsets(self) -> None:
-        self._alignment_offsets_px = {
-            "background": (0.0, 0.0),
-            "lanelets": (0.0, 0.0),
-        }
-        self._alignment_scales_xy = {
-            "background": (1.0, 1.0),
-            "lanelets": (1.0, 1.0),
-        }
-        self._apply_alignment_offsets()
-        if hasattr(self, "_location_label"):
-            self._location_label.setText("Alignment preview reset")
-
-    def _update_alignment_status(self) -> None:
-        if self._compact or not hasattr(self, "_align_label"):
-            return
-        rel_px, rel_scale = self._alignment_relative_adjustment()
-        rel_m = texture_offset_m(
-            rel_px,
-            meters_per_pixel_x=self._data.meters_per_pixel_x,
-            meters_per_pixel_y=self._data.meters_per_pixel_y,
-        )
-        bounds_dx_m, bounds_dy_m = world_bounds_delta_for_visual_offset(
-            rel_px,
-            meters_per_pixel_x=self._data.meters_per_pixel_x,
-            meters_per_pixel_y=self._data.meters_per_pixel_y,
-            y_axis_inverted=self._data.y_axis_inverted,
-        )
-        transform_dy_m = -rel_m[1] if self._data.y_axis_inverted else rel_m[1]
-        active_layer = "Lanelets" if self._alignment_target == "lanelets" else "SVG/sim"
-        self._align_label.setText(
-            f"{active_layer} | rel {rel_px[0]:+.1f}px, {rel_px[1]:+.1f}px "
-            f"| s {rel_scale[0]:.4f}/{rel_scale[1]:.4f}"
-        )
-        tooltip = (
-            "Relative offset lanelets-SVG/simulator:\n"
-            f"  pixels: x={rel_px[0]:+.2f}, y={rel_px[1]:+.2f}\n"
-            f"  texture: x={rel_m[0]:+.4f}m right, y={rel_m[1]:+.4f}m down\n"
-            f"  scale: x={rel_scale[0]:.6f}, y={rel_scale[1]:.6f}\n"
-        )
-        if self._data.map_to_texture_transform or not scale_is_effectively_one(rel_scale):
-            tooltip += (
-                "If applied to track_meta.json map_to_texture:\n"
-                f"  translation x {rel_m[0]:+.4f}m\n"
-                f"  translation y {transform_dy_m:+.4f}m\n"
-                f"  scale x {rel_scale[0]:.6f}\n"
-                f"  scale y {rel_scale[1]:.6f}"
-            )
-        else:
-            tooltip += (
-                "If applied to track_meta.json world_bounds:\n"
-                f"  x_min/x_max {bounds_dx_m:+.4f}m\n"
-                f"  y_min/y_max {bounds_dy_m:+.4f}m"
-            )
-        self._align_label.setToolTip(tooltip)
-        if hasattr(self, "_align_apply_btn"):
-            self._align_apply_btn.setEnabled(bool(self._alignment_mode) and self._alignment_has_adjustment())
-
-    def _apply_alignment_to_track_meta(self) -> None:
-        rel_px, rel_scale = self._alignment_relative_adjustment()
-        if offset_is_effectively_zero(rel_px) and scale_is_effectively_one(rel_scale):
-            self._location_label.setText("No alignment adjustment to apply")
-            return
-        meta_path = self._map_dir / "track_meta.json"
-        meta = persistence.load_json(meta_path, default={})
-        if not isinstance(meta, dict):
-            meta = {}
-        current_bounds = {
-            "x_min": self._data.x_min_m,
-            "x_max": self._data.x_min_m + self._data.img_w * self._data.meters_per_pixel_x,
-            "y_min": self._data.y_min_m,
-            "y_max": self._data.y_min_m + self._data.img_h * self._data.meters_per_pixel_y,
-        }
-        bounds = dict(meta.get("world_bounds") or current_bounds)
-        rel_m = texture_offset_m(
-            rel_px,
-            meters_per_pixel_x=self._data.meters_per_pixel_x,
-            meters_per_pixel_y=self._data.meters_per_pixel_y,
-        )
-        transform_dy_m = -rel_m[1] if self._data.y_axis_inverted else rel_m[1]
-        anchor_px = self._alignment_anchor_px()
-        anchor_m = (
-            self._data.x_min_m + anchor_px[0] * self._data.meters_per_pixel_x,
-            self._data.y_min_m + (
-                (self._data.img_h - anchor_px[1]) * self._data.meters_per_pixel_y
-                if self._data.y_axis_inverted
-                else anchor_px[1] * self._data.meters_per_pixel_y
-            ),
-        )
-        applied_to_map_transform = (
-            isinstance(meta.get("map_to_texture"), dict)
-            or bool(self._data.map_to_texture_transform)
-            or not scale_is_effectively_one(rel_scale)
-        )
-        if applied_to_map_transform:
-            meta["map_to_texture"] = adjusted_map_transform(
-                meta.get("map_to_texture") or self._data.map_to_texture_transform,
-                scale_xy=rel_scale,
-                offset_m=(rel_m[0], transform_dy_m),
-                anchor_m=anchor_m,
-            )
-            bounds_dx_m = 0.0
-            bounds_dy_m = 0.0
-        else:
-            bounds_dx_m, bounds_dy_m = world_bounds_delta_for_visual_offset(
-                rel_px,
-                meters_per_pixel_x=self._data.meters_per_pixel_x,
-                meters_per_pixel_y=self._data.meters_per_pixel_y,
-                y_axis_inverted=self._data.y_axis_inverted,
-            )
-            meta["world_bounds"] = shifted_world_bounds(
-                bounds,
-                dx_m=bounds_dx_m,
-                dy_m=bounds_dy_m,
-            )
-        meta["last_dashboard_alignment"] = {
-            "applied_at": round(_time.time(), 3),
-            "relative_offset_px": {
-                "x": round(float(rel_px[0]), 3),
-                "y": round(float(rel_px[1]), 3),
-            },
-            "relative_offset_texture_m": {
-                "x_right": round(float(rel_m[0]), 6),
-                "y_down": round(float(rel_m[1]), 6),
-            },
-            "world_bounds_delta_m": {
-                "x": round(float(bounds_dx_m), 6),
-                "y": round(float(bounds_dy_m), 6),
-            },
-            "map_to_texture_translation_delta_m": {
-                "x": round(float(rel_m[0]), 6),
-                "y": round(float(transform_dy_m), 6),
-            },
-            "relative_scale_xy": {
-                "x": round(float(rel_scale[0]), 9),
-                "y": round(float(rel_scale[1]), 9),
-            },
-            "scale_anchor_texture_m": {
-                "x": round(float(anchor_m[0]), 6),
-                "y": round(float(anchor_m[1]), 6),
-            },
-        }
-        try:
-            persistence.save_json_atomic(meta_path, meta)
-        except Exception as exc:
-            _logger.warning("Could not apply map alignment to %s: %s", meta_path, exc)
-            self._location_label.setText("Could not write track_meta.json")
-            return
-        self._alignment_offsets_px = {
-            "background": (0.0, 0.0),
-            "lanelets": (0.0, 0.0),
-        }
-        self._alignment_scales_xy = {
-            "background": (1.0, 1.0),
-            "lanelets": (1.0, 1.0),
-        }
-        self._data = MapData(self._map_dir)
-        self._scene._data = self._data
-        self._build_scene()
-        self._update_alignment_status()
-        self._fit_view()
-        if applied_to_map_transform:
-            self._location_label.setText(
-                f"Applied alignment to {meta_path.name}: "
-                f"map_to_texture x {rel_m[0]:+.3f}m, y {transform_dy_m:+.3f}m, "
-                f"scale {rel_scale[0]:.5f}/{rel_scale[1]:.5f}"
-            )
-        else:
-            self._location_label.setText(
-                f"Applied alignment to {meta_path.name}: "
-                f"world_bounds x {bounds_dx_m:+.3f}m, y {bounds_dy_m:+.3f}m"
-            )
 
     def _load_map_dialog(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -1240,18 +754,9 @@ class MapView(QWidget):
         self._map_dir = Path(path)
         self._data = MapData(self._map_dir)
         self._scene._data = self._data  # keep scene in sync
-        self._alignment_offsets_px = {
-            "background": (0.0, 0.0),
-            "lanelets": (0.0, 0.0),
-        }
-        self._alignment_scales_xy = {
-            "background": (1.0, 1.0),
-            "lanelets": (1.0, 1.0),
-        }
         self._build_scene()
         self._saved_start_pose = load_saved_start_pose(map_dir=self._map_dir)
         self._update_saved_start_label()
-        self._update_alignment_status()
         self._fit_view()
 
     def _ensure_scene_contains(self, px: float, py: float, *, margin: float = 80.0) -> None:
@@ -1488,7 +993,7 @@ class MapView(QWidget):
     def _refresh_manual_pose_controls(self) -> None:
         if self._compact:
             return
-        can_edit_pose = self._is_stop_mode() and not getattr(self, "_alignment_mode", False)
+        can_edit_pose = self._is_stop_mode()
         if not can_edit_pose and getattr(self, "_relocate_mode", False):
             self._relocate_btn.blockSignals(True)
             self._relocate_btn.setChecked(False)
@@ -1692,13 +1197,6 @@ class MapView(QWidget):
         cross-hair cursor over the viewport so the user knows the next click
         will move the car, not plan a route.
         """
-        if checked and getattr(self, "_alignment_mode", False):
-            if hasattr(self, "_relocate_btn"):
-                self._relocate_btn.blockSignals(True)
-                self._relocate_btn.setChecked(False)
-                self._relocate_btn.blockSignals(False)
-            self._location_label.setText("Turn Align off before using Relocate")
-            checked = False
         if checked and not self._is_stop_mode():
             if hasattr(self, "_relocate_btn"):
                 self._relocate_btn.blockSignals(True)
