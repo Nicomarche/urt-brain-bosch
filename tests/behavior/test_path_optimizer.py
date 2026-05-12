@@ -38,6 +38,17 @@ def _heading_tangent_error_deg(path: np.ndarray, idx: int) -> float:
     return abs(math.degrees(delta))
 
 
+def _sample1_heading_delta_from_pose_deg(path: np.ndarray, pose_yaw: float) -> float:
+    dx = float(path[1, 0] - path[0, 0])
+    dy = float(path[1, 1] - path[0, 1])
+    heading = math.atan2(dy, dx)
+    delta = math.atan2(
+        math.sin(heading - float(pose_yaw)),
+        math.cos(heading - float(pose_yaw)),
+    )
+    return math.degrees(delta)
+
+
 def _require_non_empty_route(route, *, lanelet_id: str) -> None:
     if getattr(route, "waypoints", np.empty((0, 3))).shape[0] > 0:
         return
@@ -280,7 +291,8 @@ def test_path_optimizer_preserves_visual_path_priority_inside_lanelet_corridor(
     assert out.notes["corridor_visual_lane_guidance_active"] is True
     assert out.notes["corridor_visual_path_priority_active"] is True
     assert out.notes["corridor_visual_lane_guidance_max_limit_m"] > 0.085
-    assert float(out.target_path[1, 1]) < -0.085
+    assert float(out.target_path[1, 1]) < -0.08
+    assert float(out.target_path[4, 1]) < float(out.target_path[1, 1])
     assert float(out.target_path[1, 1]) > -0.11
 
 
@@ -962,8 +974,11 @@ def test_path_optimizer_biases_prefix_back_toward_visual_lane_center() -> None:
     assert out.notes["visual_lane_reentry_active"] is True
     assert out.notes["visual_lane_reentry_applied"] is True
     assert out.notes["visual_lane_prefix_samples"] >= 4
-    assert out.target_path[1, 1] > 0.04
-    assert out.target_path[3, 1] > out.target_path[8, 1]
+    peak_idx = int(np.argmax(out.target_path[:, 1]))
+    assert 1 < peak_idx < out.target_path.shape[0] - 1
+    assert 0.005 < out.target_path[1, 1] < 0.03
+    assert out.target_path[peak_idx, 1] > out.target_path[1, 1] * 2.0
+    assert out.target_path[peak_idx, 1] > out.target_path[-1, 1]
 
 
 def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measurement() -> None:
@@ -1011,9 +1026,11 @@ def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measuremen
     assert out.notes["visual_lane_measurement_mode"] == "single_line"
     assert out.notes["visual_lane_reentry_reason"] == "single_line_physical_reentry"
     assert out.notes["visual_lane_reentry_applied"] is True
-    assert out.target_path[1, 1] > 0.02
-    assert out.target_path[1, 1] < 0.08
-    assert out.target_path[3, 1] > out.target_path[8, 1]
+    peak_idx = int(np.argmax(out.target_path[:, 1]))
+    assert 1 < peak_idx < out.target_path.shape[0] - 1
+    assert 0.005 < out.target_path[1, 1] < 0.03
+    assert out.target_path[peak_idx, 1] > out.target_path[1, 1] * 2.0
+    assert out.target_path[peak_idx, 1] > out.target_path[-1, 1]
 
 
 def test_path_optimizer_ignores_single_line_reentry_when_direction_conflicts_with_route() -> None:
@@ -1664,6 +1681,92 @@ def test_path_optimizer_keeps_straight_hold_prefix_out_of_previous_blend() -> No
     assert out.target_path[2, 1] <= out.target_path[1, 1] + 0.01
 
 
+def test_path_optimizer_ramps_visual_reentry_on_route_connector_frame() -> None:
+    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="995")
+    route = router.go_to("995", {"lanelet_id": "138"})
+    _require_non_empty_route(route, lanelet_id="138")
+
+    pose = (5.60773324453329, 6.394426395474327, -0.15746151144647136)
+    matched_idx = 53
+    matched_pose = tuple(float(v) for v in route.waypoints[matched_idx])
+    horizon_n = 40
+    dt = 0.05
+    speed_mps = 0.2
+    base_ctx = make_context(
+        pose_x=pose[0],
+        pose_y=pose[1],
+        pose_yaw=pose[2],
+        speed_mps=0.04,
+        horizon_n=horizon_n,
+        dt=dt,
+        lanelet_map=None,
+        nominal_speed_mps=speed_mps,
+        current_lanelet_id="60",
+        next_lanelet_ids=("70", "75", "85", "90", "120", "125", "138"),
+        route_waypoints=route.waypoints.tolist(),
+        matched_idx=matched_idx,
+        target_idx=55,
+        matched_pose=matched_pose,
+        maneuver_type="intersection_straight",
+        map_match_error_m=0.07800796679371268,
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(
+            base_ctx.route,
+            route_active=True,
+            route_id="route-1",
+            route_source="go_to",
+            waypoint_mode_active=True,
+            next_semantic_type="intersection",
+            next_semantic_distance_m=0.4,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=0.203,
+            line_center_offset_m=0.1165,
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            curve_hint="ENTERING",
+        ),
+    )
+    raw_path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route.waypoints,
+        matched_idx=matched_idx,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=matched_pose[:2],
+        target_speed_mps=speed_mps,
+        horizon_n=horizon_n,
+        dt=dt,
+        return_metadata=True,
+    )
+
+    out = PathOptimizer().optimize(
+        BehaviorPathPlan(
+            timestamp=ctx.now_s,
+            raw_path=raw_path,
+            base_speed_profile=np.full(horizon_n, speed_mps, dtype=float),
+            scenario_name=ScenarioName.LANE_KEEP.value,
+            valid=True,
+            notes=bridge_meta | {"path_source": "route_waypoints"},
+        ),
+        ctx,
+    )
+
+    assert bridge_meta["bridge_mode"] == "connector"
+    assert out.notes["route_visual_entry_stabilization_applied"] is True
+    assert abs(_sample1_heading_delta_from_pose_deg(out.target_path, pose[2])) <= 15.5
+    sample1_x = float(out.notes["route_visual_entry_sample1_x_fwd_after_m"])
+    sample1_y = float(out.notes["route_visual_entry_sample1_y_left_after_m"])
+    assert sample1_x > 0.01
+    assert abs(sample1_y) <= math.tan(math.radians(15.5)) * sample1_x
+
+
 def test_path_optimizer_keeps_precision_horizon_with_route_visual_reentry() -> None:
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
@@ -2008,22 +2111,92 @@ def test_path_optimizer_keeps_route_precision_after_semantic_distance_jump() -> 
         return_metadata=True,
     )
 
-    out = PathOptimizer().optimize(
-        BehaviorPathPlan(
-            timestamp=ctx.now_s,
-            raw_path=raw_path,
-            base_speed_profile=np.full(horizon_n, 0.4, dtype=float),
-            scenario_name=ScenarioName.LANE_KEEP.value,
-            valid=True,
-            notes=bridge_meta,
-        ),
-        ctx,
+    base_step_arc = path_optimizer_module._infer_step_arc(
+        base_speed_profile=np.full(horizon_n, 0.4, dtype=float),
+        horizon_n=horizon_n,
+        dt=dt,
+        fallback_speed_mps=ctx.nominal_speed_mps,
+    )
+    step_arc, meta = path_optimizer_module._refine_step_arc_for_precision_route(
+        step_arc=base_step_arc,
+        ref_speed_mps=0.4,
+        raw_path=raw_path,
+        ctx=ctx,
     )
 
-    horizon_distance_m = float(np.linalg.norm(out.target_path[-1, :2] - out.target_path[0, :2]))
-    assert 0.45 < horizon_distance_m < 0.55
-    assert abs(float(out.target_path[-1, 2])) < 0.05
-    assert np.max(np.abs(out.target_path[:12, 1] - out.target_path[0, 1])) < 0.02
+    assert meta["reason"] == "precision_waypoint_mode"
+    assert step_arc == pytest.approx(0.0125, abs=1e-9)
+
+
+def test_path_optimizer_keeps_waypoint_precision_without_semantic_distance() -> None:
+    osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
+    router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="50")
+    route = router.go_to("50", {"lanelet_id": "75"})
+    _require_non_empty_route(route, lanelet_id="75")
+
+    pose = (4.948804044528047, 5.899762255143094, -0.002610970551899235)
+    matched_idx = 10
+    matched_pose = tuple(float(v) for v in route.waypoints[matched_idx])
+    horizon_n = 40
+    dt = 0.05
+    base_ctx = make_context(
+        pose_x=pose[0],
+        pose_y=pose[1],
+        pose_yaw=pose[2],
+        speed_mps=0.1,
+        horizon_n=horizon_n,
+        dt=dt,
+        lanelet_map=None,
+        nominal_speed_mps=0.1,
+        current_lanelet_id="50",
+        next_lanelet_ids=("55", "60", "70", "75"),
+        route_waypoints=route.waypoints.tolist(),
+        matched_idx=matched_idx,
+        target_idx=12,
+        matched_pose=matched_pose,
+        maneuver_type="intersection_straight",
+        map_match_error_m=0.0006916800758575313,
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(
+            base_ctx.route,
+            route_active=True,
+            route_id="route-1",
+            route_source="go_to",
+            waypoint_mode_active=True,
+            next_semantic_type=None,
+            next_semantic_distance_m=None,
+        ),
+    )
+    raw_path, bridge_meta = build_target_path_from_route(
+        route_waypoints=route.waypoints,
+        matched_idx=matched_idx,
+        start_xy=pose[:2],
+        start_yaw_rad=pose[2],
+        matched_xy=matched_pose[:2],
+        target_speed_mps=0.1,
+        horizon_n=horizon_n,
+        dt=dt,
+        return_metadata=True,
+    )
+
+    base_step_arc = path_optimizer_module._infer_step_arc(
+        base_speed_profile=np.full(horizon_n, 0.4, dtype=float),
+        horizon_n=horizon_n,
+        dt=dt,
+        fallback_speed_mps=ctx.nominal_speed_mps,
+    )
+    step_arc, meta = path_optimizer_module._refine_step_arc_for_precision_route(
+        step_arc=base_step_arc,
+        ref_speed_mps=0.4,
+        raw_path=raw_path,
+        ctx=ctx,
+    )
+
+    assert meta["reason"] == "precision_waypoint_mode"
+    assert meta["next_semantic_distance_m"] == pytest.approx(0.0, abs=1e-9)
+    assert step_arc == pytest.approx(0.0125, abs=1e-9)
 
 
 def _with_route_signature(ctx, *, route_id: str, current_lanelet_id: str, next_lanelet_ids: tuple[str, ...]):

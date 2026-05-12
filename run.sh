@@ -153,9 +153,7 @@ fi
 export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"
 if [[ -z "${URT_EXPECTED_MPC_BACKEND:-}" ]]; then
     _URT_FORCE_PP_LC="$(printf '%s' "${URT_FORCE_PURE_PURSUIT:-}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$_URT_FORCE_PP_LC" =~ ^(0|false|no|off)$ ]]; then
-        export URT_EXPECTED_MPC_BACKEND="acados"
-    elif [[ "$_URT_FORCE_PP_LC" =~ ^(1|true|yes|on)$ || "${URT_SIM_MODE:-0}" == "1" ]]; then
+    if [[ "$_URT_FORCE_PP_LC" =~ ^(1|true|yes|on)$ ]]; then
         export URT_EXPECTED_MPC_BACKEND="pure_pursuit"
     else
         export URT_EXPECTED_MPC_BACKEND="acados"

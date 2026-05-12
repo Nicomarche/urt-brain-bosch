@@ -120,6 +120,80 @@ def _osm_states_to_controller_frame(states: np.ndarray) -> np.ndarray:
     return arr
 
 
+def _path_arc_lengths_xy(states: np.ndarray) -> np.ndarray:
+    arr = np.asarray(states, dtype=np.float64)
+    if arr.ndim != 2 or arr.shape[0] == 0 or arr.shape[1] < 2:
+        return np.zeros(0, dtype=np.float64)
+    if arr.shape[0] == 1:
+        return np.zeros(1, dtype=np.float64)
+    seg_lens = np.linalg.norm(np.diff(arr[:, :2], axis=0), axis=1)
+    return np.concatenate([[0.0], np.cumsum(seg_lens)])
+
+
+def _retime_state_refs_by_speed(
+    state_refs: np.ndarray,
+    speed_profile: np.ndarray,
+    *,
+    dt_s: float,
+    min_step_m: float,
+    max_preview_m: float | None,
+) -> tuple[np.ndarray, dict[str, float | bool]]:
+    refs = np.asarray(state_refs, dtype=np.float64)
+    speeds = np.asarray(speed_profile, dtype=np.float64).reshape(-1)
+    meta: dict[str, float | bool] = {
+        "retimed": False,
+        "source_preview_m": 0.0,
+        "effective_preview_m": 0.0,
+        "v_ref_min_mps": 0.0,
+        "v_ref_max_mps": 0.0,
+        "v_ref_mean_mps": 0.0,
+    }
+    if refs.ndim != 2 or refs.shape[1] < 3 or refs.shape[0] < 2 or speeds.size == 0:
+        return np.array(refs, copy=True), meta
+
+    n = min(int(speeds.size), int(refs.shape[0] - 1))
+    speeds = np.abs(speeds[:n])
+    meta["v_ref_min_mps"] = float(np.min(speeds))
+    meta["v_ref_max_mps"] = float(np.max(speeds))
+    meta["v_ref_mean_mps"] = float(np.mean(speeds))
+
+    source_arcs = _path_arc_lengths_xy(refs)
+    if source_arcs.size != refs.shape[0] or float(source_arcs[-1]) <= 1e-9:
+        return np.array(refs, copy=True), meta
+    meta["source_preview_m"] = float(source_arcs[-1])
+
+    min_step = max(0.0, float(min_step_m))
+    dt = max(0.0, float(dt_s))
+    step_arcs = np.maximum(speeds * dt, min_step)
+    target_arcs = np.concatenate([[0.0], np.cumsum(step_arcs)])
+    if max_preview_m is not None and math.isfinite(float(max_preview_m)) and float(max_preview_m) > 1e-6:
+        target_arcs = np.minimum(target_arcs, float(max_preview_m))
+    target_arcs = np.minimum(target_arcs, float(source_arcs[-1]))
+    meta["effective_preview_m"] = float(target_arcs[-1])
+
+    if abs(float(target_arcs[-1]) - float(source_arcs[-1])) <= 1e-6:
+        return np.array(refs, copy=True), meta
+
+    unique_mask = np.concatenate([[True], np.diff(source_arcs) > 1e-9])
+    xp = source_arcs[unique_mask]
+    src = refs[unique_mask]
+    if xp.size < 2:
+        return np.array(refs, copy=True), meta
+
+    out = np.array(refs, copy=True)
+    out[: n + 1, 0] = np.interp(target_arcs, xp, src[:, 0])
+    out[: n + 1, 1] = np.interp(target_arcs, xp, src[:, 1])
+    yaw_unwrapped = np.unwrap(src[:, 2])
+    out[: n + 1, 2] = np.array(
+        [_wrap_angle(float(yaw)) for yaw in np.interp(target_arcs, xp, yaw_unwrapped)],
+        dtype=np.float64,
+    )
+    if refs.shape[0] > n + 1:
+        out[n + 1 :] = out[n]
+    meta["retimed"] = True
+    return out, meta
+
+
 def _first_forward_reference_hint(
     target_path: np.ndarray,
     *,
@@ -639,8 +713,12 @@ class MotionController(IMotionController):
             try:
                 import config as _cfg_force
                 _force_pp = bool(getattr(_cfg_force, "FORCE_PURE_PURSUIT", False))
+                _acados_output_deadband_deg = float(
+                    getattr(_cfg_force, "ACADOS_MPC_OUTPUT_DEADBAND_DEG", output_deadband_deg)
+                )
             except Exception:
                 _force_pp = False
+                _acados_output_deadband_deg = float(output_deadband_deg)
 
             # Construcción por defecto: probamos AcadosMPC primero. Si no
             # logra cargar y NO se pidió explícitamente pure-pursuit,
@@ -648,7 +726,7 @@ class MotionController(IMotionController):
             # de Acados sea una decisión consciente, no un fallback silencioso.
             acados = None if _force_pp else AcadosMPC(
                 max_steering_deg=max_steering_deg,
-                output_deadband_deg=output_deadband_deg,
+                output_deadband_deg=_acados_output_deadband_deg,
             )
             if acados is not None and acados.ready:
                 self._solver = acados
@@ -766,11 +844,23 @@ class MotionController(IMotionController):
             self._min_moving_speed_mps: float = float(
                 getattr(_cfg, "BEHAVIOR_MIN_SPEED_MPS", 0.20)
             )
+            self._retime_acados_reference_by_speed: bool = bool(
+                getattr(_cfg, "ACADOS_MPC_RETIME_REFERENCE_BY_SPEED", True)
+            )
+            self._acados_reference_min_step_m: float = float(
+                getattr(_cfg, "ACADOS_MPC_REFERENCE_MIN_STEP_M", 0.0)
+            )
+            self._acados_reference_max_preview_m: float = float(
+                getattr(_cfg, "ACADOS_MPC_REFERENCE_MAX_PREVIEW_M", 0.85)
+            )
         except Exception:
             self._max_steer_rate_deg_s = 60.0
             self._max_speed_rate_mps2 = 0.15
             self._steer_dt_s = 0.05
             self._min_moving_speed_mps = 0.20
+            self._retime_acados_reference_by_speed = True
+            self._acados_reference_min_step_m = 0.0
+            self._acados_reference_max_preview_m = 0.85
 
     # ------------------------------------------------------------------
     # IMotionController
@@ -896,7 +986,35 @@ class MotionController(IMotionController):
             pose.fused_pose.y,
             pose.fused_pose.yaw,
         )
-        state_refs_solver = _osm_states_to_controller_frame(state_refs)
+        state_refs_for_solver = state_refs
+        preview_meta: dict[str, float | bool] = {
+            "retimed": False,
+            "source_preview_m": float(_path_arc_lengths_xy(state_refs)[-1]) if state_refs.shape[0] > 0 else 0.0,
+            "effective_preview_m": float(_path_arc_lengths_xy(state_refs)[-1]) if state_refs.shape[0] > 0 else 0.0,
+            "v_ref_min_mps": float(np.min(speed_profile)) if speed_profile.size else 0.0,
+            "v_ref_max_mps": float(np.max(speed_profile)) if speed_profile.size else 0.0,
+            "v_ref_mean_mps": float(np.mean(speed_profile)) if speed_profile.size else 0.0,
+        }
+        if self._backend_name == "acados" and bool(self._retime_acados_reference_by_speed):
+            state_refs_for_solver, preview_meta = _retime_state_refs_by_speed(
+                state_refs,
+                speed_profile,
+                dt_s=float(getattr(behavior_output, "dt", self._steer_dt_s) or self._steer_dt_s),
+                min_step_m=float(self._acados_reference_min_step_m),
+                max_preview_m=float(self._acados_reference_max_preview_m),
+            )
+        live_log(
+            "mpc",
+            event="reference_preview",
+            backend=self._backend_name,
+            retimed=bool(preview_meta.get("retimed", False)),
+            source_preview_m=float(preview_meta.get("source_preview_m", 0.0) or 0.0),
+            effective_preview_m=float(preview_meta.get("effective_preview_m", 0.0) or 0.0),
+            v_ref_min_mps=float(preview_meta.get("v_ref_min_mps", 0.0) or 0.0),
+            v_ref_max_mps=float(preview_meta.get("v_ref_max_mps", 0.0) or 0.0),
+            v_ref_mean_mps=float(preview_meta.get("v_ref_mean_mps", 0.0) or 0.0),
+        )
+        state_refs_solver = _osm_states_to_controller_frame(state_refs_for_solver)
 
         input_refs = np.zeros((n, 2), dtype=np.float64)
         input_refs[:, 0] = speed_profile  # v_ref
@@ -907,6 +1025,8 @@ class MotionController(IMotionController):
             x_current=x_current,
             state_refs=state_refs_solver,
             input_refs=input_refs,
+            v_prev=float(self._prev_speed_mps),
+            delta_prev=math.radians(float(self._prev_steer_deg)),
         )
         if result is None:
             return self._invalid("mpc_solver_failure", backend=self._backend_name)

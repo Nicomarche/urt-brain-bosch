@@ -72,12 +72,16 @@ echo "[run_test] sim logs:      $SIM_RUN_DIR/"
 
 # ---- 1) Cleanup zombies de runs previos ------------------------------------
 echo "[run_test] killing zombies..."
+launchctl bootout "gui/$(id -u)/com.urt.sim_bridge.codex" 2>/dev/null || true
 pkill -9 -f "gz-sim-main"        2>/dev/null || true
 pkill -9 -f "gz-transport-topic" 2>/dev/null || true
 pkill -9 -f "ruby .*ign-gazebo"  2>/dev/null || true
 pkill -9 -f "$SIM_DIR/sim_bridge.py"        2>/dev/null || true
+pkill -9 -f "sim_bridge.py"                 2>/dev/null || true
 pkill -9 -f "$SIM_DIR/tools/dev/gz_pose_logger.py" 2>/dev/null || true
+pkill -9 -f "gz_pose_logger.py"             2>/dev/null || true
 pkill -9 -f "$BRAIN_DIR/main.py" 2>/dev/null || true
+pkill -9 -f "main.py" 2>/dev/null || true
 pkill -9 -f "$BRAIN_DIR/.venv/bin/python.*main.py" 2>/dev/null || true
 pkill -9 -f "headless_controller.py" 2>/dev/null || true
 sleep 2
@@ -91,6 +95,7 @@ SNAP_PID=""
 
 cleanup() {
     echo "[run_test] cleanup..."
+    launchctl bootout "gui/$(id -u)/com.urt.sim_bridge.codex" 2>/dev/null || true
     [ -n "${SNAP_PID:-}" ] && kill "$SNAP_PID" 2>/dev/null || true
     [ -n "${CTRL_PID:-}" ] && kill -TERM "$CTRL_PID" 2>/dev/null || true
     [ -n "${BRAIN_PID:-}" ] && kill -TERM "$BRAIN_PID" 2>/dev/null || true
@@ -100,8 +105,11 @@ cleanup() {
     # Force kill anything still around
     pkill -9 -f "gz-sim-main"        2>/dev/null || true
     pkill -9 -f "$SIM_DIR/sim_bridge.py"  2>/dev/null || true
+    pkill -9 -f "sim_bridge.py" 2>/dev/null || true
     pkill -9 -f "$SIM_DIR/tools/dev/gz_pose_logger.py" 2>/dev/null || true
+    pkill -9 -f "gz_pose_logger.py" 2>/dev/null || true
     pkill -9 -f "$BRAIN_DIR/main.py" 2>/dev/null || true
+    pkill -9 -f "main.py" 2>/dev/null || true
     pkill -9 -f "$BRAIN_DIR/.venv/bin/python.*main.py" 2>/dev/null || true
     pkill -9 -f "headless_controller.py" 2>/dev/null || true
     # Free port :5005 si quedó tomado
@@ -159,6 +167,8 @@ echo "[run_test] starting brain (--no-gui)..."
     cd "$BRAIN_DIR"
     export URT_LIVE_LOG_PATH="$BRAIN_JSONL"
     export URT_SIM_MODE="${URT_SIM_MODE:-1}"
+    export URT_FORCE_PURE_PURSUIT="${URT_FORCE_PURE_PURSUIT:-0}"
+    export URT_EXPECTED_MPC_BACKEND="${URT_EXPECTED_MPC_BACKEND:-acados}"
     # Durante tests automatizados, el detector de parking signs cortaba
     # los runs ~16s después de entrar a AUTO. Para tests de lane following
     # no queremos esa interrupción — el maneuverManager ignora el parking
@@ -250,6 +260,7 @@ kill -TERM "$SIM_PID" 2>/dev/null || true
 sleep 2
 pkill -9 -f "gz-sim-main" 2>/dev/null || true
 pkill -9 -f "$SIM_DIR/sim_bridge.py" 2>/dev/null || true
+pkill -9 -f "sim_bridge.py" 2>/dev/null || true
 
 # ---- 10) Análisis postmortem ----------------------------------------------
 if [ "${SKIP_ANALYZE:-0}" != "1" ]; then

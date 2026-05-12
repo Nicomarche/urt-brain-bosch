@@ -73,11 +73,13 @@ class _CaptureSolver(_FakeSolver):
         self.last_x_current = None
         self.last_state_refs = None
         self.last_input_refs = None
+        self.last_kwargs = None
 
     def compute(self, x_current, state_refs, input_refs, **kwargs):
         self.last_x_current = np.asarray(x_current, dtype=np.float64).copy()
         self.last_state_refs = np.asarray(state_refs, dtype=np.float64).copy()
         self.last_input_refs = np.asarray(input_refs, dtype=np.float64).copy()
+        self.last_kwargs = dict(kwargs)
         return super().compute(x_current, state_refs, input_refs, **kwargs)
 
 
@@ -284,6 +286,43 @@ def test_motion_controller_converts_osm_frame_before_calling_solver() -> None:
     assert solver.last_state_refs[-1].tolist() == pytest.approx([6.3785, -5.8225, 0.3901])
 
 
+def test_acados_reference_is_retimed_by_speed_profile_and_uses_commanded_previous_input() -> None:
+    solver = _CaptureSolver(result=(0.20, 2.0), N=5)
+    mc = _disable_rate_limits(MotionController(solver=solver))
+    mc._backend_name = "acados"
+    mc._acados_reference_max_preview_m = 10.0
+    mc._prev_speed_mps = 0.12
+    mc._prev_steer_deg = 3.0
+    pose = PoseEstimate(fused_pose=Pose2D(x=0.0, y=0.0, yaw=0.0))
+    behavior_output = BehaviorOutput(
+        timestamp=0.0,
+        dt=1.0,
+        target_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+                [5.0, 0.0, 0.0],
+            ],
+            dtype=np.float64,
+        ),
+        speed_profile=np.full(5, 0.20),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+
+    cmd = mc.compute(behavior_output, pose)
+
+    assert cmd.valid is True
+    assert solver.last_state_refs is not None
+    assert solver.last_state_refs[:, 0].tolist() == pytest.approx([0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+    assert solver.last_state_refs[:, 1].tolist() == pytest.approx([0.0] * 6)
+    assert solver.last_kwargs["v_prev"] == pytest.approx(0.12)
+    assert solver.last_kwargs["delta_prev"] == pytest.approx(math.radians(3.0))
+
+
 def test_visual_left_route_in_osm_frame_produces_positive_left_steer() -> None:
     solver = PurePursuitSolver(
         horizon_n=5,
@@ -404,6 +443,66 @@ def test_motion_controller_requires_acados_by_default(monkeypatch: pytest.Monkey
 
     with pytest.raises(motion_controller_mod.AcadosBackendUnavailableError, match="Acados is required"):
         MotionController()
+
+
+def test_acados_straight_lateral_offset_does_not_bang_bang() -> None:
+    """Regression: small straight-line offsets must not flip steering left/right."""
+    import config as cfg
+
+    solver = motion_controller_mod.AcadosMPC(
+        output_deadband_deg=float(getattr(cfg, "ACADOS_MPC_OUTPUT_DEADBAND_DEG", 0.75))
+    )
+    if not solver.ready:
+        pytest.skip(f"Acados solver not ready: {solver.load_error}")
+
+    solver.update_weights(
+        x_cost=float(getattr(cfg, "ACADOS_MPC_X_COST", 2.0)),
+        y_cost=float(getattr(cfg, "ACADOS_MPC_Y_COST", 5.0)),
+        yaw_cost=float(getattr(cfg, "ACADOS_MPC_YAW_COST", 1.0)),
+        v_cost=float(getattr(cfg, "ACADOS_MPC_V_COST", 1.0)),
+        steer_cost=float(getattr(cfg, "ACADOS_MPC_STEER_COST", 2.0)),
+        delta_v_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_V_COST", 4.0)),
+        delta_steer_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_STEER_COST", 5.0)),
+    )
+    delta_max_rad = math.radians(float(getattr(cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+    solver.update_bounds(
+        v_min=-0.05,
+        v_max=float(getattr(cfg, "ACADOS_MPC_V_MAX", 0.40)),
+        delta_min_rad=-delta_max_rad,
+        delta_max_rad=delta_max_rad,
+    )
+
+    state = np.array([0.0, -0.05, 0.0], dtype=np.float64)
+    dt_s = 0.05
+    wheelbase_m = 0.258
+    deltas: list[float] = []
+    for _ in range(40):
+        state_refs = np.column_stack(
+            [
+                state[0] + np.linspace(0.0, 4.0, solver.N + 1),
+                np.zeros(solver.N + 1),
+                np.zeros(solver.N + 1),
+            ]
+        )
+        input_refs = np.column_stack(
+            [
+                np.full(solver.N, 0.20),
+                np.zeros(solver.N),
+            ]
+        )
+        result = solver.compute(state, state_refs, input_refs)
+        assert result is not None
+        _, delta_deg = result
+        deltas.append(float(delta_deg))
+
+        delta_rad = math.radians(float(delta_deg))
+        state[0] += 0.20 * math.cos(float(state[2])) * dt_s
+        state[1] += 0.20 * math.sin(float(state[2])) * dt_s
+        state[2] += (0.20 / wheelbase_m) * math.tan(delta_rad) * dt_s
+
+    sign_changes = sum(1 for a, b in zip(deltas, deltas[1:]) if a * b < 0.0)
+    assert sign_changes == 0
+    assert max(abs(delta) for delta in deltas) < 5.0
 
 
 # ---------- PurePursuitSolver (fallback usado en sim/dev sin acados) ------

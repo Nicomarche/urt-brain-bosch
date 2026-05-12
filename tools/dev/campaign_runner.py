@@ -312,13 +312,17 @@ def _find_gz_python() -> tuple[str, str]:
 
 
 def _cleanup_known_processes(brain_dir: Path, sim_dir: Path) -> None:
+    _stop_launchd_job("com.urt.sim_bridge.codex")
     patterns = (
         "gz-sim-main",
         "gz-transport-topic",
         "ruby .*ign-gazebo",
         str(sim_dir / "sim_bridge.py"),
+        "sim_bridge.py",
         str(sim_dir / "tools" / "dev" / "gz_pose_logger.py"),
+        "gz_pose_logger.py",
         str(brain_dir / "main.py"),
+        "main.py",
         str(brain_dir / ".venv" / "bin" / "python.*main.py"),
         "headless_controller.py",
     )
@@ -339,6 +343,21 @@ def _cleanup_known_processes(brain_dir: Path, sim_dir: Path) -> None:
     _kill_port_listeners(5005, current_pid=current_pid)
     _kill_orphaned_multiprocessing_children(brain_dir, current_pid=current_pid)
     time.sleep(1.0)
+
+
+def _stop_launchd_job(label: str) -> None:
+    if sys.platform != "darwin":
+        return
+    try:
+        uid = str(os.getuid())
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{uid}/{label}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except Exception:
+        pass
 
 
 def _kill_port_listeners(port: int, *, current_pid: int) -> None:
@@ -839,11 +858,44 @@ def _compute_metrics(
     else:
         fail_reasons.append("no_visual_lane_offset_samples")
 
+    backend_selected_events = [
+        ev
+        for ev in brain_events
+        if ev.get("thread") == "mpc" and ev.get("event") == "backend_selected"
+    ]
+    selected_backends = [
+        str(ev.get("backend"))
+        for ev in backend_selected_events
+        if ev.get("backend") is not None
+    ]
+    compute_backends = sorted({
+        str(ev.get("backend"))
+        for ev in brain_events
+        if ev.get("thread") == "mpc"
+        and ev.get("event") == "compute_out"
+        and ev.get("backend") is not None
+    })
+    non_acados_compute_backends = [
+        backend for backend in compute_backends
+        if backend != "acados"
+    ]
+    acados_selected = "acados" in selected_backends
+    if acados_selected and not non_acados_compute_backends:
+        pass_reasons.append("mpc_backend_acados")
+    else:
+        fail_reasons.append("mpc_backend_not_acados")
+
     passed = not fail_reasons
     return {
         "passed": passed,
         "pass_reasons": pass_reasons,
         "fail_reasons": fail_reasons,
+        "mpc": {
+            "selected_backends": selected_backends,
+            "compute_backends": compute_backends,
+            "non_acados_compute_backends": non_acados_compute_backends,
+            "backend_selected_events": backend_selected_events,
+        },
         "route": {
             "completed": route_completed,
             "timed_out": route_result.timed_out,
@@ -1363,6 +1415,8 @@ def main() -> int:
         brain_env = os.environ.copy()
         brain_env["URT_LIVE_LOG_PATH"] = str(brain_jsonl)
         brain_env["URT_SIM_MODE"] = "1"
+        brain_env.setdefault("URT_FORCE_PURE_PURSUIT", "0")
+        brain_env.setdefault("URT_EXPECTED_MPC_BACKEND", "acados")
         brain_env.setdefault("URT_DISABLE_AUTO_PARKING", "1")
         processes.append(
             _run(

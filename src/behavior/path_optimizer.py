@@ -88,6 +88,7 @@ _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_SHIFT_M = 0.065
 _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_FADE_DISTANCE_M = 0.65
 _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_HEADING_RAD = math.radians(28.0)
 _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_MAX_ERROR_M = 0.16
+_VISUAL_LANE_REENTRY_RAMP_DISTANCE_M = 0.25
 _VISUAL_LANE_REENTRY_DERIVED_SINGLE_LINE_ATTRS = frozenset({
     ATTR_NORMAL,
     ATTR_ONEWAY,
@@ -108,6 +109,11 @@ _VISUAL_PREFIX_FORWARD_PROGRESS_RATIO = 0.60
 _VISUAL_PREFIX_MAX_LATERAL_RATIO = 0.75
 _VISUAL_PREFIX_MIN_LATERAL_LIMIT_M = 0.05
 _VISUAL_PREFIX_FORWARD_STEP_EPS_M = 0.015
+_ROUTE_VISUAL_ENTRY_STABILIZE_DISTANCE_M = 0.30
+_ROUTE_VISUAL_ENTRY_MAX_HEADING_DEG = 15.0
+_ROUTE_VISUAL_ENTRY_MIN_FORWARD_M = 0.01
+_ROUTE_VISUAL_ENTRY_FORWARD_STEP_EPS_M = 0.008
+_ROUTE_VISUAL_ENTRY_MIN_SEMANTIC_DISTANCE_M = 0.25
 _SINGLE_LINE_VISUAL_PREFIX_MIN_HEADING_DEG = 6.0
 _SINGLE_LINE_VISUAL_PREFIX_MAX_HEADING_DEG = 20.0
 _SINGLE_LINE_VISUAL_ROUTE_OVERRIDE_MAP_MATCH_ERROR_M = max(0.15, _LANE_HALF_WIDTH_M + 0.02)
@@ -223,6 +229,38 @@ def _visual_lane_reentry_base_shift_m(state: _VisualLaneReentryState) -> float:
     ))
     quality_scale = max(0.0, min(1.0, float(state.quality)))
     return float(base_shift_m * quality_scale)
+
+
+def _visual_lane_reentry_distance_scale(
+    *,
+    traveled_m: float,
+    fade_distance_m: float,
+) -> float:
+    traveled = max(0.0, float(traveled_m))
+    fade = float(np.clip(1.0 - (traveled / max(float(fade_distance_m), 1e-6)), 0.0, 1.0))
+    ramp = _visual_lane_reentry_ramp_scale(traveled_m=traveled)
+    return min(fade, ramp)
+
+
+def _visual_lane_reentry_ramp_scale(*, traveled_m: float) -> float:
+    ramp_distance_m = max(1e-6, float(_VISUAL_LANE_REENTRY_RAMP_DISTANCE_M))
+    return float(np.clip(max(0.0, float(traveled_m)) / ramp_distance_m, 0.0, 1.0))
+
+
+def _route_visual_entry_context_allows(ctx: PlanningContext) -> tuple[bool, str]:
+    route = getattr(ctx, "route", None)
+    next_distance = getattr(route, "next_semantic_distance_m", None) if route is not None else None
+    try:
+        next_distance_m = float(next_distance) if next_distance is not None else math.inf
+    except (TypeError, ValueError):
+        next_distance_m = math.inf
+    if next_distance_m < float(_ROUTE_VISUAL_ENTRY_MIN_SEMANTIC_DISTANCE_M):
+        return False, "semantic_near"
+    lane_observation = getattr(ctx, "lane_observation", None)
+    curve_hint = str(getattr(lane_observation, "curve_hint", "UNKNOWN") or "UNKNOWN")
+    if curve_hint == "IN_CURVE":
+        return False, "visual_curve_active"
+    return True, "allowed"
 
 
 def _route_context_allows_derived_single_line_reentry(ctx: PlanningContext) -> bool:
@@ -552,6 +590,11 @@ class PathOptimizer:
         if single_line_flip_override is not None:
             containment = single_line_flip_override
         sampled_xy = containment.target_xy
+        sampled_xy, route_visual_entry_notes = _stabilize_route_visual_entry_prefix(
+            sampled_xy=sampled_xy,
+            path_plan=path_plan,
+            ctx=ctx,
+        )
         route_tracking_visual_hold = _maybe_hold_previous_visual_path_on_route_tracking(
             sampled_xy=sampled_xy,
             path_plan=path_plan,
@@ -611,6 +654,7 @@ class PathOptimizer:
         optimizer_notes = dict(visual_lane_notes)
         optimizer_notes.update(dict(visual_route_blend_notes))
         optimizer_notes.update(dict(visual_prefix_notes))
+        optimizer_notes.update(dict(route_visual_entry_notes))
         if single_line_transition_hold is not None:
             optimizer_notes.update(dict(single_line_transition_hold.notes))
         optimizer_notes.update(dict(containment.notes))
@@ -769,7 +813,8 @@ def _refine_step_arc_for_precision_route(
 
     next_semantic_type = str(getattr(route, "next_semantic_type", "") or "")
     maneuver_type = str(getattr(route, "maneuver_type", "") or "")
-    precision_context = bool(getattr(route, "waypoint_mode_active", False)) or (
+    waypoint_mode_active = bool(getattr(route, "waypoint_mode_active", False))
+    precision_context = waypoint_mode_active or (
         next_semantic_type in _PRECISION_ROUTE_SEMANTIC_TYPES
         or maneuver_type in _PRECISION_ROUTE_MANEUVERS
     )
@@ -779,8 +824,11 @@ def _refine_step_arc_for_precision_route(
 
     next_distance = getattr(route, "next_semantic_distance_m", None)
     if next_distance is None:
-        meta["reason"] = "no_semantic_distance"
-        return float(step_arc), meta
+        if waypoint_mode_active:
+            next_distance = 0.0
+        else:
+            meta["reason"] = "no_semantic_distance"
+            return float(step_arc), meta
     try:
         next_distance = max(0.0, float(next_distance))
     except (TypeError, ValueError):
@@ -790,7 +838,6 @@ def _refine_step_arc_for_precision_route(
 
     map_match_error_m = abs(float(getattr(route, "map_match_error_m", 0.0) or 0.0))
     meta["map_match_error_m"] = float(map_match_error_m)
-    waypoint_mode_active = bool(getattr(route, "waypoint_mode_active", False))
     allowed_map_match_error_m = float(_PRECISION_ROUTE_MAX_MAP_MATCH_ERROR_M)
     if waypoint_mode_active and visual_lane_reentry.active:
         allowed_map_match_error_m = max(
@@ -1093,6 +1140,7 @@ def _apply_visual_lane_reentry_bias(
         "visual_lane_quality": float(state.quality),
         "visual_lane_shift_m": 0.0,
         "visual_lane_prefix_samples": 0,
+        "visual_lane_ramp_distance_m": float(_VISUAL_LANE_REENTRY_RAMP_DISTANCE_M),
         "route_corridor_authoritative": bool(route_corridor_authoritative),
     }
     if sampled_xy.shape[0] <= 1 or not state.active:
@@ -1135,18 +1183,20 @@ def _apply_visual_lane_reentry_bias(
     max_shift_m = 0.0
     for idx in range(1, sampled_xy.shape[0]):
         traveled_m += float(np.linalg.norm(sampled_xy[idx] - sampled_xy[idx - 1]))
-        fade = max(
-            0.0,
-            1.0 - (traveled_m / max(float(state.fade_distance_m), 1e-6)),
+        distance_scale = _visual_lane_reentry_distance_scale(
+            traveled_m=traveled_m,
+            fade_distance_m=float(state.fade_distance_m),
         )
-        if fade <= 1e-6:
-            break
+        if distance_scale <= 1e-6:
+            if traveled_m >= float(state.fade_distance_m):
+                break
+            continue
         path_psi = _tangent_heading_at(sampled_xy, idx)
         if path_psi is None:
             path_psi = _segment_heading(sampled_xy)
         if path_psi is None:
             path_psi = float(ctx.pose.fused_pose.yaw)
-        shift_m = float(base_shift_m * fade)
+        shift_m = float(base_shift_m * distance_scale)
         perp_psi = float(path_psi) + (math.pi * 0.5)
         dx = shift_m * math.cos(perp_psi)
         dy = shift_m * math.sin(perp_psi)
@@ -1478,6 +1528,119 @@ def _stabilize_visual_path_prefix(
         single_line_heading_limit_deg=float(single_line_heading_limit_deg),
         single_line_heading_cap_applied=bool(heading_cap_applied),
         path_source=path_source,
+    )
+    return stabilized_xy, notes
+
+
+def _stabilize_route_visual_entry_prefix(
+    *,
+    sampled_xy: np.ndarray,
+    path_plan: BehaviorPathPlan,
+    ctx: PlanningContext,
+) -> tuple[np.ndarray, dict[str, object]]:
+    notes: dict[str, object] = {
+        "route_visual_entry_stabilization_applied": False,
+        "route_visual_entry_stabilization_points": 0,
+        "route_visual_entry_max_heading_deg": float(_ROUTE_VISUAL_ENTRY_MAX_HEADING_DEG),
+        "route_visual_entry_stabilize_distance_m": float(_ROUTE_VISUAL_ENTRY_STABILIZE_DISTANCE_M),
+        "route_visual_entry_sample1_x_fwd_before_m": 0.0,
+        "route_visual_entry_sample1_y_left_before_m": 0.0,
+        "route_visual_entry_sample1_x_fwd_after_m": 0.0,
+        "route_visual_entry_sample1_y_left_after_m": 0.0,
+        "route_visual_entry_reason": "inactive",
+    }
+    if _path_note_str(path_plan, "path_source") != "route_waypoints":
+        notes["route_visual_entry_reason"] = "path_source_not_route"
+        return np.array(sampled_xy, copy=True), notes
+    if sampled_xy.shape[0] <= 1:
+        notes["route_visual_entry_reason"] = "insufficient_points"
+        return np.array(sampled_xy, copy=True), notes
+
+    state = _visual_lane_reentry_state(ctx)
+    if not state.active:
+        notes["route_visual_entry_reason"] = str(state.reason)
+        return np.array(sampled_xy, copy=True), notes
+    context_allowed, context_reason = _route_visual_entry_context_allows(ctx)
+    if not context_allowed:
+        notes["route_visual_entry_reason"] = str(context_reason)
+        return np.array(sampled_xy, copy=True), notes
+
+    pose_x = float(ctx.pose.fused_pose.x)
+    pose_y = float(ctx.pose.fused_pose.y)
+    pose_yaw = float(ctx.pose.fused_pose.yaw)
+    max_heading_rad = math.radians(float(_ROUTE_VISUAL_ENTRY_MAX_HEADING_DEG))
+    stabilized_xy = np.array(sampled_xy, copy=True)
+    cumulative_arc_m = 0.0
+    prev_body_x = 0.0
+    prev_body_y = 0.0
+    stabilized_points = 0
+    sample1_before: tuple[float, float] | None = None
+    sample1_after: tuple[float, float] | None = None
+
+    for idx in range(1, stabilized_xy.shape[0]):
+        cumulative_arc_m += float(np.linalg.norm(stabilized_xy[idx] - stabilized_xy[idx - 1]))
+        if cumulative_arc_m > float(_ROUTE_VISUAL_ENTRY_STABILIZE_DISTANCE_M):
+            break
+        body_x, body_y = _world_to_body_xy(
+            point_xy=stabilized_xy[idx],
+            pose_x=pose_x,
+            pose_y=pose_y,
+            pose_yaw=pose_yaw,
+        )
+        if idx == 1:
+            sample1_before = (float(body_x), float(body_y))
+        min_progress_x = (
+            max(float(_ROUTE_VISUAL_ENTRY_MIN_FORWARD_M), float(cumulative_arc_m) * 0.55)
+            if idx == 1
+            else max(
+                float(_ROUTE_VISUAL_ENTRY_MIN_FORWARD_M),
+                float(prev_body_x) + float(_ROUTE_VISUAL_ENTRY_FORWARD_STEP_EPS_M),
+            )
+        )
+        adjusted_x = max(float(body_x), float(min_progress_x))
+        delta_x = max(float(adjusted_x) - float(prev_body_x), 1e-6)
+        max_delta_y = float(math.tan(max_heading_rad)) * delta_x
+        adjusted_y = float(
+            prev_body_y
+            + np.clip(float(body_y) - float(prev_body_y), -max_delta_y, max_delta_y)
+        )
+        if abs(adjusted_x - float(body_x)) > 1e-6 or abs(adjusted_y - float(body_y)) > 1e-6:
+            stabilized_xy[idx] = _body_to_world_xy(
+                x_fwd_m=adjusted_x,
+                y_left_m=adjusted_y,
+                pose_x=pose_x,
+                pose_y=pose_y,
+                pose_yaw=pose_yaw,
+            )
+            stabilized_points = idx
+        prev_body_x = adjusted_x
+        prev_body_y = adjusted_y
+        if idx == 1:
+            sample1_after = (float(adjusted_x), float(adjusted_y))
+
+    if sample1_before is None:
+        sample1_before = (0.0, 0.0)
+    if sample1_after is None:
+        sample1_after = sample1_before
+
+    notes["route_visual_entry_stabilization_applied"] = bool(stabilized_points > 0)
+    notes["route_visual_entry_stabilization_points"] = int(stabilized_points)
+    notes["route_visual_entry_sample1_x_fwd_before_m"] = float(sample1_before[0])
+    notes["route_visual_entry_sample1_y_left_before_m"] = float(sample1_before[1])
+    notes["route_visual_entry_sample1_x_fwd_after_m"] = float(sample1_after[0])
+    notes["route_visual_entry_sample1_y_left_after_m"] = float(sample1_after[1])
+    notes["route_visual_entry_reason"] = str(state.reason)
+    live_log(
+        "path_optimizer",
+        event="route_visual_entry_stabilization",
+        applied=bool(stabilized_points > 0),
+        stabilized_points=int(stabilized_points),
+        sample1_x_fwd_before_m=float(sample1_before[0]),
+        sample1_y_left_before_m=float(sample1_before[1]),
+        sample1_x_fwd_after_m=float(sample1_after[0]),
+        sample1_y_left_after_m=float(sample1_after[1]),
+        max_heading_deg=float(_ROUTE_VISUAL_ENTRY_MAX_HEADING_DEG),
+        reason=str(state.reason),
     )
     return stabilized_xy, notes
 
@@ -2258,6 +2421,12 @@ def _contain_path_within_corridor(
     )
     path_source = _path_note_str(path_plan, "path_source")
     path_source_visual = path_source == "visual_lane_waypoints"
+    route_entry_context_allowed, _route_entry_context_reason = _route_visual_entry_context_allows(ctx)
+    route_visual_entry_ramp_active = (
+        str(path_source) == "route_waypoints"
+        and bool(corridor_visual_lane_guidance_active)
+        and bool(route_entry_context_allowed)
+    )
     # A high-quality two-line measurement is the best source of the physical
     # lane center. Allow the target to use the same relaxed corridor budget for
     # route waypoints too; otherwise small OSM-vs-texture offsets force the MPC
@@ -2406,13 +2575,13 @@ def _contain_path_within_corridor(
             and limit_half_width_m > 1e-6
         )
         if apply_corridor_visual_guidance:
-            fade = max(
-                0.0,
-                1.0 - (traveled_m / max(float(visual_lane_state.fade_distance_m), 1e-6)),
+            distance_scale = _visual_lane_reentry_distance_scale(
+                traveled_m=traveled_m,
+                fade_distance_m=float(visual_lane_state.fade_distance_m),
             )
-            if fade > 1e-6:
+            if distance_scale > 1e-6:
                 desired_offset_m = float(np.clip(
-                    -float(visual_lane_base_shift_m) * fade,
+                    -float(visual_lane_base_shift_m) * distance_scale,
                     -limit_half_width_m,
                     limit_half_width_m,
                 ))
@@ -2438,7 +2607,15 @@ def _contain_path_within_corridor(
                     corridor_visual_lane_max_shift_m,
                     abs(desired_offset_m),
                 )
-        target_xy[idx] = projection.center_point + (clamped_offset_m * projection.lateral_dir)
+        corridor_target_xy = projection.center_point + (clamped_offset_m * projection.lateral_dir)
+        if route_visual_entry_ramp_active:
+            entry_scale = _visual_lane_reentry_ramp_scale(traveled_m=traveled_m)
+            target_xy[idx] = (
+                (1.0 - entry_scale) * np.asarray(sampled_xy[idx], dtype=float)
+                + entry_scale * corridor_target_xy
+            )
+        else:
+            target_xy[idx] = corridor_target_xy
 
     used_prev_safe_path = False
     mode = "corridor_nominal"
@@ -2478,6 +2655,8 @@ def _contain_path_within_corridor(
         "corridor_visual_lane_guidance_prefix_samples": int(corridor_visual_lane_prefix_samples),
         "corridor_visual_lane_guidance_max_shift_m": float(corridor_visual_lane_max_shift_m),
         "corridor_visual_lane_guidance_max_limit_m": float(corridor_visual_lane_max_limit_m),
+        "corridor_visual_lane_entry_ramp_active": bool(route_visual_entry_ramp_active),
+        "corridor_visual_lane_entry_ramp_distance_m": float(_VISUAL_LANE_REENTRY_RAMP_DISTANCE_M),
         "corridor_visual_path_priority_active": bool(corridor_visual_path_priority_active),
     }
     return _ContainmentResult(
