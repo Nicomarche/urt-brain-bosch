@@ -214,6 +214,11 @@ class threadPoseEstimator(threadTracking):
         self._gps_fix_samples: list[tuple[float, float]] = []
         self._last_accepted_gps_pose: tuple[float, float] | None = None
         self._last_gps_fix_quality = 0.0
+        # GPS-derived heading: estima yaw a partir de fixes consecutivos.
+        # Cuando el coche se mueve >0.3m entre 2 fixes, atan2(dy,dx) es el
+        # yaw real del coche (independiente del drift IMU/dead reckoning).
+        self._gps_heading_anchor: tuple[float, float] | None = None  # (x, y) del último anchor
+        self._gps_heading_last_yaw: float | None = None
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
@@ -349,17 +354,48 @@ class threadPoseEstimator(threadTracking):
         )
 
     def _send_sim_relocalize(self) -> None:
-        """In sim mode, teleport the Gazebo car to the startup pose."""
+        """In sim mode, teleport the Gazebo car to the startup pose.
+
+        Repetimos el envío persistentemente porque ZMQ PUB/SUB pierde mensajes
+        si el SUB no está listo cuando se publica. El sim_bridge tarda hasta
+        ~12s en estar listo (timeout del GPS gate). Enviamos cada 0.5s durante
+        20s, deteniéndonos en cuanto detectemos que la pose GT del sim
+        coincide con el target (= set_pose fue aplicado).
+        """
         if self._graph is None:
             return
         pose = self._startup_world_pose or self._graph.get_start_pose()
         x0, y0, yaw0 = pose
-        self._send_sim_relocalize_pose(
-            x0,
-            y0,
-            yaw0,
-            source="startup pose",
-        )
+
+        def _resend_loop():
+            import time as _time
+            # Loop persistente: cada 0.5s durante 20s o hasta que la pose
+            # fusionada esté cerca del target (el sim aplicó el teleport).
+            for tick in range(40):  # 40 * 0.5s = 20s max
+                try:
+                    self._send_sim_relocalize_pose(
+                        x0,
+                        y0,
+                        yaw0,
+                        source=f"startup pose (retry#{tick})" if tick > 0 else "startup pose",
+                    )
+                except Exception:
+                    pass
+                _time.sleep(0.5)
+                # Stop si la pose del brain ya está sincronizada con el target.
+                # `dr` actualiza después del primer set_pose exitoso.
+                dr = getattr(self, "_dr", None)
+                if dr is not None and tick >= 4:
+                    try:
+                        cur_x, cur_y, _ = dr.snapshot()
+                        if abs(float(cur_x) - float(x0)) < 0.5 and abs(float(cur_y) - float(y0)) < 0.5:
+                            # Pose ya está cerca del target — el sim aplicó.
+                            break
+                    except Exception:
+                        pass
+
+        import threading as _threading
+        _threading.Thread(target=_resend_loop, daemon=True).start()
 
     @staticmethod
     def _to_path_update(route_context: RouteContext | None):
@@ -756,7 +792,30 @@ class threadPoseEstimator(threadTracking):
 
         new_yaw = float(old_yaw)
         yaw_update_rad = 0.0
-        if explicit_yaw and not visual_protected:
+        # GPS-derived heading: si tengo un anchor previo y la distancia
+        # recorrida es >0.3m (señal>noise=15cm × 2), atan2(dy_gps, dx_gps)
+        # es el yaw real del coche. Eso corrige el drift del IMU.
+        gps_heading_anchor = getattr(self, "_gps_heading_anchor", None)
+        if gps_heading_anchor is not None:
+            ax, ay = gps_heading_anchor
+            anchor_dx = float(gps_x) - float(ax)
+            anchor_dy = float(gps_y) - float(ay)
+            anchor_dist = math.hypot(anchor_dx, anchor_dy)
+            if anchor_dist >= 0.30:  # 2× GPS noise (15cm)
+                gps_heading = math.atan2(anchor_dy, anchor_dx)
+                yaw_delta = _wrap_angle(gps_heading - float(old_yaw))
+                yaw_update_rad = max(
+                    -math.radians(15.0),
+                    min(math.radians(15.0), 0.6 * yaw_delta),
+                )
+                new_yaw = _wrap_angle(float(old_yaw) + yaw_update_rad)
+                self._gps_heading_anchor = (float(gps_x), float(gps_y))
+                self._gps_heading_last_yaw = gps_heading
+        else:
+            # Primera vez: set anchor inicial
+            self._gps_heading_anchor = (float(gps_x), float(gps_y))
+
+        if explicit_yaw and not visual_protected and abs(yaw_update_rad) < 1e-9:
             yaw_delta = _wrap_angle(float(gps_yaw) - float(old_yaw))
             yaw_update_rad = max(
                 -math.radians(2.0),

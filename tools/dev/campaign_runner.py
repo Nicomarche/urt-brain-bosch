@@ -1414,6 +1414,405 @@ def _write_visual_lane_overlay(
     return bool(cv2.imwrite(str(out_path), img))
 
 
+def _visual_offset_from_lane_event(lane_ev: dict[str, Any] | None) -> float | None:
+    if not isinstance(lane_ev, dict):
+        return None
+    center_offset_m = _finite_float(lane_ev.get("line_center_offset_m"))
+    if center_offset_m is not None:
+        return center_offset_m
+    return _finite_float(lane_ev.get("offset_m"))
+
+
+def _control_error_from_lane_event(lane_ev: dict[str, Any] | None) -> float | None:
+    if not isinstance(lane_ev, dict):
+        return None
+    return _finite_float(lane_ev.get("control_lateral_error_m"))
+
+
+def _campaign_digest_flags(
+    *,
+    lane_ev: dict[str, Any] | None,
+    plan_ev: dict[str, Any] | None,
+    visual_reentry_ev: dict[str, Any] | None,
+    mpc_ev: dict[str, Any] | None,
+) -> list[str]:
+    flags: list[str] = []
+    measurement_mode = str((lane_ev or {}).get("measurement_mode") or "missing")
+    path_source = str((plan_ev or {}).get("path_source") or "")
+    visual_offset_m = _visual_offset_from_lane_event(lane_ev)
+    control_error_m = _control_error_from_lane_event(lane_ev)
+    control_source = str((lane_ev or {}).get("control_lateral_error_source") or "")
+    steering_deg = _finite_float((mpc_ev or {}).get("steering_deg"))
+    quality = _finite_float((lane_ev or {}).get("quality"))
+
+    if measurement_mode not in {"two_line"}:
+        flags.append(f"mode:{measurement_mode}")
+    if path_source and path_source != "visual_lane_waypoints":
+        flags.append(f"path:{path_source}")
+    if visual_offset_m is not None and abs(visual_offset_m) >= 0.08:
+        flags.append(f"visual_offset:{abs(visual_offset_m):.3f}m")
+    if control_source == "two_line_edge_urgency":
+        flags.append("edge_urgency")
+    if control_source == "single_line_reacquire":
+        flags.append("single_line_reacquire")
+    if control_source == "single_line_visual_waypoint_low_authority":
+        flags.append("single_line_low_authority")
+    if str((visual_reentry_ev or {}).get("reason") or "") == "single_line_reacquire_semantic_block":
+        flags.append("single_line_reacquire_blocked:semantic")
+    if bool((visual_reentry_ev or {}).get("visual_control_memory_active")):
+        flags.append(f"visual_memory:{(visual_reentry_ev or {}).get('visual_control_memory_ticks', '-')}")
+    if control_error_m is not None and abs(control_error_m) >= 0.10:
+        flags.append(f"control_error:{abs(control_error_m):.3f}m")
+    if steering_deg is not None and abs(steering_deg) >= 20.0:
+        flags.append(f"steer_sat:{steering_deg:+.1f}deg")
+    if quality is not None and quality < 0.55:
+        flags.append(f"quality:{quality:.2f}")
+    return flags
+
+
+def _save_video_frame(
+    *,
+    video_path: str | Path | None,
+    frame_no: int,
+    out_path: Path,
+) -> str | None:
+    if not video_path:
+        return None
+    try:
+        import cv2
+    except ImportError:
+        return None
+    source = Path(video_path)
+    if not source.exists() or frame_no <= 0:
+        return None
+    cap = cv2.VideoCapture(str(source))
+    try:
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(frame_no) - 1))
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return None
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if cv2.imwrite(str(out_path), frame):
+            return str(out_path)
+    finally:
+        cap.release()
+    return None
+
+
+def _write_campaign_satellite_snapshot(
+    *,
+    out_path: Path,
+    track_png: Path,
+    expected_route: dict[str, Any],
+    actual_xy: list[list[float]],
+    pose_x: float | None,
+    pose_y: float | None,
+    pose_yaw: float | None,
+) -> str | None:
+    if pose_x is None or pose_y is None:
+        return None
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return None
+
+    meta = _overlay_map_metadata(track_png, expected_route)
+    img = cv2.imread(str(track_png), cv2.IMREAD_COLOR) if track_png.exists() else None
+    if img is None:
+        width = int(meta.get("image_width_px", 2039) or 2039)
+        height = int(meta.get("image_height_px", 1343) or 1343)
+        img = np.full((height, width, 3), 245, dtype=np.uint8)
+
+    bounds = dict(meta.get("world_bounds") or {})
+    x_min = float(bounds.get("x_min", 0.0) or 0.0)
+    y_min = float(bounds.get("y_min", 0.0) or 0.0)
+    mpp = float(meta.get("meters_per_pixel", 0.01) or 0.01)
+    y_axis_inverted = bool(meta.get("y_axis_inverted", False))
+    height_px, width_px = img.shape[:2]
+
+    def world_to_pixel(x: float, y: float) -> tuple[int, int]:
+        px = (float(x) - x_min) / mpp
+        local_y = float(y) - y_min
+        py = height_px - (local_y / mpp) if y_axis_inverted else local_y / mpp
+        return int(round(px)), int(round(py))
+
+    def draw_polyline(points: list[tuple[float, float]], color: tuple[int, int, int], thickness: int) -> None:
+        if len(points) < 2:
+            return
+        pix = np.asarray([world_to_pixel(x, y) for x, y in points], dtype=np.int32)
+        cv2.polylines(img, [pix], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+    expected_xy = [
+        (float(pt[0]), float(pt[1]))
+        for pt in expected_route.get("waypoints", [])
+        if isinstance(pt, list) and len(pt) >= 2
+    ]
+    actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
+    draw_polyline(expected_xy, (0, 155, 0), 4)
+    draw_polyline(actual_points, (25, 25, 220), 3)
+
+    px, py = world_to_pixel(float(pose_x), float(pose_y))
+    cv2.circle(img, (px, py), 8, (255, 0, 255), -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, (px, py), 11, (0, 0, 0), 2, lineType=cv2.LINE_AA)
+    if pose_yaw is not None and math.isfinite(float(pose_yaw)):
+        tip = (
+            int(round(px + 34.0 * math.cos(float(pose_yaw)))),
+            int(round(py + 34.0 * math.sin(float(pose_yaw)))),
+        )
+        cv2.arrowedLine(img, (px, py), tip, (255, 0, 255), 3, cv2.LINE_AA, tipLength=0.30)
+
+    crop_w = min(720, width_px)
+    crop_h = min(520, height_px)
+    x0 = max(0, min(width_px - crop_w, px - crop_w // 2))
+    y0 = max(0, min(height_px - crop_h, py - crop_h // 2))
+    crop = img[y0 : y0 + crop_h, x0 : x0 + crop_w]
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if cv2.imwrite(str(out_path), crop):
+        return str(out_path)
+    return None
+
+
+def _write_campaign_digest(
+    *,
+    run_dir: Path,
+    brain_events: list[dict[str, Any]],
+    video_frames: dict[str, Any] | None,
+    frame_timestamps: list[float] | None,
+    debug_video_path: str | None,
+    track_png: Path,
+    expected_route: dict[str, Any],
+    actual_xy: list[list[float]],
+    max_rows: int = 24,
+) -> dict[str, Any]:
+    if not video_frames and not frame_timestamps:
+        return {"written": False, "error": "no_frame_index"}
+
+    lane_idx = _build_event_index(brain_events, thread="lane_observer", event="lane_obs")
+    mpc_idx = _build_event_index(brain_events, thread="mpc", event="compute_out")
+    plan_idx = _build_event_index(brain_events, thread="behavior_planner", event="plan_output")
+    visual_reentry_idx = _build_event_index(brain_events, thread="path_optimizer", event="visual_lane_reentry_bias")
+    route_idx = _build_event_index(brain_events, thread="nav_planner", event="route_update")
+    pose_idx = _build_event_index(brain_events, thread="pose_estimator", event="pose_published")
+    line_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="line_loss_straight_hold")
+    route_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="route_tracking_visual_hold")
+    single_hold_idx = _build_event_index(brain_events, thread="path_optimizer", event="single_line_transition_hold")
+
+    frame_items = []
+    if video_frames and isinstance(video_frames.get("frames"), list):
+        frame_items = list(video_frames.get("frames") or [])
+    elif frame_timestamps:
+        frame_items = [
+            {"frame": idx + 1, "time_s": None, "path": str(run_dir / "frames" / f"frame_{idx + 1:06d}.png")}
+            for idx in range(len(frame_timestamps))
+        ]
+    if not frame_items:
+        return {"written": False, "error": "empty_frame_index"}
+
+    candidates: list[dict[str, Any]] = []
+    for item in frame_items:
+        try:
+            frame_no = int(item.get("frame") or 0)
+        except (TypeError, ValueError):
+            continue
+        if frame_no <= 0:
+            continue
+        frame_ts = None
+        if frame_timestamps and frame_no <= len(frame_timestamps):
+            frame_ts = _finite_float(frame_timestamps[frame_no - 1])
+        if frame_ts is None:
+            frame_time_s = _finite_float(item.get("time_s"))
+            # Without wall-clock timestamps, we cannot align robustly to JSONL.
+            if frame_time_s is None:
+                continue
+            continue
+
+        lane_ev = _event_at(lane_idx, frame_ts, max_age_s=0.45)
+        mpc_ev = _event_at(mpc_idx, frame_ts, max_age_s=0.35)
+        plan_ev = _event_at(plan_idx, frame_ts, max_age_s=0.45)
+        visual_reentry_ev = _event_at(visual_reentry_idx, frame_ts, max_age_s=0.35)
+        route_ev = _event_at(route_idx, frame_ts, max_age_s=0.45)
+        pose_ev = _event_at(pose_idx, frame_ts, max_age_s=0.35)
+        line_hold_ev = _event_at(line_hold_idx, frame_ts, max_age_s=0.35)
+        route_hold_ev = _event_at(route_hold_idx, frame_ts, max_age_s=0.35)
+        single_hold_ev = _event_at(single_hold_idx, frame_ts, max_age_s=0.35)
+        if not plan_ev or not bool(plan_ev.get("valid", False)):
+            continue
+        flags = _campaign_digest_flags(
+            lane_ev=lane_ev,
+            plan_ev=plan_ev,
+            visual_reentry_ev=visual_reentry_ev,
+            mpc_ev=mpc_ev,
+        )
+        if not flags:
+            continue
+        visual_offset_m = _visual_offset_from_lane_event(lane_ev)
+        control_error_m = _control_error_from_lane_event(lane_ev)
+        steering_deg = _finite_float((mpc_ev or {}).get("steering_deg"))
+        score = len(flags)
+        if steering_deg is not None and abs(steering_deg) >= 20.0:
+            score += 3
+        if visual_offset_m is not None and abs(visual_offset_m) >= 0.12:
+            score += 2
+        if (lane_ev or {}).get("measurement_mode") in {"blind", "none"}:
+            score += 1
+        candidates.append(
+            {
+                "frame": frame_no,
+                "ts": frame_ts,
+                "score": score,
+                "flags": flags,
+                "pov_frame": str(item.get("path") or (run_dir / "frames" / f"frame_{frame_no:06d}.png")),
+                "lanelet_id": (route_ev or {}).get("current_lanelet_id"),
+                "route_progress": _finite_float((route_ev or {}).get("route_progress")),
+                "map_match_error_m": _finite_float((route_ev or {}).get("map_match_error_m")),
+                "measurement_mode": (lane_ev or {}).get("measurement_mode"),
+                "line_sides": (lane_ev or {}).get("sides"),
+                "quality": _finite_float((lane_ev or {}).get("quality")),
+                "visual_offset_m": visual_offset_m,
+                "control_lateral_error_m": control_error_m,
+                "control_lateral_error_source": (lane_ev or {}).get("control_lateral_error_source"),
+                "single_line_reacquire_active": (lane_ev or {}).get("single_line_reacquire_active"),
+                "single_line_reacquire_side": (lane_ev or {}).get("single_line_reacquire_side"),
+                "single_line_reacquire_error_m": (lane_ev or {}).get("single_line_reacquire_error_m"),
+                "single_line_reacquire_error_source": (lane_ev or {}).get("single_line_reacquire_error_source"),
+                "direct_error_valid": (lane_ev or {}).get("direct_error_valid"),
+                "path_source": (plan_ev or {}).get("path_source"),
+                "visual_lane_measurement_source": (visual_reentry_ev or {}).get("measurement_source"),
+                "visual_lane_control_error_source": (visual_reentry_ev or {}).get("control_source"),
+                "visual_lane_reentry_reason": (visual_reentry_ev or {}).get("reason"),
+                "visual_control_memory_active": (visual_reentry_ev or {}).get("visual_control_memory_active"),
+                "visual_control_memory_ticks": (visual_reentry_ev or {}).get("visual_control_memory_ticks"),
+                "visual_control_memory_source": (visual_reentry_ev or {}).get("visual_control_memory_source"),
+                "visual_path_reason": (
+                    (plan_ev or {}).get("visual_path_primary_rejected_reason")
+                    or (plan_ev or {}).get("visual_path_primary_reason")
+                    or ""
+                ),
+                "speed_mps": _finite_float((mpc_ev or {}).get("speed_mps")),
+                "steering_deg": steering_deg,
+                "line_loss_hold": bool(line_hold_ev),
+                "line_loss_hold_ticks": (line_hold_ev or {}).get("hold_ticks"),
+                "line_loss_hold_reason": (line_hold_ev or {}).get("reason"),
+                "line_loss_measurement_mode": (line_hold_ev or {}).get("measurement_mode"),
+                "route_tracking_hold": bool(route_hold_ev),
+                "single_line_transition_hold": bool(single_hold_ev),
+                "pose_x": _finite_float((pose_ev or {}).get("fused_x")),
+                "pose_y": _finite_float((pose_ev or {}).get("fused_y")),
+                "pose_yaw": _finite_float((pose_ev or {}).get("fused_yaw_rad")),
+                "visual_map_match_accepted": (pose_ev or {}).get("visual_lane_match_accepted"),
+                "visual_map_match_reason": (pose_ev or {}).get("visual_lane_match_reason"),
+            }
+        )
+
+    transition_rows: list[dict[str, Any]] = []
+    last_signature: tuple[Any, Any] | None = None
+    for row in candidates:
+        signature = (row.get("measurement_mode"), row.get("path_source"))
+        if signature != last_signature:
+            transition_rows.append(row)
+            last_signature = signature
+    top_rows = sorted(
+        candidates,
+        key=lambda item: (-int(item.get("score", 0) or 0), int(item.get("frame", 0) or 0)),
+    )
+    selected_by_frame: dict[int, dict[str, Any]] = {}
+    for row in transition_rows[: max(1, int(max_rows) // 2)]:
+        selected_by_frame[int(row["frame"])] = row
+    for row in top_rows:
+        frame_no = int(row["frame"])
+        signature = (row.get("measurement_mode"), row.get("path_source"))
+        if any(
+            abs(frame_no - int(existing.get("frame", 0) or 0)) < 5
+            and signature == (existing.get("measurement_mode"), existing.get("path_source"))
+            for existing in selected_by_frame.values()
+        ):
+            continue
+        selected_by_frame.setdefault(int(row["frame"]), row)
+        if len(selected_by_frame) >= int(max_rows):
+            break
+    selected = [selected_by_frame[key] for key in sorted(selected_by_frame)]
+
+    digest_dir = run_dir / "campaign_digest"
+    debug_frames_dir = digest_dir / "debug"
+    satellite_dir = digest_dir / "satellite"
+    for row in selected:
+        frame_no = int(row["frame"])
+        row["debug_frame"] = _save_video_frame(
+            video_path=debug_video_path,
+            frame_no=frame_no,
+            out_path=debug_frames_dir / f"frame_{frame_no:06d}.png",
+        )
+        row["satellite_frame"] = _write_campaign_satellite_snapshot(
+            out_path=satellite_dir / f"frame_{frame_no:06d}.png",
+            track_png=track_png,
+            expected_route=expected_route,
+            actual_xy=actual_xy,
+            pose_x=_finite_float(row.get("pose_x")),
+            pose_y=_finite_float(row.get("pose_y")),
+            pose_yaw=_finite_float(row.get("pose_yaw")),
+        )
+
+    digest_dir.mkdir(parents=True, exist_ok=True)
+    digest_json = digest_dir / "digest.json"
+    digest_md = digest_dir / "digest.md"
+    digest_json.write_text(
+        json.dumps({"rows": selected}, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    lines = [
+        "# Campaign Digest",
+        "",
+        "| frame | flags | lanelet | mode | side | q | visual_offset_m | control_m | control_source | visual_reason | path_source | visual_source | steering_deg | speed_mps | hold | POV | debug | satellite |",
+        "|---:|---|---:|---|---|---:|---:|---:|---|---|---|---|---:|---:|---|---|---|---|",
+    ]
+    for row in selected:
+        hold_bits = []
+        if row.get("line_loss_hold"):
+            hold_bits.append(f"line_loss:{row.get('line_loss_hold_ticks')}")
+        if row.get("route_tracking_hold"):
+            hold_bits.append("route_visual")
+        if row.get("single_line_transition_hold"):
+            hold_bits.append("single_transition")
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("frame")),
+                    ", ".join(str(flag) for flag in row.get("flags", [])),
+                    str(row.get("lanelet_id") or "-"),
+                    str(row.get("measurement_mode") or "-"),
+                    str(row.get("single_line_reacquire_side") or row.get("line_sides") or "-"),
+                    _fmt_value(row.get("quality"), precision=2),
+                    _fmt_value(row.get("visual_offset_m"), precision=3),
+                    _fmt_value(row.get("control_lateral_error_m"), precision=3),
+                    str(row.get("control_lateral_error_source") or "-"),
+                    str(row.get("visual_lane_reentry_reason") or "-"),
+                    str(row.get("path_source") or "-"),
+                    str(row.get("visual_lane_measurement_source") or "-"),
+                    _fmt_value(row.get("steering_deg"), precision=1),
+                    _fmt_value(row.get("speed_mps"), precision=2),
+                    ", ".join(hold_bits) if hold_bits else "-",
+                    str(row.get("pov_frame") or "-"),
+                    str(row.get("debug_frame") or "-"),
+                    str(row.get("satellite_frame") or "-"),
+                ]
+            )
+            + " |"
+        )
+    digest_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {
+        "written": True,
+        "row_count": len(selected),
+        "digest_json": str(digest_json),
+        "digest_md": str(digest_md),
+        "rows": selected,
+    }
+
+
 def _collect_camera_video(brain_dir: Path, run_dir: Path, started_at: float) -> str | None:
     candidates = [
         path for path in brain_dir.glob("output_video*.avi")
@@ -1784,6 +2183,7 @@ def _draw_debug_panel(
         _put_panel_line(panel, f"mode={_short_text(lane_ev.get('measurement_mode'), max_len=16)} prev={_short_text(lane_ev.get('previous_measurement_mode'), max_len=12)} streak={lane_ev.get('measurement_mode_streak_frames', '-')}", (x, y)); y += 16
         _put_panel_line(panel, f"q={_fmt_value(lane_ev.get('quality'), precision=2)} sides={','.join(map(str, lane_ev.get('sides') or ())) or '-'} blind={_short_text(lane_ev.get('blind_mode'), max_len=12)}", (x, y)); y += 16
         _put_panel_line(panel, f"center={_fmt_cm(lane_ev.get('line_center_offset_m'))} direct={_fmt_cm(lane_ev.get('direct_error_m'))} valid={bool(lane_ev.get('direct_error_valid'))}", (x, y)); y += 16
+        _put_panel_line(panel, f"control={_fmt_cm(lane_ev.get('control_lateral_error_m'))} src={_short_text(lane_ev.get('control_lateral_error_source'), max_len=18)}", (x, y)); y += 16
         _put_panel_line(panel, f"L={_fmt_cm(lane_ev.get('left_line_distance_m'))} R={_fmt_cm(lane_ev.get('right_line_distance_m'))} width_px={_fmt_value(lane_ev.get('lane_width_px'), precision=1)}", (x, y)); y += 16
         _put_panel_line(panel, f"hdg={_fmt_deg(lane_ev.get('heading_error_rad'))} cam_yaw={_fmt_deg(lane_ev.get('camera_yaw_hint_rad'))} wp={lane_ev.get('visual_waypoint_count', '-')}", (x, y)); y += 16
         _put_panel_line(panel, f"policy={_short_text(lane_ev.get('control_policy_mode'), max_len=18)} planner={bool(lane_ev.get('planner_priority_active'))}", (x, y)); y += 18
@@ -2289,6 +2689,30 @@ def main() -> int:
         metrics["debug_overlay_video"] = debug_overlay_video
         if debug_overlay_video.get("written"):
             metrics["artifacts"]["camera_debug_overlay_video"] = str(brain_run_dir / "camera_debug_overlay.avi")
+    campaign_digest = _write_campaign_digest(
+        run_dir=brain_run_dir,
+        brain_events=brain_events,
+        video_frames=video_frames,
+        frame_timestamps=(
+            gui_overlay_video.get("_frame_timestamps")
+            if gui_overlay_video is not None
+            else None
+        ),
+        debug_video_path=(
+            str(brain_run_dir / "camera_debug_overlay.avi")
+            if debug_overlay_video is not None and debug_overlay_video.get("written")
+            else None
+        ),
+        track_png=args.track_png.resolve(),
+        expected_route=expected_route,
+        actual_xy=metrics["ground_truth"]["actual_path"],
+    )
+    metrics["campaign_digest"] = {
+        key: value for key, value in campaign_digest.items() if key != "rows"
+    }
+    if campaign_digest.get("written"):
+        metrics["artifacts"]["campaign_digest_md"] = str(campaign_digest.get("digest_md"))
+        metrics["artifacts"]["campaign_digest_json"] = str(campaign_digest.get("digest_json"))
     metrics["artifacts"].update(
         {
             "brain_jsonl": str(brain_jsonl),

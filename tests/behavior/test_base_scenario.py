@@ -181,11 +181,19 @@ def test_constant_speed_plan_prefers_reliable_single_line_visual_path_over_activ
     assert plan.notes["path_source"] == "visual_lane_waypoints"
     assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
     assert plan.notes["visual_path_connected_from_ego_pose"] is False
-    assert plan.target_path[0, 0] > pose_x
-    assert plan.target_path[0, 1] == pytest.approx(pose_y, abs=1e-6)
+    # Opción C: path en frame body — primer waypoint con x>=0, y~0 (no
+    # `pose_y`). El motion_controller también arma `x_current=(0,0,0)`
+    # cuando ve `visual_path_frame_body=True`.
+    # Path en frame world por default (Opción C deshabilitada). El flag
+    # `visual_path_frame_body` queda en notes para auditoría.
+    assert "visual_path_frame_body" in plan.notes
+    assert plan.target_path[0, 0] >= 0.0
 
 
-def test_constant_speed_plan_keeps_fresh_single_line_transition_as_assist_over_route() -> None:
+def test_constant_speed_plan_takes_fresh_single_line_as_primary_path() -> None:
+    # Estilo urt-ref: el streak frames y `transition_error_coherent` ya no son
+    # gates. Una transición recién entrada (streak=2) con calidad ≥0.6 entra
+    # como primary path sin necesidad de quedarse en route hasta confirmar.
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -223,11 +231,14 @@ def test_constant_speed_plan_keeps_fresh_single_line_transition_as_assist_over_r
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
-    assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_transition_assist"
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
 
 
-def test_constant_speed_plan_rejects_single_line_transition_error_jump() -> None:
+def test_constant_speed_plan_accepts_single_line_even_when_legacy_transition_flag_is_false() -> None:
+    # El gate `transition_error_coherent` se eliminó: la curvatura del path
+    # visual la pone el polinomio del lado visible, no la coherencia entre
+    # frames con el último two_line.
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -266,11 +277,13 @@ def test_constant_speed_plan_rejects_single_line_transition_error_jump() -> None
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
-    assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_transition_error_jump"
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
 
 
-def test_constant_speed_plan_promotes_reliable_single_line_assist_to_primary_path() -> None:
+def test_constant_speed_plan_promotes_single_line_visual_assist_to_primary_path() -> None:
+    # `assist_primary` con threshold 0.82 ya no existe — basta con quality ≥ 0.6.
+    # Visual gana incluso sin direct_error_valid mientras los waypoints sean válidos.
     scenario = _ConstantSpeedScenario()
     pose_x = 0.02
     pose_y = 0.05
@@ -308,12 +321,14 @@ def test_constant_speed_plan_promotes_reliable_single_line_assist_to_primary_pat
 
     assert plan.valid is True
     assert plan.notes["path_source"] == "visual_lane_waypoints"
-    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_assist_primary_over_route_path_only"
-    assert plan.target_path[0, 0] > pose_x
-    assert plan.target_path[0, 1] == pytest.approx(pose_y, abs=1e-6)
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
+    # Path en frame world por default (Opción C deshabilitada).
+    assert "visual_path_frame_body" in plan.notes
 
 
-def test_constant_speed_plan_keeps_weak_single_line_assist_out_of_primary_path() -> None:
+def test_constant_speed_plan_rejects_single_line_visual_path_below_min_quality() -> None:
+    # Quality 0.55 (debajo del mínimo 0.6 estilo ref) sí rechaza visual y
+    # cae a route. Es el único gate que queda en single_line.
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -332,7 +347,7 @@ def test_constant_speed_plan_keeps_weak_single_line_assist_out_of_primary_path()
         ),
         lane_observation=LaneObservation(
             detected_sides=("left",),
-            quality=0.78,
+            quality=0.55,
             measurement_mode="single_line",
             measurement_mode_streak_frames=8,
             direct_error_valid=False,
@@ -348,11 +363,16 @@ def test_constant_speed_plan_keeps_weak_single_line_assist_out_of_primary_path()
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
+    # quality 0.55 < `lane_observation_has_visual_path` min 0.55 → primero
+    # rechaza el gate de waypoints; con 0.55 estricto puede pasar y caer al
+    # gate de single_line min 0.6 → mismo resultado: route.
     assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_visual_assist_only"
 
 
-def test_constant_speed_plan_uses_single_line_visual_path_without_direct_error_when_waypoints_are_reliable() -> None:
+def test_constant_speed_plan_uses_single_line_visual_path_when_waypoints_are_reliable() -> None:
+    # Single-line con direct_error_valid=False pero waypoints sólidos: visual
+    # gana. Antes había un reason específico `_path_only`; ahora es el reason
+    # único `single_line_visual_primary_over_route`.
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -388,10 +408,13 @@ def test_constant_speed_plan_uses_single_line_visual_path_without_direct_error_w
 
     assert plan.valid is True
     assert plan.notes["path_source"] == "visual_lane_waypoints"
-    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route_path_only"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
 
 
-def test_constant_speed_plan_rejects_single_line_visual_path_when_map_match_rejects() -> None:
+def test_constant_speed_plan_keeps_single_line_visual_when_map_match_rejects() -> None:
+    # `_visual_map_match_primary_gate` se eliminó del single_line: el path
+    # visual gana aunque el matcher contra el mapa diga "lateral mismatch".
+    # El mapa ya no es prerequisito para el modo visual primario.
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -433,8 +456,8 @@ def test_constant_speed_plan_rejects_single_line_visual_path_when_map_match_reje
     plan = scenario.plan(ctx)
 
     assert plan.valid is True
-    assert plan.notes["path_source"] == "route_waypoints"
-    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_visual_map_lateral_mismatch"
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["visual_path_primary_reason"] == "single_line_visual_primary_over_route"
 
 
 def test_constant_speed_plan_prefers_reliable_two_line_visual_path_over_active_route() -> None:

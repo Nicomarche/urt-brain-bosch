@@ -80,6 +80,9 @@ class LaneObservation:
       - `left/right_line_distance_m`: distancia visual estimada desde el
         centro del auto hasta cada línea. `line_center_offset_m` positivo =
         el auto está más cerca de la línea izquierda.
+      - `control_lateral_error_m`: error lateral visual para control/MPC.
+        Mantiene el mismo signo que `direct_error_m`, pero puede incluir
+        urgencia de borde. No debe usarse para relocalización lateral.
       - `curve_hint ∈ {"STRAIGHT","LEFT","RIGHT","UNKNOWN"}`.
       - `blind_mode`: si el detector no ve carril, anuncia el modo en el que
         está operando ("lost", "single_line", etc.) para que el planner
@@ -100,6 +103,7 @@ class LaneObservation:
     lateral_offset_m: float | None = None
     heading_error_rad: float = 0.0
     direct_error_m: float | None = None
+    control_lateral_error_m: float | None = None
     lane_width_px: float | None = None
     left_line_distance_m: float | None = None
     right_line_distance_m: float | None = None

@@ -63,7 +63,10 @@ SIM_SUBMODEL = _setting_bool(True, "subModel", env=("URT_SIM_SUBMODEL",))
 
 # ===================== PHYSICAL DIMENSIONS =====================
 # Lane and road geometry (BFMC spec)
-LANE_WIDTH_CM = 35.0           # carril: distancia entre bordes interiores de líneas
+# 37 cm alineado con urt-ref (`LANE_WIDTH_PIXEL = 0.37 / METER_PER_PIXEL_X`
+# en LaneDetector.hpp:182). Afecta síntesis de single-line (la línea ausente
+# se desplaza por LANE_WIDTH/2) y validación de ancho ±25%.
+LANE_WIDTH_CM = 37.0           # carril: distancia entre bordes interiores de líneas
 LINE_WIDTH_CM = 2.0            # ancho de las marcas viales pintadas
 
 # ── Visual lane → MPC reference (paradigma urt-ref) ─────────────────────────
@@ -83,7 +86,19 @@ LANE_VISUAL_PRIMARY_ENABLED = _setting_bool(
     "lane_visual_primary",
     env=("LANE_VISUAL_PRIMARY_ENABLED", "URT_LANE_VISUAL_PRIMARY"),
 )
-LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY = 0.75
+# Opción C (Paso 6): cuando el path viene de visual, pasarlo al MPC en
+# frame body del coche (pose tratada como (0,0,0)) en vez de OSM.
+#
+# DESHABILITADO por default (False): el `path_optimizer.py` aplica
+# transformaciones `_world_to_body_xy` / `_body_to_world_xy` sobre el path
+# asumiendo que está en world, y eso rompe el path si llega ya en body
+# (queda mixto: tp[0] en body, tp[1..N] en world después del re-sample).
+# Con encoder físico (Paso 9a en sim, firmware Nucleo en real) el EKF
+# tiene drift mínimo y frame world es seguro como en urt-ref. Si en el
+# futuro se quiere desacoplar del EKF, hay que adaptar TODO el
+# path_optimizer para detectar el flag y no aplicar transformaciones.
+LANE_VISUAL_PATH_FRAME_BODY = False
+LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY = 0.6
 LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_STREAK_FRAMES = 6
 LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_ENABLED = True
 LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_MIN_QUALITY = 0.82
@@ -91,8 +106,63 @@ LANE_VISUAL_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M = 0.05
 LANE_VISUAL_TWO_LINE_ERROR_MEMORY_MAX_AGE_S = 0.75
 LANE_VISUAL_SINGLE_LINE_SIDE_MEMORY_MAX_AGE_S = 0.85
 LANE_VISUAL_SINGLE_LINE_MAX_PREFIX_ABS_Y_M = (LANE_WIDTH_CM / 200.0) + 0.08
-LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG = 32.0
-LANE_VISUAL_SINGLE_LINE_REQUIRE_MAP_MATCH_WITH_ROUTE = True
+LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG = 45.0  # ref usa 25° pero el detector activo necesita más tolerancia en curva
+
+# ── Override del rule `route_precision_context:turn_heading_change_*` ───────
+# El planner por default rechaza `visual_lane_waypoints` y fuerza
+# `route_waypoints` cuando el OSM dice que viene una curva > 25° (regla
+# geométrica para detectar intersecciones en el mapa, en
+# `src/behavior/scenarios/base.py:_route_precision_context`).
+#
+# Problema: en algunas curvas suaves del track real (BFMC sim) el OSM tiene
+# artifacts de hasta 90° por geometría triangulada del lanelet, mientras la
+# cámara ve una curva continua de ~40° con dos líneas perfectas (q=1.0).
+# La regla rechaza el visual y el MPC sigue el OSM saturando ±25° en sentido
+# OPUESTO a la curva real (campaña manual run_manual_20260511_192422 lo
+# confirmó en lanelets 60/70/85).
+#
+# Override: cuando la visual lane es two_line con quality >= umbral, ignoramos
+# el rule de heading_change y dejamos al MPC seguir lo que ve. El check
+# semántico (intersection/stopline/crosswalk/parking/roundabout) queda intacto.
+# Para deshabilitar el override (volver al comportamiento anterior):
+# `LANE_VISUAL_OVERRIDES_HEADING_CHANGE_RULE = False`.
+LANE_VISUAL_OVERRIDES_HEADING_CHANGE_RULE = True
+LANE_VISUAL_OVERRIDE_HEADING_CHANGE_MIN_QUALITY = 0.95
+# Umbral mínimo de cambio de heading visual (rad) para activar la comprobación
+# de conflicto visual↔ruta. Si el path visual cambia menos de este ángulo en
+# sentido opuesto a la ruta, se ignora (es ruido de curvatura, no un fork).
+# 0.174 rad ≈ 10°.
+LANE_VISUAL_ROUTE_CONFLICT_MIN_RAD = 0.174
+# Si el heading del robot difiere del waypoint de ruta en más de este umbral (20°),
+# se rechaza la visual: indica que el robot está entrando a una bifurcación donde
+# la cámara ve ambas ramas y calcula un centro incorrecto (ej. ll90 fork → 23°).
+# El chequeo persiste hasta que el robot gire para alinearse con la ruta.
+LANE_VISUAL_ROUTE_ALIGNMENT_MAX_RAD = 0.349  # 20°
+
+# ── Deadband del error lateral del lane observer ────────────────────────────
+# Si la cámara reporta |line_center_offset_m| < deadband, lo zeroizamos antes
+# de que llegue al MPC. Sin esto, pure-pursuit con lookahead corto (~0.24m
+# a 0.2 m/s) amplifica offsets pequeños a alpha grande (5cm → ~12° alpha)
+# y satura el steer a 16°. El operador humano tolera offsets pequeños y solo
+# corrige cuando se aleja >5cm — el deadband replica esa tolerancia.
+#
+# Calibrado iterativamente contra el manejo manual del operador:
+#   - run_manual_20260511_193516 lanelet 138: visual offset ~+1.9cm, manual 0°,
+#     MPC pedía +15° → deadband 5cm solucionó el caso (Δp50 16°→7.6°)
+#   - run_manual_20260511_194608 lanelet 995: visual offset sostenido +11cm,
+#     manual 0°, MPC pedía +16° (cap) → 5cm no alcanzó.
+#
+# El operador tolera offsets de hasta ~10-11cm sin corregir (su cross-track
+# p90 en manual fue 17cm). Subimos el deadband a 10cm para matchear esa
+# tolerancia. Beyond 10cm el MPC vuelve a comportarse normal — corrige
+# offsets reales que el operador también corregiría.
+#
+# Trade-off: con 10cm el MPC va a ignorar oscilaciones de hasta una banda
+# completa entre líneas (carril ~37cm, half=18cm). Eso es lo que vos hacés.
+#
+# Para desactivar: `LANE_CONTROL_ERROR_DEADBAND_M = 0.0`.
+LANE_CONTROL_ERROR_DEADBAND_M = 0.12
+LANE_VISUAL_SINGLE_LINE_REQUIRE_MAP_MATCH_WITH_ROUTE = False  # estilo ref: visual gana sin pedir map_match
 LANE_VISUAL_PRIMARY_PRECISION_ZONE_M = 0.45
 
 # Parking spot dimensions (BFMC spec)
@@ -361,7 +431,9 @@ ACADOS_MPC_T = 0.05
 
 # Velocidad de referencia por defecto [m/s].  El MPC optimiza alrededor de
 # este valor.  En competencia ajustar según la zona (highway vs curva).
-ACADOS_MPC_V_REF = 0.20
+# 0.32 m/s alineado con urt-ref (`v_ref = 0.32` en PathManager.h:31).
+# Si el coche tiene problemas de tracking, bajar gradualmente (0.20-0.32).
+ACADOS_MPC_V_REF = 0.32
 
 # Modelo del vehículo.
 ACADOS_MPC_WHEELBASE = 0.258      # distancia entre ejes [m]
@@ -369,7 +441,9 @@ ACADOS_MPC_L_R = 0.103            # eje trasero a CG [m]
 ACADOS_MPC_L_F = 0.155            # eje delantero a CG [m]
 
 # Límites de control.
-ACADOS_MPC_V_MAX = 0.40           # velocidad máxima [m/s] en AUTO = 40 cm/s
+ACADOS_MPC_V_MAX = 0.22           # velocidad máxima [m/s]. Shadow analysis: iguala la vel del conductor
+                                  # (~0.20 m/s) para que ACADOS planifique a la velocidad real y no
+                                  # sobrecompense el steer asumiendo que va al doble de rápido.
 ACADOS_MPC_V_MIN = -0.50          # velocidad mínima [m/s] (reversa)
 ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
 
@@ -381,9 +455,9 @@ ACADOS_MPC_X_COST = 2.0
 ACADOS_MPC_Y_COST = 2.0
 ACADOS_MPC_YAW_COST = 0.5
 ACADOS_MPC_V_COST = 1.0
-ACADOS_MPC_STEER_COST = 0.3   # >0 evita bang-bang ±25°; era 0.0 (solver ignoraba ángulo absoluto)
+ACADOS_MPC_STEER_COST = 0.5   # >0 evita bang-bang ±25°; era 0.3
 ACADOS_MPC_DELTA_V_COST = 4.0   # sube rampa de arranque; era 1.5 (llegaba a v_ref demasiado rápido)
-ACADOS_MPC_DELTA_STEER_COST = 0.75
+ACADOS_MPC_DELTA_STEER_COST = 1.5  # compromiso: era 0.75 (oscilación ±25°), subió a 3.0 (muy sticky en ll50/ll996), ahora 1.5
 
 # Zona muerta de salida del MPC completo [°].
 ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.5
@@ -449,11 +523,19 @@ TRACKING_PRECISION_LOOKAHEAD_M = 0.10
 # Overrides:
 #   URT_USE_ENCODER=0 / use_encoder:=false
 #   URT_USE_GPS=0     / use_gps:=false
+# urt-ref `origin/main` usa `use_encoder default="true"` en
+# controller.launch:16. El encoder físico calibrado alimenta el EKF.
 TRACKING_USE_ENCODER = _setting_bool(
     True,
     "use_encoder",
     env=("URT_USE_ENCODER", "TRACKING_USE_ENCODER"),
 )
+# GPS habilitado: el sim_bridge entrega GPS locsys tcp://4691
+# (sim_bridge.py:597). Sin GPS, el dead reckoning del brain diverge 14m del
+# ground truth real del sim (iter19 pose_drift_max=13.97m). Con GPS la
+# pose se mantiene a 0.3m del GT (iter20 mean=0.288m). El `map_match_error`
+# aparente bueno sin GPS era engañoso — comparaba contra el mapa interno
+# del brain, no contra el mundo real.
 TRACKING_USE_GPS = _setting_bool(
     True,
     "use_gps",
@@ -674,6 +756,18 @@ BEHAVIOR_MAX_SPEED_MPS = 0.40       # cap absoluto de AUTO = 40 cm/s
 # Geometría y containment lateral del planner. Los valores están escalados
 # para BFMC (carril 35 cm, vehículo ~19 cm de ancho) y se usan para exigir
 # que la referencia publicada al MPC permanezca dentro del corredor del mapa.
+#
+# === BYPASS DEL PATH_OPTIMIZER ESTILO REF ===
+# urt-ref pasa el path Dijkstra/spline directo al MPC sin smoothing/blending/
+# containment. Activar para replicar ese flujo (recomendado para alinear con
+# ref main). Cuando True, `PathOptimizer.optimize` retorna el raw_path
+# resampleado a horizon_n+1 sin más procesamiento si `path_source="route_waypoints"`.
+BEHAVIOR_PATH_OPTIMIZER_BYPASS_ROUTE = _setting_bool(
+    False,
+    "bypass_path_optimizer",
+    env=("URT_BYPASS_PATH_OPTIMIZER", "BEHAVIOR_PATH_OPTIMIZER_BYPASS_ROUTE"),
+)
+
 BEHAVIOR_VEHICLE_WIDTH_M = 0.19
 BEHAVIOR_CONTAINMENT_CLEARANCE_M = 0.01
 BEHAVIOR_CONTAINMENT_WARN_ERROR_M = 0.05
@@ -689,6 +783,16 @@ BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.20
 BEHAVIOR_CONTAINMENT_STUCK_TICKS = 40
 BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.20
 
+# Curvature-anticipating apex offset en la referencia del controlador.
+# Desplaza cada waypoint del path de referencia hacia el interior de la
+# curva próxima para que el controlador "quiera" estar en la posición apex
+# en lugar de la centerline pura. APEX_GAIN=0 → sin offset (baseline).
+BEHAVIOR_APEX_GAIN = 0.0
+BEHAVIOR_APEX_LOOKAHEAD_M = 1.5
+# Curvatura de referencia [m]: al invertirla, da el radio al que el offset
+# llega al 100% del gain. 0.4 → radio ~40 cm (curva pronunciada BFMC).
+BEHAVIOR_APEX_SENSITIVITY_M = 0.4
+
 # Aceleración máxima del ramp de velocidad en el BehaviorPlanner [m/s²].
 # 0.25 m/s² → llega a 0.15 m/s en ~0.6 s (12 ticks a 20 Hz).
 BEHAVIOR_ACCEL_MPS2 = 0.25
@@ -699,9 +803,11 @@ BEHAVIOR_ACCEL_MPS2 = 0.25
 BEHAVIOR_MAX_SPEED_RATE_MPS2 = 0.25
 
 # Velocidad máxima de cambio del ángulo de steering [°/s].
-# A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~8 ticks (0.4 s).
-# Bajar si el auto sigue oscilando; subir si es demasiado lento en curvas.
-BEHAVIOR_MAX_STEER_RATE_DEG_S = 60.0
+# A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~12 ticks (0.6 s).
+# Con 200°/s y dirección incorrecta, el actuador se bloquea en el extremo
+# equivocado en 2-3 ticks antes de que el pure-pursuit se auto-corrija.
+# Con 60°/s hay ~12 ticks de margen → el robot avanza y corrige la dirección.
+BEHAVIOR_MAX_STEER_RATE_DEG_S = 100.0
 
 # Cuando el path primario viene de la cámara, el control lateral debe entrar
 # como corrección fina, no como giro máximo hacia el centro visual instantáneo.
@@ -711,21 +817,22 @@ BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_START_M = 0.10
 BEHAVIOR_VISUAL_PRIMARY_RECOVERY_ERROR_FULL_M = 0.15
 BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_DEG = 16.0
 BEHAVIOR_VISUAL_PRIMARY_CURVE_STEER_FULL_DEG = 16.0
-BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_RATE_DEG_S = 60.0
+BEHAVIOR_VISUAL_PRIMARY_CURVE_MAX_STEER_RATE_DEG_S = 100.0
 BEHAVIOR_VISUAL_PRIMARY_MAX_STEER_RATE_DEG_S = 35.0
 BEHAVIOR_VISUAL_PRIMARY_RECOVERY_MAX_STEER_RATE_DEG_S = 60.0
 BEHAVIOR_LINE_LOSS_STRAIGHT_HOLD_ROUTE_ESCAPE_MIN_TICKS = 24
-BEHAVIOR_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M = 0.12
+BEHAVIOR_LINE_LOSS_ROUTE_TURN_MAX_MAP_ERROR_M = 0.25
 BEHAVIOR_LINE_LOSS_PREVIOUS_VISUAL_HOLD_ENABLED = True
 BEHAVIOR_VISUAL_TWO_LINE_ABSURD_CORRIDOR_VIOLATION_M = 20.0
 BEHAVIOR_VISUAL_ABSURD_CORRIDOR_VIOLATION_M = 0.50
 BEHAVIOR_VISUAL_PREVIOUS_PATH_MAX_SAMPLE1_GAP_M = 0.08
 
 # Lookahead del PurePursuitSolver (fallback sin acados).
-# Con el piso reglamentario de 20 cm/s, 30 cm de lookahead abre demasiado la
-# entrada de curvas chicas. Apuntamos a ~22 cm a 20 cm/s y dejamos que crezca
-# con la velocidad hasta el techo de competencia.
-BEHAVIOR_MIN_LOOKAHEAD_M = 0.22
+# El kink geométrico al inicio de cada lanelet tiene un "crossing point" a
+# distancia variable: lanelet 120 ≈ 0.25 m, lanelets 70/90/125 > 0.40 m.
+# Con 0.70 m el goal siempre queda más allá del cruce → dirección correcta.
+# Sólo vinculante a v < 0.636 m/s (luego toma L_d = 1.1·v dinámica).
+BEHAVIOR_MIN_LOOKAHEAD_M = 0.70
 BEHAVIOR_LOOKAHEAD_GAIN_S = 1.1
 
 # Tasa de actualización del thread (s). Con pause=0.05 corremos a ~20 Hz,
@@ -780,7 +887,9 @@ TRACKING_ROUTE_LANELET_OVERRIDE_ERROR_M = 0.12
 TRACKING_SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M = 0.45
 TRACKING_SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M = 0.30
 TRACKING_SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M = 0.25
-TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.75
+# 0.5s alineado con `lane_localization_cooldown` del ref
+# (urt-ref/.../tunable_params.yaml:9). Antes era 0.75s.
+TRACKING_SEMANTIC_RELOCALIZATION_COOLDOWN_S = 0.5
 
 # Stopline visual con OpenCV:
 # 1) se arma solo cuando la ruta espera un stopline cerca,
@@ -823,9 +932,8 @@ TRACKING_COMMAND_SPEED_FALLBACK_SCALE = TRACKING_COMMAND_SPEED_CALIBRATION_SCALE
 TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = True
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
 
-# GPS is optional and never authoritative by default. When enabled, the pose
-# estimator accepts a locsys fix only after several nearby samples and after
-# checking it against the current dead-reckoning pose.
+# GPS authority. "hard" reset rompe el dead reckoning (coche se queda
+# anclado). "init_recovery_soft" aplica corrección incremental con gain.
 LOCALIZATION_GPS_AUTHORITY = (
     _setting_raw(
         "localization_gps_authority",
@@ -834,18 +942,23 @@ LOCALIZATION_GPS_AUTHORITY = (
     )
     or "init_recovery_soft"
 )
+# GPS validation: sim_bridge entrega GPS a 10Hz con noise ±15cm (radio).
+# Thresholds calibrados al noise real:
+#   - OUTLIER_DISTANCE_M = 2×noise para descartar samples atípicos
+#   - MAX_EXPECTED_ERROR_M = 3×noise para distinguir "GPS off" vs noise normal
+# El SAMPLE_WINDOW=5 median ya promedia 5 fixes para filtrar ruido a ±5cm.
 TRACKING_GPS_VALIDATION_ENABLED = True
 TRACKING_GPS_SAMPLE_WINDOW = 5
 TRACKING_GPS_MIN_SAMPLES = 3
 TRACKING_GPS_ZERO_EPS_M = 1e-3
-TRACKING_GPS_OUTLIER_DISTANCE_M = 0.60
-TRACKING_GPS_MAX_JUMP_M = 1.00
-TRACKING_GPS_MAX_EXPECTED_ERROR_M = 0.75
-TRACKING_GPS_SOFT_GAIN = 0.25
-TRACKING_GPS_SOFT_MAX_STEP_M = 0.020
-TRACKING_GPS_RECOVERY_MAX_STEP_M = 0.050
+TRACKING_GPS_OUTLIER_DISTANCE_M = 0.30  # 2×noise (15cm)
+TRACKING_GPS_MAX_JUMP_M = 1.00  # ~7×noise, suficiente para movimiento real
+TRACKING_GPS_MAX_EXPECTED_ERROR_M = 0.45  # 3×noise (umbral discrim. real drift)
+TRACKING_GPS_SOFT_GAIN = 0.50  # aplica 50% del error medio-filtrado
+TRACKING_GPS_SOFT_MAX_STEP_M = 0.050  # 5cm/paso para corregir drift de yaw
+TRACKING_GPS_RECOVERY_MAX_STEP_M = 0.100
 TRACKING_GPS_RECOVERY_ERROR_M = 0.30
-TRACKING_GPS_SOFT_LATERAL_GAIN = 0.20
+TRACKING_GPS_SOFT_LATERAL_GAIN = 0.40
 TRACKING_GPS_VISUAL_LATERAL_BLOCK_M = 0.05
 TRACKING_GPS_VISUAL_PROTECT_QUALITY = 0.55
 

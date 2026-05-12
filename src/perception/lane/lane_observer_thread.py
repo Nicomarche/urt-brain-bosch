@@ -12,20 +12,6 @@ _VISUAL_PATH_QUALITY_BUMP = 0.85
 _VISUAL_PATH_MIN_POINTS = max(2, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8)))
 _LANE_WIDTH_M = max(0.01, float(getattr(_config, "LANE_WIDTH_CM", 35.0) or 35.0) / 100.0)
 _LINE_DISTANCE_MARGIN_M = max(0.04, _LANE_WIDTH_M * 0.18)
-_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M = max(
-    0.02,
-    float(
-        getattr(
-            _config,
-            "LANE_VISUAL_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M",
-            max(0.035, _LANE_WIDTH_M * 0.14),
-        )
-    ),
-)
-_TWO_LINE_ERROR_MEMORY_MAX_AGE_S = max(
-    0.05,
-    float(getattr(_config, "LANE_VISUAL_TWO_LINE_ERROR_MEMORY_MAX_AGE_S", 0.75)),
-)
 _SINGLE_LINE_SIDE_MEMORY_MAX_AGE_S = max(
     0.05,
     float(getattr(_config, "LANE_VISUAL_SINGLE_LINE_SIDE_MEMORY_MAX_AGE_S", 0.85)),
@@ -40,8 +26,11 @@ _SINGLE_LINE_MAX_PREFIX_ABS_Y_M = max(
         )
     ),
 )
+# Estilo urt-ref: el polyfit puede tener heading inicial alto en curva pronunciada
+# y eso es legítimo, no outlier. 45° es el bound de seguridad — por encima sí
+# es claramente ruido.
 _SINGLE_LINE_MAX_NEAR_YAW_RAD = math.radians(
-    max(5.0, float(getattr(_config, "LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG", 32.0)))
+    max(5.0, float(getattr(_config, "LANE_VISUAL_SINGLE_LINE_MAX_NEAR_YAW_DEG", 45.0)))
 )
 
 
@@ -63,67 +52,51 @@ class threadLaneObserver(ThreadWithStop):
         self._last_sequence = 0
         self._last_measurement_mode: str | None = None
         self._measurement_mode_streak_frames = 0
-        self._last_reliable_two_line_error_m: float | None = None
-        self._last_reliable_two_line_timestamp: float | None = None
-        self._last_reliable_two_line_error_source: str | None = None
+        # Solo memorizamos el lado del último single_line confiable para el
+        # side-flip reject (estilo urt-ref: protección contra ruido del YOLO
+        # al alternar lado sin pasar por two_line confirmado).
         self._last_reliable_single_line_side: str | None = None
         self._last_reliable_single_line_timestamp: float | None = None
 
     @staticmethod
     def _line_side_from_screen_position(snapshot: VisualStateSnapshot) -> tuple[str, ...]:
+        # CONFIAR en la clasificación del detector (`_split_candidates` ya
+        # ordenó las líneas por `x_bottom < W/2` estilo urt-ref). Antes este
+        # método recalculaba el side y a veces lo invertía cuando el extremo
+        # superior de la línea cruzaba la mitad de la imagen — eso confundía
+        # las líneas en curva (la diagonal cubre ambos lados aunque su
+        # extremo bajo esté claramente de un solo lado).
         local_payload = snapshot.local_lane_payload or {}
         lines = dict(local_payload.get("lane_side_lines") or {})
-        try:
-            img_w = float(local_payload.get("frame_width") or 0.0)
-        except (TypeError, ValueError):
-            img_w = 0.0
-        if img_w <= 1.0:
-            return tuple()
 
-        present_lines: list[tuple[str, tuple[float, float, float, float]]] = []
+        present_sides: list[str] = []
         for raw_side in ("left", "right"):
             raw_line = lines.get(raw_side)
             if not isinstance(raw_line, (list, tuple)) or len(raw_line) < 4:
                 continue
             try:
-                x1, y1, x2, y2 = (float(raw_line[0]), float(raw_line[1]), float(raw_line[2]), float(raw_line[3]))
+                values = (float(raw_line[0]), float(raw_line[1]), float(raw_line[2]), float(raw_line[3]))
             except (TypeError, ValueError):
                 continue
-            if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+            if not all(math.isfinite(v) for v in values):
                 continue
-            present_lines.append((raw_side, (x1, y1, x2, y2)))
+            present_sides.append(raw_side)
 
-        if not present_lines:
-            return tuple()
-        if len(present_lines) >= 2:
-            return ("left", "right")
-
-        _raw_side, (x1, y1, x2, y2) = present_lines[0]
-        # Usamos el extremo más cercano a la parte baja de la imagen, que es el
-        # punto más estable para decidir si la línea visible cae a la izquierda
-        # o a la derecha del auto en pantalla.
-        line_x = x1 if y1 >= y2 else x2
-        return ("left",) if line_x < (img_w / 2.0) else ("right",)
+        return tuple(present_sides)
 
     @staticmethod
     def _detected_sides(snapshot: VisualStateSnapshot) -> tuple[str, ...]:
-        frame_trace = snapshot.frame_trace or {}
-        lane_observation = frame_trace.get("lane_observation") or {}
-        visible_side = str(lane_observation.get("visible_side", "") or "")
-        if visible_side == "both":
-            return ("left", "right")
-        if visible_side in {"left", "right"}:
-            return (visible_side,)
-
-        debug = frame_trace.get("debug") or {}
-        resolved_side = str(debug.get("single_line_resolved_side", "") or "")
-        if resolved_side in {"left", "right"}:
-            return (resolved_side,)
-
+        # Clasificación por posición X del extremo más cercano al coche de
+        # la línea visible (estilo urt-ref). No confiamos en la clase del
+        # modelo ni en flags propagados desde frames anteriores: cada frame
+        # decide su lado a partir de la geometría observada.
         line_sides = threadLaneObserver._line_side_from_screen_position(snapshot)
         if line_sides:
             return line_sides
 
+        # Fallback: si por algún motivo no llegaron las `lane_side_lines`,
+        # contamos puntos por lado en el payload de la IA local. Eso pasa
+        # cuando el detector emitió solo máscaras sin líneas resumidas.
         local_payload = snapshot.local_lane_payload or {}
         point_counts = dict(local_payload.get("lane_side_point_counts") or {})
         sides = []
@@ -134,12 +107,6 @@ class threadLaneObserver(ThreadWithStop):
         if sides:
             return tuple(sides)
 
-        if frame_trace.get("avg_left_line") is not None and frame_trace.get("avg_right_line") is not None:
-            return ("left", "right")
-        if frame_trace.get("avg_left_line") is not None:
-            return ("left",)
-        if frame_trace.get("avg_right_line") is not None:
-            return ("right",)
         return tuple()
 
     @staticmethod
@@ -165,26 +132,81 @@ class threadLaneObserver(ThreadWithStop):
     def _line_distance_metrics(snapshot: VisualStateSnapshot) -> tuple[float | None, float | None, float | None]:
         frame_trace = snapshot.frame_trace or {}
         debug = frame_trace.get("debug") or {}
-        if not isinstance(debug, dict):
+        if isinstance(debug, dict):
+            for prefix in ("two_line", "sl"):
+                left_cm = debug.get(f"{prefix}_D_left_cm")
+                right_cm = debug.get(f"{prefix}_D_right_cm")
+                if left_cm is None or right_cm is None:
+                    continue
+                try:
+                    left_m = float(left_cm) / 100.0
+                    right_m = float(right_cm) / 100.0
+                except (TypeError, ValueError):
+                    continue
+                if not (math.isfinite(left_m) and math.isfinite(right_m)):
+                    continue
+                center_offset_m = 0.5 * (right_m - left_m)
+                return left_m, right_m, center_offset_m
+
+        # Fallback: derivar distancias desde `lane_side_lines` del payload
+        # local cuando el threadLineFollowing no publica sl_D_left/right_cm
+        # (caso común en single_line). Calculamos la distancia desde el
+        # centro del coche (mitad del frame en imagen) al extremo bajo de
+        # cada línea, escalado por cm/px estimado.
+        local_payload = snapshot.local_lane_payload or {}
+        lines = dict(local_payload.get("lane_side_lines") or {})
+        try:
+            img_w = float(local_payload.get("frame_width") or 0.0)
+        except (TypeError, ValueError):
+            img_w = 0.0
+        if img_w <= 1.0 or not lines:
             return None, None, None
 
-        for prefix in ("two_line", "sl"):
-            left_cm = debug.get(f"{prefix}_D_left_cm")
-            right_cm = debug.get(f"{prefix}_D_right_cm")
-            if left_cm is None or right_cm is None:
-                continue
+        # Estimar cm_per_px del payload (lane_width_px en imagen original).
+        lane_width_px = None
+        if int(local_payload.get("lane_count", 0) or 0) >= 2:
+            left_l = lines.get("left") or []
+            right_l = lines.get("right") or []
+            if len(left_l) >= 4 and len(right_l) >= 4:
+                try:
+                    lane_width_px = abs(float(right_l[0]) - float(left_l[0]))
+                except (TypeError, ValueError):
+                    lane_width_px = None
+        cm_per_px = None
+        if lane_width_px and lane_width_px > 1.0:
+            cm_per_px = (_LANE_WIDTH_M * 100.0) / float(lane_width_px)
+        else:
+            # Sin two_line para calibrar, estimar conservadoramente: el
+            # ancho típico del carril ocupa ~45% del frame en imagen original.
+            cm_per_px = (_LANE_WIDTH_M * 100.0) / max(float(img_w) * 0.45, 1.0)
+        if not (math.isfinite(cm_per_px) and cm_per_px > 0.0):
+            return None, None, None
+
+        center_x = float(img_w) / 2.0
+
+        def _line_dist(side_key: str) -> float | None:
+            ln = lines.get(side_key)
+            if not isinstance(ln, (list, tuple)) or len(ln) < 4:
+                return None
             try:
-                left_m = float(left_cm) / 100.0
-                right_m = float(right_cm) / 100.0
+                x1, y1, x2, y2 = float(ln[0]), float(ln[1]), float(ln[2]), float(ln[3])
             except (TypeError, ValueError):
-                continue
-            if not (math.isfinite(left_m) and math.isfinite(right_m)):
-                continue
-            # Positivo significa que la distancia derecha es mayor que la
-            # izquierda, o sea: el auto está desplazado hacia la línea izquierda.
+                return None
+            if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+                return None
+            # x del extremo más bajo de la línea (cerca del coche).
+            line_x_bottom = x1 if y1 >= y2 else x2
+            dist_px = abs(line_x_bottom - center_x)
+            return float(dist_px) * float(cm_per_px) / 100.0  # cm → m
+
+        left_m = _line_dist("left")
+        right_m = _line_dist("right")
+        if left_m is None and right_m is None:
+            return None, None, None
+        center_offset_m = None
+        if left_m is not None and right_m is not None:
             center_offset_m = 0.5 * (right_m - left_m)
-            return left_m, right_m, center_offset_m
-        return None, None, None
+        return left_m, right_m, center_offset_m
 
     @staticmethod
     def _line_geometry_valid(
@@ -276,11 +298,13 @@ class threadLaneObserver(ThreadWithStop):
         detected_sides: tuple[str, ...],
         blind_mode: str | None,
     ) -> str:
-        frame_trace = snapshot.frame_trace or {}
-        debug = frame_trace.get("debug") or {}
-        debug_mode = str(debug.get("measurement_mode", "") or "")
-        if debug_mode in {"two_line", "single_line", "route_tracking", "blind", "none"}:
-            return debug_mode
+        # Estilo urt-ref: el modo se decide por lo que se ve en el frame
+        # actual (detected_sides), NO por el `debug.measurement_mode` legacy
+        # que threadLineFollowing publicaba con lógica propia. Confiar en el
+        # debug a veces dejaba el observer en "none" aunque viéramos una
+        # línea válida (frames 245-248 del iter6: sides=['left'] pero
+        # debug.mode='none' → observer devolvía 'none' y q=0.20, perdiendo
+        # el path visual).
         if len(detected_sides) >= 2:
             return "two_line"
         if len(detected_sides) == 1:
@@ -389,6 +413,44 @@ class threadLaneObserver(ThreadWithStop):
         return out
 
     @staticmethod
+    def _trim_visual_waypoint_prefix(
+        center_waypoints_body: tuple[tuple[float, float, float], ...],
+        *,
+        lane_width_m: float | None,
+    ) -> tuple[tuple[tuple[float, float, float], ...], int]:
+        """Recorta los waypoints iniciales con |y| > lateral_limit o x < 0.
+
+        Estilo `_trim_nonforward_visual_prefix` en trajectory_builder pero
+        más simple: si el primer waypoint es lateral o atrás del coche,
+        prueba descartándolo y reevalúa. Devuelve (waypoints_trimmed, n).
+        Si el prefijo queda con <`_VISUAL_PATH_MIN_POINTS`, devuelve el
+        original — que luego `_visual_waypoint_geometry_reject_reason` va
+        a marcar para vaciar el path.
+        """
+        if len(center_waypoints_body) < 2:
+            return center_waypoints_body, 0
+        width = lane_width_m if lane_width_m is not None and lane_width_m > 0.0 else _LANE_WIDTH_M
+        lateral_limit_m = max(float(_SINGLE_LINE_MAX_PREFIX_ABS_Y_M), (float(width) * 0.5) + 0.05)
+
+        def _prefix_ok(start_idx: int) -> bool:
+            if start_idx >= len(center_waypoints_body):
+                return False
+            x, y, _ = center_waypoints_body[start_idx]
+            return float(x) >= -0.02 and abs(float(y)) <= lateral_limit_m
+
+        if _prefix_ok(0):
+            return center_waypoints_body, 0
+        # Probar recortando 1, 2, … puntos hasta que el primer waypoint sea OK
+        # y queden suficientes para que el path siga siendo útil.
+        for trim_count in range(1, len(center_waypoints_body)):
+            remaining = len(center_waypoints_body) - trim_count
+            if remaining < int(_VISUAL_PATH_MIN_POINTS):
+                break
+            if _prefix_ok(trim_count):
+                return center_waypoints_body[trim_count:], trim_count
+        return center_waypoints_body, 0
+
+    @staticmethod
     def _visual_waypoint_geometry_reject_reason(
         *,
         measurement_mode: str,
@@ -417,8 +479,13 @@ class threadLaneObserver(ThreadWithStop):
                 return "single_line_waypoint_low_forward_span"
         if max(abs(y) for y in ys) > lateral_limit_m:
             return "single_line_waypoint_lateral_out_of_lane"
-        near_yaw = max(abs(threadLaneObserver._wrap_angle(psi)) for psi in psis[: min(4, len(psis))])
-        if near_yaw > float(_SINGLE_LINE_MAX_NEAR_YAW_RAD):
+        # Estilo urt-ref: solo descartar si TODO el prefijo near-field es
+        # outlier. Antes era `max(first 4)` con 32°; ahora pedimos que el
+        # promedio de los primeros 4 supere 45° para descartar (un solo
+        # waypoint con 50° en curva ya no rompe el path completo).
+        near_psis = [abs(threadLaneObserver._wrap_angle(psi)) for psi in psis[: min(4, len(psis))]]
+        avg_near_yaw = sum(near_psis) / len(near_psis)
+        if avg_near_yaw > float(_SINGLE_LINE_MAX_NEAR_YAW_RAD):
             return "single_line_waypoint_yaw_outlier"
         return None
 
@@ -470,6 +537,14 @@ class threadLaneObserver(ThreadWithStop):
             if side_value in ("left", "right"):
                 extrapolated_side = side_value
 
+        # Paso 5: antes de evaluar el reject, intentar recortar puntos
+        # iniciales que estén fuera del corredor o detrás del coche. Si el
+        # resto del path sigue siendo razonable, conservamos la curva — antes
+        # cualquier outlier en el prefijo vaciaba el path entero.
+        center_waypoints_body, prefix_trim_count = self._trim_visual_waypoint_prefix(
+            center_waypoints_body,
+            lane_width_m=lane_width_m,
+        )
         visual_waypoint_geometry_reject_reason = self._visual_waypoint_geometry_reject_reason(
             measurement_mode=measurement_mode,
             center_waypoints_body=center_waypoints_body,
@@ -510,66 +585,22 @@ class threadLaneObserver(ThreadWithStop):
                 direct_error_m = float(center_error_m)
                 direct_error_valid = True
 
-        transition_reference_error_m = None
-        transition_error_delta_m = None
-        transition_error_coherent = True
-        transition_selected_error_source = None
-        transition_selected_error_m = None
+        # Estilo urt-ref: el path visual sale del polinomio fitteado al lado
+        # visible (en single_line se sintetiza la otra línea desplazando
+        # lane_width). No filtramos por coherencia con frames anteriores —
+        # cuando una línea se pierde, el centro reconstruido va a saltar y
+        # eso es esperado. La geometría del polinomio decide.
         single_line_side_reject_reason = None
-        if measurement_mode == "single_line" and line_geometry_valid:
-            last_two_line_error_m = self._finite_float(
-                getattr(self, "_last_reliable_two_line_error_m", None)
-            )
-            last_two_line_timestamp = self._finite_float(
-                getattr(self, "_last_reliable_two_line_timestamp", None)
-            )
-            snapshot_timestamp = self._finite_float(snapshot.timestamp)
-            memory_age_s = None
-            if last_two_line_timestamp is not None and snapshot_timestamp is not None:
-                memory_age_s = max(0.0, float(snapshot_timestamp) - float(last_two_line_timestamp))
-            memory_fresh = (
-                last_two_line_error_m is not None
-                and (
-                    memory_age_s is None
-                    or memory_age_s <= float(_TWO_LINE_ERROR_MEMORY_MAX_AGE_S)
-                )
-            )
-            if memory_fresh and last_two_line_error_m is not None:
-                transition_reference_error_m = float(last_two_line_error_m)
-                candidates: list[tuple[str, float]] = []
-                for source, value in (
-                    ("line_center_offset_m", line_center_offset_m),
-                    ("direct_error_m", direct_error_m),
-                    ("visual_waypoint_error_m", derived_error_m),
-                ):
-                    candidate = self._finite_float(value)
-                    if candidate is not None:
-                        candidates.append((source, candidate))
-                if candidates:
-                    transition_selected_error_source, transition_selected_error_m = min(
-                        candidates,
-                        key=lambda item: abs(float(item[1]) - float(last_two_line_error_m)),
-                    )
-                    transition_error_delta_m = abs(
-                        float(transition_selected_error_m) - float(last_two_line_error_m)
-                    )
-                    transition_error_coherent = (
-                        transition_error_delta_m
-                        <= float(_SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M)
-                    )
-                    if transition_error_coherent:
-                        direct_error_m = float(transition_selected_error_m)
-                        direct_error_valid = True
-                    else:
-                        direct_error_m = None
-                        direct_error_valid = False
-                        explicit_direct_error_invalid = True
-
         current_single_line_side = None
         if measurement_mode == "single_line" and len(detected_sides) == 1:
             side_candidate = str(detected_sides[0])
             if side_candidate in {"left", "right"}:
                 current_single_line_side = side_candidate
+
+        # Side-flip reject: cambio de lado entre frames consecutivos sin pasar
+        # por two_line confirmado es ruido del detector, no una transición
+        # legítima. Lo conservamos del flujo anterior porque protege contra
+        # falsos positivos del YOLO en frames borrosos.
         if current_single_line_side is not None:
             last_side = getattr(self, "_last_reliable_single_line_side", None)
             last_side_ts = self._finite_float(
@@ -592,7 +623,6 @@ class threadLaneObserver(ThreadWithStop):
                 and str(previous_measurement_mode or "none") != "two_line"
             ):
                 single_line_side_reject_reason = "side_flip_without_two_line_confirmation"
-                transition_error_coherent = False
                 direct_error_m = None
                 direct_error_valid = False
                 explicit_direct_error_invalid = True
@@ -631,24 +661,81 @@ class threadLaneObserver(ThreadWithStop):
         else:
             quality = base_quality
 
-        if not transition_error_coherent:
-            quality = min(float(quality), 0.45)
         if single_line_side_reject_reason is not None or visual_waypoint_geometry_reject_reason is not None:
             quality = min(float(quality), 0.35)
 
-        if measurement_mode == "two_line" and direct_error_valid and line_geometry_valid:
-            memory_error_m = self._finite_float(line_center_offset_m)
-            memory_source = "line_center_offset_m"
-            if memory_error_m is None:
-                memory_error_m = self._finite_float(direct_error_m)
-                memory_source = "direct_error_m"
-            if memory_error_m is not None and float(quality) >= 0.8:
-                self._last_reliable_two_line_error_m = float(memory_error_m)
-                self._last_reliable_two_line_timestamp = float(snapshot.timestamp)
-                self._last_reliable_two_line_error_source = memory_source
-                self._last_reliable_single_line_side = None
-                self._last_reliable_single_line_timestamp = None
+        # `control_lateral_error_m` para MPC: prioridad
+        # 1) **two_line con geometría válida**: usar `line_center_offset_m`
+        #    (calculado desde píxeles reales de cada línea). Antes usábamos
+        #    el primer waypoint del path visual, pero el polyfit BEV puede
+        #    sesgarlo: vimos L=0.135 R=0.235 (off=+5cm) pero cle=+0.007 del
+        #    waypoint. La geometría píxel-a-píxel es más fiel.
+        # 2) **single_line con line_distance**: inferimos el error desde la
+        #    distancia a la línea visible asumiendo LANE_WIDTH/2 (estilo
+        #    urt-ref: línea ausente sintetizada).
+        # 3) primer waypoint del path visual (fallback geométrico).
+        control_lateral_error_m: float | None = None
+        control_lateral_error_source = "none"
+        if measurement_mode == "two_line" and line_geometry_valid:
+            candidate = self._finite_float(line_center_offset_m)
+            if candidate is not None and not explicit_direct_error_invalid:
+                control_lateral_error_m = float(candidate)
+                control_lateral_error_source = "two_line_center"
         elif (
+            measurement_mode == "single_line"
+            and current_single_line_side is not None
+            and single_line_side_reject_reason is None
+            and line_geometry_valid
+        ):
+            half_width = float(lane_width_m or _LANE_WIDTH_M) * 0.5
+            visible_distance = self._finite_float(
+                left_line_distance_m if current_single_line_side == "left" else right_line_distance_m
+            )
+            if visible_distance is not None:
+                # Convención (igual a line_center_offset_m en two_line):
+                # positivo = coche desplazado a la IZQUIERDA del centro.
+                # Si solo veo LEFT a dist=L → centro asumido a half_width
+                # del coche, error = half_width - L (positivo si L<half_w,
+                # i.e., coche cerca de la izquierda).
+                # Si solo veo RIGHT a dist=R → error = R - half_width
+                # (negativo si R<half_w, i.e., coche cerca de la derecha).
+                if current_single_line_side == "left":
+                    candidate = half_width - visible_distance
+                else:
+                    candidate = visible_distance - half_width
+                if math.isfinite(candidate):
+                    control_lateral_error_m = float(candidate)
+                    control_lateral_error_source = "single_line_distance"
+        # Fallback: primer waypoint visual (geometría del polyfit).
+        if control_lateral_error_m is None and center_waypoints_body:
+            candidate = self._finite_float(-float(center_waypoints_body[0][1]))
+            if candidate is not None:
+                control_lateral_error_m = float(candidate)
+                control_lateral_error_source = "visual_waypoint_first"
+
+        # Deadband del error lateral: pure-pursuit con lookahead corto (0.24m
+        # típico) amplifica offsets pequeños a alpha grande (5cm → ~12°),
+        # y termina en saturación a 16° de steer. El operador humano tolera
+        # offsets pequeños (campaña run_manual_20260511_193516 lanelet 138:
+        # visual offset mean=+1.9cm, manual median=0° pero MPC median=+15°).
+        # Si el offset cae dentro del deadband, lo tratamos como centrado.
+        # `LANE_CONTROL_ERROR_DEADBAND_M = 0` desactiva la lógica (compat).
+        if control_lateral_error_m is not None:
+            try:
+                deadband = float(getattr(_config, "LANE_CONTROL_ERROR_DEADBAND_M", 0.0))
+            except (TypeError, ValueError):
+                deadband = 0.0
+            if deadband > 0.0 and abs(control_lateral_error_m) < deadband:
+                control_lateral_error_m = 0.0
+                control_lateral_error_source = (
+                    f"{control_lateral_error_source}+deadband"
+                    if control_lateral_error_source != "none"
+                    else "deadband"
+                )
+
+        # Memoria del side single_line (para el side-flip reject del próximo
+        # frame). El two_line memory completo ya no se usa.
+        if (
             current_single_line_side is not None
             and single_line_side_reject_reason is None
             and visual_waypoint_geometry_reject_reason is None
@@ -659,50 +746,23 @@ class threadLaneObserver(ThreadWithStop):
 
         observation_debug = dict(debug)
         observation_debug["raw_direct_error_m"] = raw_direct_error_m
+        observation_debug["control_lateral_error_m"] = control_lateral_error_m
+        observation_debug["control_lateral_error_source"] = control_lateral_error_source
         observation_debug["line_geometry_valid"] = bool(line_geometry_valid)
         observation_debug["previous_measurement_mode"] = previous_measurement_mode
         observation_debug["measurement_mode_streak_frames"] = int(self._measurement_mode_streak_frames)
         if measurement_mode == "two_line" and line_center_offset_m is not None:
             observation_debug["two_line_center_error_m"] = float(line_center_offset_m)
             observation_debug["two_line_direct_error_for_localization_m"] = float(direct_error_m or 0.0)
-        observation_debug["transition_error_coherent"] = bool(transition_error_coherent)
         observation_debug["visual_waypoint_geometry_valid"] = visual_waypoint_geometry_reject_reason is None
-        if transition_reference_error_m is not None:
-            observation_debug["transition_reference_error_m"] = float(transition_reference_error_m)
-        if transition_error_delta_m is not None:
-            observation_debug["transition_error_delta_m"] = float(transition_error_delta_m)
-        if transition_selected_error_source:
-            observation_debug["transition_selected_error_source"] = str(transition_selected_error_source)
-            observation_debug["transition_selected_error_m"] = float(transition_selected_error_m)
-        if measurement_mode == "two_line":
-            observation_debug["last_reliable_two_line_error_m"] = getattr(
-                self,
-                "_last_reliable_two_line_error_m",
-                None,
-            )
-            observation_debug["last_reliable_two_line_error_source"] = getattr(
-                self,
-                "_last_reliable_two_line_error_source",
-                None,
-            )
         if not line_geometry_valid:
             observation_debug["line_geometry_reject_reason"] = "line_distance_out_of_lane_bounds"
             observation_debug["raw_left_line_distance_m"] = raw_left_line_distance_m
             observation_debug["raw_right_line_distance_m"] = raw_right_line_distance_m
             observation_debug["raw_line_center_offset_m"] = raw_line_center_offset_m
             observation_debug["line_geometry_visual_path_allowed"] = bool(visual_path_geometry_allowed)
-        elif not transition_error_coherent:
-            observation_debug["single_line_transition_reject_reason"] = (
-                single_line_side_reject_reason or "error_jump_from_last_two_line"
-            )
-            observation_debug["single_line_transition_max_error_delta_m"] = float(
-                _SINGLE_LINE_TRANSITION_MAX_ERROR_DELTA_M
-            )
         if visual_waypoint_geometry_reject_reason is not None:
             observation_debug["visual_waypoint_reject_reason"] = str(
-                visual_waypoint_geometry_reject_reason
-            )
-            observation_debug["single_line_transition_reject_reason"] = str(
                 visual_waypoint_geometry_reject_reason
             )
         if single_line_side_reject_reason is not None:
@@ -721,6 +781,7 @@ class threadLaneObserver(ThreadWithStop):
             lateral_offset_m=direct_error_m,
             heading_error_rad=float(snapshot.heading_error_rad or 0.0),
             direct_error_m=direct_error_m,
+            control_lateral_error_m=control_lateral_error_m,
             lane_width_px=self._lane_width_px(snapshot),
             left_line_distance_m=left_line_distance_m,
             right_line_distance_m=right_line_distance_m,
@@ -732,9 +793,6 @@ class threadLaneObserver(ThreadWithStop):
             measurement_mode=measurement_mode,
             measurement_mode_streak_frames=int(self._measurement_mode_streak_frames),
             previous_measurement_mode=previous_measurement_mode,
-            transition_reference_error_m=transition_reference_error_m,
-            transition_error_delta_m=transition_error_delta_m,
-            transition_error_coherent=bool(transition_error_coherent),
             direct_error_valid=direct_error_valid,
             control_policy_mode=self._control_policy_mode(snapshot),
             planner_priority_active=self._planner_priority_active(snapshot),
@@ -787,6 +845,8 @@ class threadLaneObserver(ThreadWithStop):
             "lane_observer", event="lane_obs",
             offset_m=lane_observation.lateral_offset_m,
             direct_error_m=lane_observation.direct_error_m,
+            control_lateral_error_m=lane_observation.control_lateral_error_m,
+            control_lateral_error_source=lane_observation.debug.get("control_lateral_error_source"),
             heading_error_rad=float(lane_observation.heading_error_rad or 0.0),
             camera_yaw_hint_rad=lane_observation.camera_yaw_hint_rad,
             camera_yaw_hint_confidence=float(lane_observation.camera_yaw_hint_confidence or 0.0),
@@ -802,15 +862,14 @@ class threadLaneObserver(ThreadWithStop):
             measurement_mode=lane_observation.measurement_mode,
             measurement_mode_streak_frames=int(lane_observation.measurement_mode_streak_frames),
             previous_measurement_mode=lane_observation.previous_measurement_mode,
-            transition_error_coherent=bool(lane_observation.transition_error_coherent),
-            transition_reference_error_m=lane_observation.transition_reference_error_m,
-            transition_error_delta_m=lane_observation.transition_error_delta_m,
             direct_error_valid=bool(lane_observation.direct_error_valid),
             control_policy_mode=lane_observation.control_policy_mode,
             planner_priority_active=bool(lane_observation.planner_priority_active),
             visual_waypoint_count=len(lane_observation.center_waypoints_body or ()),
             extrapolated_side=lane_observation.extrapolated_side,
             lane_width_m=lane_observation.lane_width_m,
+            single_line_side_reject_reason=lane_observation.debug.get("single_line_side_reject_reason"),
+            visual_waypoint_reject_reason=lane_observation.debug.get("visual_waypoint_reject_reason"),
         )
 
         if stopline_observation.visible or stopline_observation.pass_event is not None:

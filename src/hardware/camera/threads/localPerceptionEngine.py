@@ -450,6 +450,31 @@ class LocalPerceptionEngine:
         min_area_px = max(int(mask.shape[0] * mask.shape[1] * 0.0008), 20)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         components = []
+        # Stoplines (marcas transversales) tienen bbox MUCHO más ancho que
+        # alto. Lane lines, incluso en curvas cerradas, mantienen mayor
+        # extensión vertical en la imagen. Filtramos solo componentes con
+        # bbox claramente horizontal (w/h > 4.0) para no eliminar lanes en
+        # curva con threshold demasiado agresivo (2.0 daba falsos positivos).
+        max_horizontal_aspect = float(
+            getattr(config, "LOCAL_AI_LANE_COMPONENT_MAX_W_OVER_H", 4.0)
+        )
+        # Altura mínima del componente como fracción de la altura del frame.
+        # Lane lines reales cubren >=15-25% de la altura (van del fondo del
+        # frame hacia el horizonte). Fragmentos espurios (líneas residuales
+        # del horizonte, reflejos) son cortos verticalmente y se descartan.
+        min_height_ratio = float(
+            getattr(config, "LOCAL_AI_LANE_COMPONENT_MIN_HEIGHT_RATIO", 0.18)
+        )
+        min_height_px = max(20, int(round(float(mask.shape[0]) * min_height_ratio)))
+        # Una lane line del carril ACTUAL debe llegar cerca del coche.
+        # Threshold 0.55 (era 0.65 muy estricto) — en curvas pronunciadas
+        # la lane line se inclina y su extremo bajo puede no llegar al 65%.
+        # 55% es suficiente para descartar fragmentos del horizonte sin
+        # afectar lanes en curva.
+        min_bottom_reach_ratio = float(
+            getattr(config, "LOCAL_AI_LANE_COMPONENT_MIN_BOTTOM_REACH_RATIO", 0.55)
+        )
+        min_y_bottom_px = int(round(float(mask.shape[0]) * min_bottom_reach_ratio))
         for label_idx in range(1, num_labels):
             area = int(stats[label_idx, cv2.CC_STAT_AREA])
             if area < min_area_px:
@@ -461,15 +486,48 @@ class LocalPerceptionEngine:
                 continue
 
             x1, y1, x2, y2 = bbox
+            # Filtro stopline: si el bbox es claramente más ancho que alto,
+            # es una marca transversal (stopline/crosswalk), no una lane line.
+            bbox_w = float(x2 - x1)
+            bbox_h = float(y2 - y1)
+            if bbox_h > 0 and (bbox_w / bbox_h) > max_horizontal_aspect:
+                continue
+            # Filtro de fragmentos cortos: una lane line real cubre suficiente
+            # extensión vertical. Fragmentos pequeños del horizonte o reflejos
+            # quedan fuera. Sin esto, el `_split_candidates` clasificaba
+            # fragmentos espurios como side opuesto y reportaba two_line falso.
+            if bbox_h < min_height_px:
+                continue
+            # Filtro de alcance al bottom: SOLO aplica a componentes
+            # relativamente cortos (altura < 30% del frame). Lanes en curva
+            # pronunciada pueden tener su extremo bajo en y2≈55-65% y
+            # serían rechazadas si el filtro fuera incondicional. Si el
+            # componente es largo verticalmente (>30%), se considera lane
+            # válida aunque no llegue al fondo del frame.
+            tall_component_threshold = int(round(float(mask.shape[0]) * 0.30))
+            if bbox_h < tall_component_threshold and y2 < min_y_bottom_px:
+                continue
+            # x_bottom: el x del extremo más cercano al coche (y máximo en imagen).
+            # Más estable que x_center para clasificar lado en líneas inclinadas
+            # (curvas), donde el centro del bbox puede caer del lado equivocado
+            # mientras el extremo bajo se mantiene del lado correcto.
+            ys, xs = np.where(component_mask > 0)
+            if ys.size > 0:
+                y_bottom = int(ys.max())
+                xs_at_bottom = xs[ys == y_bottom]
+                x_bottom = float(xs_at_bottom.mean()) if xs_at_bottom.size > 0 else (x1 + x2) / 2.0
+            else:
+                x_bottom = (x1 + x2) / 2.0
             components.append(
                 {
                     "mask": component_mask,
                     "box": bbox,
                     "x_center": (x1 + x2) / 2.0,
+                    "x_bottom": x_bottom,
                 }
             )
 
-        return sorted(components, key=lambda item: item["x_center"])
+        return sorted(components, key=lambda item: item["x_bottom"])
 
     def _mask_x_at_y(self, mask, y_target, search_radius=12):
         if mask is None or mask.size == 0:
@@ -922,6 +980,12 @@ class LocalPerceptionEngine:
         return keep_indices[: self.max_detections]
 
     def _split_candidates(self, result, frame_shape):
+        # Clasificación LEFT/RIGHT estilo urt-ref (LaneDetector.hpp:1008-1017):
+        # nunca se confía en la clase del modelo para decidir lado; cada componente
+        # conexo de máscara se asigna por la posición X de su extremo más cercano
+        # al coche (x_bottom < W/2 → LEFT, sino RIGHT). Aplica igual a clases
+        # explícitas "left"/"right", a "generic_lane" y a fallback `classXX` con
+        # máscara. Las clases no-lane (signos) se mantienen separadas.
         height, width = frame_shape
         boxes = getattr(result, "boxes", None)
         if boxes is None or len(boxes) == 0:
@@ -949,12 +1013,11 @@ class LocalPerceptionEngine:
             mask = self._segments_to_mask(segments, (height, width))
             has_mask = bool(mask is not None and np.any(mask))
 
-            # Cuando el engine viene sin nombres y devuelve classXX,
-            # si trae mascara lo tratamos como carril generico.
-            if role is None and self._is_fallback_class_name(class_name) and has_mask:
-                role = "generic"
+            is_lane_class = role in ("left", "right", "generic")
+            if not is_lane_class and self._is_fallback_class_name(class_name) and has_mask:
+                is_lane_class = True
 
-            if role is None:
+            if not is_lane_class:
                 if conf < self.sign_min_confidence:
                     continue
                 sign_detections.append(
@@ -967,58 +1030,57 @@ class LocalPerceptionEngine:
                 )
                 continue
 
-            if role == "generic":
-                components = self._split_mask_components(mask)
-                if len(components) >= 2:
-                    left_component = components[0]
-                    right_component = components[-1]
-                    side_candidates["left"].append(
-                        {
-                            "mask": left_component["mask"],
-                            "x_center": left_component["x_center"],
-                            "confidence": conf,
-                            "side_source": "split_component",
-                        }
-                    )
-                    side_candidates["right"].append(
-                        {
-                            "mask": right_component["mask"],
-                            "x_center": right_component["x_center"],
-                            "confidence": conf,
-                            "side_source": "split_component",
-                        }
-                    )
-                    continue
-                if len(components) == 1:
-                    mask = components[0]["mask"]
-                    x_center = components[0]["x_center"]
-                    role = "left" if x_center < frame_center else "right"
-                    side_source = "guessed_single"
-                else:
-                    role = "left" if x_center < frame_center else "right"
-                    side_source = "guessed_single"
-            else:
-                side_source = "explicit_class"
+            components = self._split_mask_components(mask) if has_mask else []
 
-            side_candidates[role].append(
-                {
-                    "mask": mask,
-                    "x_center": x_center,
-                    "confidence": conf,
-                    "side_source": side_source,
-                    # Marks that the x_center heuristic was used: the BEV
-                    # reclassification step in threadLineFollowing will verify
-                    # and correct the assignment when both sides are visible.
-                    "bev_verification_pending": side_source == "guessed_single",
-                }
-            )
+            if not components:
+                # Sin máscara: caemos al x_center del bbox como aproximación.
+                # Es lo mejor que se puede hacer sin geometría real.
+                resolved_side = "left" if x_center < frame_center else "right"
+                side_candidates[resolved_side].append(
+                    {
+                        "mask": mask,
+                        "x_center": x_center,
+                        "x_bottom": x_center,
+                        "confidence": conf,
+                        "side_source": "bbox_center_no_mask",
+                    }
+                )
+                continue
 
+            # Cada componente conexo se clasifica independientemente por
+            # x_bottom — esto equivale al "peak < W/2 → LEFT" del histograma
+            # del ref (LaneDetector.hpp:1008-1014). Si una sola detección
+            # contiene dos componentes (una a cada lado), cada uno termina en
+            # su lado correcto sin confiar en orden ni en x_center.
+            for comp in components:
+                comp_side = "left" if comp["x_bottom"] < frame_center else "right"
+                side_candidates[comp_side].append(
+                    {
+                        "mask": comp["mask"],
+                        "x_center": comp["x_center"],
+                        "x_bottom": comp["x_bottom"],
+                        "confidence": conf,
+                        "side_source": "x_bottom_position",
+                    }
+                )
+
+        # Si quedaron varios candidatos en un mismo lado (raro, pero posible
+        # con dos detecciones del modelo), elegimos el de x_bottom más extremo
+        # — el más alejado del centro de la imagen, que es el más probable
+        # de ser la verdadera línea del carril (no una sombra/marca interior).
         for side in ("left", "right"):
-            side_candidates[side].sort(
-                key=lambda item: (abs(item["x_center"] - frame_center), -item["confidence"])
-            )
-            if side_candidates[side]:
-                side_candidates[side] = [side_candidates[side][0]]
+            if not side_candidates[side]:
+                continue
+            if side == "left":
+                # Para el lado izquierdo, el mejor candidato es el de menor x_bottom.
+                side_candidates[side].sort(
+                    key=lambda item: (item["x_bottom"], -item["confidence"])
+                )
+            else:
+                side_candidates[side].sort(
+                    key=lambda item: (-item["x_bottom"], -item["confidence"])
+                )
+            side_candidates[side] = [side_candidates[side][0]]
 
         sign_detections.sort(key=lambda item: item["confidence"], reverse=True)
         sign_detections = sign_detections[: self.sign_max_detections]

@@ -1478,11 +1478,21 @@ Args:
         if bev_cm_per_px <= 0.0:
             return None
 
-        min_points = int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8))
+        # Paso 3 (paridad geométrica con urt-ref::get_waypoints):
+        #  - grado 3 cúbico fijo (ref: LaneDetector.hpp:947)
+        #  - inicio en near=0 siempre (ref: línea 594)
+        #  - espaciado por arc-length, no por forward (ref: línea 633)
+        #  - síntesis single-line con LANE_WIDTH/2 constante (ref: línea 613-615)
+        #  - validación de ancho ±15% (Paso 0b, ref: línea 605 usa 25%)
+        # Sin anchors heading/lateral post-fit: el polinomio es el path.
+        # min_points: 6 para single-line robusto. Antes era 8 (estricto)
+        # y dejaba a 79% de los frames single_line SIN waypoints válidos,
+        # rompiendo el control visual cuando se pierde una línea.
+        min_points = max(6, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 6)))
         density_m = float(getattr(_config, "LANE_VISUAL_WAYPOINT_DENSITY_M", 0.032))
         n_points = max(2, int(getattr(_config, "LANE_VISUAL_WAYPOINT_COUNT", 40)))
-        deg_high = int(getattr(_config, "LANE_VISUAL_POLY_DEGREE_HIGH", 3))
-        deg_low = int(getattr(_config, "LANE_VISUAL_POLY_DEGREE_LOW", 2))
+        # Grado fijo: 3 (cúbico) si hay puntos suficientes, sino rechazar el fit.
+        poly_deg = int(getattr(_config, "LANE_VISUAL_POLY_DEGREE_HIGH", 3))
         lane_width_cm = float(getattr(self, "lane_width_cm", 35.0) or 35.0)
         lane_width_m = lane_width_cm / 100.0
 
@@ -1510,13 +1520,15 @@ Args:
         bev_right = _project_to_bev(lane_side_points.get("right"))
 
         def _fit(bev_pts):
+            # Grado 3 fijo: si no hay puntos suficientes para un cúbico
+            # estable, devolver None — no degradar a cuadrático. El ref
+            # también usa grado 3 siempre.
             if bev_pts.shape[0] < min_points:
                 return None
             ys = bev_pts[:, 1]
             xs = bev_pts[:, 0]
-            deg = deg_high if bev_pts.shape[0] >= 12 else deg_low
             try:
-                coeffs = np.polyfit(ys, xs, deg)
+                coeffs = np.polyfit(ys, xs, poly_deg)
             except (np.linalg.LinAlgError, TypeError, ValueError):
                 return None
             if not np.all(np.isfinite(coeffs)):
@@ -1529,15 +1541,38 @@ Args:
             return None
 
         center_bev_x = float(img_w) / 2.0
+        # Constante: LANE_WIDTH_PIXEL / 2 (ref: LaneDetector.hpp:182)
         lane_half_px = (lane_width_m * 100.0 / 2.0) / bev_cm_per_px
-        single_line_center_factor = max(
-            0.20,
-            min(0.50, float(single_line_target_factor if single_line_target_factor is not None else 0.50)),
-        )
+        # Convención de signo para arc-length: METER_PER_PIXEL_X = METER_PER_PIXEL_Y
+        # = bev_cm_per_px / 100 m/px. dx/dy_world == dx/dy_pixel.
+        m_per_px = float(bev_cm_per_px) / 100.0
 
-        # Determinar el rango de y_bev disponible. Usamos la intersección
-        # cuando hay dos lados (para evitar extrapolar uno) o el rango del
-        # lado disponible cuando hay uno solo.
+        # Paso 0b: validación de ancho ±25% en el primer waypoint (cerca del
+        # coche), análogo a `urt-ref::LaneDetector::get_waypoints` línea 605.
+        # IMPORTANTE: evaluar el ancho en `y_bev = img_h` (la parte BAJA del
+        # BEV, justo delante del coche) donde los datos del modelo IA son
+        # reales y no extrapolación. Evaluar sobre el rango common COMPLETO
+        # mezcla zonas donde no hay puntos y produce false positives.
+        if left_fit is not None and right_fit is not None:
+            # Evaluar en el bottom del BEV donde el carril está bien definido
+            # geométricamente (la parte cercana al coche).
+            y_eval_bottom = float(img_h)
+            left_x_bottom = float(np.polyval(left_fit[0], y_eval_bottom))
+            right_x_bottom = float(np.polyval(right_fit[0], y_eval_bottom))
+            measured_width_px = abs(right_x_bottom - left_x_bottom)
+            expected_width_px = (lane_width_m * 100.0) / bev_cm_per_px
+            width_error_ratio = abs(measured_width_px - expected_width_px) / max(
+                expected_width_px, 1e-6
+            )
+            if width_error_ratio > 0.25:
+                # Degradar a single-line: nos quedamos con el lado de
+                # más puntos (que es el más confiable).
+                if int(bev_left.shape[0]) >= int(bev_right.shape[0]):
+                    right_fit = None
+                else:
+                    left_fit = None
+
+        # Rango y_bev efectivo
         if left_fit is not None and right_fit is not None:
             y_min = max(left_fit[1], right_fit[1])
             y_max = min(left_fit[2], right_fit[2])
@@ -1551,28 +1586,47 @@ Args:
         if not (np.isfinite(y_min) and np.isfinite(y_max)) or y_max - y_min <= 1.0:
             return None
 
+        # Inicio en near=0 SIEMPRE (ref: LaneDetector.hpp:594). Aunque el
+        # polyfit haya muestreado puntos a partir de y_max, el polinomio
+        # cúbico extrapola suavemente hacia el hood — esto es exactamente
+        # lo que hace el ref.
         forward_far_m = (float(img_h) - y_min) * bev_cm_per_px / 100.0
-        forward_near_m = max(0.0, (float(img_h) - y_max) * bev_cm_per_px / 100.0)
-        forward_far_m = max(forward_near_m + density_m, forward_far_m)
+        if forward_far_m <= density_m:
+            return None
 
+        # Espaciado por arc-length (ref: LaneDetector.hpp:627-634):
+        # dy = density / sqrt(1 + (dx/dy)^2). En curva pronunciada esto
+        # entrega waypoints uniformes por arco, no por forward (que
+        # quedaban más juntos en metros reales cuando la curva era cerrada).
+        current_y_m = 0.0
         center_pts: list[tuple[float, float]] = []
-        for k in range(n_points):
-            forward_m = forward_near_m + density_m * k
-            if forward_m > forward_far_m:
+        for _ in range(n_points):
+            if current_y_m > forward_far_m:
                 break
-            bev_y = float(img_h) - (forward_m * 100.0 / bev_cm_per_px)
+            bev_y = float(img_h) - (current_y_m * 100.0 / bev_cm_per_px)
             if left_fit is not None and right_fit is not None:
                 left_x = float(np.polyval(left_fit[0], bev_y))
                 right_x = float(np.polyval(right_fit[0], bev_y))
                 center_x = 0.5 * (left_x + right_x)
+                # Derivadas en bev_y para el avance por arc-length
+                left_dxdy = float(np.polyval(np.polyder(np.asarray(left_fit[0])), bev_y))
+                right_dxdy = float(np.polyval(np.polyder(np.asarray(right_fit[0])), bev_y))
+                center_dxdy = 0.5 * (left_dxdy + right_dxdy)
             elif left_fit is not None:
                 left_x = float(np.polyval(left_fit[0], bev_y))
-                center_x = left_x + (2.0 * single_line_center_factor * lane_half_px)
+                # Centro = línea visible + LANE_WIDTH/2 constante (ref: línea 615)
+                center_x = left_x + lane_half_px
+                center_dxdy = float(np.polyval(np.polyder(np.asarray(left_fit[0])), bev_y))
             else:
                 right_x = float(np.polyval(right_fit[0], bev_y))
-                center_x = right_x - (2.0 * single_line_center_factor * lane_half_px)
+                center_x = right_x - lane_half_px
+                center_dxdy = float(np.polyval(np.polyder(np.asarray(right_fit[0])), bev_y))
             lateral_left_m = -(center_x - center_bev_x) * bev_cm_per_px / 100.0
-            center_pts.append((forward_m, lateral_left_m))
+            center_pts.append((current_y_m, lateral_left_m))
+            # En coordenadas mundo: METER_PER_PIXEL_X == METER_PER_PIXEL_Y,
+            # entonces dx/dy_world == dx/dy_pixel. dy avanza por arc-length.
+            dy_m = density_m / math.sqrt(1.0 + center_dxdy * center_dxdy)
+            current_y_m += dy_m
 
         if len(center_pts) < 2:
             return None
@@ -1583,50 +1637,12 @@ Args:
         psi[:-1] = np.arctan2(diffs[:, 1], diffs[:, 0])
         psi[-1] = psi[-2]
 
-        # Anclaje conservador: si el polinomio sub-rotó (heading inicial mucho
-        # menor que el legacy near-field), corregir hacia el legacy. Si ya
-        # rota igual o más, dejar al polinomio. Esto ataca el caso del
-        # usuario ("dobló demasiado abierto" = under-correction) sin cortar
-        # la curva en frames donde el polinomio captó bien la curvatura.
+        # Sin anchors heading/lateral: el polinomio es el path. Si el
+        # detector subrota o desvía lateralmente, el problema está en los
+        # puntos del modelo o la calibración BEV — no se corrige post-hoc
+        # rotando/trasladando rígidamente con datos legacy ruidosos.
         anchor_applied = 0.0
-        if heading_hint_rad is not None and math.isfinite(float(heading_hint_rad)):
-            target_psi = -float(heading_hint_rad)  # CCW+ heading_err → body psi negative
-            initial_psi = float(psi[0])
-            target_mag = abs(target_psi)
-            initial_mag = abs(initial_psi)
-            same_sign = (target_psi * initial_psi) >= 0.0
-            under_rotation = (target_mag - initial_mag) > 0.08  # ~4.6°
-            sign_flip = (target_mag > 0.10) and (not same_sign)
-            if under_rotation or sign_flip:
-                delta_psi = target_psi - initial_psi
-                wrap = math.atan2(math.sin(delta_psi), math.cos(delta_psi))
-                # Rota rígidamente alrededor del primer waypoint — preserva la
-                # curvatura/forma del polinomio, solo gira el path entero.
-                anchor_x, anchor_y = float(center_arr[0, 0]), float(center_arr[0, 1])
-                cos_d = math.cos(wrap)
-                sin_d = math.sin(wrap)
-                rel = center_arr - np.array([anchor_x, anchor_y], dtype=float)
-                rotated = np.empty_like(rel)
-                rotated[:, 0] = rel[:, 0] * cos_d - rel[:, 1] * sin_d
-                rotated[:, 1] = rel[:, 0] * sin_d + rel[:, 1] * cos_d
-                center_arr = rotated + np.array([anchor_x, anchor_y], dtype=float)
-                psi = psi + wrap
-                anchor_applied = float(wrap)
-
-        # Lateral anchor: traslada el path para que el primer waypoint matchee
-        # al lateral_hint_m (= -direct_error_m legacy). Sin esto, en two_line
-        # el polinomio bajo-corrige (mid-bev difiere del midpoint a reference_y
-        # en píxeles que usa el legacy) y el coche "no le da bola al punto
-        # verde". Sólo aplica si la diferencia es significativa para evitar
-        # ruido de polyfit.
         lateral_anchor_applied = 0.0
-        if lateral_hint_m is not None and math.isfinite(float(lateral_hint_m)):
-            target_y = float(lateral_hint_m)
-            current_y = float(center_arr[0, 1])
-            delta_y = target_y - current_y
-            if abs(delta_y) > 0.02:  # 2 cm threshold — debajo es ruido del fit
-                center_arr[:, 1] += delta_y
-                lateral_anchor_applied = float(delta_y)
 
         center_waypoints_body = tuple(
             (float(center_arr[i, 0]), float(center_arr[i, 1]), float(psi[i]))
@@ -1645,11 +1661,8 @@ Args:
             },
             "heading_anchor_applied_rad": anchor_applied,
             "lateral_anchor_applied_m": lateral_anchor_applied,
-            "single_line_target_factor": (
-                float(single_line_center_factor)
-                if extrapolated_side is not None
-                else None
-            ),
+            # Estilo ref: centro geométrico fijo, sin factor configurable.
+            "single_line_target_factor": 0.5 if extrapolated_side is not None else None,
         }
 
     def _coerce_explicit_line(self, line_value, img_h, img_w):
@@ -8631,109 +8644,18 @@ Args:
 
 
     def _reclassify_masks_via_bev(self, side_masks, side_lines=None):
-        """Correct left/right lane mask classification using bird's eye view centroids.
+        """Pass-through (no-op).
 
-        In perspective space the x_center heuristic fails when the vehicle is
-        heading into a curve: the geometrically-right lane can appear on the
-        LEFT half of the camera frame.  In BEV (after homography warp) the x
-        position is metrically correct and unambiguous regardless of heading:
-        the left lane mask always has a smaller BEV x-centroid than the right.
-
-        Handles BOTH the two-mask case (swap detection) and the single-mask
-        case (wrong-side detection):
-          - Two masks present: swap if left_bev_cx > right_bev_cx.
-          - One mask present:  move to the correct side based on BEV x-centroid
-            relative to the BEV image centre.  This fixes single-line mode
-            misclassifications where the only visible line is near the image
-            centre in perspective but clearly on one side in BEV.
-
-        Returns (corrected_side_masks, corrected_side_lines, was_swapped).
-        Falls back without modification when BEV is not calibrated, masks are
-        empty, or an exception occurs.
+        La clasificación left/right ahora se hace upstream en
+        `LocalPerceptionEngine._split_candidates`, usando la posición X del
+        extremo más cercano al coche de cada componente conexo (`x_bottom`).
+        Eso replica el método del repo de referencia urt-ref (LaneDetector.hpp:
+        1008-1014 — `peak < W/2 → LEFT`) y elimina la necesidad de verificar
+        la asignación en BEV. Si en el futuro hace falta una verificación
+        adicional, reintroducir aquí — por ahora devolvemos los inputs sin
+        modificar.
         """
-        if not getattr(self, 'perspective_initialized', False):
-            return side_masks, side_lines, False
-        if not isinstance(side_masks, dict):
-            return side_masks, side_lines, False
-
-        left_mask = side_masks.get('left')
-        right_mask = side_masks.get('right')
-        has_left = isinstance(left_mask, np.ndarray) and left_mask.size > 0 and np.any(left_mask)
-        has_right = isinstance(right_mask, np.ndarray) and right_mask.size > 0 and np.any(right_mask)
-
-        if not has_left and not has_right:
-            return side_masks, side_lines, False
-
-        try:
-            # Pick any mask to get shape
-            ref_mask = left_mask if has_left else right_mask
-            h, w = ref_mask.shape[:2]
-            warp_size = (w, h)
-            min_area = max(2, int(w * h * 0.0002))
-            bev_center = w / 2.0
-
-            def _bev_cx(mask):
-                bev = cv2.warpPerspective(mask.astype(np.uint8), self.perspective_M, warp_size)
-                cols = np.where(bev > 0)[1]
-                return float(np.mean(cols)) if len(cols) >= min_area else None
-
-            if has_left and has_right:
-                # ── Two-mask case: detect swap ────────────────────────────────
-                lcx = _bev_cx(left_mask)
-                rcx = _bev_cx(right_mask)
-                self._last_bev_reclassify_debug = {
-                    'case': 'two_masks',
-                    'L_bev_cx': round(lcx, 1) if lcx is not None else None,
-                    'R_bev_cx': round(rcx, 1) if rcx is not None else None,
-                    'bev_center': round(bev_center, 1),
-                    'swapped': False,
-                }
-                if lcx is None or rcx is None:
-                    return side_masks, side_lines, False
-                if lcx > rcx:
-                    self._last_bev_reclassify_debug['swapped'] = True
-                    corrected_masks = {'left': right_mask, 'right': left_mask}
-                    corrected_lines = side_lines
-                    if isinstance(side_lines, dict):
-                        corrected_lines = {
-                            'left': side_lines.get('right'),
-                            'right': side_lines.get('left'),
-                        }
-                    return corrected_masks, corrected_lines, True
-                return side_masks, side_lines, False
-
-            else:
-                # ── Single-mask case: verify side via BEV centroid ────────────
-                present_side = 'left' if has_left else 'right'
-                present_mask = left_mask if has_left else right_mask
-                cx = _bev_cx(present_mask)
-                correct_side = None if cx is None else ('left' if cx < bev_center else 'right')
-                swapped = correct_side is not None and correct_side != present_side
-                self._last_bev_reclassify_debug = {
-                    'case': 'single_mask',
-                    'present_side': present_side,
-                    'bev_cx': round(cx, 1) if cx is not None else None,
-                    'bev_center': round(bev_center, 1),
-                    'correct_side': correct_side,
-                    'swapped': swapped,
-                }
-                if cx is None:
-                    return side_masks, side_lines, False
-                if swapped:
-                    corrected_masks = {'left': None, 'right': None}
-                    corrected_masks[correct_side] = present_mask
-                    corrected_lines = {'left': None, 'right': None}
-                    if isinstance(side_lines, dict):
-                        corrected_lines[correct_side] = side_lines.get(present_side)
-                    elif side_lines is None:
-                        corrected_lines = None
-                    return corrected_masks, corrected_lines, True
-                return side_masks, side_lines, False
-
-        except Exception:
-            pass
-
-        self._last_bev_reclassify_debug = {}
+        self._last_bev_reclassify_debug = {"case": "passthrough_no_op"}
         return side_masks, side_lines, False
 
     def _estimate_ground_distance_cm(self, box_normalized, img_w, img_h):

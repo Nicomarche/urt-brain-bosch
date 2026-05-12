@@ -1,13 +1,9 @@
 # tests/perception/test_lane_polynomial_heading_anchor.py
 #
-# Cubre el "heading anchor" del polinomio: cuando el polinomio sub-rota
-# en curvas (síntoma del usuario: "dobló demasiado abierto"), se rota
-# rígidamente para alinear con `heading_error_rad` del near-field legacy.
-#
-# La función `_extract_lane_polynomials_and_waypoints` necesita una
-# instancia de threadLineFollowing con muchas dependencias inicializadas;
-# en estos tests instanciamos una versión mínima vía `__new__` y seteamos
-# sólo los atributos que la función toca.
+# Estilo urt-ref: los anchors heading/lateral fueron eliminados. El path
+# visual sale 1:1 del polinomio fitteado y nunca se rota o traslada por
+# `heading_hint_rad`/`lateral_hint_m`. Estos tests verifican explícitamente
+# que llegada cualquier hint, el path queda sin modificar.
 
 from __future__ import annotations
 
@@ -81,81 +77,48 @@ class TestHeadingAnchor(unittest.TestCase):
         self.assertIsNotNone(out)
         self.assertEqual(out["heading_anchor_applied_rad"], 0.0)
 
-    def test_anchor_applies_when_polynomial_undershoots(self):
-        # Polinomio captura un carril casi recto pero el legacy near-field
-        # dice que hay un heading_error grande → anclar.
+    def test_heading_hint_is_ignored_in_ref_style(self):
+        # heading_hint_rad llega pero NO se aplica: el polinomio es el path.
+        # Si el detector subrota, se corrige mejorando los puntos del modelo
+        # o la calibración BEV, no con anchors legacy ruidosos.
         inst, h, w = _make_minimal_thread()
         pts = {
             "left": _straight_line_points(h, w, -120),
             "right": _straight_line_points(h, w, +120),
         }
+        baseline = inst._extract_lane_polynomials_and_waypoints(pts, h, w, heading_hint_rad=None)
         out = inst._extract_lane_polynomials_and_waypoints(pts, h, w, heading_hint_rad=0.4)
         self.assertIsNotNone(out)
-        anchor = float(out["heading_anchor_applied_rad"])
-        # heading_hint=+0.4 → target_psi=-0.4. Polinomio era recto → anchor ≈ -0.4.
-        self.assertLess(anchor, -0.30)
-        self.assertGreater(anchor, -0.50)
-        # El primer waypoint debe heading hacia la derecha (negativo en body math)
-        wpts = out["center_waypoints_body"]
-        self.assertGreaterEqual(len(wpts), 8)
-        self.assertLess(wpts[0][2], -0.30)
-
-    def test_anchor_flips_sign_when_polynomial_curves_wrong_direction(self):
-        # Polinomio inclinado hacia la IZQUIERDA (heading positivo en body)
-        # pero legacy heading_error=+0.3 (lane CW de car → target body psi
-        # NEGATIVO). Sign flip claro → anchor.
-        inst, h, w = _make_minimal_thread()
-        pts = {
-            "left": [(img_x, y) for y, img_x in zip(
-                np.linspace(h * 0.6, h, 30),
-                np.linspace(w / 2.0 - 200, w / 2.0 - 80, 30),
-            )],
-            "right": [(img_x, y) for y, img_x in zip(
-                np.linspace(h * 0.6, h, 30),
-                np.linspace(w / 2.0 + 80, w / 2.0 + 200, 30),
-            )],
-        }
-        out = inst._extract_lane_polynomials_and_waypoints(pts, h, w, heading_hint_rad=+0.3)
-        self.assertIsNotNone(out)
-        self.assertNotEqual(out["heading_anchor_applied_rad"], 0.0)
-        # target_psi=-0.3 → primer waypoint psi negativo después del anchor
-        wpts = out["center_waypoints_body"]
-        self.assertLess(wpts[0][2], -0.10)
+        self.assertEqual(out["heading_anchor_applied_rad"], 0.0)
+        # Con o sin hint, los waypoints deben ser idénticos: el path es el
+        # polinomio, no se rota.
+        for base_wp, out_wp in zip(
+            baseline["center_waypoints_body"], out["center_waypoints_body"]
+        ):
+            self.assertAlmostEqual(base_wp[0], out_wp[0], places=6)
+            self.assertAlmostEqual(base_wp[1], out_wp[1], places=6)
+            self.assertAlmostEqual(base_wp[2], out_wp[2], places=6)
 
 
 class TestLateralAnchor(unittest.TestCase):
-    def test_lateral_anchor_aligns_first_waypoint_with_hint(self):
+    def test_lateral_hint_is_ignored_in_ref_style(self):
+        # lateral_hint_m llega pero NO se aplica.
         inst, h, w = _make_minimal_thread()
         pts = {
             "left": _straight_line_points(h, w, -120),
             "right": _straight_line_points(h, w, +120),
         }
-        # Sin hint: el path centra ~0
+        # Sin hint
         baseline = inst._extract_lane_polynomials_and_waypoints(pts, h, w)
         self.assertIsNotNone(baseline)
         baseline_y0 = baseline["center_waypoints_body"][0][1]
 
-        # Con hint = +0.10 m (lane center 10 cm a la izquierda en body)
+        # Con hint = +0.10 m: NO debe trasladarse el path.
         out = inst._extract_lane_polynomials_and_waypoints(pts, h, w, lateral_hint_m=+0.10)
         self.assertIsNotNone(out)
-        anchored_y0 = out["center_waypoints_body"][0][1]
-        self.assertAlmostEqual(anchored_y0, 0.10, places=4)
-        self.assertNotEqual(out["lateral_anchor_applied_m"], 0.0)
-        # La forma se preserva: shift de todos los puntos por el mismo delta
-        delta = anchored_y0 - baseline_y0
-        for orig, anchored in zip(baseline["center_waypoints_body"], out["center_waypoints_body"]):
-            self.assertAlmostEqual(anchored[1] - orig[1], delta, places=4)
-
-    def test_lateral_anchor_skipped_when_difference_below_threshold(self):
-        inst, h, w = _make_minimal_thread()
-        pts = {
-            "left": _straight_line_points(h, w, -120),
-            "right": _straight_line_points(h, w, +120),
-        }
-        # Polinomio centra ~0; hint también ~0 (diff < 2 cm) → skip
-        out = inst._extract_lane_polynomials_and_waypoints(pts, h, w, lateral_hint_m=0.005)
-        self.assertIsNotNone(out)
         self.assertEqual(out["lateral_anchor_applied_m"], 0.0)
+        anchored_y0 = out["center_waypoints_body"][0][1]
+        self.assertAlmostEqual(anchored_y0, baseline_y0, places=4)
 
 
 class TestVisualWaypointPayloadFallback(unittest.TestCase):

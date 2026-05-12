@@ -577,6 +577,61 @@ def _format_acados_required_error(acados: AcadosMPC) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Kink guard — corrige el path antes de pasarlo al solver.
+# ---------------------------------------------------------------------------
+def _kink_guard(
+    state_refs_solver: np.ndarray,
+    x_current: np.ndarray,
+) -> np.ndarray:
+    """Elimina waypoints iniciales en el lado lateral equivocado (kink).
+
+    Al inicio de cada lanelet, la geometría de transición puede colocar los
+    primeros waypoints al lado contrario del heading del robot respecto al
+    destino del path. Esto hace que ACADOS y pure-pursuit computen steer con
+    signo invertido — confirmado visualmente en lanelets 90, 996 y 120.
+
+    Detecta el cruce comparando el cross-product heading→waypoint_i con el
+    del último waypoint (que está en el lado correcto). Los waypoints antes
+    del cruce se descartan y el path avanza, repitiendo el último waypoint
+    para conservar la longitud N+1.
+    """
+    if len(state_refs_solver) < 4:
+        return state_refs_solver
+
+    cx = float(x_current[0])
+    cy = float(x_current[1])
+    yaw = float(x_current[2])
+    hx, hy = math.cos(yaw), math.sin(yaw)
+
+    # Dirección global del path: vector ego → último waypoint.
+    lx = float(state_refs_solver[-1, 0]) - cx
+    ly = float(state_refs_solver[-1, 1]) - cy
+    cross_last = hx * ly - hy * lx  # >0: destino a la IZQUIERDA del heading
+
+    if abs(cross_last) < 0.05:  # path casi recto — sin kink lateral relevante
+        return state_refs_solver
+
+    # Primer waypoint en el mismo lado lateral que el destino.
+    i_cross: int | None = None
+    for i, wp in enumerate(state_refs_solver):
+        wx = float(wp[0]) - cx
+        wy = float(wp[1]) - cy
+        if (hx * wy - hy * wx) * cross_last >= 0:  # mismo lado → pasamos el cruce
+            i_cross = i
+            break
+
+    if i_cross is None or i_cross == 0:
+        return state_refs_solver  # sin kink o todos en el lado equivocado
+
+    # Desplazar el path hacia adelante; rellenar el final con el último waypoint.
+    out = np.empty_like(state_refs_solver)
+    n_keep = len(state_refs_solver) - i_cross
+    out[:n_keep] = state_refs_solver[i_cross:]
+    out[n_keep:] = state_refs_solver[-1]
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Capa de contrato. ÚNICO punto que produce MotorCommand.
 # ---------------------------------------------------------------------------
 class MotionController(IMotionController):
@@ -943,18 +998,34 @@ class MotionController(IMotionController):
         # while the bicycle model in Acados/PurePursuit expects the standard
         # ENU/CCW convention with `+delta = left`. Mirror Y here so both the
         # solver state and the reference corridor live in the same handedness.
-        x_current = _osm_pose_to_controller_frame(
-            pose.fused_pose.x,
-            pose.fused_pose.y,
-            pose.fused_pose.yaw,
+        notes = getattr(behavior_output, "notes", None)
+        path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
+        # Opción C (Paso 6): cuando el path viene en frame body (visual
+        # primary), el ego también vive en frame body — x_current = (0, 0, 0).
+        # Esto desacopla el OCP del yaw del EKF (que sin encoder deriva
+        # varios grados por minuto) y evita que el `yaw_cost` del MPC
+        # introduzca steering parásito.
+        path_frame_body = bool(
+            isinstance(notes, dict) and notes.get("visual_path_frame_body")
         )
-        state_refs_solver = _osm_states_to_controller_frame(state_refs)
+        if path_frame_body and path_source == "visual_lane_waypoints":
+            x_current = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+            state_refs_solver = _osm_states_to_controller_frame(state_refs)
+        else:
+            x_current = _osm_pose_to_controller_frame(
+                pose.fused_pose.x,
+                pose.fused_pose.y,
+                pose.fused_pose.yaw,
+            )
+            state_refs_solver = _osm_states_to_controller_frame(state_refs)
 
         input_refs = np.zeros((n, 2), dtype=np.float64)
         input_refs[:, 0] = speed_profile  # v_ref
         # input_refs[:, 1] = 0  # delta_ref (steering ref siempre 0)
-        notes = getattr(behavior_output, "notes", None)
-        path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
+
+        # Kink guard: elimina waypoints iniciales en el lado lateral equivocado.
+        # Confirmado visualmente en lanelets 90, 996 (route) y visual frame.
+        state_refs_solver = _kink_guard(state_refs_solver, x_current)
 
         # 5. Llamar al solver. Si devuelve None, el OCP no resolvió.
         result = self._solver.compute(

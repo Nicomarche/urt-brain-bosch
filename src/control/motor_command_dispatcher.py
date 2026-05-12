@@ -35,9 +35,18 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 from src.control.safety_gate import SafetyGate
+
+# Shadow mode: gate paralelo al state-gate de abajo. Si está activo, el
+# dispatcher NUNCA escribe SpeedMotor/SteerMotor independientemente del
+# estado — solo el `live_log("dispatcher", event="dispatch_decision", ...)`
+# sigue corriendo (queda arriba del check), así que conservamos la traza
+# completa de lo que el MPC habría comandado mientras el operador maneja
+# en MANUAL desde la GUI.
+_SHADOW_PLANNER = os.environ.get("URT_SHADOW_PLANNER", "0") == "1"
 from src.core.messaging.allMessages import (
     MotorCommandMsg,
     SpeedMotor,
@@ -175,7 +184,10 @@ class threadMotorCommandDispatcher(ThreadWithStop):
 
         # Si el estado no es operativo, no escribimos. El gate sigue
         # corriendo (logging continúa para diagnóstico).
-        if self._current_state not in {"AUTO", "ODOMETRY", "PARKING"}:
+        # `URT_SHADOW_PLANNER=1` fuerza no-actuar incluso si el state fuera
+        # operativo, dejando al MPC corriendo en shadow para un operador en
+        # MANUAL desde la GUI.
+        if _SHADOW_PLANNER or self._current_state not in {"AUTO", "ODOMETRY", "PARKING"}:
             return
 
         self._send(cmd)

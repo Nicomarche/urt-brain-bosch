@@ -33,9 +33,18 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
+
+# Shadow mode: si está activo, el planner sigue planeando aunque el modo
+# no sea AUTO/ODOMETRY. Sirve para correr el MPC en "modo fantasma" mientras
+# un operador maneja en MANUAL, comparando offline lo que el controlador
+# quería hacer vs lo que la persona realmente hizo. El dispatcher tiene un
+# gate paralelo que NUNCA actúa motores cuando este flag está activo, así
+# que es seguro dejar el plan corriendo: no toca al hardware.
+_SHADOW_PLANNER = os.environ.get("URT_SHADOW_PLANNER", "0") == "1"
 
 from src.behavior.context import PlanningContext
 from src.core.messaging.allMessages import BehaviorOutputMsg, BehaviorPlannerStatus, StateChange
@@ -234,7 +243,11 @@ class threadBehaviorPlanner(ThreadWithStop):
             pass
 
         # Fuera de modos autónomos no planear ni correr el MPC.
-        if self._current_mode not in {"AUTO", "ODOMETRY"}:
+        # Excepción: `URT_SHADOW_PLANNER=1` deja al planner corriendo en
+        # cualquier modo para que el MPC compute "lo que haría" mientras un
+        # operador maneja en MANUAL. El dispatcher bloquea la actuación en
+        # paralelo, así que el plan queda como log-only.
+        if self._current_mode not in {"AUTO", "ODOMETRY"} and not _SHADOW_PLANNER:
             self._current_speed_mps = 0.0
             self._publish_empty(reason="mode_not_auto")
             return

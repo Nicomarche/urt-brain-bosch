@@ -37,6 +37,28 @@ from src.utils.live_log import live_log
 if TYPE_CHECKING:
     from src.routing.lanelet.lanelet_map import LaneletMap
 
+try:
+    from config import BEHAVIOR_APEX_GAIN as _APEX_GAIN
+    from config import BEHAVIOR_APEX_LOOKAHEAD_M as _APEX_LOOKAHEAD_M
+    from config import BEHAVIOR_APEX_SENSITIVITY_M as _APEX_SENSITIVITY_M
+    from config import LANE_WIDTH_CM as _LANE_WIDTH_CM_TB
+    from config import BEHAVIOR_VEHICLE_WIDTH_M as _BEHAVIOR_VEHICLE_WIDTH_M_TB
+    from config import BEHAVIOR_CONTAINMENT_CLEARANCE_M as _BEHAVIOR_CONTAINMENT_CLEARANCE_M_TB
+except Exception:
+    _APEX_GAIN = 0.0
+    _APEX_LOOKAHEAD_M = 1.5
+    _APEX_SENSITIVITY_M = 0.4
+    _LANE_WIDTH_CM_TB = 37.0
+    _BEHAVIOR_VEHICLE_WIDTH_M_TB = 0.19
+    _BEHAVIOR_CONTAINMENT_CLEARANCE_M_TB = 0.01
+
+_APEX_SAFE_HALF_WIDTH_M = max(
+    0.0,
+    float(_LANE_WIDTH_CM_TB) / 200.0
+    - float(_BEHAVIOR_VEHICLE_WIDTH_M_TB) * 0.5
+    - float(_BEHAVIOR_CONTAINMENT_CLEARANCE_M_TB),
+)
+
 
 _STRAIGHT_ROUTE_HEADING_TOL_DEG = 8.0
 _STRAIGHT_HOLD_MAX_YAW_DELTA_DEG = 8.0
@@ -134,6 +156,7 @@ def build_target_path(
     psi = _compute_headings(sampled_xy)
 
     target_path = np.column_stack([sampled_xy, psi])
+    target_path = _apply_apex_offset(target_path, step_arc_m=step_arc)
     live_log(
         "trajectory_builder", event="target_path_built",
         start_lanelet_id=str(start_lanelet_id),
@@ -369,6 +392,7 @@ def build_target_path_from_route(
 
     headings = _compute_headings(polyline_xy)
     target_path = np.column_stack([polyline_xy, headings])
+    target_path = _apply_apex_offset(target_path, step_arc_m=step_arc)
     live_log(
         "trajectory_builder", event="route_target_path_built",
         matched_idx=int(idx0),
@@ -413,8 +437,9 @@ def build_target_path_from_visual(
     dt: float,
     *,
     connect_from_ego_pose: bool = True,
+    frame_body: bool = False,
 ) -> np.ndarray:
-    """Construye target_path (N+1, 3) en frame OSM/mapa a partir de waypoints visuales.
+    """Construye target_path (N+1, 3) a partir de waypoints visuales.
 
     Replica el paradigma de `urt-ref::LaneDetector::get_waypoints` →
     `state_refs` del solver acados: la percepción ya trae la curva del
@@ -447,16 +472,26 @@ def build_target_path_from_visual(
         para no dejar un gap en el path; en `single_line` puede crear una
         diagonal artificial que hace que el MPC "entre a doblar" demasiado
         pronto, así que el caller puede desactivarlo.
+      frame_body: si True (Opción C del plan), ignora `ego_pose` y produce
+        el path en frame body del coche (pose tratada como (0,0,0)). Esto
+        desacopla el path visual del drift de yaw del EKF — cuando la
+        localización global tiene error, el MPC ve un path que sigue
+        siendo coherente porque vive en el frame del coche. El caller
+        (motion_controller) debe usar la misma convención para `x_current`
+        cuando `path_source=="visual_lane_waypoints"`.
 
     Returns:
-      ndarray (N+1, 3) con `(x, y, psi)` en frame OSM/mapa. Si el
-      polinomio no cubre todo el horizonte, los samples sobrantes se
-      extienden en línea recta con el yaw del último waypoint
-      transformado (no se extrapola el polinomio fuera de su rango).
+      ndarray (N+1, 3) con `(x, y, psi)`. En frame OSM/mapa cuando
+      `frame_body=False`; en frame body del coche cuando `frame_body=True`.
     """
-    pose_x = float(getattr(ego_pose, "x", 0.0) or 0.0)
-    pose_y = float(getattr(ego_pose, "y", 0.0) or 0.0)
-    pose_yaw = float(getattr(ego_pose, "yaw", 0.0) or 0.0)
+    if frame_body:
+        pose_x = 0.0
+        pose_y = 0.0
+        pose_yaw = 0.0
+    else:
+        pose_x = float(getattr(ego_pose, "x", 0.0) or 0.0)
+        pose_y = float(getattr(ego_pose, "y", 0.0) or 0.0)
+        pose_yaw = float(getattr(ego_pose, "yaw", 0.0) or 0.0)
     if horizon_n <= 0:
         return np.array([[pose_x, pose_y, pose_yaw]], dtype=float)
 
@@ -535,6 +570,48 @@ def build_target_path_from_visual(
         ],
     )
     return target_path
+
+
+def _apply_apex_offset(
+    path: np.ndarray,
+    step_arc_m: float,
+) -> np.ndarray:
+    """Desplaza cada waypoint hacia el interior de la curva próxima (apex anticipation).
+
+    Para cada punto k, calcula la curvatura media de los próximos
+    BEHAVIOR_APEX_LOOKAHEAD_M metros y aplica un offset lateral hacia el
+    interior de esa curva. El controlador deja de corregir al conductor cuando
+    éste ya está en la posición óptima para el giro.
+
+    Sin efecto si BEHAVIOR_APEX_GAIN == 0 (default). La dirección de offset usa
+    la perpendicular derecha del frame OSM (y-sur): (-sin(ψ), cos(ψ)).
+    Curvatura CW+ → curva a la derecha → offset hacia la derecha (interior).
+    """
+    gain = float(_APEX_GAIN)
+    if gain <= 0.0 or _APEX_SAFE_HALF_WIDTH_M <= 0.0:
+        return path
+
+    n = path.shape[0]
+    lookahead_steps = max(1, int(math.ceil(float(_APEX_LOOKAHEAD_M) / max(float(step_arc_m), 1e-6))))
+    sensitivity = max(1e-6, float(_APEX_SENSITIVITY_M))
+    result = np.array(path, copy=True)
+
+    for k in range(n):
+        end = min(k + lookahead_steps + 1, n)
+        if end - k < 2:
+            continue
+        arc_len = (end - k) * float(step_arc_m)
+        delta_psi = _wrap_angle(float(path[end - 1, 2]) - float(path[k, 2]))
+        curvature = delta_psi / max(arc_len, 1e-6)  # rad/m, CW+ en OSM
+
+        offset_fraction = max(-1.0, min(1.0, curvature * sensitivity))
+        offset_m = gain * offset_fraction * _APEX_SAFE_HALF_WIDTH_M
+
+        psi_k = float(path[k, 2])
+        result[k, 0] = path[k, 0] + offset_m * (-math.sin(psi_k))
+        result[k, 1] = path[k, 1] + offset_m * math.cos(psi_k)
+
+    return result
 
 
 def _trim_nonforward_visual_prefix(

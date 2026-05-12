@@ -125,6 +125,13 @@ class BaseScenario(ABC):
         )
         if use_visual_path:
             connect_visual_path_from_ego = False
+            # Opción C (paso 6): cuando la fuente del path es visual, lo
+            # entregamos al MPC en frame body. El motion_controller debe
+            # detectar `path_source=="visual_lane_waypoints"` y usar
+            # `x_current=(0,0,0)` para resolver el OCP en el mismo frame.
+            visual_path_frame_body = bool(
+                getattr(_config, "LANE_VISUAL_PATH_FRAME_BODY", True)
+            )
             target_path = build_target_path_from_visual(
                 center_waypoints_body=lane_obs.center_waypoints_body,
                 ego_pose=ctx.pose.fused_pose,
@@ -132,11 +139,13 @@ class BaseScenario(ABC):
                 horizon_n=ctx.horizon_n,
                 dt=ctx.dt,
                 connect_from_ego_pose=connect_visual_path_from_ego,
+                frame_body=visual_path_frame_body,
             )
             notes.setdefault("path_source", "visual_lane_waypoints")
             notes.setdefault("recovery_source", "visual_lane_waypoints")
             notes["visual_lane_waypoint_count"] = int(len(lane_obs.center_waypoints_body or ()))
             notes["visual_path_connected_from_ego_pose"] = bool(connect_visual_path_from_ego)
+            notes["visual_path_frame_body"] = bool(visual_path_frame_body)
             if lane_obs.extrapolated_side:
                 notes["visual_lane_extrapolated_side"] = str(lane_obs.extrapolated_side)
             if lane_obs.lane_width_m is not None:
@@ -181,7 +190,10 @@ class BaseScenario(ABC):
         else:
             return self._fallback_plan(ctx, reason="no_lanelet_map_or_id")
         if lane_obs is not None and _supports_visual_lane_reentry_bias(lane_obs):
-            notes["visual_lane_error_m"] = float(lane_obs.direct_error_m or 0.0)
+            control_error_m = getattr(lane_obs, "control_lateral_error_m", None)
+            notes["visual_lane_error_m"] = float(
+                control_error_m if control_error_m is not None else (lane_obs.direct_error_m or 0.0)
+            )
             notes["visual_lane_quality"] = float(lane_obs.quality or 0.0)
         speed_profile = np.full(ctx.horizon_n, float(target_speed_mps), dtype=float)
         stop_required = False
@@ -221,7 +233,10 @@ def _supports_visual_lane_reentry_bias(lane_observation) -> bool:
         and bool(getattr(lane_observation, "direct_error_valid", False))
         and str(getattr(lane_observation, "measurement_mode", "none")) == "two_line"
         and float(getattr(lane_observation, "quality", 0.0) or 0.0) >= 0.8
-        and getattr(lane_observation, "direct_error_m", None) is not None
+        and (
+            getattr(lane_observation, "control_lateral_error_m", None) is not None
+            or getattr(lane_observation, "direct_error_m", None) is not None
+        )
     )
 
 
@@ -272,70 +287,47 @@ def _select_visual_primary_path(
         return True, reason
 
     if measurement_mode == "single_line":
+        # Estilo urt-ref: cuando se pierde una línea, el detector sintetiza la
+        # ausente desplazando lane_width sobre el polinomio visible. El path
+        # resultante mantiene la curvatura del polinomio — es tan válido como
+        # two_line. Por eso bajamos el bar de aceptación a `0.6` y eliminamos
+        # los gates redundantes (transition_error_coherent, streak, map_match
+        # obligatorio, assist_primary). Mantenemos solo: calidad mínima y los
+        # waypoints viables (que ya validó `lane_observation_has_visual_path`
+        # antes de llegar acá).
         min_single_quality = float(
-            getattr(_config, "LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY", 0.75)
+            getattr(_config, "LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_QUALITY", 0.6)
         )
-        min_single_streak = int(
-            getattr(_config, "LANE_VISUAL_SINGLE_LINE_PRIMARY_MIN_STREAK_FRAMES", 6)
-        )
-        planner_priority = bool(getattr(lane_observation, "planner_priority_active", False))
-        if not bool(getattr(lane_observation, "transition_error_coherent", True)):
-            return False, "single_line_transition_error_jump"
         quality = float(getattr(lane_observation, "quality", 0.0) or 0.0)
         if quality < min_single_quality:
             return False, "single_line_quality_below_primary"
-        single_line_streak = int(
-            getattr(lane_observation, "measurement_mode_streak_frames", 0) or 0
-        )
-        if (
-            route_corridor_available or lanelet_corridor_available
-        ) and single_line_streak < max(1, min_single_streak):
-            return False, "single_line_transition_assist"
-        visual_map_match_gate = _visual_map_match_primary_gate(
-            ctx,
-            measurement_mode=measurement_mode,
-            route_corridor_available=route_corridor_available,
-            lanelet_corridor_available=lanelet_corridor_available,
-        )
-        if visual_map_match_gate is not None:
-            return False, visual_map_match_gate
-        assist_primary = False
-        if not planner_priority:
-            assist_primary_enabled = bool(
-                getattr(_config, "LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_ENABLED", True)
-            )
-            assist_min_quality = float(
-                getattr(
-                    _config,
-                    "LANE_VISUAL_SINGLE_LINE_ASSIST_PRIMARY_MIN_QUALITY",
-                    max(0.82, min_single_quality),
-                )
-            )
-            control_policy = str(
-                getattr(lane_observation, "control_policy_mode", "") or ""
-            ).upper()
-            assist_primary = (
-                assist_primary_enabled
-                and quality >= assist_min_quality
-                and control_policy in {"VISUAL_ASSIST", "ROUTE_TRACKING", "LANE_KEEP", ""}
-            )
-            if not assist_primary:
-                return False, "single_line_visual_assist_only"
-        if not bool(getattr(lane_observation, "direct_error_valid", False)):
-            reason = "single_line_primary_path_only"
-            if route_corridor_available or lanelet_corridor_available:
-                reason = "single_line_visual_primary_over_route_path_only"
-            if assist_primary:
-                reason = "single_line_visual_assist_primary_over_route_path_only"
-            return True, reason
         reason = "single_line_primary"
         if route_corridor_available or lanelet_corridor_available:
             reason = "single_line_visual_primary_over_route"
-        if assist_primary:
-            reason = "single_line_visual_assist_primary_over_route"
         return True, reason
 
     return False, f"unsupported_measurement_mode:{measurement_mode}"
+
+
+def _visual_heading_change_rad(lane_obs) -> float:
+    """Signed heading change (rad) over visual lane center waypoints in body frame.
+
+    Positive = left curve, negative = right curve — same convention as
+    route.path_heading_change_rad so the two values can be compared directly.
+    Returns 0.0 on any missing / malformed data.
+    """
+    try:
+        wps = tuple(getattr(lane_obs, "center_waypoints_body", None) or ())
+        if len(wps) < 2:
+            return 0.0
+        delta = float(wps[-1][2]) - float(wps[0][2])
+        while delta > math.pi:
+            delta -= 2.0 * math.pi
+        while delta < -math.pi:
+            delta += 2.0 * math.pi
+        return delta
+    except (TypeError, ValueError, IndexError):
+        return 0.0
 
 
 def _route_precision_context(ctx: PlanningContext) -> str | None:
@@ -348,6 +340,90 @@ def _route_precision_context(ctx: PlanningContext) -> str | None:
     ).lower()
     if semantic in {"intersection", "stopline", "crosswalk", "parking", "roundabout"}:
         return f"route_precision_context:{semantic}"
+    # Detección geométrica de intersección: si el path GPS del próximo
+    # tramo tiene un cambio de heading grande (>25°), el coche está
+    # entrando a un giro de intersección. En esos casos el visual sigue
+    # ciegamente las líneas rectas del cruce y no dobla; debemos preferir
+    # la ruta GPS que conoce la geometría del giro.
+    try:
+        heading_change_rad = abs(float(getattr(route, "path_heading_change_rad", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        heading_change_rad = 0.0
+    heading_change_threshold_rad = float(
+        getattr(_config, "LANE_VISUAL_ROUTE_INTERSECTION_HEADING_CHANGE_RAD", 0.436)
+    )  # default ≈ 25°
+    if heading_change_rad >= heading_change_threshold_rad:
+        # Override visual: cuando la cámara ve un two_line con quality ≥ umbral,
+        # tiene la geometría REAL de la curva, no la del OSM. Esto se origina
+        # en el run manual run_manual_20260511_192422 donde lanelets 60/70/85
+        # reportaron heading_change OSM de 79-90° (artifacts del mapa) mientras
+        # la visual veía una curva continua con q=1.0; el operador siguió la
+        # cámara y mantuvo la trayectoria, el MPC siguió OSM y habría comandado
+        # ±25° en sentido opuesto. El semántico-check de arriba (intersection /
+        # stopline / crosswalk / parking / roundabout) queda intacto: en
+        # cruces reales sin línea continua sí necesitamos la ruta.
+        override_enabled = bool(
+            getattr(_config, "LANE_VISUAL_OVERRIDES_HEADING_CHANGE_RULE", True)
+        )
+        if override_enabled:
+            lane = getattr(ctx, "lane_observation", None)
+            if lane is not None:
+                mode = str(getattr(lane, "measurement_mode", "") or "")
+                quality = float(getattr(lane, "quality", 0.0) or 0.0)
+                min_quality = float(
+                    getattr(
+                        _config,
+                        "LANE_VISUAL_OVERRIDE_HEADING_CHANGE_MIN_QUALITY",
+                        0.95,
+                    )
+                )
+                if mode == "two_line" and quality >= min_quality:
+                    # Verificación de dirección: si la visual apunta en sentido
+                    # opuesto a la ruta, es una bifurcación donde la cámara ve
+                    # ambas ramas y el centro calculado apunta al fork incorrecto.
+                    # En ese caso NO hacer el override — usar la ruta.
+                    route_heading_signed = float(
+                        getattr(route, "path_heading_change_rad", 0.0) or 0.0
+                    )
+                    visual_change_rad = _visual_heading_change_rad(lane)
+                    conflict_threshold_rad = float(
+                        getattr(_config, "LANE_VISUAL_ROUTE_CONFLICT_MIN_RAD", 0.174)
+                    )
+                    if (
+                        abs(visual_change_rad) >= conflict_threshold_rad
+                        and visual_change_rad * route_heading_signed < 0
+                    ):
+                        return (
+                            f"route_precision_context:visual_route_conflict_"
+                            f"{math.degrees(visual_change_rad):.0f}vs"
+                            f"{math.degrees(route_heading_signed):.0f}deg"
+                        )
+                    return None
+        return f"route_precision_context:turn_heading_change_{math.degrees(heading_change_rad):.0f}deg"
+    # Chequeo de alineación: si el heading del robot difiere del waypoint de ruta
+    # en más del umbral, el robot está entrando a una bifurcación o giro donde la
+    # cámara ve ambas ramas y genera un centro erróneo. Este chequeo persiste
+    # naturalmente hasta que el robot gire y se alinee con la ruta.
+    # Se evalúa sobre el waypoint actual Y el siguiente para ser robusto a la
+    # oscilación del matched_idx (el localizador alterna entre idx y idx+1 en bordes).
+    try:
+        route_waypoints = list(getattr(route, "route_waypoints", None) or [])
+        matched_idx = int(getattr(route, "matched_idx", 0) or 0)
+        robot_yaw = float(ctx.pose.fused_pose.yaw)
+        alignment_delta_rad = 0.0
+        n_wps = len(route_waypoints)
+        for check_idx in (matched_idx, min(matched_idx + 1, n_wps - 1)):
+            if 0 <= check_idx < n_wps:
+                wp_yaw = float(route_waypoints[check_idx][2])
+                d = (wp_yaw - robot_yaw + math.pi) % (2.0 * math.pi) - math.pi
+                alignment_delta_rad = max(alignment_delta_rad, abs(d))
+    except (TypeError, ValueError, IndexError):
+        alignment_delta_rad = 0.0
+    alignment_threshold_rad = float(
+        getattr(_config, "LANE_VISUAL_ROUTE_ALIGNMENT_MAX_RAD", 0.349)  # 20°
+    )
+    if alignment_delta_rad >= alignment_threshold_rad:
+        return f"route_precision_context:heading_misaligned_{math.degrees(alignment_delta_rad):.0f}deg"
     return None
 
 
