@@ -31,7 +31,6 @@ from src.routing.lanelet.attributes import (
     ATTR_NORMAL, ATTR_CROSSWALK, ATTR_INTERSECTION, ATTR_ONEWAY,
     ATTR_HIGHWAY_LEFT, ATTR_HIGHWAY_RIGHT, ATTR_ROUNDABOUT, ATTR_STOPLINE,
 )
-from src.dashboard.gui.widgets._map_alignment import map_to_texture_point
 
 # BGR node colours
 _NODE_COLORS = {
@@ -102,7 +101,6 @@ class TrackVisualizer(threading.Thread):
         self._texture_x_min     = 0.0
         self._texture_y_min     = 0.0
         self._y_axis_inverted   = True
-        self._map_to_texture_transform = {}
         self._img_w             = None
         self._img_h             = None
 
@@ -170,13 +168,8 @@ class TrackVisualizer(threading.Thread):
     def _world_to_px(self, x: float, y: float):
         """Convert world metres → integer canvas pixel coordinates."""
         if self._use_image_coords:
-            # world → image pixel (Y-flip: in the image y=0 is top, world y=0 is bottom)
-            texture_x, texture_y = map_to_texture_point(
-                (float(x), float(y)),
-                self._map_to_texture_transform,
-            )
-            img_x = (texture_x - self._texture_x_min) / self._meters_per_pixel_x
-            local_y = (texture_y - self._texture_y_min) / self._meters_per_pixel_y
+            img_x = (float(x) - self._texture_x_min) / self._meters_per_pixel_x
+            local_y = (float(y) - self._texture_y_min) / self._meters_per_pixel_y
             img_y = self._img_h - local_y if self._y_axis_inverted else local_y
             px = int(self._img_offset_x + img_x * self._img_scale)
             py = int(self._img_offset_y + img_y * self._img_scale)
@@ -254,7 +247,6 @@ class TrackVisualizer(threading.Thread):
                 imgW = jdata.get('imgW')
                 imgH = jdata.get('imgH')
                 bounds = jdata.get('world_bounds') or {}
-                map_to_texture = jdata.get('map_to_texture') or {}
                 raw  = self._load_background_image(bg_image_path, bg_svg_path,
                                                    target_width_px=imgW)
                 if raw is not None and mpp_x and mpp_y and imgW and imgH:
@@ -271,15 +263,12 @@ class TrackVisualizer(threading.Thread):
                     bg = np.zeros((canvas_size, canvas_size, 3), dtype=np.uint8)
                     bg[off_y:off_y + new_h, off_x:off_x + new_w] = resized
                     self._use_image_coords = True
-                    self._meters_per_pixel = mpp
-                    self._meters_per_pixel_x = mpp_x
-                    self._meters_per_pixel_y = mpp_y
+                    self._meters_per_pixel = mpp or mpp_x
+                    self._meters_per_pixel_x = float(mpp_x)
+                    self._meters_per_pixel_y = float(mpp_y)
                     self._texture_x_min = float(bounds.get('x_min', 0.0) or 0.0)
                     self._texture_y_min = float(bounds.get('y_min', 0.0) or 0.0)
                     self._y_axis_inverted = bool(jdata.get('y_axis_inverted', True))
-                    self._map_to_texture_transform = (
-                        dict(map_to_texture) if isinstance(map_to_texture, dict) else {}
-                    )
                     self._img_w      = imgW
                     self._img_h      = imgH
                     self._img_scale  = s
@@ -287,7 +276,7 @@ class TrackVisualizer(threading.Thread):
                     self._img_offset_y = off_y
                     src = bg_svg_path or bg_image_path or "<unknown>"
                     print(f"[TrackVisualizer] Background loaded: {src} "
-                          f"({imgW}×{imgH}px, {mpp_x:.6f}×{mpp_y:.6f} m/px)")
+                          f"({imgW}×{imgH}px, {float(mpp_x):.6f}×{float(mpp_y):.6f} m/px)")
             except Exception as e:
                 print(f"[TrackVisualizer] Warning — background not loaded: {e}")
 

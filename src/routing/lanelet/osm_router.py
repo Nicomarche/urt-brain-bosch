@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import heapq
+import json
 import math
 import os
 from dataclasses import dataclass
@@ -50,7 +51,11 @@ class OsmRouteGraph:
         self.step_m = float(step_m)
         self._osm_path = os.path.abspath(osm_path)
         self.lanelet_map = load_lanelet2_osm(self._osm_path, step_m=self.step_m)
-        self.map_metadata = self.lanelet_map.get_map_metadata()
+        self.map_metadata = self._load_effective_map_metadata(self.lanelet_map.get_map_metadata())
+        try:
+            self.lanelet_map._map_metadata = dict(self.map_metadata)
+        except Exception:
+            pass
 
         self._start_lanelet_id = self._resolve_start_lanelet_id(start_lanelet_id)
         self.reference_node_ids, closed_loop = self._build_reference_loop(self._start_lanelet_id)
@@ -66,6 +71,66 @@ class OsmRouteGraph:
 
     def get_map_metadata(self) -> dict:
         return dict(self.map_metadata)
+
+    def _load_effective_map_metadata(self, osm_metadata: dict) -> dict:
+        metadata = dict(osm_metadata or {})
+        meta_path = os.path.join(os.path.dirname(self._osm_path), "track_meta.json")
+        if not os.path.exists(meta_path):
+            return metadata
+        try:
+            with open(meta_path, "r", encoding="utf-8") as fh:
+                track_meta = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return metadata
+        if not isinstance(track_meta, dict):
+            return metadata
+
+        bounds = track_meta.get("world_bounds") or {}
+        if isinstance(bounds, dict):
+            try:
+                x_min = float(bounds["x_min"])
+                x_max = float(bounds["x_max"])
+                y_min = float(bounds["y_min"])
+                y_max = float(bounds["y_max"])
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                metadata["world_bounds"] = {
+                    "x_min": x_min,
+                    "x_max": x_max,
+                    "y_min": y_min,
+                    "y_max": y_max,
+                }
+                metadata["width_m"] = max(0.001, float(x_max - x_min))
+                metadata["height_m"] = max(0.001, float(y_max - y_min))
+
+        if track_meta.get("y_axis_inverted") is not None:
+            metadata["y_axis_inverted"] = bool(track_meta.get("y_axis_inverted"))
+        try:
+            mpp = float(track_meta.get("metersPerPixel", metadata.get("meters_per_pixel", 0.01)))
+            if mpp > 0.0:
+                metadata["meters_per_pixel"] = mpp
+                metadata["pixels_per_meter"] = round(1.0 / mpp, 6)
+        except (TypeError, ValueError):
+            pass
+        for src_key, dst_key in (
+            ("metersPerPixelX", "meters_per_pixel_x"),
+            ("metersPerPixelY", "meters_per_pixel_y"),
+        ):
+            try:
+                value = float(track_meta.get(src_key))
+            except (TypeError, ValueError):
+                continue
+            if value > 0.0:
+                metadata[dst_key] = value
+        try:
+            metadata["image_width_px"] = int(track_meta.get("imgW", metadata.get("image_width_px", 0)))
+            metadata["image_height_px"] = int(track_meta.get("imgH", metadata.get("image_height_px", 0)))
+        except (TypeError, ValueError):
+            pass
+        metadata["track_meta_path"] = meta_path
+        metadata["source"] = "lanelet2_osm+track_meta"
+        return metadata
 
     def get_start_node_id(self) -> str:
         return self._start_lanelet_id

@@ -2,53 +2,26 @@
   "coordinate_origin": "bottom_left",
   "imgH": 1333,
   "imgW": 2000,
-  "last_dashboard_alignment": {
-    "applied_at": 1778441807.898,
-    "relative_offset_px": {
-      "x": 9.612,
-      "y": -17.621
-    },
-    "relative_offset_texture_m": {
-      "x_right": 0.099461,
-      "y_down": -0.182345
-    },
-    "world_bounds_delta_m": {
-      "x": -0.099461,
-      "y": 0.182345
-    }
-  },
-  "map_to_texture": {
-    "scale_xy": [
-      1.015042203508703,
-      1.0270201813264996
-    ],
-    "source": "lanelet_bounds_to_svg_world_bounds",
-    "source_lanelet_bounds": {
-      "x_max": 10.1959,
-      "x_min": -10.1934,
-      "y_max": 6.6667,
-      "y_min": -6.7566
-    },
-    "translation_xy": [
-      -0.08946980275438676,
-      0.1187835571506266
-    ],
-    "yaw_deg": 0.0
+  "manual_calibration": {
+    "saved_at": 1778600463.015,
+    "scale": 1.0,
+    "x_min": -10.3534,
+    "y_min": -6.6466
   },
   "metersPerPixel": 0.010348,
   "metersPerPixelX": 0.010348,
-  "metersPerPixelY": 0.010342085521380344,
-  "notes": "Pista oficial BFMC. SVG rasterizado a 2000px de ancho con rsvg-convert. metersPerPixelX = 20.696m / 2000px; metersPerPixelY = 13.786m / 1333px. y_axis_inverted=false para que el dashboard renderice con la misma orientación visual del simulador usando el mismo frame geométrico del OSM.",
+  "metersPerPixelY": 0.010348,
+  "notes": "Calibracion manual del dashboard/simulador: xMin/yMin mueven el frame mapa->pixel; Scale es uniforme y 1.0 mantiene Lanelet/SVG a la misma escala. Estos valores se usan para clicks y Relocate.",
   "source_svg": "track.svg",
   "source_svg_viewbox_mm": [
     20696,
     13786
   ],
   "world_bounds": {
-    "x_max": 10.259799,
-    "x_min": -10.436201,
-    "y_max": 6.965619,
-    "y_min": -6.820381
+    "x_max": 10.342599999999997,
+    "x_min": -10.3534,
+    "y_max": 7.147284,
+    "y_min": -6.6466
   },
   "y_axis_inverted": false
 }

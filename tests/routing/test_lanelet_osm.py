@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from src.routing.lanelet.osm_router import OsmRouteGraph
@@ -331,6 +332,43 @@ def test_load_lanelet2_osm_exposes_map_metadata_from_osm_bounds(tmp_path: Path) 
     assert metadata["world_bounds"]["y_max"] == 2.0
     assert metadata["width_m"] == 1.0
     assert metadata["height_m"] == 1.0
+
+
+def test_router_merges_sibling_track_meta_for_localisation_frame(tmp_path: Path) -> None:
+    osm_path = tmp_path / "local_xy_lanelet.osm"
+    osm_path.write_text(_LOCAL_XY_LANELET_OSM, encoding="utf-8")
+    (tmp_path / "track_meta.json").write_text(
+        json.dumps(
+            {
+                "metersPerPixel": 0.5,
+                "metersPerPixelX": 0.5,
+                "metersPerPixelY": 0.5,
+                "imgW": 10,
+                "imgH": 10,
+                "y_axis_inverted": False,
+                "world_bounds": {
+                    "x_min": -2.0,
+                    "x_max": 3.0,
+                    "y_min": -4.0,
+                    "y_max": 1.0,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    router = OsmRouteGraph(str(osm_path), step_m=0.20)
+    metadata = router.get_map_metadata()
+
+    assert metadata["source"] == "lanelet2_osm+track_meta"
+    assert metadata["world_bounds"]["x_min"] == -2.0
+    assert metadata["world_bounds"]["y_min"] == -4.0
+    assert metadata["width_m"] == 5.0
+    assert metadata["height_m"] == 5.0
+    assert metadata["meters_per_pixel"] == 0.5
+    pose = router.localisation_to_world_pose({"posA": 2.5, "posB": 3.0}, default_yaw=0.0)
+    assert pose is not None
+    assert pose[:2] == (0.5, -1.0)
 
 
 def test_repo_sim_map_uses_contiguous_successors_for_reference_loop() -> None:
