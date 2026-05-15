@@ -48,7 +48,7 @@ def test_velocity_planner_stops_for_stopline() -> None:
     assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_velocity_planner_stops_for_lidar_obstacle_in_corridor() -> None:
+def test_velocity_planner_slows_instead_of_stopping_for_lidar_obstacle_in_corridor() -> None:
     ctx = make_context(
         horizon_n=10,
         dt=0.1,
@@ -71,9 +71,10 @@ def test_velocity_planner_stops_for_lidar_obstacle_in_corridor() -> None:
         drivable_right_bound=np.zeros((11, 2), dtype=float),
         ctx=ctx,
     )
-    assert out.stop_required is True
-    assert np.allclose(out.speed_profile, 0.0)
-    assert any(note.get("mode") == "lidar_obstacle_stop" for note in out.notes["velocity_modules"])
+    assert out.stop_required is False
+    assert not np.allclose(out.speed_profile, 0.0)
+    assert np.max(out.speed_profile) <= 0.20
+    assert any(note.get("mode") == "lidar_obstacle_slow" for note in out.notes["velocity_modules"])
 
 
 def test_velocity_planner_slows_for_lidar_obstacle() -> None:

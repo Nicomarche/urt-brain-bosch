@@ -22,6 +22,10 @@ try:
 except Exception:
     _LIDAR_STOP_M = 0.45
 try:
+    from config import LIDAR_OBSTACLE_STOP_ENABLED as _LIDAR_STOP_ENABLED
+except Exception:
+    _LIDAR_STOP_ENABLED = False
+try:
     from config import LIDAR_OBSTACLE_SLOW_DISTANCE_M as _LIDAR_SLOW_M
 except Exception:
     _LIDAR_SLOW_M = 0.90
@@ -406,7 +410,7 @@ class LidarObstacleRule:
                     "target_distance_m": float(nearest.distance_min_m),
                 }
             )
-            if x <= float(_LIDAR_STOP_M):
+            if bool(_LIDAR_STOP_ENABLED) and x <= float(_LIDAR_STOP_M):
                 speed[:] = 0.0
                 stop_req = True
                 notes["mode"] = "lidar_obstacle_stop"

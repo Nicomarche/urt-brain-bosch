@@ -193,6 +193,7 @@ def test_lidar_required_missing_or_stale_falls_back() -> None:
 def test_lidar_emergency_front_obstacle_falls_back() -> None:
     cfg = SafetyGateConfig(
         lidar_required=False,
+        lidar_emergency_obstacle_enabled=True,
         lidar_emergency_distance_m=0.28,
         lidar_emergency_half_width_m=0.14,
     )
@@ -208,6 +209,22 @@ def test_lidar_emergency_front_obstacle_falls_back() -> None:
     )
     assert out.source == "safety_gate"
     assert out.reason.startswith("lidar_emergency_")
+
+
+def test_lidar_obstacle_emergency_disabled_by_default() -> None:
+    cfg = SafetyGateConfig(lidar_required=False)
+    gate = SafetyGate(cfg)
+    now = 1000.0
+    cmd = _good_cmd(now)
+    out = gate.evaluate(
+        motor_command=cmd,
+        behavior_timestamp=now,
+        pose_timestamp=now,
+        lidar_timestamp=now,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.20, x_m=0.20, y_m=0.0),),
+        now=now,
+    )
+    assert out is cmd
 
 
 def test_lidar_not_required_passthrough_without_scan() -> None:

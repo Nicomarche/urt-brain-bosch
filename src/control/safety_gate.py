@@ -63,6 +63,7 @@ class SafetyGateConfig:
 
     lidar_required: bool = bool(getattr(_cfg, "LIDAR_REQUIRED", False))
     lidar_stale_timeout_s: float = float(getattr(_cfg, "LIDAR_STALE_TIMEOUT_S", 0.5))
+    lidar_emergency_obstacle_enabled: bool = bool(getattr(_cfg, "LIDAR_EMERGENCY_OBSTACLE_ENABLED", False))
     lidar_emergency_distance_m: float = float(getattr(_cfg, "LIDAR_EMERGENCY_DISTANCE_M", 0.28))
     lidar_emergency_half_width_m: float = float(getattr(_cfg, "LIDAR_EMERGENCY_HALF_WIDTH_M", 0.14))
 
@@ -157,12 +158,13 @@ class SafetyGate:
                 return self._fallback(t_now, f"lidar_stale_{lidar_age:.2f}s")
 
         # Regla 5 — emergencia frontal por obstáculo LiDAR.
-        emergency = self._lidar_emergency_obstacle(lidar_obstacles)
-        if emergency is not None:
-            return self._fallback(
-                t_now,
-                f"lidar_emergency_{emergency.distance_min_m:.2f}m",
-            )
+        if self._config.lidar_emergency_obstacle_enabled:
+            emergency = self._lidar_emergency_obstacle(lidar_obstacles)
+            if emergency is not None:
+                return self._fallback(
+                    t_now,
+                    f"lidar_emergency_{emergency.distance_min_m:.2f}m",
+                )
 
         # Todo OK — pasa el comando original sin modificar.
         self._last_decision_reason = "passthrough"
