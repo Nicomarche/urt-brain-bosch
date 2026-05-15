@@ -40,6 +40,12 @@ import time
 from dataclasses import dataclass
 
 from src.core.types.control import MotorCommand
+from src.core.types.lidar import LidarObstacle
+
+try:
+    import config as _cfg
+except Exception:  # pragma: no cover - config unavailable only in isolated imports
+    _cfg = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,11 @@ class SafetyGateConfig:
     # Pose más vieja que esto ⇒ fallback. EKF7 corre nominalmente a >50 Hz
     # (encoder + IMU), así que 300 ms ya indica falla del bus serial.
     pose_stale_timeout_s: float = 0.3
+
+    lidar_required: bool = bool(getattr(_cfg, "LIDAR_REQUIRED", False))
+    lidar_stale_timeout_s: float = float(getattr(_cfg, "LIDAR_STALE_TIMEOUT_S", 0.5))
+    lidar_emergency_distance_m: float = float(getattr(_cfg, "LIDAR_EMERGENCY_DISTANCE_M", 0.28))
+    lidar_emergency_half_width_m: float = float(getattr(_cfg, "LIDAR_EMERGENCY_HALF_WIDTH_M", 0.14))
 
 
 class SafetyGate:
@@ -88,6 +99,8 @@ class SafetyGate:
         motor_command: MotorCommand | None,
         behavior_timestamp: float | None,
         pose_timestamp: float | None,
+        lidar_timestamp: float | None = None,
+        lidar_obstacles: tuple[LidarObstacle, ...] | list[LidarObstacle] = (),
         now: float | None = None,
     ) -> MotorCommand:
         """Devuelve el comando seguro para despachar.
@@ -135,6 +148,22 @@ class SafetyGate:
         if pose_age > self._config.pose_stale_timeout_s:
             return self._fallback(t_now, f"pose_stale_{pose_age:.2f}s")
 
+        # Regla 4 — LiDAR requerido/stale.
+        if self._config.lidar_required:
+            if lidar_timestamp is None:
+                return self._fallback(t_now, "no_lidar_scan")
+            lidar_age = t_now - float(lidar_timestamp)
+            if lidar_age > self._config.lidar_stale_timeout_s:
+                return self._fallback(t_now, f"lidar_stale_{lidar_age:.2f}s")
+
+        # Regla 5 — emergencia frontal por obstáculo LiDAR.
+        emergency = self._lidar_emergency_obstacle(lidar_obstacles)
+        if emergency is not None:
+            return self._fallback(
+                t_now,
+                f"lidar_emergency_{emergency.distance_min_m:.2f}m",
+            )
+
         # Todo OK — pasa el comando original sin modificar.
         self._last_decision_reason = "passthrough"
         return motor_command
@@ -168,3 +197,23 @@ class SafetyGate:
             source="safety_gate",
             reason=reason,
         )
+
+    def _lidar_emergency_obstacle(
+        self,
+        obstacles: tuple[LidarObstacle, ...] | list[LidarObstacle],
+    ) -> LidarObstacle | None:
+        if not obstacles:
+            return None
+        max_x = float(self._config.lidar_emergency_distance_m)
+        half_width = float(self._config.lidar_emergency_half_width_m)
+        best: LidarObstacle | None = None
+        for obs in obstacles:
+            if not isinstance(obs, LidarObstacle):
+                continue
+            x = float(obs.x_m)
+            y = float(obs.y_m)
+            if x < 0.0 or x > max_x or abs(y) > half_width:
+                continue
+            if best is None or float(obs.distance_min_m) < float(best.distance_min_m):
+                best = obs
+        return best

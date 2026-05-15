@@ -47,6 +47,9 @@ CAMERA_HEIGHT_CM = 17.0
 #   f_y @ 720px = (720/2)/tan(14.84°) = 1357px (pixels cuadrados)
 #   Jetson escala 720→480 de forma no uniforme: f_y @ 480px = 1357 × 480/720 = 905px
 CAMERA_FY_480 = 905.0
+# Horizontal field of view used to align AI bounding boxes with 2D LiDAR
+# sectors. RPi Camera v2 is ~62.2° horizontal in the 16:9 capture mode.
+CAMERA_HORIZONTAL_FOV_DEG = 62.2
 #
 # CAMERA_PITCH_DEG: ángulo de inclinación de la cámara hacia abajo (desde horizontal).
 # Derivado de parámetros IMX219 + observable px_per_cm ≈ 14.1 en reference_y=288px
@@ -597,6 +600,57 @@ BEHAVIOR_LOOKAHEAD_GAIN_S = 1.1
 # Tasa de actualización del thread (s). Con pause=0.05 corremos a ~20 Hz,
 # emparejando dt del MPC.
 BEHAVIOR_THREAD_PAUSE_S = 0.05
+
+# ===================== 2D LIDAR =====================
+# Native 2D LiDAR input. Hardware reads LD19/STL-19P over serial; sim/mac reads
+# LaserScan snapshots from Gazebo through sim_bridge.py over ZMQ.
+LIDAR_ENABLED = True
+LIDAR_BACKEND = "zmq" if _SIM_MODE else "serial"
+LIDAR_SERIAL_PORT = None
+LIDAR_SERIAL_BAUD = 230400
+LIDAR_SERIAL_TIMEOUT_S = 0.5
+LIDAR_BINS = 720
+LIDAR_RANGE_MIN_M = 0.05
+LIDAR_RANGE_MAX_M = 4.0
+LIDAR_ROLLING_TTL_S = 0.5
+LIDAR_YAW_OFFSET_DEG = 0.0
+LIDAR_CLOCKWISE = False
+LIDAR_OBSTACLE_CLUSTER_RANGE_M = 1.2
+LIDAR_CLUSTER_MIN_INTENSITY = 5.0
+LIDAR_CLUSTER_MAX_GAP_DEG = 5.0
+LIDAR_CLUSTER_MIN_POINTS = 3
+LIDAR_CLUSTER_KEEP_SINGLE_BELOW_M = 1.20
+LIDAR_REQUIRED = False
+LIDAR_STALE_TIMEOUT_S = 0.5
+LIDAR_EMERGENCY_DISTANCE_M = 0.28
+LIDAR_EMERGENCY_HALF_WIDTH_M = 0.14
+LIDAR_OBSTACLE_STOP_DISTANCE_M = 0.45
+LIDAR_OBSTACLE_SLOW_DISTANCE_M = 0.90
+LIDAR_OBSTACLE_CORRIDOR_HALF_WIDTH_M = 0.14
+LIDAR_OBSTACLE_MIN_FORWARD_X_M = 0.0
+LIDAR_AI_SECTOR_MIN_HALF_WIDTH_DEG = 2.0
+LIDAR_AI_SECTOR_EXTRA_DEG = 0.0
+LIDAR_AI_SECTOR_MAX_HALF_WIDTH_DEG = 12.0
+LIDAR_AI_OBJECT_SECTOR_MIN_HALF_WIDTH_DEG = 24.0
+LIDAR_AI_OBJECT_SECTOR_EXTRA_DEG = 4.0
+LIDAR_AI_OBJECT_SECTOR_MAX_HALF_WIDTH_DEG = 30.0
+LIDAR_AI_MATCH_DISTANCE_M = 0.30
+LIDAR_AI_MATCH_ANGLE_DEG = 28.0
+LIDAR_AI_MATCH_XY_M = 0.28
+LIDAR_AI_MATCH_MIN_FORWARD_X_M = -0.02
+LIDAR_AI_MATCH_MAX_ABS_ANGLE_DEG = 120.0
+LIDAR_AI_MATCH_MAX_SCORE = 1.35
+ZMQ_LIDAR_ENDPOINT = "tcp://localhost:5578"
+ZMQ_LIDAR_TOPIC = b"lidar"
+
+# ===================== OVERTAKE =====================
+OVERTAKE_ENABLED = True
+OVERTAKE_FORWARD_MIN_M = 0.25
+OVERTAKE_FORWARD_MAX_M = 1.25
+OVERTAKE_LATERAL_OFFSET_M = 0.16
+OVERTAKE_SIDE_CLEAR_FORWARD_M = 1.25
+OVERTAKE_SIDE_CLEAR_HALF_WIDTH_M = 0.12
+OVERTAKE_SPEED_MPS = 0.30
 
 # ----------------------------------------------------------------------------
 # Auto-lap mode (sim/demo): el coche da vueltas siguiendo el loop de lanelets

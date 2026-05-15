@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from src.core.types.perception import LaneObservation, StoplineObservation, TrackedObject
+from src.core.types.lidar import LidarObstacle, LidarScan
 from src.core.types.pose import PoseEstimate
 from src.core.types.routing import RouteContext
 
@@ -59,6 +60,8 @@ class PlanningContext:
     lane_observation: LaneObservation | None = None
     stopline_observation: StoplineObservation | None = None
     tracked_objects: tuple[TrackedObject, ...] = ()
+    lidar_scan: LidarScan | None = None
+    lidar_obstacles: tuple[LidarObstacle, ...] = ()
     lanelet_map: "LaneletMap | None" = None
     # Hints opcionales del subsistema de signos. Cada record describe un
     # sign reciente (kind, distance_m, side). El BehaviorPlanner usa esto

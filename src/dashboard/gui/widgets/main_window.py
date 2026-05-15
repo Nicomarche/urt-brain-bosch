@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
     # para ver stats mientras se maneja en manual.
     DEFAULT_TABS = (
         ("driving",      "Driving"),
+        ("lidar",        "LiDAR"),
         ("map",          "Map"),
         ("routes",       "Routes"),
         ("calibration",  "Calibration"),
@@ -350,6 +351,7 @@ def _install_default_panels(window: "MainWindow", client: SocketIOClient) -> Non
     from .calibration_wizard import CalibrationWizard
     from .console_panel import ConsolePanel
     from .line_following_panel import LineFollowingPanel
+    from .lidar_panel import LidarPanel
     from .map_view import MapView
     from .params_table import ParamsTable
     from .routes_panel import RoutesPanel
@@ -358,6 +360,7 @@ def _install_default_panels(window: "MainWindow", client: SocketIOClient) -> Non
     # ya la embebe junto a la cámara para que el operador vea los gauges
     # mientras maneja en manual.
     window.add_tab("driving", "Driving", _build_driving_tab(client, window))
+    window.add_tab("lidar", "LiDAR", LidarPanel(client))
     window.add_tab("map", "Map", MapView(client))
     window.add_tab("routes", "Routes", RoutesPanel(client))
     window.add_tab("calibration", "Calibration", CalibrationWizard(client))

@@ -47,6 +47,7 @@ from src.core.messaging.allMessages import (
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.control import MotorCommand
+from src.core.types.lidar import LidarObstacle, LidarScan
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
 
@@ -62,6 +63,8 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         safety_gate: SafetyGate | None = None,
         behavior_output_buffer=None,
         pose_estimate_buffer=None,
+        lidar_scan_buffer=None,
+        lidar_obstacles_buffer=None,
         pause_s: float = 0.02,
         logging=None,
         debugging: bool = False,
@@ -73,6 +76,8 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._motor_cmd_buf = motor_command_buffer
         self._behavior_buf = behavior_output_buffer
         self._pose_buf = pose_estimate_buffer
+        self._lidar_scan_buf = lidar_scan_buffer
+        self._lidar_obs_buf = lidar_obstacles_buffer
         self._gate = safety_gate or SafetyGate()
         self.logging = logging
         self.debugging = bool(debugging)
@@ -131,11 +136,15 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         pose_ts = (
             self._read_timestamp(self._pose_buf) if self._pose_buf else None
         )
+        lidar_ts = self._read_lidar_timestamp()
+        lidar_obstacles = self._read_lidar_obstacles()
 
         cmd = self._gate.evaluate(
             motor_command=motor_cmd if isinstance(motor_cmd, MotorCommand) else None,
             behavior_timestamp=behavior_ts,
             pose_timestamp=pose_ts,
+            lidar_timestamp=lidar_ts,
+            lidar_obstacles=lidar_obstacles,
         )
         self._last_dispatched = cmd
 
@@ -153,6 +162,8 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             steering_deg=float(cmd.steering_deg),
             behavior_age_s=(now_t - behavior_ts) if behavior_ts else None,
             pose_age_s=(now_t - pose_ts) if pose_ts else None,
+            lidar_age_s=(now_t - lidar_ts) if lidar_ts else None,
+            lidar_obstacles=len(lidar_obstacles),
             dispatched=(self._current_state in {"AUTO", "PARKING"}),
             had_motor_cmd=isinstance(motor_cmd, MotorCommand),
         )
@@ -279,6 +290,30 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         except Exception:
             return None
         return float(ts) if ts else None
+
+    def _read_lidar_timestamp(self) -> float | None:
+        if self._lidar_scan_buf is None:
+            return None
+        try:
+            scan = self._lidar_scan_buf.read_latest()
+        except Exception:
+            return None
+        if isinstance(scan, LidarScan) and float(scan.timestamp) > 0.0:
+            return float(scan.timestamp)
+        return self._read_timestamp(self._lidar_scan_buf)
+
+    def _read_lidar_obstacles(self) -> tuple[LidarObstacle, ...]:
+        if self._lidar_obs_buf is None:
+            return ()
+        try:
+            payload = self._lidar_obs_buf.read_latest()
+        except Exception:
+            return ()
+        if isinstance(payload, tuple) and all(isinstance(o, LidarObstacle) for o in payload):
+            return payload
+        if isinstance(payload, list) and all(isinstance(o, LidarObstacle) for o in payload):
+            return tuple(payload)
+        return ()
 
     # ----------------------------------------------------------------
     @staticmethod

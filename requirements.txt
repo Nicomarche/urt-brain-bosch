@@ -8,6 +8,7 @@ Twisted>=24.7.0
 cryptography>=43,<45
 opencv-python          # if wheel fails, use: sudo apt-get install -y python3-opencv
 pyserial==3.5
+pyzmq>=26,<27
 # numpy from PyPI uses Apple Accelerate on macOS ARM64 (no OpenBLAS, no Homebrew
 # libomp). Without this, --system-site-packages inherits Homebrew numpy which
 # links OpenBLAS → Homebrew libomp, causing two libomp instances to load

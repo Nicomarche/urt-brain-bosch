@@ -282,6 +282,32 @@ class SignDetectionStatus(Enum):
     msgID = 3
     msgType = "dict"  # {"enabled": bool, "fps": float, "last_sign": str}
 
+class DetectedObjectsMsg(Enum):
+    Queue = "General"
+    Owner = "threadLocalPerception"
+    msgID = 4
+    # value format: {"timestamp": float,
+    #                "objects": [{"kind": str, "confidence": float,
+    #                             "bbox_xyxy": [float, float, float, float],
+    #                             "angle_rad": float|None,
+    #                             "distance_m": float|None,
+    #                             "distance_source": str,
+    #                             "world_xy": [float, float]|None}, ...]}
+    msgType = "dict"
+
+################################# From LiDAR ##################################
+class LidarScanMsg(Enum):
+    Queue = "General"
+    Owner = "threadLidar"
+    msgID = 1
+    msgType = "dict"
+
+class LidarStatusMsg(Enum):
+    Queue = "General"
+    Owner = "threadLidar"
+    msgID = 2
+    msgType = "dict"
+
 
 ################################# From Nucleo ##################################
 class BatteryLvl(Enum):

@@ -43,9 +43,23 @@ class Parking(BaseScenario):
         return False
 
     def plan(self, ctx: PlanningContext) -> BehaviorOutput:
+        notes = {"reason": "parking_approach"}
+        if self._spot_occupied(ctx):
+            notes["spot_occupied"] = True
         return self._build_constant_speed_plan(
             ctx=ctx,
             target_speed_mps=_PARKING_APPROACH_SPEED_MPS,
             scenario_name=self.name,
-            notes={"reason": "parking_approach"},
+            notes=notes,
         )
+
+    def _spot_occupied(self, ctx: PlanningContext) -> bool:
+        for obs in ctx.lidar_obstacles:
+            if 0.15 <= float(obs.x_m) <= 0.90 and abs(float(obs.y_m)) <= 0.35:
+                return True
+        for track in ctx.tracked_objects:
+            if str(track.class_name).lower() not in {"car", "vehicle", "obstacle"}:
+                continue
+            if track.age_frames >= 2:
+                return True
+        return False

@@ -17,6 +17,7 @@ import numpy as np
 import pytest
 
 from src.behavior.context import PlanningContext
+from src.core.types.lidar import LidarObstacle, LidarScan
 from src.core.types.perception import LaneObservation, StoplineObservation, TrackedObject
 from src.core.types.pose import Pose2D, PoseEstimate
 from src.core.types.routing import RegulatoryElement, RouteContext
@@ -146,6 +147,8 @@ def make_context(
     route_points: list[dict[str, float]] | tuple[dict[str, float], ...] = (),
     regulatory_ahead: tuple[RegulatoryElement, ...] = (),
     tracked_objects: tuple[TrackedObject, ...] = (),
+    lidar_scan: LidarScan | None = None,
+    lidar_obstacles: tuple[LidarObstacle, ...] = (),
     sign_hints: tuple[dict, ...] = (),
     nominal_speed_mps: float = 0.50,
     max_speed_mps: float = 1.00,
@@ -195,6 +198,8 @@ def make_context(
         lane_observation=LaneObservation(),
         stopline_observation=StoplineObservation(),
         tracked_objects=tracked_objects,
+        lidar_scan=lidar_scan,
+        lidar_obstacles=lidar_obstacles,
         lanelet_map=lanelet_map,
         sign_hints=sign_hints,
     )

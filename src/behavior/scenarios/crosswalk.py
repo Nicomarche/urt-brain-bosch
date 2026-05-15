@@ -93,7 +93,7 @@ class Crosswalk(BaseScenario):
         sin_psi = math.sin(ego_psi)
 
         for track in ctx.tracked_objects:
-            if track.class_name.lower() != "pedestrian":
+            if track.class_name.lower() not in {"pedestrian", "person"}:
                 continue
             if track.age_frames < 2:
                 continue

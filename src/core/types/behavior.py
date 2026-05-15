@@ -45,6 +45,7 @@ class ScenarioName(str, Enum):
     CROSSWALK = "crosswalk"
     HIGHWAY = "highway"
     ROUNDABOUT = "roundabout"
+    OVERTAKE = "overtake"
     # FALLBACK no es un scenario propiamente dicho — lo usa el planner
     # cuando ningún scenario está activo, para emitir un BehaviorOutput
     # con stop_required=True. Mantener acá evita strings mágicos.

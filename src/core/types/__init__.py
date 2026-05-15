@@ -30,6 +30,7 @@ from src.core.types.perception import (
 )
 from src.core.types.routing import RouteContext
 from src.core.types.control import ControlDecision
+from src.core.types.lidar import LidarHealth, LidarObstacle, LidarPoint, LidarScan
 
 __all__ = [
     "Pose2D",
@@ -40,4 +41,8 @@ __all__ = [
     "VisualStateSnapshot",
     "RouteContext",
     "ControlDecision",
+    "LidarPoint",
+    "LidarScan",
+    "LidarObstacle",
+    "LidarHealth",
 ]

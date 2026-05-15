@@ -13,6 +13,7 @@ from src.perception.signs.sign_classifier import (
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import (
+    DetectedObjectsMsg,
     LineFollowingConfig,
     LineFollowingStatus,
     LocalLanePerception,
@@ -24,6 +25,9 @@ from src.core.messaging.allMessages import (
 )
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.core.types.perception import DetectedObject
+from src.core.types.pose import PoseEstimate
+from src.perception.lidar.processing import distance_in_sector
 
 
 class threadLocalPerception(ThreadWithStop):
@@ -31,6 +35,10 @@ class threadLocalPerception(ThreadWithStop):
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  local_lane_buffer=None,
+                 detection_buffer=None,
+                 lidar_scan_buffer=None,
+                 pose_estimate_buffer=None,
+                 sign_hints_buffer=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
                  action_cooldown=15.0,
@@ -50,6 +58,10 @@ class threadLocalPerception(ThreadWithStop):
         self.debugger = debugger
         self.frame_buffer = frame_buffer
         self.local_lane_buffer = local_lane_buffer
+        self.detection_buffer = detection_buffer
+        self.lidar_scan_buffer = lidar_scan_buffer
+        self.pose_estimate_buffer = pose_estimate_buffer
+        self.sign_hints_buffer = sign_hints_buffer
 
         self.enable_sign_detection = enable_sign_detection
         self.enable_actions = enable_actions
@@ -118,6 +130,7 @@ class threadLocalPerception(ThreadWithStop):
         self.signStatusSender = messageHandlerSender(self.queuesList, SignDetectionStatus)
         self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
         self.serialCameraSender = messageHandlerSender(self.queuesList, serialCamera)
+        self.detectedObjectsSender = messageHandlerSender(self.queuesList, DetectedObjectsMsg)
 
         self.engine = self._build_engine()
         print(
@@ -268,6 +281,70 @@ class threadLocalPerception(ThreadWithStop):
         except (TypeError, ValueError, IndexError, ZeroDivisionError):
             return None
 
+    def _bbox_center_angle_rad(self, box) -> float | None:
+        """Map a normalized bbox center to LiDAR angle.
+
+        Engine boxes are [y1, x1, y2, x2] normalized. Image x grows right;
+        LiDAR angle grows left, so the sign is inverted.
+        """
+
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return None
+        try:
+            x_center = 0.5 * (float(box[1]) + float(box[3]))
+            hfov = math.radians(float(getattr(config, "CAMERA_HORIZONTAL_FOV_DEG", 62.2)))
+            return (0.5 - x_center) * hfov
+        except (TypeError, ValueError):
+            return None
+
+    def _estimate_lidar_distance_cm(self, box, *, broad_sector: bool = False) -> float | None:
+        scan = self.lidar_scan_buffer.read_latest() if self.lidar_scan_buffer is not None else None
+        angle = self._bbox_center_angle_rad(box)
+        if scan is None or angle is None:
+            return None
+        try:
+            y1, x1, y2, x2 = [float(v) for v in box]
+            width_norm = max(0.02, min(0.40, x2 - x1))
+        except (TypeError, ValueError):
+            width_norm = 0.08
+        hfov = math.radians(float(getattr(config, "CAMERA_HORIZONTAL_FOV_DEG", 62.2)))
+        base_half_width = 0.5 * width_norm * hfov
+        if broad_sector:
+            min_half_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_MIN_HALF_WIDTH_DEG", 24.0))
+            extra_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_EXTRA_DEG", 4.0))
+            max_half_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_MAX_HALF_WIDTH_DEG", 30.0))
+        else:
+            min_half_deg = float(getattr(config, "LIDAR_AI_SECTOR_MIN_HALF_WIDTH_DEG", 2.0))
+            extra_deg = float(getattr(config, "LIDAR_AI_SECTOR_EXTRA_DEG", 0.0))
+            max_half_deg = float(getattr(config, "LIDAR_AI_SECTOR_MAX_HALF_WIDTH_DEG", 12.0))
+        half_width = max(math.radians(min_half_deg), base_half_width + math.radians(extra_deg))
+        half_width = min(math.radians(max_half_deg), half_width)
+        dist_m = distance_in_sector(scan, center_angle_rad=angle, half_width_rad=half_width)
+        if dist_m is None:
+            return None
+        return round(float(dist_m) * 100.0, 1)
+
+    def _project_lidar_detection_to_world(
+        self,
+        box,
+        distance_cm: float | None,
+    ) -> tuple[float, float] | None:
+        if distance_cm is None:
+            return None
+        pose = self.pose_estimate_buffer.read_latest() if self.pose_estimate_buffer is not None else None
+        if not isinstance(pose, PoseEstimate):
+            return None
+        angle = self._bbox_center_angle_rad(box)
+        if angle is None:
+            return None
+        distance_m = float(distance_cm) * 0.01
+        body_x = distance_m * math.cos(angle)
+        body_y = distance_m * math.sin(angle)
+        yaw = float(pose.fused_pose.yaw)
+        world_x = float(pose.fused_pose.x) + body_x * math.cos(yaw) - body_y * math.sin(yaw)
+        world_y = float(pose.fused_pose.y) + body_x * math.sin(yaw) + body_y * math.cos(yaw)
+        return (float(world_x), float(world_y))
+
     def _handle_walk_area(self, detections, now):
         """Track walk-area detections sin forzar cambios de modo.
 
@@ -381,7 +458,17 @@ class threadLocalPerception(ThreadWithStop):
         box_area = max(0.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
 
         img_height = img_shape[0] if img_shape is not None else None
-        distance_cm = self._estimate_sign_distance_cm(box, img_height)
+        lidar_distance_cm = self._estimate_lidar_distance_cm(box)
+        camera_distance_cm = self._estimate_sign_distance_cm(box, img_height)
+        if lidar_distance_cm is not None:
+            distance_cm = lidar_distance_cm
+            distance_source = "lidar"
+        elif camera_distance_cm is not None:
+            distance_cm = camera_distance_cm
+            distance_source = "camera"
+        else:
+            distance_cm = None
+            distance_source = "none"
 
         self.detection_count += 1
         self.last_sign_name = sign_name
@@ -391,8 +478,18 @@ class threadLocalPerception(ThreadWithStop):
             "box": [round(float(v), 5) for v in box],
             "box_area": round(box_area, 5),
             "distance_cm": distance_cm,
+            "distance_source": distance_source,
             "timestamp": now,
         })
+        if self.sign_hints_buffer is not None:
+            hint = {
+                "kind": sign_name,
+                "distance_m": (float(distance_cm) * 0.01) if distance_cm is not None else None,
+                "distance_source": distance_source,
+                "timestamp": now,
+                "confidence": round(confidence, 3),
+            }
+            self.sign_hints_buffer.write((hint,), timestamp=now)
 
         effective_min_box = self.sign_min_box_area_per_sign.get(
             sign_name, self.sign_min_box_area
@@ -400,7 +497,7 @@ class threadLocalPerception(ThreadWithStop):
         is_close = box_area >= effective_min_box
         is_actionable = is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
-        dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""
+        dist_str = f" ~{distance_cm:.0f}cm/{distance_source}" if distance_cm is not None else ""
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
             f"{sign_display} ({confidence:.1%}) box={box_area:.3%}{dist_str}"
@@ -418,6 +515,91 @@ class threadLocalPerception(ThreadWithStop):
 
         # Sign actions are now handled centrally by ManeuverManager inside
         # threadLineFollowing. Local perception publishes observations only.
+
+    def _publish_detected_objects(self, detections, now, img_shape=None):
+        objects: list[DetectedObject] = []
+        dashboard_objects: list[dict] = []
+        for det in detections or []:
+            class_name = str(det.get("class", "") or "").strip().lower()
+            if not self._is_tracked_object_class(class_name):
+                continue
+            try:
+                confidence = float(det.get("confidence", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                confidence = 0.0
+            box = det.get("box", [0.0, 0.0, 0.0, 0.0])
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                box = [0.0, 0.0, 0.0, 0.0]
+
+            lidar_distance_cm = self._estimate_lidar_distance_cm(box, broad_sector=True)
+            camera_distance_cm = self._estimate_sign_distance_cm(
+                box,
+                img_shape[0] if img_shape is not None else None,
+            )
+            if lidar_distance_cm is not None:
+                distance_cm = lidar_distance_cm
+                distance_source = "lidar"
+            elif camera_distance_cm is not None:
+                distance_cm = camera_distance_cm
+                distance_source = "camera"
+            else:
+                distance_cm = None
+                distance_source = "none"
+            angle = self._bbox_center_angle_rad(box)
+            world_xy = (
+                self._project_lidar_detection_to_world(box, distance_cm)
+                if distance_source == "lidar"
+                else None
+            )
+            bbox_xyxy = _box_yxyx_to_xyxy(box)
+            obj = DetectedObject(
+                timestamp=now,
+                class_id=int(det.get("class_id", -1) or -1) if str(det.get("class_id", "-1")).lstrip("-").isdigit() else -1,
+                class_name=class_name,
+                confidence=confidence,
+                bbox_xyxy=tuple(bbox_xyxy),
+                position_world_xy=world_xy,
+            )
+            objects.append(obj)
+            dashboard_objects.append(
+                {
+                    "kind": class_name,
+                    "confidence": round(confidence, 4),
+                    "bbox_xyxy": [round(float(v), 5) for v in bbox_xyxy],
+                    "angle_rad": float(angle) if angle is not None else None,
+                    "distance_m": (float(distance_cm) * 0.01) if distance_cm is not None else None,
+                    "distance_source": distance_source,
+                    "world_xy": list(world_xy) if world_xy is not None else None,
+                }
+            )
+
+        if self.detection_buffer is not None:
+            self.detection_buffer.write(objects, timestamp=now)
+        try:
+            self.detectedObjectsSender.send({
+                "timestamp": now,
+                "objects": dashboard_objects,
+            })
+        except Exception:
+            if self.logger is not None:
+                self.logger.exception("failed to publish DetectedObjectsMsg")
+
+    @staticmethod
+    def _is_tracked_object_class(class_name: str) -> bool:
+        return str(class_name).lower() in {
+            "obstacle",
+            "road_block",
+            "vehicle",
+            "car",
+            "bus",
+            "truck",
+            "pedestrian",
+            "person",
+            "cyclist",
+            "bicycle",
+            "motorcycle",
+            "traffic_light",
+        }
 
     def _publish_status(self, result, now):
         if now - self.last_status_time < 1.0:
@@ -645,6 +827,7 @@ class threadLocalPerception(ThreadWithStop):
             detections = result.get("detections", [])
             self._handle_walk_area(detections, now)
             self._publish_sign(detections, now, img_shape=self._last_frame_shape)
+            self._publish_detected_objects(detections, now, img_shape=self._last_frame_shape)
             self._publish_status(result, now)
             self._publish_dashboard_frame(result, frame, now)
         except Exception as e:
@@ -652,3 +835,11 @@ class threadLocalPerception(ThreadWithStop):
 
     def stop(self):
         super(threadLocalPerception, self).stop()
+
+
+def _box_yxyx_to_xyxy(box) -> tuple[float, float, float, float]:
+    try:
+        y1, x1, y2, x2 = [float(v) for v in box]
+    except (TypeError, ValueError):
+        return (0.0, 0.0, 0.0, 0.0)
+    return (x1, y1, x2, y2)

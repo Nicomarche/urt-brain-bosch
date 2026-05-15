@@ -7,7 +7,8 @@ import pytest
 
 from src.behavior.velocity_planner import BehaviorVelocityPlanner
 from src.core.types.behavior import BehaviorPathPlan, ScenarioName
-from src.core.types.perception import LaneObservation
+from src.core.types.lidar import LidarObstacle
+from src.core.types.perception import LaneObservation, TrackedObject
 from src.core.types.routing import RegulatoryElement
 from tests.behavior.conftest import make_context
 
@@ -45,6 +46,91 @@ def test_velocity_planner_stops_for_stopline() -> None:
 
     assert out.stop_required is True
     assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_velocity_planner_stops_for_lidar_obstacle_in_corridor() -> None:
+    ctx = make_context(
+        horizon_n=10,
+        dt=0.1,
+        nominal_speed_mps=0.4,
+        max_speed_mps=1.0,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.30, x_m=0.30, y_m=0.0, point_count=4),),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.4, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+    assert out.stop_required is True
+    assert np.allclose(out.speed_profile, 0.0)
+    assert any(note.get("mode") == "lidar_obstacle_stop" for note in out.notes["velocity_modules"])
+
+
+def test_velocity_planner_slows_for_lidar_obstacle() -> None:
+    ctx = make_context(
+        horizon_n=10,
+        dt=0.1,
+        nominal_speed_mps=0.6,
+        max_speed_mps=1.0,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.70, x_m=0.70, y_m=0.02, point_count=4),),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.6, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+    assert out.stop_required is False
+    assert np.max(out.speed_profile) <= 0.20
+    assert any(note.get("mode") == "lidar_obstacle_slow" for note in out.notes["velocity_modules"])
+
+
+def test_velocity_planner_acc_with_track_ahead() -> None:
+    track = TrackedObject(
+        track_id=7,
+        class_name="vehicle",
+        confidence=0.9,
+        position_world_xy=(0.75, 0.0),
+        velocity_world_xy=(0.15, 0.0),
+        age_frames=4,
+    )
+    ctx = make_context(horizon_n=10, dt=0.1, nominal_speed_mps=0.6, max_speed_mps=1.0, tracked_objects=(track,))
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.6, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+    assert np.max(out.speed_profile) <= 0.20
+    assert any(note.get("mode") == "acc_target" and note.get("track_id") == 7.0 for note in out.notes["velocity_modules"])
 
 
 def test_velocity_planner_caps_speed_on_curvature() -> None:

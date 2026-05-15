@@ -133,12 +133,16 @@ class processCamera(WorkerProcess):
         from src.behavior.scenarios.highway import Highway
         from src.behavior.scenarios.intersection import Intersection
         from src.behavior.scenarios.lane_keep import LaneKeep
+        from src.behavior.scenarios.overtake import Overtake
         from src.behavior.scenarios.parking import Parking
         from src.behavior.scenarios.roundabout import Roundabout
         from src.control.controller_thread import threadMotionController
         from src.control.motion_controller import MotionController
         from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
         from src.control.safety_gate import SafetyGate
+        from src.perception.lidar.thread_lidar import threadLidar
+        from src.perception.tracking.object_tracker_thread import threadObjectTracker
+        from src.perception.tracking.sort_tracker import MOTTracker
 
         _TRACKING_ENABLED = False
         _TRACKING_SHOW_WINDOW = False
@@ -181,6 +185,29 @@ class processCamera(WorkerProcess):
         )
         self.threads.append(camTh)
         
+        lane_observation_buffer = LatestValueBuffer()
+        stopline_observation_buffer = LatestValueBuffer()
+        pose_estimate_buffer = LatestValueBuffer()
+        route_context_buffer = LatestValueBuffer()
+        visual_candidate_buffer = LatestValueBuffer()
+        visual_state_buffer = LatestValueBuffer()
+        control_decision_buffer = LatestValueBuffer()
+        detection_buffer = LatestValueBuffer()
+        tracked_objects_buffer = LatestValueBuffer()
+        lidar_scan_buffer = LatestValueBuffer()
+        lidar_obstacles_buffer = LatestValueBuffer()
+        sign_hints_buffer = LatestValueBuffer()
+
+        lidarTh = threadLidar(
+            self.queuesList,
+            self.logging,
+            self.debugging,
+            lidar_scan_buffer=lidar_scan_buffer,
+            lidar_obstacles_buffer=lidar_obstacles_buffer,
+            pose_estimate_buffer=pose_estimate_buffer,
+        )
+        self.threads.append(lidarTh)
+
         # Local AI perception (TensorRT engine) now runs inside the camera process.
         # Phase 6: este thread es el ÚNICO productor de `serialCamera` —
         # publica el frame ya anotado (carriles + cajas de señales) al
@@ -190,6 +217,10 @@ class processCamera(WorkerProcess):
             self.queuesList, self.logging, self.debugging,
             frame_buffer=self.frame_buffer,
             local_lane_buffer=self.local_lane_buffer,
+            detection_buffer=detection_buffer,
+            lidar_scan_buffer=lidar_scan_buffer,
+            pose_estimate_buffer=pose_estimate_buffer,
+            sign_hints_buffer=sign_hints_buffer,
             enable_sign_detection=self.enable_sign_detection,
             enable_actions=self.sign_detection_actions,
             sign_min_confidence=self.sign_min_confidence,
@@ -198,14 +229,6 @@ class processCamera(WorkerProcess):
             stream_to_dashboard=self.stream_to_dashboard,
         )
         self.threads.append(localPerceptionTh)
-
-        lane_observation_buffer = LatestValueBuffer()
-        stopline_observation_buffer = LatestValueBuffer()
-        pose_estimate_buffer = LatestValueBuffer()
-        route_context_buffer = LatestValueBuffer()
-        visual_candidate_buffer = LatestValueBuffer()
-        visual_state_buffer = LatestValueBuffer()
-        control_decision_buffer = LatestValueBuffer()
 
         # Phase 4–6: buffers del path de control nuevo.
         # `behavior_output_buffer` lo escribe `threadBehaviorPlanner` (single
@@ -311,6 +334,17 @@ class processCamera(WorkerProcess):
             self.threads.append(poseEstimatorTh)
             self.threads.append(plannerTh)
 
+        objectTrackerTh = threadObjectTracker(
+            self.queuesList,
+            tracker=MOTTracker(),
+            detection_buffer=detection_buffer,
+            pose_estimate_buffer=pose_estimate_buffer,
+            tracked_objects_buffer=tracked_objects_buffer,
+            logging=self.logging,
+            debugging=self.debugging,
+        )
+        self.threads.append(objectTrackerTh)
+
         laneObserverTh = threadLaneObserver(
             self.queuesList,
             visual_state_buffer=visual_state_buffer,
@@ -368,6 +402,7 @@ class processCamera(WorkerProcess):
                 Intersection(),
                 Roundabout(),
                 Highway(),
+                Overtake(),
                 LaneKeep(),
             ]
         )
@@ -379,7 +414,10 @@ class processCamera(WorkerProcess):
             route_context_buffer=route_context_buffer,
             lane_observation_buffer=lane_observation_buffer,
             stopline_observation_buffer=stopline_observation_buffer,
-            tracked_objects_buffer=None,  # Phase 5 MOTTracker aún sin thread wireado
+            tracked_objects_buffer=tracked_objects_buffer,
+            lidar_scan_buffer=lidar_scan_buffer,
+            lidar_obstacles_buffer=lidar_obstacles_buffer,
+            sign_hints_buffer=sign_hints_buffer,
             behavior_output_buffer=behavior_output_buffer,
             dt_s=_behavior_dt_s,
             horizon_n=_behavior_horizon_n,
@@ -420,6 +458,8 @@ class processCamera(WorkerProcess):
             safety_gate=SafetyGate(),
             behavior_output_buffer=behavior_output_buffer,
             pose_estimate_buffer=pose_estimate_buffer,
+            lidar_scan_buffer=lidar_scan_buffer,
+            lidar_obstacles_buffer=lidar_obstacles_buffer,
             logging=self.logging,
             debugging=self.debugging,
         )

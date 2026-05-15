@@ -19,6 +19,7 @@ import pytest
 
 from src.control.safety_gate import SafetyGate, SafetyGateConfig
 from src.core.types.control import MotorCommand
+from src.core.types.lidar import LidarObstacle
 
 
 def _good_cmd(now: float) -> MotorCommand:
@@ -164,3 +165,61 @@ def test_last_reason_updates_per_call() -> None:
         now=now,
     )
     assert gate.last_reason == "no_motor_command"
+
+
+def test_lidar_required_missing_or_stale_falls_back() -> None:
+    cfg = SafetyGateConfig(lidar_required=True, lidar_stale_timeout_s=0.5)
+    gate = SafetyGate(cfg)
+    now = 1000.0
+    out = gate.evaluate(
+        motor_command=_good_cmd(now),
+        behavior_timestamp=now,
+        pose_timestamp=now,
+        lidar_timestamp=None,
+        now=now,
+    )
+    assert out.reason == "no_lidar_scan"
+
+    out = gate.evaluate(
+        motor_command=_good_cmd(now),
+        behavior_timestamp=now,
+        pose_timestamp=now,
+        lidar_timestamp=now - 1.0,
+        now=now,
+    )
+    assert out.reason.startswith("lidar_stale_")
+
+
+def test_lidar_emergency_front_obstacle_falls_back() -> None:
+    cfg = SafetyGateConfig(
+        lidar_required=False,
+        lidar_emergency_distance_m=0.28,
+        lidar_emergency_half_width_m=0.14,
+    )
+    gate = SafetyGate(cfg)
+    now = 1000.0
+    out = gate.evaluate(
+        motor_command=_good_cmd(now),
+        behavior_timestamp=now,
+        pose_timestamp=now,
+        lidar_timestamp=now,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.25, x_m=0.24, y_m=0.02),),
+        now=now,
+    )
+    assert out.source == "safety_gate"
+    assert out.reason.startswith("lidar_emergency_")
+
+
+def test_lidar_not_required_passthrough_without_scan() -> None:
+    cfg = SafetyGateConfig(lidar_required=False)
+    gate = SafetyGate(cfg)
+    now = 1000.0
+    cmd = _good_cmd(now)
+    out = gate.evaluate(
+        motor_command=cmd,
+        behavior_timestamp=now,
+        pose_timestamp=now,
+        lidar_timestamp=None,
+        now=now,
+    )
+    assert out is cmd

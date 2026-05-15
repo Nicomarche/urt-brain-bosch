@@ -18,12 +18,25 @@ _INTERSECTION_RANGE_M = 6.0
 _CURVATURE_A_LAT_MAX_MPS2 = 0.45
 
 try:
+    from config import LIDAR_OBSTACLE_STOP_DISTANCE_M as _LIDAR_STOP_M
+except Exception:
+    _LIDAR_STOP_M = 0.45
+try:
+    from config import LIDAR_OBSTACLE_SLOW_DISTANCE_M as _LIDAR_SLOW_M
+except Exception:
+    _LIDAR_SLOW_M = 0.90
+try:
+    from config import LIDAR_OBSTACLE_CORRIDOR_HALF_WIDTH_M as _LIDAR_CORRIDOR_HALF_WIDTH_M
+except Exception:
+    _LIDAR_CORRIDOR_HALF_WIDTH_M = 0.14
+
+try:
     from config import BEHAVIOR_MIN_SPEED_MPS as _BEHAVIOR_MIN_SPEED_MPS
 except Exception:
     _BEHAVIOR_MIN_SPEED_MPS = 0.20
 
 _CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
-_LANE_CONTAINMENT_WARN_CAP_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
+_LANE_CONTAINMENT_WARN_CAP_MPS = min(float(_BEHAVIOR_MIN_SPEED_MPS), 0.06)
 
 try:
     from config import (
@@ -38,6 +51,7 @@ try:
     )
 except Exception:
     _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
+_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = min(float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS), 0.04)
 
 try:
     from config import (
@@ -59,6 +73,7 @@ try:
     )
 except Exception:
     _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
+_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = min(float(_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS), 0.08)
 
 # Histeresis para que el error tenga que decrecer al menos 5 mm por tick
 # para considerarse "el robot está recuperando"; valores menores son ruido.
@@ -243,7 +258,9 @@ class LaneContainmentRule:
                 note["zero_from_idx"] = int(zero_from_idx)
                 return VelocityRuleResult(speed, stop_req, note, True)
             speed = np.minimum(speed, float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS))
-            note["mode"] = "future_horizon_crawl"
+            speed[zero_from_idx:] = 0.0
+            stop_req = True
+            note["mode"] = "stop"
             note["zero_from_idx"] = int(zero_from_idx)
             note["cap_mps"] = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
             return VelocityRuleResult(speed, stop_req, note, True)
@@ -354,6 +371,63 @@ class RegulatoryElementRule:
         )
 
 
+class LidarObstacleRule:
+    name = "lidar_obstacle"
+
+    def apply(
+        self,
+        *,
+        speed_profile: np.ndarray,
+        target_path: np.ndarray,
+        ctx: PlanningContext,
+        stop_required: bool,
+        planning_notes: dict,
+    ) -> VelocityRuleResult:
+        speed = np.array(speed_profile, copy=True, dtype=float)
+        stop_req = bool(stop_required)
+        nearest = None
+        half_width = float(_LIDAR_CORRIDOR_HALF_WIDTH_M)
+
+        for obs in ctx.lidar_obstacles:
+            x = float(getattr(obs, "x_m", 0.0))
+            y = float(getattr(obs, "y_m", 0.0))
+            if x <= 0.0 or abs(y) > half_width:
+                continue
+            if nearest is None or x < float(getattr(nearest, "x_m", math.inf)):
+                nearest = obs
+
+        notes: dict[str, object] = {"kind": self.name}
+        if nearest is not None:
+            x = float(nearest.x_m)
+            notes.update(
+                {
+                    "target_x_m": x,
+                    "target_y_m": float(nearest.y_m),
+                    "target_distance_m": float(nearest.distance_min_m),
+                }
+            )
+            if x <= float(_LIDAR_STOP_M):
+                speed[:] = 0.0
+                stop_req = True
+                notes["mode"] = "lidar_obstacle_stop"
+                return VelocityRuleResult(speed, stop_req, notes, True)
+            if x <= float(_LIDAR_SLOW_M):
+                cap = min(float(_BEHAVIOR_MIN_SPEED_MPS), float(ctx.max_speed_mps))
+                speed = np.minimum(speed, cap)
+                notes["mode"] = "lidar_obstacle_slow"
+                notes["cap_mps"] = float(cap)
+                return VelocityRuleResult(speed, stop_req, notes, True)
+
+        acc = _acc_target(ctx, half_width=half_width)
+        if acc is not None:
+            cap = min(float(ctx.max_speed_mps), max(float(_BEHAVIOR_MIN_SPEED_MPS), acc["speed_mps"]))
+            speed = np.minimum(speed, cap)
+            notes.update({"mode": "acc_target", **acc, "cap_mps": float(cap)})
+            return VelocityRuleResult(speed, stop_req, notes, True)
+
+        return VelocityRuleResult(speed, stop_req, {}, False)
+
+
 class BehaviorVelocityPlanner:
     """Genera el perfil de velocidad final para el MPC.
 
@@ -373,6 +447,7 @@ class BehaviorVelocityPlanner:
                 LaneContainmentRule(),
                 CurvatureConstraintRule(),
                 RegulatoryElementRule(),
+                LidarObstacleRule(),
                 CompetitionSpeedBoundsRule(),
             ]
         )
@@ -461,8 +536,6 @@ def _apply_competition_speed_bounds(
     """Keep moving commands inside competition bounds while preserving stops."""
     speed = np.asarray(speed_profile, dtype=float)
     bounded = np.minimum(np.array(speed, copy=True), float(max_speed_mps))
-    moving = bounded > 1e-6
-    bounded[moving] = np.maximum(bounded[moving], float(min_speed_mps))
     return bounded
 
 
@@ -527,3 +600,33 @@ def _compute_curvature(target_path: np.ndarray) -> np.ndarray:
     if kappas.size >= 2:
         kappas[0] = kappas[1]
     return kappas
+
+
+def _acc_target(ctx: PlanningContext, *, half_width: float) -> dict[str, float] | None:
+    ego_x = float(ctx.pose.fused_pose.x)
+    ego_y = float(ctx.pose.fused_pose.y)
+    ego_yaw = float(ctx.pose.fused_pose.yaw)
+    cos_y = math.cos(ego_yaw)
+    sin_y = math.sin(ego_yaw)
+    best: dict[str, float] | None = None
+    for track in ctx.tracked_objects:
+        if str(track.class_name).lower() not in {"car", "vehicle", "bus", "truck", "obstacle"}:
+            continue
+        tx, ty = track.position_world_xy
+        dx = float(tx) - ego_x
+        dy = float(ty) - ego_y
+        forward = dx * cos_y + dy * sin_y
+        lateral = -dx * sin_y + dy * cos_y
+        if forward <= 0.0 or forward > float(_LIDAR_SLOW_M) or abs(lateral) > half_width:
+            continue
+        tvx, tvy = track.velocity_world_xy
+        track_forward_speed = float(tvx) * cos_y + float(tvy) * sin_y
+        target = {
+            "track_id": float(track.track_id),
+            "distance_m": float(forward),
+            "lateral_m": float(lateral),
+            "speed_mps": max(0.0, float(track_forward_speed) - 0.05),
+        }
+        if best is None or target["distance_m"] < best["distance_m"]:
+            best = target
+    return best

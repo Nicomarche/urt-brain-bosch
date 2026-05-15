@@ -42,6 +42,7 @@ from src.core.messaging.allMessages import BehaviorOutputMsg, BehaviorPlannerSta
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.behavior import BehaviorOutput, ScenarioName
+from src.core.types.lidar import LidarObstacle, LidarScan
 from src.core.types.perception import LaneObservation, StoplineObservation, TrackedObject
 from src.core.types.pose import PoseEstimate
 from src.core.types.routing import RouteContext
@@ -82,6 +83,9 @@ class threadBehaviorPlanner(ThreadWithStop):
         stopline_observation_buffer: "LatestValueBuffer",
         tracked_objects_buffer: "LatestValueBuffer | None",
         behavior_output_buffer: "LatestValueBuffer",
+        lidar_scan_buffer: "LatestValueBuffer | None" = None,
+        lidar_obstacles_buffer: "LatestValueBuffer | None" = None,
+        sign_hints_buffer: "LatestValueBuffer | None" = None,
         *,
         dt_s: float,
         horizon_n: int,
@@ -102,6 +106,9 @@ class threadBehaviorPlanner(ThreadWithStop):
         self._lane_buf = lane_observation_buffer
         self._stopline_buf = stopline_observation_buffer
         self._tracked_buf = tracked_objects_buffer
+        self._lidar_scan_buf = lidar_scan_buffer
+        self._lidar_obs_buf = lidar_obstacles_buffer
+        self._sign_hints_buf = sign_hints_buffer
         self._output_buf = behavior_output_buffer
         self._dt_s = float(dt_s)
         self._horizon_n = int(horizon_n)
@@ -285,6 +292,8 @@ class threadBehaviorPlanner(ThreadWithStop):
             lane_observation_available=bool(ctx.lane_observation is not None),
             stopline_observation_available=bool(ctx.stopline_observation is not None),
             tracked_object_count=int(len(ctx.tracked_objects or ())),
+            lidar_obstacle_count=int(len(ctx.lidar_obstacles or ())),
+            lidar_scan_age_s=(ctx.now_s - ctx.lidar_scan.timestamp) if ctx.lidar_scan is not None else None,
             pose_x=float(ctx.pose.fused_pose.x),
             pose_y=float(ctx.pose.fused_pose.y),
             pose_yaw_rad=float(ctx.pose.fused_pose.yaw),
@@ -437,6 +446,22 @@ class threadBehaviorPlanner(ThreadWithStop):
             ):
                 tracked = payload
 
+        lidar_scan = self._lidar_scan_buf.read_latest() if self._lidar_scan_buf is not None else None
+        if not isinstance(lidar_scan, LidarScan):
+            lidar_scan = None
+
+        lidar_obstacles: tuple[LidarObstacle, ...] = ()
+        if self._lidar_obs_buf is not None:
+            payload = self._lidar_obs_buf.read_latest()
+            if isinstance(payload, tuple) and all(isinstance(o, LidarObstacle) for o in payload):
+                lidar_obstacles = payload
+
+        sign_hints: tuple[dict, ...] = ()
+        if self._sign_hints_buf is not None:
+            payload = self._sign_hints_buf.read_latest()
+            if isinstance(payload, (list, tuple)):
+                sign_hints = tuple(dict(item) for item in payload if isinstance(item, dict))
+
         return PlanningContext(
             now_s=float(now_s),
             dt=self._dt_s,
@@ -448,7 +473,10 @@ class threadBehaviorPlanner(ThreadWithStop):
             lane_observation=lane_obs,
             stopline_observation=stopline_obs,
             tracked_objects=tracked,
+            lidar_scan=lidar_scan,
+            lidar_obstacles=lidar_obstacles,
             lanelet_map=self._lanelet_map,
+            sign_hints=sign_hints,
         )
 
     # ----------------------------------------------------------------

@@ -163,6 +163,10 @@ class SocketIOClient(QObject):
     semaphores_signal = pyqtSignal(object)       # list[dict]
     navigation_status_signal = pyqtSignal(object)
     behavior_output_signal = pyqtSignal(object)   # dict: target_path, speed_profile, notes
+    lidar_scan_signal = pyqtSignal(object)
+    lidar_status_signal = pyqtSignal(object)
+    detected_objects_signal = pyqtSignal(object)
+    tracked_objects_signal = pyqtSignal(object)
     motor_command_signal = pyqtSignal(object)     # dict: steering_deg, speed_mps, valid, source, reason
     gps_fix_signal = pyqtSignal(object)           # dict: world_x, world_y, timestamp
     camera_frame_signal = pyqtSignal(QImage)     # decoded JPEG/PNG → QImage
@@ -433,6 +437,22 @@ class SocketIOClient(QObject):
         @self._sio.on(ev.EVT_BEHAVIOR_OUTPUT)
         def _on_behavior_output(data):  # noqa: ANN001
             self.behavior_output_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_LIDAR_SCAN)
+        def _on_lidar_scan(data):  # noqa: ANN001
+            self.lidar_scan_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_LIDAR_STATUS)
+        def _on_lidar_status(data):  # noqa: ANN001
+            self.lidar_status_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_DETECTED_OBJECTS)
+        def _on_detected_objects(data):  # noqa: ANN001
+            self.detected_objects_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_TRACKED_OBJECTS)
+        def _on_tracked_objects(data):  # noqa: ANN001
+            self.tracked_objects_signal.emit(_unwrap_payload(data))
 
         # ---- Camera ----
         # Preferred (binary JPEG): payload is raw bytes.
