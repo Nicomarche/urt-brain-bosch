@@ -40,7 +40,17 @@ except Exception:
     _BEHAVIOR_MIN_SPEED_MPS = 0.20
 
 _CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
-_LANE_CONTAINMENT_WARN_CAP_MPS = min(float(_BEHAVIOR_MIN_SPEED_MPS), 0.06)
+# REGRESSION GUARD:
+# Acados re-temporiza la referencia del MPC usando el speed_profile final
+# (ver MotionController._retime_state_refs_by_speed). Si lane containment
+# baja warn/crawl/recovery por debajo del mínimo de movimiento, el preview
+# físico del MPC se achica brutalmente: con N=40 y dt=0.05, 0.20 m/s mira
+# ~0.40 m, pero 0.04-0.06 m/s mira solo ~0.08-0.12 m. Ese cambio hizo que
+# el auto corrigiera tarde y circulara pegado a las líneas. No hardcodear
+# estos caps por debajo del mínimo; si config pide un crawl bajo,
+# competition_bounds debe restaurar el piso de movimiento para cualquier
+# velocidad no-cero.
+_LANE_CONTAINMENT_WARN_CAP_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
 
 try:
     from config import (
@@ -55,7 +65,6 @@ try:
     )
 except Exception:
     _BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = 0.04
-_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS = min(float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS), 0.04)
 
 try:
     from config import (
@@ -77,7 +86,6 @@ try:
     )
 except Exception:
     _BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = 0.08
-_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS = min(float(_BEHAVIOR_CONTAINMENT_RECOVERY_SPEED_MPS), 0.08)
 
 # Histeresis para que el error tenga que decrecer al menos 5 mm por tick
 # para considerarse "el robot está recuperando"; valores menores son ruido.
@@ -262,9 +270,10 @@ class LaneContainmentRule:
                 note["zero_from_idx"] = int(zero_from_idx)
                 return VelocityRuleResult(speed, stop_req, note, True)
             speed = np.minimum(speed, float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS))
-            speed[zero_from_idx:] = 0.0
-            stop_req = True
-            note["mode"] = "stop"
+            # No marcar stop_required cuando la inviabilidad es futura: el
+            # MotionController traduce stop_required a steering=0, justo cuando
+            # necesitamos mantener autoridad lateral para volver al corridor.
+            note["mode"] = "future_horizon_crawl"
             note["zero_from_idx"] = int(zero_from_idx)
             note["cap_mps"] = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
             return VelocityRuleResult(speed, stop_req, note, True)
@@ -540,6 +549,8 @@ def _apply_competition_speed_bounds(
     """Keep moving commands inside competition bounds while preserving stops."""
     speed = np.asarray(speed_profile, dtype=float)
     bounded = np.minimum(np.array(speed, copy=True), float(max_speed_mps))
+    moving = bounded > 1e-6
+    bounded[moving] = np.maximum(bounded[moving], float(min_speed_mps))
     return bounded
 
 
