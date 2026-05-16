@@ -125,6 +125,7 @@ class threadPoseEstimator(threadTracking):
         self._last_gps_raw_xy: tuple[float, float] | None = None
         self._last_gps_raw_monotonic = 0.0
         self._gps_calibration_offset_xy: tuple[float, float] | None = None
+        self._pending_yaw_offset_target_rad: float | None = None
         self._startup_world_pose = self._resolve_initial_world_pose()
         self._apply_start_pose_override()
         self._send_sim_relocalize()
@@ -200,6 +201,27 @@ class threadPoseEstimator(threadTracking):
         source = self._localisation_source(payload, meta, "manual_localisation").strip().lower()
         return bool(meta.get("gps_calibration")) or source.startswith("manual_dashboard")
 
+    def _calibrate_imu_yaw_offset_to(self, target_yaw_rad: float) -> tuple[bool, float | None]:
+        self._pending_yaw_offset_target_rad = float(target_yaw_rad)
+        imu = getattr(self, "_last_raw_imu", None)
+        if not isinstance(imu, dict):
+            self._yaw_offset_calibrated = False
+            return False, None
+        last_imu_t = getattr(self, "_last_imu_t", None)
+        if last_imu_t is None or (time.monotonic() - float(last_imu_t)) > 1.0:
+            self._yaw_offset_calibrated = False
+            return False, None
+        try:
+            raw_yaw_deg = float(imu.get("yaw"))
+        except (TypeError, ValueError):
+            self._yaw_offset_calibrated = False
+            return False, None
+        yaw_raw_rad = _IMU_YAW_SIGN * math.radians(raw_yaw_deg)
+        self._yaw_offset = float(target_yaw_rad) - float(yaw_raw_rad)
+        self._yaw_offset_calibrated = True
+        self._pending_yaw_offset_target_rad = None
+        return True, raw_yaw_deg
+
     def _apply_gps_dashboard_calibration(self, payload: dict, meta: dict, current_yaw: float):
         raw_xy = self._latest_gps_raw_xy_for_calibration(payload)
         if raw_xy is None:
@@ -225,14 +247,22 @@ class threadPoseEstimator(threadTracking):
         self._yaw_ekf_p = _YAW_EKF_P_INIT
         self._last_absolute_yaw_fix_monotonic = time.monotonic()
         self._last_absolute_yaw_fix_source = "gps_dashboard_calibration"
+        imu_calibrated, raw_yaw_deg = self._calibrate_imu_yaw_offset_to(float(yaw))
         if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
             self.tracking_state.set_lane_measurement_state(False, 0.0)
 
+        imu_text = (
+            f"; imu_raw={float(raw_yaw_deg):.1f}° "
+            f"imu_offset={math.degrees(float(self._yaw_offset)):.1f}°"
+            if imu_calibrated
+            else "; imu offset pending next IMU"
+        )
         print(
             "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
             f" - GPS calibrated: raw ({raw_x:.3f}, {raw_y:.3f}) -> "
             f"map ({float(target_x):.3f}, {float(target_y):.3f}); "
             f"offset=({offset_x:.3f}, {offset_y:.3f})"
+            f"{imu_text}"
         )
         return True, {
             "mode": "gps_calibration",
@@ -697,8 +727,14 @@ class threadPoseEstimator(threadTracking):
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 yaw_raw_rad = _IMU_YAW_SIGN * math.radians(yaw_deg)
                 if not self._yaw_offset_calibrated:
-                    self._yaw_offset = self._start_yaw_rad - yaw_raw_rad
+                    target_yaw = (
+                        float(self._pending_yaw_offset_target_rad)
+                        if self._pending_yaw_offset_target_rad is not None
+                        else float(self._start_yaw_rad)
+                    )
+                    self._yaw_offset = target_yaw - yaw_raw_rad
                     self._yaw_offset_calibrated = True
+                    self._pending_yaw_offset_target_rad = None
                 elif not self._has_fresh_absolute_yaw_fix(now):
                     # EKF correction: fuse IMU absolute heading with kinematic prediction.
                     # R scales with steer²: large steer → servo EMI biases magnetometer
