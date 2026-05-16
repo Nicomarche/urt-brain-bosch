@@ -61,6 +61,7 @@ from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import CurrentSpeed, Localisation, Location
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.utils.live_log import live_log
 
 # Defaults que se sobreescriben con los valores de config.py si está disponible.
 _LOCSYS_PORT        = 4691
@@ -534,6 +535,19 @@ class threadLocSys(ThreadWithStop):
                 payload["yaw_deg"] = float(data["yaw_deg"])
         except (TypeError, ValueError):
             pass
+        live_log(
+            "locsys",
+            event="gps_fix",
+            world_x=float(x),
+            world_y=float(y),
+            yaw_rad=(
+                float(payload.get("yaw_rad"))
+                if payload.get("yaw_rad") is not None
+                else None
+            ),
+            source=str(payload.get("meta", {}).get("source", "")),
+            sim_mode=bool(self._sim_mode),
+        )
         self.localisationSender.send(payload)
         if self.debugger:
             yaw_dbg = payload.get("yaw_deg")

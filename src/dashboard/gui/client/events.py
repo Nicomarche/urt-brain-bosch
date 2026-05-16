@@ -71,6 +71,7 @@ EVT_CONSOLE_LOG = "console_log"
 EVT_LOAD_BACK = "loadBack"
 EVT_MOTOR_COMMAND_MSG = "MotorCommandMsg"
 EVT_GPS_FIX = "GpsFix"                  # {"world_x": float, "world_y": float, "timestamp": float}
+EVT_DEAD_RECKONING = "DeadReckoning"    # {"x": float, "y": float, "yaw_deg": float, "timestamp": float}
 
 # ---- Routes / params persistence (table-state contract) -------------------
 ROUTE_SAVE = "save"

@@ -48,7 +48,8 @@ from src.core.messaging.allMessages import (
     CalibPWMData,
     CalibRunDone,
     SteeringLimits,
-    AliveSignal
+    AliveSignal,
+    OdoDistance,
 )
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -102,6 +103,7 @@ class threadRead(ThreadWithStop):
         self.calibRunDoneSender = messageHandlerSender(self.queuesList, CalibRunDone)
         self.steeringLimitsSender = messageHandlerSender(self.queuesList, SteeringLimits)
         self.aliveSignalSender = messageHandlerSender(self.queuesList, AliveSignal)
+        self.odoDistanceSender = messageHandlerSender(self.queuesList, OdoDistance)
 
     # ====================================== RUN ==========================================
     def thread_work(self):
@@ -174,6 +176,15 @@ class threadRead(ThreadWithStop):
                 speed = value.split(",")[0]
                 if (lambda v: (lambda: float(v), True)[1] if isinstance(v, str) else False)(speed):
                     self.currentSpeedSender.send(float(speed))
+
+            elif action == "odo":
+                # @odo:<mm>;; — accumulated Hall distance (uint32, mm).
+                # The DR consumer uses deltas, so the brain never resets it.
+                odo_str = value.split(",")[0]
+                try:
+                    self.odoDistanceSender.send(int(odo_str))
+                except ValueError:
+                    pass
 
             elif action == "steer":
                 steer = value.split(",")[0]

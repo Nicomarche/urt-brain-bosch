@@ -394,6 +394,8 @@ class _MapScene(QGraphicsScene):
             sp = event.scenePos()
             x_m, y_m = self._data.pixel_to_world(sp.x(), sp.y())
             self.map_clicked.emit(x_m, y_m)
+            event.accept()
+            return
         super().mousePressEvent(event)
 
 
@@ -459,6 +461,20 @@ class _GpsDot(QGraphicsEllipseItem):
         self.setPen(QPen(QColor("#ffffff"), 1.5))
         self.setBrush(QBrush(QColor(0, 120, 255, 200)))
         self.setZValue(90)
+        self.setVisible(False)
+
+
+class _DrDot(QGraphicsEllipseItem):
+    """Green dot marking the pure dead-reckoning estimate."""
+
+    R = 8
+
+    def __init__(self):
+        super().__init__(-self.R, -self.R, 2 * self.R, 2 * self.R)
+        self.setPen(QPen(QColor("#ffffff"), 2.0))
+        self.setBrush(QBrush(QColor(46, 212, 122, 230)))
+        self.setZValue(103)
+        self.setAcceptedMouseButtons(Qt.NoButton)
         self.setVisible(False)
 
 
@@ -654,6 +670,7 @@ class MapView(QWidget):
         self._client.behavior_output_signal.connect(self._on_behavior_output)
         self._client.state_change_signal.connect(self._on_state_change)
         self._client.gps_fix_signal.connect(self._on_gps_fix)
+        self._client.dead_reckoning_signal.connect(self._on_dead_reckoning)
         self._mode = ev.MODE_STOP
         self._relocate_mode = False
         self._refresh_manual_pose_controls()
@@ -712,6 +729,8 @@ class MapView(QWidget):
         self._scene.addItem(self._cursor)
         self._gps_dot = _GpsDot()
         self._scene.addItem(self._gps_dot)
+        self._dr_dot = _DrDot()
+        self._scene.addItem(self._dr_dot)
 
         self._cars_items: list[QGraphicsItem] = []
         self._semaphore_items: list[QGraphicsItem] = []
@@ -1491,6 +1510,21 @@ class MapView(QWidget):
         if self._last_location_time <= 0.0:
             self._set_cursor_pose(x_m, y_m, gps_yaw_deg)
         self._update_gps_age_label()
+
+    def _on_dead_reckoning(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        if not payload.get("anchored"):
+            self._dr_dot.setVisible(False)
+            return
+        try:
+            x_m = float(payload["x"])
+            y_m = float(payload["y"])
+        except (TypeError, ValueError, KeyError):
+            return
+        px, py = self._data.world_to_pixel(x_m, y_m)
+        self._dr_dot.setPos(px, py)
+        self._dr_dot.setVisible(True)
 
     def _update_gps_age_label(self) -> None:
         if self._last_gps_fix_time <= 0.0:

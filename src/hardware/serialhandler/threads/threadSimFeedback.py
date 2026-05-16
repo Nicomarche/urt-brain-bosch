@@ -60,6 +60,7 @@ from src.core.messaging.allMessages import (
     CurrentSpeed,
     CurrentSteer,
     ImuData,
+    OdoDistance,
 )
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -119,6 +120,7 @@ class threadSimFeedback(ThreadWithStop):
         self.currentSpeedSender = messageHandlerSender(self.queuesList, CurrentSpeed)
         self.currentSteerSender = messageHandlerSender(self.queuesList, CurrentSteer)
         self.imuDataSender = messageHandlerSender(self.queuesList, ImuData)
+        self.odoDistanceSender = messageHandlerSender(self.queuesList, OdoDistance)
 
     # ------------------------------------------------------------------
     def _ensure_socket(self) -> bool:
@@ -174,6 +176,13 @@ class threadSimFeedback(ThreadWithStop):
         if speed_mmps is not None:
             try:
                 self.currentSpeedSender.send(float(speed_mmps))
+            except (TypeError, ValueError):
+                pass
+
+        odo_mm = payload.get("odo_mm")
+        if odo_mm is not None:
+            try:
+                self.odoDistanceSender.send(int(odo_mm))
             except (TypeError, ValueError):
                 pass
 

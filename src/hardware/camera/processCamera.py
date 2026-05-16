@@ -150,6 +150,7 @@ class processCamera(WorkerProcess):
         try:
             from src.routing.navigation_planner_thread import threadNavigationPlanner
             from src.localization.pose_estimator_thread import threadPoseEstimator
+            from src.localization.dead_reckoning_pure_thread import threadDeadReckoningPure
             from src.localization.relocalization_thread import TrackingState
             from src.routing.visualizer import TrackVisualizer
             import config as _cfg
@@ -316,6 +317,11 @@ class processCamera(WorkerProcess):
                 logging=self.logging,
                 debugging=self.debugging,
             )
+            deadReckoningPureTh = threadDeadReckoningPure(
+                self.queuesList,
+                logging=self.logging,
+                debugging=self.debugging,
+            )
             plannerTh = threadNavigationPlanner(
                 self.queuesList,
                 tracking_state,
@@ -334,6 +340,7 @@ class processCamera(WorkerProcess):
                 visualizer=visualizer,
             )
             self.threads.append(poseEstimatorTh)
+            self.threads.append(deadReckoningPureTh)
             self.threads.append(plannerTh)
 
         objectTrackerTh = threadObjectTracker(

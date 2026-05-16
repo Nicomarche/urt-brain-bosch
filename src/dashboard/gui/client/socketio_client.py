@@ -169,6 +169,7 @@ class SocketIOClient(QObject):
     tracked_objects_signal = pyqtSignal(object)
     motor_command_signal = pyqtSignal(object)     # dict: steering_deg, speed_mps, valid, source, reason
     gps_fix_signal = pyqtSignal(object)           # dict: world_x, world_y, timestamp
+    dead_reckoning_signal = pyqtSignal(object)    # dict: x, y, yaw_deg, timestamp, anchored
     camera_frame_signal = pyqtSignal(QImage)     # decoded JPEG/PNG → QImage
     line_following_debug_signal = pyqtSignal(QImage)
     line_following_status_signal = pyqtSignal(object)
@@ -520,3 +521,7 @@ class SocketIOClient(QObject):
         @self._sio.on(ev.EVT_GPS_FIX)
         def _on_gps_fix(data):  # noqa: ANN001
             self.gps_fix_signal.emit(_unwrap_payload(data))
+
+        @self._sio.on(ev.EVT_DEAD_RECKONING)
+        def _on_dead_reckoning(data):  # noqa: ANN001
+            self.dead_reckoning_signal.emit(_unwrap_payload(data))

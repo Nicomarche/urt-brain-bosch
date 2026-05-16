@@ -47,7 +47,12 @@ from enum import Enum
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.templates.workerprocess import WorkerProcess
-from src.core.messaging.allMessages import Localisation, Semaphores, StateChange
+from src.core.messaging.allMessages import (
+    DeadReckoningPose,
+    Localisation,
+    Semaphores,
+    StateChange,
+)
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.transitionTable import TransitionTable
 from src.statemachine.systemMode import SystemMode
@@ -317,6 +322,8 @@ class processDashboard(WorkerProcess):
     def subscribe(self):
         """Subscribe function. In this function we make all the required subscribe to process gateway."""
         for name, enum in self.messagesAndVals.items():
+            if name in {"DeadReckoningPose", "OdoDistance"}:
+                continue
             if enum["owner"] != "Dashboard":
                 subscriber = messageHandlerSubscriber(self.queueList, enum["enum"], "lastOnly", True)
                 self.messages[name] = {"obj": subscriber}
@@ -333,6 +340,9 @@ class processDashboard(WorkerProcess):
         # Filtering by meta.source happens in send_continuous_messages().
         self._gps_fix_subscriber = messageHandlerSubscriber(
             self.queueList, Localisation, "lastOnly", True
+        )
+        self._dr_subscriber = messageHandlerSubscriber(
+            self.queueList, DeadReckoningPose, "lastOnly", True
         )
 
 
@@ -707,6 +717,13 @@ class processDashboard(WorkerProcess):
                 and gps_payload.get("meta", {}).get("source") == "gps_localisation"
             ):
                 self.socketio.emit("GpsFix", {"value": gps_payload})
+        except Exception:
+            pass
+
+        try:
+            dr_payload = self._dr_subscriber.receive()
+            if isinstance(dr_payload, dict):
+                self.socketio.emit("DeadReckoning", {"value": dr_payload})
         except Exception:
             pass
 

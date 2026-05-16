@@ -1,7 +1,7 @@
 {
     "code_gen_opts": {
-        "acados_include_path": "/home/urt/acados_install/include",
-        "acados_lib_path": "/home/urt/acados_install/lib",
+        "acados_include_path": "/Users/luciogarcia/acados_install/include",
+        "acados_lib_path": "/Users/luciogarcia/acados_install/lib",
         "acados_link_libs": {
             "clarabel": "",
             "daqp": "",
@@ -13,14 +13,14 @@
             "qpoases": "-lqpOASES_e"
         },
         "acados_version": null,
-        "code_export_directory": "/home/urt/Documents/urt-brain-bosch/src/control/c_generated_code",
+        "code_export_directory": "/Users/luciogarcia/urt-brain-bosch/src/control/c_generated_code",
         "cython_include_dirs": [
-            "/home/urt/.local/lib/python3.10/site-packages/numpy/core/include",
-            "/usr/include/python3.10"
+            "/Users/luciogarcia/urt-brain-bosch/.venv/lib/python3.13/site-packages/numpy/_core/include",
+            "/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/include/python3.13"
         ],
-        "json_file": "/home/urt/Documents/urt-brain-bosch/src/control/c_generated_code/acados_ocp_bfmc_bicycle.json",
-        "os": "unix",
-        "shared_lib_ext": ".so"
+        "json_file": "/Users/luciogarcia/urt-brain-bosch/src/control/c_generated_code/acados_ocp_bfmc_bicycle.json",
+        "os": "mac",
+        "shared_lib_ext": ".dylib"
     },
     "constraints": {
         "C": [],
@@ -404,7 +404,7 @@
         "bfmc_bicycle_cost/bfmc_bicycle_cost_y_e_fun_jac_ut_xt.c",
         "bfmc_bicycle_cost/bfmc_bicycle_cost_y_e_hess.c"
     ],
-    "hash": "b3e93da0b951cc68bc8c5e9d6b901f52",
+    "hash": "3694e1968529469d8dd3ce6e4a4b0029",
     "model": {
         "con_h_expr": [],
         "con_h_expr_0": [],

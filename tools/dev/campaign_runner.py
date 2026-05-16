@@ -840,6 +840,32 @@ def _compute_metrics(
         if expected_xy:
             distances.append(_point_to_polyline_distance(point, expected_xy))
 
+    gps_xy: list[tuple[float, float]] = [
+        (float(ev["world_x"]), float(ev["world_y"]))
+        for ev in brain_events
+        if ev.get("thread") == "locsys"
+        and ev.get("event") == "gps_fix"
+        and ev.get("world_x") is not None
+        and ev.get("world_y") is not None
+    ]
+    pose_xy: list[tuple[float, float]] = [
+        (float(ev["fused_x"]), float(ev["fused_y"]))
+        for ev in brain_events
+        if ev.get("thread") == "pose_estimator"
+        and ev.get("event") == "pose_published"
+        and ev.get("fused_x") is not None
+        and ev.get("fused_y") is not None
+    ]
+    dr_xy: list[tuple[float, float]] = [
+        (float(ev["x"]), float(ev["y"]))
+        for ev in brain_events
+        if ev.get("thread") == "dead_reckoning"
+        and ev.get("event") == "dr_pose"
+        and ev.get("anchored")
+        and ev.get("x") is not None
+        and ev.get("y") is not None
+    ]
+
     route_updates = [
         ev for ev in brain_events
         if ev.get("thread") == "nav_planner" and ev.get("event") == "route_update"
@@ -1058,6 +1084,12 @@ def _compute_metrics(
                 "threshold_max": max_max_m,
             },
             "actual_path": [[float(x), float(y)] for x, y in actual_xy],
+        },
+        "paths": {
+            "gps": [[float(x), float(y)] for x, y in gps_xy],
+            "pose": [[float(x), float(y)] for x, y in pose_xy],
+            "dead_reckoning": [[float(x), float(y)] for x, y in dr_xy],
+            "ground_truth": [[float(x), float(y)] for x, y in actual_xy],
         },
         "visual_lane": {
             "samples": len(lane_abs_offsets),
@@ -1807,6 +1839,69 @@ def _write_overlay(
     return bool(cv2.imwrite(str(out_path), img))
 
 
+def _write_dr_overlay(
+    *,
+    out_path: Path,
+    track_png: Path,
+    expected_route: dict[str, Any],
+    gps_xy: list[tuple[float, float]],
+    pose_xy: list[tuple[float, float]],
+    dr_xy: list[tuple[float, float]],
+    gt_xy: list[tuple[float, float]],
+) -> bool:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return False
+
+    meta = _overlay_map_metadata(track_png, expected_route)
+    img = cv2.imread(str(track_png), cv2.IMREAD_COLOR) if track_png.exists() else None
+    if img is None:
+        width = int(meta.get("image_width_px", 2039) or 2039)
+        height = int(meta.get("image_height_px", 1343) or 1343)
+        img = np.full((height, width, 3), 245, dtype=np.uint8)
+
+    bounds = dict(meta.get("world_bounds") or {})
+    x_min = float(bounds.get("x_min", 0.0) or 0.0)
+    y_min = float(bounds.get("y_min", 0.0) or 0.0)
+    mpp = float(meta.get("meters_per_pixel", 0.01) or 0.01)
+    y_axis_inverted = bool(meta.get("y_axis_inverted", False))
+    height_px = int(img.shape[0])
+
+    def world_to_pixel(x: float, y: float) -> tuple[int, int]:
+        px = (float(x) - x_min) / mpp
+        local_y = float(y) - y_min
+        py = height_px - (local_y / mpp) if y_axis_inverted else local_y / mpp
+        return int(round(px)), int(round(py))
+
+    def clean_points(points) -> list[tuple[float, float]]:
+        return [
+            (float(pt[0]), float(pt[1]))
+            for pt in points
+            if isinstance(pt, (list, tuple)) and len(pt) >= 2
+        ]
+
+    def draw_polyline(points, color: tuple[int, int, int], thickness: int) -> None:
+        clean = clean_points(points)
+        if len(clean) < 2:
+            return
+        pix = np.asarray([world_to_pixel(x, y) for x, y in clean], dtype=np.int32)
+        cv2.polylines(img, [pix], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
+
+    draw_polyline(gt_xy, (180, 180, 180), 2)
+    draw_polyline(gps_xy, (255, 120, 0), 3)
+    draw_polyline(pose_xy, (87, 107, 255), 3)
+    draw_polyline(dr_xy, (122, 212, 46), 3)
+
+    cv2.putText(img, "ground_truth", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (180, 180, 180), 2, cv2.LINE_AA)
+    cv2.putText(img, "gps", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 120, 0), 2, cv2.LINE_AA)
+    cv2.putText(img, "pose_fused", (24, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (87, 107, 255), 2, cv2.LINE_AA)
+    cv2.putText(img, "dead_reckoning", (24, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (122, 212, 46), 2, cv2.LINE_AA)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    return bool(cv2.imwrite(str(out_path), img))
+
+
 def _collect_visual_lane_samples(
     brain_events: list[dict[str, Any]],
     *,
@@ -2306,6 +2401,18 @@ def main() -> int:
     )
     if overlay_written:
         metrics["artifacts"]["overlay_png"] = str(brain_run_dir / "overlay.png")
+    paths = metrics.get("paths", {})
+    dr_overlay_written = _write_dr_overlay(
+        out_path=brain_run_dir / "overlay_dr.png",
+        track_png=args.track_png.resolve(),
+        expected_route=expected_route,
+        gps_xy=paths.get("gps", []),
+        pose_xy=paths.get("pose", []),
+        dr_xy=paths.get("dead_reckoning", []),
+        gt_xy=paths.get("ground_truth", metrics["ground_truth"]["actual_path"]),
+    )
+    if dr_overlay_written:
+        metrics["artifacts"]["overlay_dr_png"] = str(brain_run_dir / "overlay_dr.png")
     visual_overlay_written = _write_visual_lane_overlay(
         out_path=brain_run_dir / "overlay_visual_lane.png",
         track_png=args.track_png.resolve(),

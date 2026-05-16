@@ -382,11 +382,25 @@ class SteeringLimits(Enum):
     msgID = 12
     msgType = "dict"
 
+class OdoDistance(Enum):
+    Queue = "General"
+    Owner = "threadRead"
+    msgID = 13
+    msgType = "int"
+
 
 ################################# From Locsys ##################################
 class Location(Enum):
     Queue = "General"
     Owner = "threadTrafficCommunication"
+    msgID = 1
+    msgType = "dict"
+
+
+########################### From Dead Reckoning ###############################
+class DeadReckoningPose(Enum):
+    Queue = "General"
+    Owner = "threadDeadReckoning"
     msgID = 1
     msgType = "dict"
 

@@ -63,6 +63,36 @@ _has_template() {
     ACADOS_SOURCE_DIR="$ACADOS_INSTALL_DIR" \
         "$PYTHON_BIN" -c "from acados_template import AcadosOcpSolver" 2>/dev/null
 }
+_solver_json_matches_host() {
+    [[ -f "$SOLVER_JSON" ]] || return 1
+    "$PYTHON_BIN" - "$SOLVER_JSON" "$PROJECT_ROOT/src/control/c_generated_code" "$ACADOS_INSTALL_DIR" ".$LIB_EXT" <<'PY'
+import json
+import os
+import sys
+
+json_path, solver_dir, acados_dir, expected_ext = sys.argv[1:5]
+
+with open(json_path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+
+opts = data.get("code_gen_opts", {})
+
+def same_path(actual: object, expected: str) -> bool:
+    if not isinstance(actual, str) or not actual:
+        return False
+    return os.path.abspath(os.path.expanduser(actual)) == os.path.abspath(os.path.expanduser(expected))
+
+checks = [
+    same_path(opts.get("code_export_directory"), solver_dir),
+    same_path(opts.get("json_file"), json_path),
+    same_path(opts.get("acados_lib_path"), os.path.join(acados_dir, "lib")),
+    same_path(opts.get("acados_include_path"), os.path.join(acados_dir, "include")),
+    opts.get("shared_lib_ext") == expected_ext,
+]
+
+raise SystemExit(0 if all(checks) else 1)
+PY
+}
 _has_solver() {
     [[ -f "$SOLVER_JSON" ]] || return 1
     if [[ "$PLATFORM" == "Darwin" ]]; then
@@ -70,7 +100,8 @@ _has_solver() {
     else
         local lib_path="$PROJECT_ROOT/src/control/c_generated_code/libacados_ocp_solver_bfmc_bicycle.so"
     fi
-    [[ -f "$lib_path" ]]
+    [[ -f "$lib_path" ]] || return 1
+    _solver_json_matches_host
 }
 _solver_loads() {
     cd "$PROJECT_ROOT"
@@ -187,7 +218,7 @@ fi
 
 # ── 5. Generar solver si falta ────────────────────────────────────────────────
 if ! _has_solver; then
-    log "Paso 4b/4 — generando solver OCP (bicicleta BFMC, N=30)…"
+    log "Paso 4b/4 — generando solver OCP (bicicleta BFMC)…"
     cd "$PROJECT_ROOT"
     ACADOS_SOURCE_DIR="$ACADOS_INSTALL_DIR" \
     DYLD_LIBRARY_PATH="$ACADOS_INSTALL_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
