@@ -88,6 +88,29 @@ class processDashboard(WorkerProcess):
         self.messages = {}
         self.sendMessages = {}
         self.messagesAndVals = {}
+        self._dashboard_trace_channels = {
+            "ActuatorCommandStatus",
+            "AliveSignal",
+            "BatteryLvl",
+            "CalibPWMData",
+            "CalibRunDone",
+            "CurrentDistance",
+            "CurrentSpeed",
+            "CurrentSteer",
+            "EnableButton",
+            "ImuAck",
+            "ImuData",
+            "InstantConsumption",
+            "Klem",
+            "ResourceMonitor",
+            "SerialConnectionState",
+            "SpeedMotor",
+            "SteerMotor",
+            "SteeringLimits",
+            "ToggleHallSpeed",
+            "OdoReset",
+            "Brake",
+        }
 
         self.memoryUsage = 0
         self.cpuCoreUsage = 0
@@ -157,7 +180,6 @@ class processDashboard(WorkerProcess):
             "LocalPerceptionStatus",
             "SignDetectionDebug",
             "SignDetectionStatus",
-            "ActuatorCommandStatus",
         }
         for channel in ignored_channels:
             self.messagesAndVals.pop(channel, None)
@@ -335,9 +357,24 @@ class processDashboard(WorkerProcess):
             if enum["owner"] != "Dashboard":
                 subscriber = messageHandlerSubscriber(self.queueList, enum["enum"], "lastOnly", True)
                 self.messages[name] = {"obj": subscriber}
+                if name in self._dashboard_trace_channels:
+                    enum_cls = enum["enum"]
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mSUB\033[0m"
+                        f" channel={name} owner={enum_cls.Owner.value}"
+                        f" msgID={enum_cls.msgID.value} queue={enum_cls.Queue.value}"
+                        f" mode=lastOnly"
+                    )
             else:
                 sender = messageHandlerSender(self.queueList, enum["enum"])
                 self.sendMessages[str(name)] = {"obj": sender}
+                if name in self._dashboard_trace_channels:
+                    enum_cls = enum["enum"]
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mSEND-REG\033[0m"
+                        f" channel={name} owner={enum_cls.Owner.value}"
+                        f" msgID={enum_cls.msgID.value} queue={enum_cls.Queue.value}"
+                    )
 
         subscriber = messageHandlerSubscriber(self.queueList, Semaphores, "fifo", True)
         self.messages["Semaphores"] = {"obj": subscriber}
@@ -367,7 +404,24 @@ class processDashboard(WorkerProcess):
     def send_message_to_brain(self, dataName, dataDict):
         """Send messages to the backend."""
         if dataName in self.sendMessages:
-            self.sendMessages[dataName]["obj"].send(dataDict.get("Value"))
+            value = dataDict.get("Value")
+            self.sendMessages[dataName]["obj"].send(value)
+            if dataName in self._dashboard_trace_channels:
+                enum_cls = self.messagesAndVals[dataName]["enum"]
+                queue_name = enum_cls.Queue.value
+                print(
+                    f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mQUEUE\033[0m"
+                    f" frontend -> brain channel={dataName}"
+                    f" queue={queue_name} owner={enum_cls.Owner.value}"
+                    f" msgID={enum_cls.msgID.value}"
+                    f" qsize={self._queue_depth(queue_name)}"
+                    f" value={self._preview(value)}"
+                )
+        elif dataName in self._dashboard_trace_channels:
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mNO-SENDER\033[0m"
+                f" channel={dataName} payload={self._preview(dataDict)}"
+            )
 
 
     def handle_message(self, data):
@@ -649,6 +703,18 @@ class processDashboard(WorkerProcess):
 
         return str(value)
 
+    def _preview(self, value, limit=180):
+        text = repr(value)
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _queue_depth(self, queue_name):
+        try:
+            return self.queueList[queue_name].qsize()
+        except Exception:
+            return "n/a"
+
 
     def update_hardware_data(self):
         """Monitor and update hardware metrics periodically."""
@@ -697,6 +763,13 @@ class processDashboard(WorkerProcess):
                 resp = subscriber["obj"].receive()
                 if resp is None:
                     continue
+
+                if msg in self._dashboard_trace_channels:
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mIPC\033[0m"
+                        f" channel={msg} received type={type(resp).__name__}"
+                        f" value={self._preview(resp)}"
+                    )
 
                 if msg == "SerialConnectionState":
                     self.serialConnected = resp
@@ -751,6 +824,11 @@ class processDashboard(WorkerProcess):
 
                 safe_resp = self._make_json_safe(resp)
                 self.socketio.emit(msg, {"value": safe_resp})
+                if msg in self._dashboard_trace_channels:
+                    print(
+                        f"\033[1;97m[ Dashboard ] :\033[0m \033[1;96mEMIT\033[0m"
+                        f" socketio channel={msg} value={self._preview(safe_resp)}"
+                    )
                 if self.debugging:
                     self.logger.info(f"{msg}: {safe_resp}")
             except Exception as e:

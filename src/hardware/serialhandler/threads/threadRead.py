@@ -43,6 +43,7 @@ from src.core.messaging.allMessages import (
     ResourceMonitor,
     CurrentSpeed,
     CurrentSteer,
+    CurrentDistance,
     ShutDownSignal,
     SerialConnectionState,
     CalibPWMData,
@@ -79,6 +80,7 @@ class threadRead(ThreadWithStop):
                                "speed": "between -500 and 500", "break": "between -250 and 250"}
 
         self.warningPattern = r'^(-?[0-9]+)H(-?[0-5]?[0-9])M(-?[0-5]?[0-9])S$'
+        self.warningColonPattern = r'^(-?[0-9]+):(-?[0-5]?[0-9]):(-?[0-5]?[0-9])$'
         self.resourceMonitorPattern = r'Heap \((\d+\.\d+)\);Stack \((\d+\.\d+)\)'
 
         # error rate limiting
@@ -86,6 +88,11 @@ class threadRead(ThreadWithStop):
         self.error_cooldown = timedelta(seconds=3)
         self._last_feedback_log = {}
         self._last_feedback_log_time = {}
+        self._serial_debug_enabled = True
+        self._last_read_status_log = 0.0
+        self._read_bytes_total = 0
+        self._read_frames_total = 0
+        self._read_empty_ticks = 0
 
         self.queue_sending()
 
@@ -98,6 +105,7 @@ class threadRead(ThreadWithStop):
         self.resourceMonitorSender = messageHandlerSender(self.queuesList, ResourceMonitor)
         self.currentSpeedSender = messageHandlerSender(self.queuesList, CurrentSpeed)
         self.currentSteerSender = messageHandlerSender(self.queuesList, CurrentSteer)
+        self.currentDistanceSender = messageHandlerSender(self.queuesList, CurrentDistance)
         self.warningSender = messageHandlerSender(self.queuesList, ShutDownSignal)
         self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
         self.calibPWMDataSender = messageHandlerSender(self.queuesList, CalibPWMData)
@@ -111,24 +119,35 @@ class threadRead(ThreadWithStop):
             with self.process.serialLock:
                 serial_con = self.process.serialCon
                 if serial_con is None or not self.process.serialConnected or not serial_con.is_open:
+                    self._log_read_status(serial_con, reason="not_connected")
                     return
 
-                if serial_con.in_waiting > 0:
+                waiting = serial_con.in_waiting
+                if waiting > 0:
                     try:
-                        data = serial_con.read(serial_con.in_waiting).decode("ascii", errors="ignore")
+                        data = serial_con.read(waiting).decode("ascii", errors="ignore")
+                        before_len = len(self.buffer)
                         self.buffer += data
+                        self._read_bytes_total += len(data)
+                        self._read_empty_ticks = 0
+                        self._log_serial_read(data, waiting, before_len, len(self.buffer))
 
                     except Exception as e:
                         if self._should_send_error():
                             self.serialConnectionStateSender.send(False)
                             print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Reading from serial ({e})")
                         return
+                else:
+                    self._read_empty_ticks += 1
+                    self._log_read_status(serial_con, reason="idle", waiting=waiting)
 
             while ";;" in self.buffer:
                 msg, self.buffer = self.buffer.split(";;", 1)
 
                 if msg.strip():
                     try:
+                        self._read_frames_total += 1
+                        self._log_serial_frame(msg.strip(), len(self.buffer))
                         self.send_queue(msg.strip())
                     except Exception as e:
                         print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Processing message \033[94m{msg.strip()}\033[0m ({e})")
@@ -141,98 +160,169 @@ class threadRead(ThreadWithStop):
     # ==================================== SENDING =======================================
     def queue_sending(self):
         """Callback function for enable button flag."""
-        self.enableButtonSender.send(True)
+        self._send_and_log(EnableButton, self.enableButtonSender, True, "heartbeat", "queue_sending")
         threading.Timer(1, self.queue_sending).start()
 
     def send_queue(self, buff):
         """This function select which type of message we receive from NUCLEO and send the data further."""
 
-        if '@' in buff and ':' in buff:
-            action, value = buff.split(":", 1)  # Limit to first colon only
-            action = re.sub(r'[^a-zA-Z0-9]', '', action)
-            if self.debugger:
-                self.logger.info(buff)
+        if ':' not in buff:
+            self._log_ignored_frame(buff, "missing ':' separator")
+            return
 
-            if action == "imu":
-                splittedValue = value.split(";")
-                if(len(buff)>20):
-                    data = {
-                        "roll": splittedValue[0],
-                        "pitch": splittedValue[1],
-                        "yaw": splittedValue[2],
-                        "accelx": splittedValue[3],
-                        "accely": splittedValue[4],
-                        "accelz": splittedValue[5],
-                    }
-                    self.imuDataSender.send(str(data))
-                else:
-                    self.imuAckSender.send(splittedValue[0])
+        raw_action, value = buff.split(":", 1)  # Limit to first colon only
+        marker = raw_action[0] if raw_action[:1] in ("@", "#") else ""
+        action = re.sub(r'[^a-zA-Z0-9]', '', raw_action)
+        if not action:
+            self._log_ignored_frame(buff, "empty action after cleanup")
+            return
 
-            elif action == "brake":
-                self.currentSpeedSender.send(0.0)
-                self.currentSteerSender.send(0.0)
+        self._log_parsed_action(buff, marker, action, value)
+        if marker != "@":
+            reason = (
+                "expected Nucleo feedback marker '@'; '#' looks like command echo"
+                if marker == "#"
+                else "expected Nucleo feedback marker '@'"
+            )
+            self._log_ignored_frame(buff, reason, warning=True)
+            return
+        if self.debugger:
+            self.logger.info(buff)
 
-            elif action == "speed":
-                speed = value.split(",")[0]
-                if (lambda v: (lambda: float(v), True)[1] if isinstance(v, str) else False)(speed):
-                    speed_value = float(speed)
-                    self.currentSpeedSender.send(speed_value)
-                    self._log_feedback_value("speed", speed_value)
+        if action == "imu":
+            splittedValue = value.split(";")
+            if(len(buff)>20):
+                data = {
+                    "roll": splittedValue[0],
+                    "pitch": splittedValue[1],
+                    "yaw": splittedValue[2],
+                    "accelx": splittedValue[3],
+                    "accely": splittedValue[4],
+                    "accelz": splittedValue[5],
+                }
+                self._send_and_log(ImuData, self.imuDataSender, str(data), action, buff)
+            else:
+                self._send_and_log(ImuAck, self.imuAckSender, splittedValue[0], action, buff)
 
-            elif action == "steer":
-                steer = value.split(",")[0]
-                if (lambda v: (lambda: float(v), True)[1] if isinstance(v, str) else False)(steer):
-                    steer_value = float(steer)
-                    self.currentSteerSender.send(steer_value)
-                    self._log_feedback_value("steer", steer_value)
+        elif action == "brake":
+            self._send_and_log(CurrentSpeed, self.currentSpeedSender, 0.0, action, buff)
+            self._send_and_log(CurrentSteer, self.currentSteerSender, 0.0, action, buff)
 
-            elif action == "vcdCalib":
-                splittedValue = value.split(";")
-                speedPWM = splittedValue[0]
-                steerPWM = splittedValue[1]
-                
-                if speedPWM == "0" and steerPWM == "0":
-                    self.calibRunDoneSender.send(True)
-                else:
-                    self.calibPWMDataSender.send({"speedPWM": speedPWM, "steerPWM": steerPWM})
+        elif action == "speed":
+            speed = value.split(",")[0]
+            if self.is_float(speed):
+                speed_value = float(speed)
+                self._send_and_log(CurrentSpeed, self.currentSpeedSender, speed_value, action, buff)
+                self._log_feedback_value("speed", speed_value)
+            else:
+                self._log_ignored_frame(buff, f"speed is not numeric: {speed!r}", warning=True)
 
-            elif action == "alive":
-                self.aliveSignalSender.send(True)
+        elif action == "steer":
+            steer = value.split(",")[0]
+            if self.is_float(steer):
+                steer_value = float(steer)
+                self._send_and_log(CurrentSteer, self.currentSteerSender, steer_value, action, buff)
+                self._log_feedback_value("steer", steer_value)
+            else:
+                self._log_ignored_frame(buff, f"steer is not numeric: {steer!r}", warning=True)
 
-            elif action == "steerLimits":
-                splittedValue = value.split(";")
-                lowerLimit = splittedValue[0]
-                upperLimit = splittedValue[1]
-                self.steeringLimitsSender.send({"lowerLimit": lowerLimit, "upperLimit": upperLimit})
-                
-            elif action == "instant":
-                if self.check_valid_value(action, value):
-                    self.instantConsumptionSender.send(float(value))
+        elif action == "odo":
+            distance = value.split(";")[0]
+            if self.is_float(distance):
+                distance_mm = int(float(distance))
+                self._send_and_log(
+                    CurrentDistance,
+                    self.currentDistanceSender,
+                    distance_mm,
+                    action,
+                    buff,
+                )
+                self._log_feedback_value("odo_mm", distance_mm)
+            else:
+                self._log_ignored_frame(buff, f"odo is not numeric: {distance!r}", warning=True)
 
-            elif action == "battery":
-                if self.check_valid_value(action, value):
-                    percentage = (int(value)-7000)/14
-                    percentage = max(0, min(100, round(percentage)))
+        elif action == "vcdCalib":
+            splittedValue = value.split(";")
+            speedPWM = splittedValue[0]
+            steerPWM = splittedValue[1]
 
-                    self.batteryLvlSender.send(percentage)
+            if speedPWM == "0" and steerPWM == "0":
+                self._send_and_log(CalibRunDone, self.calibRunDoneSender, True, action, buff)
+            else:
+                self._send_and_log(
+                    CalibPWMData,
+                    self.calibPWMDataSender,
+                    {"speedPWM": speedPWM, "steerPWM": steerPWM},
+                    action,
+                    buff,
+                )
 
-            elif action == "resourceMonitor":
-                if self.check_valid_value(action, value):
-                    data = re.match(self.resourceMonitorPattern, value)
-                    if data:
-                        message = {"heap": data.group(1), "stack": data.group(2)}
-                        self.resourceMonitorSender.send(message)
+        elif action == "vcd":
+            self._log_ack(action, value, buff)
 
-            elif action == "warning":
-                data = re.match(self.warningPattern, value)
+        elif action == "alive":
+            self._send_and_log(AliveSignal, self.aliveSignalSender, True, action, buff)
+
+        elif action == "steerLimits":
+            splittedValue = value.split(";")
+            lowerLimit = splittedValue[0]
+            upperLimit = splittedValue[1]
+            self._send_and_log(
+                SteeringLimits,
+                self.steeringLimitsSender,
+                {"lowerLimit": lowerLimit, "upperLimit": upperLimit},
+                action,
+                buff,
+            )
+
+        elif action == "instant":
+            if self.check_valid_value(action, value):
+                self._send_and_log(
+                    InstantConsumption,
+                    self.instantConsumptionSender,
+                    float(value),
+                    action,
+                    buff,
+                )
+
+        elif action == "battery":
+            if self.check_valid_value(action, value):
+                percentage = (int(value)-7000)/14
+                percentage = max(0, min(100, round(percentage)))
+
+                self._send_and_log(BatteryLvl, self.batteryLvlSender, percentage, action, buff)
+
+        elif action == "resourceMonitor":
+            if self.check_valid_value(action, value):
+                data = re.match(self.resourceMonitorPattern, value)
                 if data:
-                    print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Shutdown in \033[94m{data.group(1)}h {data.group(2)}m {data.group(3)}s\033[0m")
-                    self.warningSender.send(data)
-                    
-            elif action == "shutdown":
+                    message = {"heap": data.group(1), "stack": data.group(2)}
+                    self._send_and_log(ResourceMonitor, self.resourceMonitorSender, message, action, buff)
+                else:
+                    self._log_ignored_frame(buff, "resourceMonitor regex did not match", warning=True)
+
+        elif action == "warning":
+            data = re.match(self.warningPattern, value) or re.match(self.warningColonPattern, value)
+            if data:
+                warning_value = f"{data.group(1)}:{data.group(2)}:{data.group(3)}"
+                print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Shutdown in \033[94m{data.group(1)}h {data.group(2)}m {data.group(3)}s\033[0m")
+                self._send_and_log(ShutDownSignal, self.warningSender, warning_value, action, buff)
+            else:
+                self._log_ignored_frame(buff, "warning regex did not match", warning=True)
+
+        elif action == "shutdown":
+            if value == "ack":
+                self._log_ack(action, value, buff)
+            else:
                 print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - \033[94mShutting down now!\033[0m")
                 self.event.wait(3)
                 os.system("sudo shutdown -h now")
+
+        elif action in ("kl", "hallspeed", "odoreset", "batteryCapacity"):
+            self._log_ack(action, value, buff)
+
+        else:
+            self._log_ignored_frame(buff, f"unknown action={action!r}", warning=True)
             
     def check_valid_value(self, action, message):
         if message == "syntax error":
@@ -269,6 +359,103 @@ class threadRead(ThreadWithStop):
         print(
             f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mFEEDBACK\033[0m"
             f" {name}={float(value):.1f}"
+        )
+
+    def _preview(self, value, limit=180):
+        text = repr(value)
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _queue_depth(self, queue_name):
+        try:
+            return self.queuesList[queue_name].qsize()
+        except Exception:
+            return "n/a"
+
+    def _log_serial_read(self, data, waiting, before_len, after_len):
+        if not self._serial_debug_enabled:
+            return
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRAW\033[0m"
+            f" threadRead read bytes={len(data)} requested={waiting}"
+            f" buffer={before_len}->{after_len} chunk={self._preview(data)}"
+        )
+
+    def _log_read_status(self, serial_con, reason, waiting=None):
+        if not self._serial_debug_enabled:
+            return
+        now = time.time()
+        if now - self._last_read_status_log < 2.0:
+            return
+        self._last_read_status_log = now
+        try:
+            is_open = bool(serial_con and serial_con.is_open)
+        except Exception:
+            is_open = False
+        if waiting is None and serial_con is not None:
+            try:
+                waiting = serial_con.in_waiting
+            except Exception as exc:
+                waiting = f"err:{exc}"
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRX-IDLE\033[0m"
+            f" reason={reason} device={getattr(self.process, 'serialDevice', None)!r}"
+            f" connected={getattr(self.process, 'serialConnected', None)}"
+            f" open={is_open} in_waiting={waiting}"
+            f" buffer_len={len(self.buffer)} empty_ticks={self._read_empty_ticks}"
+            f" bytes_total={self._read_bytes_total} frames_total={self._read_frames_total}"
+        )
+
+    def _log_serial_frame(self, frame, remaining_buffer_len):
+        if not self._serial_debug_enabled:
+            return
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mFRAME\033[0m"
+            f" threadRead frame={self._preview(frame)}"
+            f" remaining_buffer={remaining_buffer_len}"
+        )
+
+    def _log_parsed_action(self, raw, marker, action, value):
+        if not self._serial_debug_enabled:
+            return
+        marker_text = marker or "<none>"
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mPARSE\033[0m"
+            f" marker={marker_text!r} action={action!r}"
+            f" value={self._preview(value)} raw={self._preview(raw)}"
+        )
+
+    def _log_ignored_frame(self, raw, reason, warning=False):
+        if not self._serial_debug_enabled:
+            return
+        tag = "\033[1;93mWARN\033[0m" if warning else "\033[1;93mDROP\033[0m"
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m {tag}"
+            f" threadRead ignored raw={self._preview(raw)} reason={reason}"
+        )
+
+    def _log_ack(self, action, value, raw):
+        if not self._serial_debug_enabled:
+            return
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mACK\033[0m"
+            f" action={action!r} value={self._preview(value)} raw={self._preview(raw)}"
+        )
+
+    def _send_and_log(self, enum_cls, sender, value, action, raw):
+        sender.send(value)
+        if not self._serial_debug_enabled:
+            return
+        queue_name = enum_cls.Queue.value
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mQUEUE\033[0m"
+            f" threadRead -> {enum_cls.__name__}"
+            f" queue={queue_name} owner={enum_cls.Owner.value}"
+            f" msgID={enum_cls.msgID.value} type={enum_cls.msgType.value}"
+            f" qsize={self._queue_depth(queue_name)}"
+            f" value={self._preview(value)}"
+            f" from_action={action!r} raw={self._preview(raw)}"
         )
 
     def _should_send_error(self):

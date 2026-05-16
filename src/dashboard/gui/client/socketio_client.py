@@ -155,6 +155,7 @@ class SocketIOClient(QObject):
     instant_consumption_signal = pyqtSignal(float)
     current_speed_signal = pyqtSignal(int)
     current_steer_signal = pyqtSignal(int)
+    current_distance_signal = pyqtSignal(float)
     steering_limits_signal = pyqtSignal(object)  # {"upper": int, "lower": int}
     state_change_signal = pyqtSignal(str)
     warning_signal_signal = pyqtSignal(str)
@@ -406,6 +407,15 @@ class SocketIOClient(QObject):
                 self.current_steer_signal.emit(
                     int(round(float(_unwrap_payload(data)) / 10.0))
                 )
+            except (TypeError, ValueError):
+                pass
+
+        @self._sio.on(ev.EVT_CURRENT_DISTANCE)
+        def _on_distance(data):  # noqa: ANN001
+            # Nucleo odometer publishes millimetres accumulated since the last
+            # #odoreset. GUI widgets display metres.
+            try:
+                self.current_distance_signal.emit(float(_unwrap_payload(data)) / 1000.0)
             except (TypeError, ValueError):
                 pass
 

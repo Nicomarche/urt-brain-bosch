@@ -33,12 +33,20 @@ import time
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import (
     ActuatorCommandStatus,
+    AliveSignal,
+    BatteryLvl,
+    CalibPWMData,
+    CalibRunDone,
+    CurrentDistance,
     CurrentSpeed,
     CurrentSteer,
     DetectedObjectsMsg,
+    EnableButton,
     Brake,
     ImuData,
+    InstantConsumption,
     Klem,
+    OdoReset,
     LidarScanMsg,
     LidarStatusMsg,
     LineFollowingDebug,
@@ -49,6 +57,11 @@ from src.core.messaging.allMessages import (
     SignDetectionDebug,
     SignDetectionStatus,
     SteerMotor,
+    ToggleHallSpeed,
+    ResourceMonitor,
+    SerialConnectionState,
+    SteeringLimits,
+    ShutDownSignal,
     TrackedObjectsMsg,
     mainCamera,
     serialCamera,
@@ -169,7 +182,39 @@ class threadGateway(ThreadWithStop):
             (ImuData.Owner.value, ImuData.msgID.value),
             (CurrentSpeed.Owner.value, CurrentSpeed.msgID.value),
             (CurrentSteer.Owner.value, CurrentSteer.msgID.value),
+            (CurrentDistance.Owner.value, CurrentDistance.msgID.value),
             *self._manual_control_latest_keys,
+        }
+        self._serial_trace_message_classes = (
+            ActuatorCommandStatus,
+            AliveSignal,
+            BatteryLvl,
+            CalibPWMData,
+            CalibRunDone,
+            CurrentDistance,
+            CurrentSpeed,
+            CurrentSteer,
+            EnableButton,
+            ImuData,
+            InstantConsumption,
+            ResourceMonitor,
+            SerialConnectionState,
+            SteeringLimits,
+            ShutDownSignal,
+            SpeedMotor,
+            SteerMotor,
+            Brake,
+            Klem,
+            ToggleHallSpeed,
+            OdoReset,
+        )
+        self._serial_trace_keys = {
+            (cls.Owner.value, cls.msgID.value)
+            for cls in self._serial_trace_message_classes
+        }
+        self._serial_trace_labels = {
+            (cls.Owner.value, cls.msgID.value): cls.__name__
+            for cls in self._serial_trace_message_classes
         }
 
     # =================================== SUBSCRIBE ======================================
@@ -205,6 +250,13 @@ class threadGateway(ThreadWithStop):
             )
         if (Owner, Id) not in self.messageApproved:
             self.messageApproved.append((Owner, Id))
+        if message_key in self._serial_trace_keys:
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;96mSUB\033[0m"
+                f" {self._message_label(message_key)} subscribed by \033[94m{To}\033[0m"
+                f" latest_only={message_key in self._latest_only_keys}"
+                f" total_subscribers={len(self.sendingList[Owner][Id])}"
+            )
         if (Owner, Id) == self._klem_key:
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
@@ -235,6 +287,13 @@ class threadGateway(ThreadWithStop):
                 pass
         if not self.sendingList.get(Owner, {}).get(Id) and (Owner, Id) in self.messageApproved:
             self.messageApproved.remove((Owner, Id))
+        if (Owner, Id) in self._serial_trace_keys:
+            remaining = len(self.sendingList.get(Owner, {}).get(Id, {}))
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;96mUNSUB\033[0m"
+                f" {self._message_label((Owner, Id))} unsubscribed by \033[94m{To}\033[0m"
+                f" remaining_subscribers={remaining}"
+            )
         if (Owner, Id) == self._klem_key:
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
@@ -256,11 +315,21 @@ class threadGateway(ThreadWithStop):
         Type = message["msgType"]
         Value = message["msgValue"]
         message_key = (Owner, Id)
+        trace_message = message_key in self._serial_trace_keys
         if message_key == self._klem_key:
             receivers = list(self.sendingList.get(Owner, {}).get(Id, {}).keys())
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
                 f" - Dispatching Klem \033[94m{Value}\033[0m to \033[94m{len(receivers)}\033[0m subscriber(s)"
+            )
+        elif trace_message:
+            receivers = list(self.sendingList.get(Owner, {}).get(Id, {}).keys())
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;96mROUTE\033[0m"
+                f" {self._message_label(message_key)} owner={Owner} msgID={Id}"
+                f" type={Type} subscribers={len(receivers)}"
+                f" approved={message_key in self.messageApproved}"
+                f" value={self._preview(Value)}"
             )
 
         if message_key in self.messageApproved:
@@ -278,10 +347,16 @@ class threadGateway(ThreadWithStop):
                         {"Type": Type, "value": Value, "id": Id, "Owner": Owner}
                     )
                     if not submitted:
-                        if message_key == self._klem_key or self.debugging:
-                            self.logger.warning(
+                        if message_key == self._klem_key or trace_message or self.debugging:
+                            msg = (
                                 f"[ Gateway ] Subscriber queue full; dropping "
-                                f"message for '{element}' (Owner={Owner}, msgID={Id})"
+                                f"{self._message_label(message_key)} for '{element}' "
+                                f"(Owner={Owner}, msgID={Id})"
+                            )
+                            self.logger.warning(msg)
+                            print(
+                                f"\033[1;97m[ Gateway ] :\033[0m \033[1;91mDROP\033[0m"
+                                f" {msg}"
                             )
                         continue
                 except Exception as exc:
@@ -300,6 +375,13 @@ class threadGateway(ThreadWithStop):
                         f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
                         f" - Queued Klem \033[94m{Value}\033[0m to \033[94m{element}\033[0m"
                     )
+                elif trace_message:
+                    print(
+                        f"\033[1;97m[ Gateway ] :\033[0m \033[1;96mPIPE\033[0m"
+                        f" {self._message_label(message_key)} -> \033[94m{element}\033[0m"
+                        f" latest_only={getattr(sender, 'latest_only', False)}"
+                        f" submitted={submitted}"
+                    )
                 if self.debugging:
                     self.logger.warning(message)
             for element in broken:
@@ -313,6 +395,12 @@ class threadGateway(ThreadWithStop):
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;93mWARNING\033[0m"
                 f" - Klem \033[94m{Value}\033[0m has no approved subscribers"
             )
+        elif trace_message:
+            print(
+                f"\033[1;97m[ Gateway ] :\033[0m \033[1;93mNO-SUB\033[0m"
+                f" {self._message_label(message_key)} owner={Owner} msgID={Id}"
+                f" value={self._preview(Value)}"
+            )
 
     # ====================================================================================
 
@@ -321,6 +409,15 @@ class threadGateway(ThreadWithStop):
         """Made for debugging"""
 
         self.logger.warning(self.sendingList)
+
+    def _message_label(self, message_key):
+        return self._serial_trace_labels.get(message_key, f"{message_key[0]}:{message_key[1]}")
+
+    def _preview(self, value, limit=180):
+        text = repr(value)
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
 
     def _drain_queue(self, queue_name, max_items, collapse_latest=False):
         """Drain several pending messages in one cycle to avoid queue backlog."""
@@ -378,7 +475,16 @@ class threadGateway(ThreadWithStop):
             source_queue = "General"
 
         for message in messages:
-            if (message.get("Owner"), message.get("msgID")) == self._klem_key:
+            message_key = (message.get("Owner"), message.get("msgID"))
+            if message_key in self._serial_trace_keys:
+                print(
+                    f"\033[1;97m[ Gateway ] :\033[0m \033[1;96mQUEUE\033[0m"
+                    f" {source_queue} -> {self._message_label(message_key)}"
+                    f" owner={message.get('Owner')} msgID={message.get('msgID')}"
+                    f" type={message.get('msgType')}"
+                    f" value={self._preview(message.get('msgValue'))}"
+                )
+            if message_key == self._klem_key:
                 print(
                     f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
                     f" - Received Klem \033[94m{message.get('msgValue')}\033[0m from \033[94m{source_queue}\033[0m queue"

@@ -41,6 +41,7 @@ from src.core.messaging.allMessages import (
     SpeedMotor,
     Brake,
     ToggleBatteryLvl,
+    ToggleHallSpeed,
     ToggleImuData,
     ToggleInstant,
     ToggleResourceMonitor,
@@ -48,6 +49,7 @@ from src.core.messaging.allMessages import (
     ControlCalib,
     IsAlive,
     RequestSteerLimits,
+    OdoReset,
     SimRelocalize,
 )
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
@@ -130,6 +132,8 @@ class threadWrite(ThreadWithStop):
         self.batterySubscriber = messageHandlerSubscriber(self.queuesList, ToggleBatteryLvl, "lastOnly", True)
         self.resourceMonitorSubscriber = messageHandlerSubscriber(self.queuesList, ToggleResourceMonitor, "lastOnly", True)
         self.imuSubscriber = messageHandlerSubscriber(self.queuesList, ToggleImuData, "lastOnly", True)
+        self.hallSpeedSubscriber = messageHandlerSubscriber(self.queuesList, ToggleHallSpeed, "lastOnly", True)
+        self.odoResetSubscriber = messageHandlerSubscriber(self.queuesList, OdoReset, "lastOnly", True)
         self.controlCalibSubscriber = messageHandlerSubscriber(self.queuesList, ControlCalib, "lastOnly", True)
         self.isAliveSubscriber = messageHandlerSubscriber(self.queuesList, IsAlive, "lastOnly", True)
         self.requestSteerLimitsSubscriber = messageHandlerSubscriber(self.queuesList, RequestSteerLimits, "lastOnly", True)
@@ -307,6 +311,12 @@ class threadWrite(ThreadWithStop):
         payload = dict(snapshot)
         payload["timestamp"] = now
         self.actuatorStatusSender.send(payload)
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mQUEUE\033[0m"
+            f" threadWrite -> ActuatorCommandStatus queue=General"
+            f" qsize={self._queue_depth('General')}"
+            f" payload={self._preview(payload)}"
+        )
         self._last_status_snapshot = snapshot
         self._last_status_send_time = now
 
@@ -427,8 +437,11 @@ class threadWrite(ThreadWithStop):
                 "ToggleBatteryLvl",
                 "ToggleImuData",
                 "ToggleResourceMonitor",
+                "ToggleHallSpeed",
             ]
             for key in toggle_keys:
+                if key not in data:
+                    continue
                 toggle = data[key]
                 value_str = toggle["value"]
                 value = 0 if str(value_str) == "False" else 1
@@ -538,6 +551,20 @@ class threadWrite(ThreadWithStop):
                 if self.debugger:
                     self.logger.info(requestSteerLimitsRecv)
                 command = {"action": "steerLimits", "request": 0}
+                self.send_to_serial(command)
+
+            hallSpeedRecv = self.hallSpeedSubscriber.receive()
+            if hallSpeedRecv is not None:
+                if self.debugger:
+                    self.logger.info(hallSpeedRecv)
+                command = {"action": "hallspeed", "activate": self._payload_to_int(hallSpeedRecv)}
+                self.send_to_serial(command)
+
+            odoResetRecv = self.odoResetSubscriber.receive()
+            if odoResetRecv is not None:
+                if self.debugger:
+                    self.logger.info(odoResetRecv)
+                command = {"action": "odoreset", "request": self._payload_to_int(odoResetRecv, default=1)}
                 self.send_to_serial(command)
 
             simRelocalizeRecv = self.simRelocalizeSubscriber.receive()
@@ -727,28 +754,28 @@ class threadWrite(ThreadWithStop):
                 if instantRecv is not None:
                     if self.debugger:
                         self.logger.info(instantRecv) 
-                    command = {"action": "instant", "activate": int(instantRecv)}
+                    command = {"action": "instant", "activate": self._payload_to_int(instantRecv)}
                     self.send_to_serial(command)
 
                 batteryRecv = self.batterySubscriber.receive()
                 if batteryRecv is not None: 
                     if self.debugger:
                         self.logger.info(batteryRecv)
-                    command = {"action": "battery", "activate": int(batteryRecv)}
+                    command = {"action": "battery", "activate": self._payload_to_int(batteryRecv)}
                     self.send_to_serial(command)
 
                 resourceMonitorRecv = self.resourceMonitorSubscriber.receive()
                 if resourceMonitorRecv is not None: 
                     if self.debugger:
                         self.logger.info(resourceMonitorRecv)
-                    command = {"action": "resourceMonitor", "activate": int(resourceMonitorRecv)}
+                    command = {"action": "resourceMonitor", "activate": self._payload_to_int(resourceMonitorRecv)}
                     self.send_to_serial(command)
 
                 imuRecv = self.imuSubscriber.receive()
                 if imuRecv is not None: 
                     if self.debugger:
                         self.logger.info(imuRecv)
-                    command = {"action": "imu", "activate": int(imuRecv)}
+                    command = {"action": "imu", "activate": self._payload_to_int(imuRecv)}
                     self.send_to_serial(command)
 
             self._publish_actuator_status()
@@ -800,3 +827,28 @@ class threadWrite(ThreadWithStop):
             self.last_error_time = now
             return True
         return False
+
+    def _queue_depth(self, queue_name):
+        try:
+            return self.queuesList[queue_name].qsize()
+        except Exception:
+            return "n/a"
+
+    def _preview(self, value, limit=180):
+        text = repr(value)
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def _payload_to_int(self, value, default=0):
+        if isinstance(value, bool):
+            return 1 if value else 0
+        text = str(value).strip().lower()
+        if text in {"true", "on", "yes"}:
+            return 1
+        if text in {"false", "off", "no"}:
+            return 0
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return int(default)

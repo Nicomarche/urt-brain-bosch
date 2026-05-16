@@ -51,6 +51,32 @@
         "checked": true,
         "hasChanged": false
     },
+    "ToggleHallSpeed": {
+        "value": "True",
+        "initialValue": "True",
+        "interval": 0,
+        "type": "dropdown",
+        "values": [
+            "True",
+            "False"
+        ],
+        "command": "hallspeed",
+        "checked": true,
+        "hasChanged": false
+    },
+    "OdoReset": {
+        "value": "True",
+        "initialValue": "True",
+        "interval": 0,
+        "type": "dropdown",
+        "values": [
+            "True",
+            "False"
+        ],
+        "command": "odoreset",
+        "checked": false,
+        "hasChanged": false
+    },
     "Brightness": {
         "value": 55,
         "initialValue": 55,

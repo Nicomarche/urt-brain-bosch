@@ -227,6 +227,18 @@ class LocalisationFix(Enum):
     # Backwards-compatible alias for the same localisation channel.
     msgType = "dict"
 
+class ToggleHallSpeed(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 25
+    msgType = "str"
+
+class OdoReset(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 26
+    msgType = "str"
+
 ################################# From Line Following ##################################
 class LineFollowingDebug(Enum):
     Queue = "General"
@@ -381,6 +393,12 @@ class SteeringLimits(Enum):
     Owner = "threadRead"
     msgID = 12
     msgType = "dict"
+
+class CurrentDistance(Enum):
+    Queue = "General"
+    Owner = "threadRead"
+    msgID = 13
+    msgType = "int"
 
 
 ################################# From Locsys ##################################

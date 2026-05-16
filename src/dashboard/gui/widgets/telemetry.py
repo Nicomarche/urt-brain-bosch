@@ -263,6 +263,12 @@ class InstantConsumption(_NumericReadout):
         client.instant_consumption_signal.connect(self.set_value)
 
 
+class DistanceReadout(_NumericReadout):
+    def __init__(self, client: SocketIOClient, parent: Optional[QWidget] = None):
+        super().__init__("Distance", "m", parent=parent)
+        client.current_distance_signal.connect(self.set_value)
+
+
 # ----------------------------------------------------------------------
 # Hardware data — CPU usage / CPU temp / RAM, three small gauges.
 # ----------------------------------------------------------------------
@@ -399,6 +405,7 @@ class TelemetryCluster(QWidget):
         readouts_row.setSpacing(8)
         readouts_row.addWidget(BatteryIndicator(client))
         readouts_row.addWidget(InstantConsumption(client))
+        readouts_row.addWidget(DistanceReadout(client))
 
         layout = QVBoxLayout(self)
         layout.setSpacing(12)

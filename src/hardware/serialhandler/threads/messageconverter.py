@@ -59,6 +59,8 @@ class MessageConverter:
         "instant": [["activate"], [1], [False]],
         "resourceMonitor": [["activate"], [1], [False]],
         "alive": [["activate"], [1], [False]],
+        "hallspeed": [["activate"], [1], [False]],
+        "odoreset": [["request"], [3], [False]],
         "steerLimits": [["request"], [1], [False]],
         "imu": [["activate"], [1], [False]],
         "vcd": [["speed", "steer", "time"], [3, 3, 3], [False]],
@@ -129,4 +131,3 @@ class MessageConverter:
                 return False
 
         return True
-
