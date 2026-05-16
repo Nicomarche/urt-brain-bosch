@@ -27,6 +27,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 
 import queue
+import threading
 import time
 
 from src.templates.threadwithstop import ThreadWithStop
@@ -35,6 +36,7 @@ from src.core.messaging.allMessages import (
     CurrentSpeed,
     CurrentSteer,
     DetectedObjectsMsg,
+    Brake,
     ImuData,
     Klem,
     LidarScanMsg,
@@ -43,12 +45,86 @@ from src.core.messaging.allMessages import (
     LineFollowingStatus,
     LocalLanePerception,
     LocalPerceptionStatus,
+    SpeedMotor,
     SignDetectionDebug,
     SignDetectionStatus,
+    SteerMotor,
     TrackedObjectsMsg,
     mainCamera,
     serialCamera,
 )
+
+
+class _AsyncPipeSender:
+    """Owns one subscriber pipe so a slow receiver cannot block Gateway."""
+
+    def __init__(self, receiver, pipe, logger, latest_only=False):
+        self.receiver = receiver
+        self.pipe = pipe
+        self.logger = logger
+        self.latest_only = bool(latest_only)
+        self._closed = False
+        self._queue = queue.Queue(maxsize=1 if self.latest_only else 32)
+        self._sentinel = object()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"GatewayPipeSender-{receiver}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def submit(self, payload):
+        if self._closed:
+            return False
+
+        if self.latest_only:
+            try:
+                while True:
+                    self._queue.get_nowait()
+            except queue.Empty:
+                pass
+
+        try:
+            self._queue.put_nowait(payload)
+            return True
+        except queue.Full:
+            # FIFO command queues should almost never fill. If they do, drop
+            # for this receiver only instead of freezing the global gateway.
+            return False
+
+    def close(self):
+        self._closed = True
+        try:
+            self.pipe.close()
+        except Exception:
+            pass
+        try:
+            self._queue.put_nowait(self._sentinel)
+        except queue.Full:
+            pass
+
+    def _run(self):
+        while not self._closed:
+            payload = self._queue.get()
+            if payload is self._sentinel:
+                break
+            try:
+                self.pipe.send(payload)
+            except (BrokenPipeError, EOFError, OSError) as exc:
+                self._closed = True
+                try:
+                    self.logger.warning(
+                        f"[ Gateway ] Pipe send failed for subscriber "
+                        f"'{self.receiver}' ({exc})"
+                    )
+                except Exception:
+                    pass
+                break
+
 
 class threadGateway(ThreadWithStop):
     """Thread which will handle processGateway functionalities.\n
@@ -71,6 +147,11 @@ class threadGateway(ThreadWithStop):
         self.max_general_batch = 64
         self.max_config_batch = 32
         self._klem_key = (Klem.Owner.value, Klem.msgID.value)
+        self._manual_control_latest_keys = {
+            (SpeedMotor.Owner.value, SpeedMotor.msgID.value),
+            (SteerMotor.Owner.value, SteerMotor.msgID.value),
+            (Brake.Owner.value, Brake.msgID.value),
+        }
         self._latest_only_keys = {
             (mainCamera.Owner.value, mainCamera.msgID.value),
             (serialCamera.Owner.value, serialCamera.msgID.value),
@@ -88,6 +169,7 @@ class threadGateway(ThreadWithStop):
             (ImuData.Owner.value, ImuData.msgID.value),
             (CurrentSpeed.Owner.value, CurrentSpeed.msgID.value),
             (CurrentSteer.Owner.value, CurrentSteer.msgID.value),
+            *self._manual_control_latest_keys,
         }
 
     # =================================== SUBSCRIBE ======================================
@@ -103,13 +185,26 @@ class threadGateway(ThreadWithStop):
         Id = message["msgID"]
         To = message["To"]["receiver"]
         Pipe = message["To"]["pipe"]
+        message_key = (Owner, Id)
         if not Owner in self.sendingList.keys():
             self.sendingList[Owner] = {}
         if not Id in self.sendingList[Owner].keys():
             self.sendingList[Owner][Id] = {}
-        if not To in self.sendingList[Owner][Id].keys():
-            self.sendingList[Owner][Id][To] = Pipe
-        self.messageApproved.append((Owner, Id))
+        existing = self.sendingList[Owner][Id].get(To)
+        if existing is None or getattr(existing, "closed", False):
+            if existing is not None:
+                try:
+                    existing.close()
+                except Exception:
+                    pass
+            self.sendingList[Owner][Id][To] = _AsyncPipeSender(
+                To,
+                Pipe,
+                self.logger,
+                latest_only=message_key in self._latest_only_keys,
+            )
+        if (Owner, Id) not in self.messageApproved:
+            self.messageApproved.append((Owner, Id))
         if (Owner, Id) == self._klem_key:
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
@@ -132,8 +227,14 @@ class threadGateway(ThreadWithStop):
         To = message["To"]["receiver"]
 
         # We delete the value from Dictionary
-        del self.sendingList[Owner][Id][To]
-        self.messageApproved.remove((Owner, Id))
+        sender = self.sendingList.get(Owner, {}).get(Id, {}).pop(To, None)
+        if sender is not None:
+            try:
+                sender.close()
+            except Exception:
+                pass
+        if not self.sendingList.get(Owner, {}).get(Id) and (Owner, Id) in self.messageApproved:
+            self.messageApproved.remove((Owner, Id))
         if (Owner, Id) == self._klem_key:
             print(
                 f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
@@ -167,12 +268,23 @@ class threadGateway(ThreadWithStop):
             # (removemos pipes rotos in-place).
             broken = []
             for element in list(self.sendingList[Owner][Id].keys()):
+                sender = self.sendingList[Owner][Id][element]
+                if getattr(sender, "closed", False):
+                    broken.append(element)
+                    continue
                 try:
                     # We send a dictionary that contain the type of the message and message
-                    self.sendingList[Owner][Id][element].send(
+                    submitted = sender.submit(
                         {"Type": Type, "value": Value, "id": Id, "Owner": Owner}
                     )
-                except BrokenPipeError:
+                    if not submitted:
+                        if message_key == self._klem_key or self.debugging:
+                            self.logger.warning(
+                                f"[ Gateway ] Subscriber queue full; dropping "
+                                f"message for '{element}' (Owner={Owner}, msgID={Id})"
+                            )
+                        continue
+                except Exception as exc:
                     # El recv-end del subscriber se cerró (spawn mode, proceso
                     # terminado, o doble-registro desde el proceso padre).
                     # Lo removemos para no volver a fallar en mensajes futuros,
@@ -180,19 +292,20 @@ class threadGateway(ThreadWithStop):
                     broken.append(element)
                     self.logger.warning(
                         f"[ Gateway ] BrokenPipe → removing subscriber "
-                        f"'{element}' (Owner={Owner}, msgID={Id})"
+                        f"'{element}' (Owner={Owner}, msgID={Id}, error={exc})"
                     )
                     continue
                 if message_key == self._klem_key:
                     print(
                         f"\033[1;97m[ Gateway ] :\033[0m \033[1;92mINFO\033[0m"
-                        f" - Delivered Klem \033[94m{Value}\033[0m to \033[94m{element}\033[0m"
+                        f" - Queued Klem \033[94m{Value}\033[0m to \033[94m{element}\033[0m"
                     )
                 if self.debugging:
                     self.logger.warning(message)
             for element in broken:
                 try:
-                    del self.sendingList[Owner][Id][element]
+                    sender = self.sendingList[Owner][Id].pop(element)
+                    sender.close()
                 except KeyError:
                     pass
         elif message_key == self._klem_key:
@@ -238,10 +351,19 @@ class threadGateway(ThreadWithStop):
 
     # ==================================== RUN ===========================================
 
+    def _process_config_messages(self):
+        for message2 in self._drain_queue("Config", self.max_config_batch):
+            if str.lower(message2["Subscribe/Unsubscribe"]) == "subscribe":
+                self.subscribe(message2)
+            else:
+                self.unsubscribe(message2)
+
     def thread_work(self):
         """This function will take the messages in priority order form the queues.\n
         the prioirty is: Critical > Warning > General
         """
+
+        self._process_config_messages()
 
         messages = []
         source_queue = None
@@ -263,13 +385,19 @@ class threadGateway(ThreadWithStop):
                 )
             self.send(message)
 
-        for message2 in self._drain_queue("Config", self.max_config_batch):
-            if str.lower(message2["Subscribe/Unsubscribe"]) == "subscribe":
-                self.subscribe(message2)
-            else:
-                self.unsubscribe(message2)
+        self._process_config_messages()
 
         # print(time.perf_counter_ns())
+
+    def stop(self):
+        for owner in list(self.sendingList.values()):
+            for msg_receivers in list(owner.values()):
+                for sender in list(msg_receivers.values()):
+                    try:
+                        sender.close()
+                    except Exception:
+                        pass
+        super(threadGateway, self).stop()
 
 
 # =====================================================================================

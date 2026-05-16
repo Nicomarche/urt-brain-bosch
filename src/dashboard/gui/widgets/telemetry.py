@@ -77,7 +77,8 @@ class _ArcGauge(QGraphicsView):
         self._min = float(min_value)
         self._max = float(max_value)
         self._unit = unit
-        self._value: float = self._min
+        self._value: float = 0.0 if self._min <= 0.0 <= self._max else self._min
+        self._has_value = False
 
         self.setRenderHint(QPainter.Antialiasing)
         self.setStyleSheet("background:#111; border:none;")
@@ -145,6 +146,7 @@ class _ArcGauge(QGraphicsView):
         if v > self._max:
             v = self._max
         self._value = v
+        self._has_value = True
         self._update_visuals()
 
     def _update_visuals(self) -> None:
@@ -163,7 +165,11 @@ class _ArcGauge(QGraphicsView):
         path.arcTo(QRectF(10, 10, s - 20, s - 20), 180, -frac * 180)
         self._fill.setPath(path)
 
-        text = f"{self._value:.0f}{(' ' + self._unit) if self._unit else ''}"
+        text = (
+            f"{self._value:.0f}{(' ' + self._unit) if self._unit else ''}"
+            if self._has_value
+            else "--"
+        )
         self._label.setPlainText(text)
         self._reposition_label()
 

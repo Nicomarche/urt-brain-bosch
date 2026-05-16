@@ -39,6 +39,7 @@ import os
 import time
 import base64
 
+import config
 from flask import Flask, request
 from flask_socketio import SocketIO
 from flask_cors import CORS
@@ -74,6 +75,9 @@ class processDashboard(WorkerProcess):
         self.logger = logging
         self.debugging = debugging
         self.stream_camera = stream_camera
+        self.emit_legacy_camera = bool(
+            getattr(config, "DASHBOARD_EMIT_LEGACY_CAMERA_BASE64", False)
+        )
         
         # ip replacement
         IpManager.replace_ip_in_file()
@@ -704,26 +708,35 @@ class processDashboard(WorkerProcess):
                         pass
 
                 # ── Camera fast-path ─────────────────────────────────────────
-                # The brain encodes JPEG → base64 (string) in threadCamera.py
-                # and ships it through the IPC queue. The Angular legacy
-                # frontend consumes the base64 string via `serialCamera`, but
-                # base64 inflates payload by ~33% AND forces a JSON pass.
-                #
-                # The new PyQt5 GUI prefers `serialCamera_bin` — raw JPEG
-                # bytes pushed directly as a SocketIO binary frame. We emit
-                # both: legacy clients keep working, new clients save CPU and
-                # bandwidth on the Jetson (the stream is the dominant load).
+                # The perception thread sends JPEG → base64 through the local
+                # IPC queue. The PyQt GUI consumes raw JPEG bytes via
+                # `serialCamera_bin`, so only emit the binary frame to the
+                # active dashboard session. Sending the legacy base64 event in
+                # parallel roughly doubles monitor CPU/bandwidth and can back
+                # up the SocketIO/Qt queues during remote operation.
                 if msg == "serialCamera" and isinstance(resp, str):
+                    active_room = self.activeUser if self.sessionActive else None
+                    if not active_room:
+                        continue
+                    if not self._is_socket_connected(active_room):
+                        self._clear_active_session()
+                        continue
+
+                    emitted_binary = False
                     try:
                         jpg_bytes = base64.b64decode(resp)
-                        self.socketio.emit("serialCamera_bin", jpg_bytes)
+                        self.socketio.emit(
+                            "serialCamera_bin", jpg_bytes, room=active_room
+                        )
+                        emitted_binary = True
                     except Exception as exc:
                         # If decoding fails, fall through and at least emit
                         # the legacy text frame so something still shows.
                         if self.debugging:
                             self.logger.warning(
                                 f"serialCamera_bin decode failed: {exc}")
-                    self.socketio.emit(msg, {"value": resp})
+                    if self.emit_legacy_camera or not emitted_binary:
+                        self.socketio.emit(msg, {"value": resp}, room=active_room)
                     continue
 
                 if msg == "Location" and isinstance(resp, dict):

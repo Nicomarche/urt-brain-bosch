@@ -39,6 +39,7 @@ import base64
 import json
 import logging
 import threading
+import time
 from typing import Any, Optional
 
 from PyQt5.QtCore import QObject, pyqtSignal
@@ -186,6 +187,10 @@ class SocketIOClient(QObject):
         self._url = f"http://{host}:{port}"
         self._connect_lock = threading.Lock()
         self._started = False
+        self._camera_emit_lock = threading.Lock()
+        self._last_camera_bin_mono = 0.0
+        self._last_camera_emit_mono = 0.0
+        self._camera_min_emit_interval_s = 1.0 / 15.0
 
         # python-socketio handles reconnect internally; we just configure it.
         self._sio = socketio.Client(
@@ -462,6 +467,10 @@ class SocketIOClient(QObject):
         # Preferred (binary JPEG): payload is raw bytes.
         @self._sio.on(ev.EVT_CAMERA_BIN)
         def _on_camera_bin(data):  # noqa: ANN001
+            now = time.monotonic()
+            self._last_camera_bin_mono = now
+            if not self._reserve_camera_emit_slot(now):
+                return
             img = _decode_jpeg_bytes(data if isinstance(data, (bytes, bytearray))
                                      else bytes(data) if data else b"")
             if img is not None and not img.isNull():
@@ -470,6 +479,14 @@ class SocketIOClient(QObject):
         # Legacy fallback (base64 PNG inside {value: ...}).
         @self._sio.on(ev.EVT_CAMERA_BASE64)
         def _on_camera_b64(data):  # noqa: ANN001
+            now = time.monotonic()
+            # When a modern backend sends binary JPEG frames, the legacy
+            # base64 event is a duplicate. Ignore it so Qt does not decode and
+            # repaint the same frame twice.
+            if now - self._last_camera_bin_mono < 2.0:
+                return
+            if not self._reserve_camera_emit_slot(now):
+                return
             payload = _unwrap_payload(data)
             if isinstance(payload, str):
                 img = _decode_base64_image(payload)
@@ -524,3 +541,11 @@ class SocketIOClient(QObject):
         @self._sio.on(ev.EVT_GPS_FIX)
         def _on_gps_fix(data):  # noqa: ANN001
             self.gps_fix_signal.emit(_unwrap_payload(data))
+
+    def _reserve_camera_emit_slot(self, now: float) -> bool:
+        """Return True if a camera frame should be decoded/emitted now."""
+        with self._camera_emit_lock:
+            if now - self._last_camera_emit_mono < self._camera_min_emit_interval_s:
+                return False
+            self._last_camera_emit_mono = now
+            return True

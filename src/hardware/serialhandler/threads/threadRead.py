@@ -84,6 +84,8 @@ class threadRead(ThreadWithStop):
         # error rate limiting
         self.last_error_time = None
         self.error_cooldown = timedelta(seconds=3)
+        self._last_feedback_log = {}
+        self._last_feedback_log_time = {}
 
         self.queue_sending()
 
@@ -173,12 +175,16 @@ class threadRead(ThreadWithStop):
             elif action == "speed":
                 speed = value.split(",")[0]
                 if (lambda v: (lambda: float(v), True)[1] if isinstance(v, str) else False)(speed):
-                    self.currentSpeedSender.send(float(speed))
+                    speed_value = float(speed)
+                    self.currentSpeedSender.send(speed_value)
+                    self._log_feedback_value("speed", speed_value)
 
             elif action == "steer":
                 steer = value.split(",")[0]
                 if (lambda v: (lambda: float(v), True)[1] if isinstance(v, str) else False)(steer):
-                    self.currentSteerSender.send(float(steer))
+                    steer_value = float(steer)
+                    self.currentSteerSender.send(steer_value)
+                    self._log_feedback_value("steer", steer_value)
 
             elif action == "vcdCalib":
                 splittedValue = value.split(";")
@@ -248,6 +254,22 @@ class threadRead(ThreadWithStop):
             return False
 
         return True
+
+    def _log_feedback_value(self, name, value):
+        """Log feedback changes lightly so manual-command issues are traceable."""
+        now = time.time()
+        last_value = self._last_feedback_log.get(name)
+        last_time = self._last_feedback_log_time.get(name, 0.0)
+        changed = last_value is None or abs(float(value) - float(last_value)) >= 1.0
+        if not changed and (now - last_time) < 1.0:
+            return
+
+        self._last_feedback_log[name] = float(value)
+        self._last_feedback_log_time[name] = now
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mFEEDBACK\033[0m"
+            f" {name}={float(value):.1f}"
+        )
 
     def _should_send_error(self):
         """Check if we should send an error message (rate limiting)."""

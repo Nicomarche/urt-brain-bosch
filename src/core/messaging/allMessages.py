@@ -74,25 +74,25 @@ class Semaphores(Enum):
 
 ################################# From Dashboard ##################################
 class SpeedMotor(Enum):
-    Queue = "General"
+    Queue = "Critical"
     Owner = "Dashboard"
     msgID = 1
     msgType = "str"
 
 class SteerMotor(Enum):
-    Queue = "General"
+    Queue = "Critical"
     Owner = "Dashboard"
     msgID = 2
     msgType = "str"
 
 class Control(Enum):
-    Queue = "General"
+    Queue = "Critical"
     Owner = "Dashboard"
     msgID = 3
     msgType = "dict"
 
 class Brake(Enum):
-    Queue = "General"
+    Queue = "Critical"
     Owner = "Dashboard"
     msgID = 4
     msgType = "str"
@@ -110,7 +110,7 @@ class Config(Enum):
     msgType = "dict"
 
 class Klem(Enum):
-    Queue = "General"
+    Queue = "Critical"
     Owner = "Dashboard"
     msgID = 7
     msgType = "str"

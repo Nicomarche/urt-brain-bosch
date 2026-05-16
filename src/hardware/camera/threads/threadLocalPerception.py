@@ -86,10 +86,15 @@ class threadLocalPerception(ThreadWithStop):
         # motor genera en `_draw_debug_views`. `threadCamera` se quedó solo con
         # captura → frame_buffer → grabación. La flag `stream_to_dashboard`
         # respeta `URT_STREAM_CAMERA=0` para correr headless en competencia.
-        self.stream_to_dashboard = bool(stream_to_dashboard)
-        self._dashboard_publish_interval = 1.0 / 10.0  # ~10 Hz, mismo orden que el legacy serialCamera
+        dashboard_fps = max(0.0, float(getattr(config, "DASHBOARD_CAMERA_FPS", 6.0)))
+        self.stream_to_dashboard = bool(stream_to_dashboard) and dashboard_fps > 0.0
+        self._dashboard_publish_interval = (
+            1.0 / dashboard_fps if dashboard_fps > 0.0 else float("inf")
+        )
         self._last_dashboard_publish_time = 0.0
-        self._dashboard_jpeg_quality = 70  # mismo nivel que threadCamera para mantener tamaño/CPU equivalentes
+        self._dashboard_jpeg_quality = int(
+            getattr(config, "DASHBOARD_CAMERA_JPEG_QUALITY", 55)
+        )
 
         self.last_infer_time = 0.0
         self.last_status_time = 0.0
@@ -727,8 +732,8 @@ class threadLocalPerception(ThreadWithStop):
         base64 (en vez de bytes crudos) para no tocar el fast-path existente
         en `processDashboard.send_continuous_messages`.
 
-        Rate-limit: ~10 Hz. La inferencia corre a ~10 Hz (LOCAL_AI_INTERVAL),
-        así que en la práctica publicamos un frame por inferencia.
+        Rate-limit: configurable con `URT_DASHBOARD_CAMERA_FPS` (default 6).
+        La inferencia puede correr bastante más rápido que el preview remoto.
         """
         if not self.stream_to_dashboard:
             return

@@ -949,7 +949,7 @@ PICAMERA_HDR_GLARE_THRESHOLD = 0.04
 
 # Transmitir video de la cámara al dashboard (PyQt5 GUI o Angular legacy).
 #
-# Costos: JPEG encode (~70% calidad, ~50KB/frame) y emisión SocketIO binaria.
+# Costos: JPEG encode y emisión SocketIO binaria.
 # Tras la migración a `serialCamera_bin` (bytes JPEG en vez de PNG base64) el
 # costo es ~5-10x menor que en la era Angular, así que el default queda en
 # True: el GUI PyQt5 lo necesita o no muestra nada en el panel "Driving".
@@ -959,6 +959,33 @@ PICAMERA_HDR_GLARE_THRESHOLD = 0.04
 # el thread de cámara dejará de encodear JPEG y `processDashboard` no
 # se suscribirá al canal `serialCamera`.
 STREAM_CAMERA_TO_DASHBOARD = _os.environ.get("URT_STREAM_CAMERA", "1") == "1"
+
+# Stream del preview remoto. En Jetson la cámara puede capturar a 60 FPS, pero
+# el monitor no necesita esa cadencia: bajar FPS/calidad evita colas grandes de
+# SocketIO/Qt cuando se usa `./run.sh --monitor <jetson>:5005`.
+def _env_float(name, default):
+    try:
+        return float(_os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name, default):
+    try:
+        return int(_os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+DASHBOARD_CAMERA_FPS = max(0.0, _env_float("URT_DASHBOARD_CAMERA_FPS", 6.0))
+DASHBOARD_CAMERA_JPEG_QUALITY = max(
+    35, min(90, _env_int("URT_DASHBOARD_CAMERA_JPEG_QUALITY", 55))
+)
+# Por default ya no reenviamos el frame base64 legacy junto al binario: el GUI
+# PyQt usa `serialCamera_bin` y emitir ambos duplica CPU/ancho de banda.
+DASHBOARD_EMIT_LEGACY_CAMERA_BASE64 = (
+    _os.environ.get("URT_DASHBOARD_EMIT_LEGACY_CAMERA", "0") == "1"
+)
 
 # ===================== DEBUG WINDOWS =====================
 # Ventanas de OpenCV para debug visual (requieren monitor/display conectado).
