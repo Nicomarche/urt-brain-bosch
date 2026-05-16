@@ -26,12 +26,17 @@
 
 """threadLocSys — cliente BFMC locsys GPS para simulación y competencia real.
 
-Protocolo de competencia (ECC-BFMC Computer):
+Protocolo de competencia (ECC-BFMC Computer), variante locsysDevice:
 1. Conectar al TrafficCommunicationServer TCP:5000
 2. Enviar  {"reqORinfo": "request", "type": "locsysDevice", "DeviceID": <ID>}
 3. Recibir {"response": "<IP>:<PORT>", ...}
 4. Conectar al locsys device TCP:<PORT>
 5. Recibir {"x": float, "y": float, "yaw_rad"?: float}\n
+
+Variante locIDsub:
+1. Conectar al TrafficCommunicationServer TCP:5000
+2. Enviar {"reqORinfo": "info", "type": "locIDsub", "locID": <ID>, "freq": 0.25}
+3. Recibir {"type": "location", "x": mm, "y": mm, "z": mm}
 
 En simulación (MOTOR_OUTPUT == "zmq"):
 por defecto se conecta directo al LoCSys expuesto por `sim_bridge`
@@ -74,6 +79,9 @@ _LOCSYS_USE_TRAFFIC_COMM_SERVER = True
 _LOCSYS_DIRECT_FALLBACK_ENABLED = False
 _TRAFFIC_COMM_SEND_EGO_DATA = True
 _TRAFFIC_COMM_SEND_PERIOD_S = 0.25
+_TRAFFIC_COMM_LOCSYS_MODE = "auto"
+_TRAFFIC_COMM_LOCSYS_SUB_FREQ = 0.25
+_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 0.001
 
 try:
     from config import (
@@ -93,6 +101,9 @@ try:
         LOCSYS_DIRECT_FALLBACK_ENABLED as _LOCSYS_DIRECT_FALLBACK_ENABLED,
         TRAFFIC_COMM_SEND_EGO_DATA as _TRAFFIC_COMM_SEND_EGO_DATA,
         TRAFFIC_COMM_SEND_PERIOD_S as _TRAFFIC_COMM_SEND_PERIOD_S,
+        TRAFFIC_COMM_LOCSYS_MODE as _TRAFFIC_COMM_LOCSYS_MODE,
+        TRAFFIC_COMM_LOCSYS_SUB_FREQ as _TRAFFIC_COMM_LOCSYS_SUB_FREQ,
+        TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE as _TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE,
     )
 except ImportError:
     pass
@@ -103,6 +114,10 @@ _SOCKET_TIMEOUT_S = 1.5
 _JSON_DECODER = json.JSONDecoder()
 _AUTO_HOST_TOKENS = {"", "auto", "autodiscover", "autodiscovery", "discover"}
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+
+
+class _TrafficRequestNotRecognised(RuntimeError):
+    pass
 
 
 def _extract_json_objects(buffer: str) -> tuple[list[dict], str]:
@@ -127,6 +142,20 @@ def _extract_json_objects(buffer: str) -> tuple[list[dict], str]:
 
 def _is_auto_traffic_host(host: str) -> bool:
     return str(host or "").strip().lower() in _AUTO_HOST_TOKENS
+
+
+def _traffic_locsys_mode() -> str:
+    mode = str(_TRAFFIC_COMM_LOCSYS_MODE or "auto").strip().lower()
+    aliases = {
+        "": "auto",
+        "locsysdevice": "request",
+        "locsys_device": "request",
+        "address": "request",
+        "locidsub": "subscribe",
+        "loc_id_sub": "subscribe",
+        "subscription": "subscribe",
+    }
+    return aliases.get(mode, mode)
 
 
 def _traffic_public_key_candidates() -> list[Path]:
@@ -232,6 +261,7 @@ class threadLocSys(ThreadWithStop):
         self._traffic_next_connect_t = 0.0
         self._traffic_last_send_t = 0.0
         self._traffic_comm_endpoint: tuple[str, int] | None = None
+        self._traffic_locsys_runtime_mode: str | None = None
 
     # ------------------------------------------------------------------
 
@@ -312,6 +342,8 @@ class threadLocSys(ThreadWithStop):
             return _SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT
         if not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
             return _LOCSYS_HOST_COMP, _LOCSYS_PORT
+        if _traffic_locsys_mode() == "subscribe":
+            raise RuntimeError("TRAFFIC_COMM_LOCSYS_MODE=subscribe no usa locsys device address")
 
         try:
             traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
@@ -339,15 +371,20 @@ class threadLocSys(ThreadWithStop):
                 if resp is None:
                     raise TimeoutError("traffic server did not return a JSON response")
                 if resp.get("error") is not None:
-                    raise ValueError(
+                    message = (
                         f"traffic server locsysDevice DeviceID={_LOCSYS_DEVICE_ID} "
                         f"error: {resp.get('error')} response={resp!r}"
                     )
+                    if "request not recognised" in str(resp.get("error")).lower():
+                        raise _TrafficRequestNotRecognised(message)
+                    raise ValueError(message)
                 address = _extract_locsys_address_from_response(resp)
                 if address is None:
                     raise ValueError(f"traffic server returned no locsys address: {resp!r}")
                 host, port_str = address.rsplit(":", 1)
                 return host.strip(), int(port_str.strip())
+        except _TrafficRequestNotRecognised:
+            raise
         except Exception as exc:
             endpoint_label = (
                 "auto"
@@ -512,13 +549,156 @@ class threadLocSys(ThreadWithStop):
 
     # ------------------------------------------------------------------
 
+    def _traffic_subscription_fix_from_message(self, data: dict) -> dict | None:
+        if data.get("error") is not None:
+            raise ValueError(f"traffic locIDsub error: {data.get('error')} response={data!r}")
+
+        nested = data.get("location", data.get("data"))
+        if isinstance(nested, dict):
+            nested_fix = self._traffic_subscription_fix_from_message(nested)
+            if nested_fix is not None:
+                return nested_fix
+
+        msg_type = str(data.get("type", "location")).strip().lower()
+        if msg_type not in {"location", "locsys", "locsyslocation"}:
+            return None
+
+        candidates = (
+            ("x", "y"),
+            ("world_x", "world_y"),
+            ("posA", "posB"),
+            ("value1", "value2"),
+        )
+        x = y = None
+        for x_key, y_key in candidates:
+            x = self._as_float(data.get(x_key))
+            y = self._as_float(data.get(y_key))
+            if x is not None and y is not None:
+                break
+        if x is None or y is None:
+            return None
+
+        scale = float(_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE)
+        fix = {
+            "x": x * scale,
+            "y": y * scale,
+        }
+
+        yaw_rad = self._as_float(data.get("yaw_rad"))
+        if yaw_rad is not None:
+            fix["yaw_rad"] = yaw_rad
+        else:
+            yaw_deg = self._as_float(data.get("yaw_deg", data.get("yaw")))
+            if yaw_deg is not None:
+                fix["yaw_deg"] = yaw_deg
+        return fix
+
+    def _thread_work_traffic_subscription(self) -> None:
+        """Recibe GPS directo desde TrafficCommunicationServer usando locIDsub."""
+        try:
+            traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
+        except Exception as exc:
+            if not self._blocker.is_set():
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - No se pudo resolver "
+                    f"TrafficCommunicationServer para locIDsub ({exc}); reintentando en "
+                    f"{_GPS_RECONNECT_S:.0f}s"
+                )
+                self._blocker.wait(_GPS_RECONNECT_S)
+            return
+
+        print(
+            f"\033[1;97m[ LocSys ] :\033[0m "
+            f"\033[1;92mINFO\033[0m - Suscribiendo GPS locIDsub "
+            f"id={_LOCSYS_DEVICE_ID} en {traffic_host}:{traffic_port}"
+        )
+
+        try:
+            with socket.create_connection((traffic_host, traffic_port), timeout=5.0) as sock:
+                sock.settimeout(_SOCKET_TIMEOUT_S)
+                req = {
+                    "reqORinfo": "info",
+                    "type": "locIDsub",
+                    "locID": _LOCSYS_DEVICE_ID,
+                    "freq": float(_TRAFFIC_COMM_LOCSYS_SUB_FREQ),
+                }
+                sock.sendall(json.dumps(req).encode("utf-8"))
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;92mINFO\033[0m - Conectado al stream GPS locIDsub"
+                )
+                buffer = ""
+                while not self._blocker.is_set():
+                    try:
+                        chunk = sock.recv(4096)
+                    except socket.timeout:
+                        self._send_ego_data_to_traffic_server()
+                        continue
+                    if not chunk:
+                        break
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    objects, buffer = _extract_json_objects(buffer)
+                    for data in objects:
+                        try:
+                            fix = self._traffic_subscription_fix_from_message(data)
+                            if fix is not None:
+                                self._emit_fix(fix)
+                            elif self.debugger:
+                                print(
+                                    f"\033[1;97m[ LocSys ] :\033[0m "
+                                    f"traffic locIDsub ignored: {data!r}"
+                                )
+                        except TypeError as exc:
+                            if self.debugger:
+                                print(
+                                    f"\033[1;97m[ LocSys ] :\033[0m "
+                                    f"traffic locIDsub parse error: {exc}"
+                                )
+                    self._send_ego_data_to_traffic_server()
+        except Exception as exc:
+            if not self._blocker.is_set():
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - Stream GPS locIDsub perdido ({exc}), "
+                    f"reintentando en {_GPS_RECONNECT_S:.0f}s"
+                )
+                self._blocker.wait(_GPS_RECONNECT_S)
+
     def thread_work(self) -> None:
         """Ciclo de conexión + recepción. Reconecta automáticamente."""
         if self._blocker.is_set():
             return
 
+        mode = self._traffic_locsys_runtime_mode or _traffic_locsys_mode()
+        if (
+            mode == "subscribe"
+            and _LOCSYS_USE_TRAFFIC_COMM_SERVER
+            and not (self._sim_mode and not _LOCSYS_USE_TRAFFIC_COMM_SERVER)
+        ):
+            self._thread_work_traffic_subscription()
+            return
+
         try:
             host, port = self._resolve_locsys_address()
+        except _TrafficRequestNotRecognised as exc:
+            if mode == "auto" and not self._blocker.is_set():
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - {exc}; el server descubierto "
+                    f"usa el protocolo locIDsub. Probando suscripcion directa."
+                )
+                self._traffic_locsys_runtime_mode = "subscribe"
+                self._thread_work_traffic_subscription()
+            elif not self._blocker.is_set():
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - TrafficCommunicationServer no "
+                    f"reconoce locsysDevice ({exc}); reintentando en "
+                    f"{_GPS_RECONNECT_S:.0f}s"
+                )
+                self._blocker.wait(_GPS_RECONNECT_S)
+            return
         except Exception as exc:
             if not self._blocker.is_set():
                 print(

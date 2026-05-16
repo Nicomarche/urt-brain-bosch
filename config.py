@@ -510,6 +510,8 @@ LOCSYS_PORT          = 4691
 # Fallback directo al locsys device. En competencia normal NO debería usarse:
 # el coche debe pedir esa IP al TrafficCommunicationServer. Queda como escape
 # manual sólo si `LOCSYS_DIRECT_FALLBACK_ENABLED=True`.
+# No es la IP del TrafficCommunicationServer; esa se controla con TRAFFIC_COMM_HOST.
+# Este valor queda ignorado mientras LOCSYS_DIRECT_FALLBACK_ENABLED=False.
 LOCSYS_HOST_COMP     = "192.168.50.2"
 TRAFFIC_COMM_HOST    = "127.0.0.1" if _SIM_MODE else "auto"
 TRAFFIC_COMM_PORT    = 5000
@@ -518,6 +520,15 @@ TRAFFIC_COMM_DISCOVERY_PORT = 9000
 TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 5.0
 TRAFFIC_COMM_PUBLIC_KEY_PATH = "auto"
 LOCSYS_DEVICE_ID     = 5
+# Modo de GPS via TrafficCommunicationServer:
+#   "auto"      -> intenta request locsysDevice; si el server no lo reconoce,
+#                  usa suscripcion locIDsub directa al TrafficCommunicationServer.
+#   "request"   -> solo locsysDevice -> IP:puerto del locsys device.
+#   "subscribe" -> solo locIDsub -> stream {"type":"location","x","y","z"}.
+TRAFFIC_COMM_LOCSYS_MODE = "auto"
+TRAFFIC_COMM_LOCSYS_SUB_FREQ = 0.25
+# El stream locIDsub de BFMC llega en milimetros; el resto del brain usa metros.
+TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 0.001
 
 SIM_LOCSYS_HOST      = "localhost"
 SIM_LOCSYS_PORT      = 4691
