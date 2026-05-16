@@ -287,7 +287,11 @@ class SocketIOClient(QObject):
     def _connect_loop(self) -> None:
         """Initial connect + python-socketio's own reconnect handles the rest."""
         try:
-            self._sio.connect(self._url, transports=["websocket", "polling"])
+            # Monitor mode runs over a direct LAN link to Flask-SocketIO/eventlet.
+            # WebSocket-only avoids the polling->websocket upgrade window where
+            # the backend can briefly see two Socket.IO session ids and trip the
+            # single-session lock.
+            self._sio.connect(self._url, transports=["websocket"])
             # ``wait()`` blocks until disconnect; reconnect is handled internally.
             self._sio.wait()
         except socketio.exceptions.ConnectionError as exc:

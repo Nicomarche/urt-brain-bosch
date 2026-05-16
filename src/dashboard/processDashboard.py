@@ -304,6 +304,17 @@ class processDashboard(WorkerProcess):
             if self.debugging:
                 self.logger.info("Client connected — EnableButton sent")
 
+        @self.socketio.on('disconnect')
+        def on_client_disconnect():
+            socketId = request.sid
+            if self.sessionActive and self.activeUser == socketId:
+                print(
+                    f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m"
+                    f" - Active dashboard peer disconnected \033[94m{socketId}\033[0m;"
+                    " releasing session"
+                )
+                self._clear_active_session()
+
         # Start background tasks here (in the child process, after fork) so that
         # the eventlet green threads belong to the correct hub.
         self._start_background_tasks()
@@ -453,6 +464,28 @@ class processDashboard(WorkerProcess):
         self.heartbeat_received = True
 
 
+    def _clear_active_session(self):
+        """Release the single-user lock and reset heartbeat state."""
+        self.sessionActive = False
+        self.activeUser = None
+        self.heartbeat_retries = 0
+        self.heartbeat_received = False
+
+
+    def _is_socket_connected(self, socketId):
+        """Best-effort check for stale Socket.IO session ids."""
+        if not socketId or self.socketio is None:
+            return False
+        try:
+            manager = self.socketio.server.manager
+            return bool(manager.is_connected(socketId, namespace="/"))
+        except Exception:
+            # Flask-SocketIO manager internals vary by version. If the check is
+            # unavailable, keep the existing session policy and let heartbeat
+            # timeout clear the lock.
+            return True
+
+
     def handle_driving_mode(self, dataDict):
         """Handle driving mode change.
 
@@ -519,9 +552,22 @@ class processDashboard(WorkerProcess):
 
     def handle_single_user_session(self, socketId):
         """Handle session access for a single user."""
+        if (
+            self.sessionActive
+            and self.activeUser != socketId
+            and not self._is_socket_connected(self.activeUser)
+        ):
+            print(
+                f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m"
+                f" - Releasing stale dashboard session \033[94m{self.activeUser}\033[0m"
+            )
+            self._clear_active_session()
+
         if not self.sessionActive:
             self.sessionActive = True
             self.activeUser = socketId
+            self.heartbeat_retries = 0
+            self.heartbeat_received = True
             print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mINFO\033[0m - Session access granted to \033[94m{socketId}\033[0m")
             self.socketio.emit('session_access', {'data': True}, room=socketId)
             self.send_message_to_brain("RequestSteerLimits", {"Value": True})
@@ -536,8 +582,7 @@ class processDashboard(WorkerProcess):
     def handle_session_end(self, socketId):
         """Handle session end for the single user."""
         if self.sessionActive and self.activeUser == socketId:
-            self.sessionActive = False
-            self.activeUser = None
+            self._clear_active_session()
 
 
     def handle_save_table_state(self, data):
@@ -623,15 +668,14 @@ class processDashboard(WorkerProcess):
             return
 
         if not self.heartbeat_received and self.sessionActive:
+            active_user = self.activeUser
             self.heartbeat_retries += 1
             if self.heartbeat_retries < self.heartbeat_max_retries:
-                self.socketio.emit('heartbeat', {'data': 'Heartbeat'})
+                self.socketio.emit('heartbeat', {'data': 'Heartbeat'}, room=active_user)
             else:
-                print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m - Connection lost with peer \033[94m{self.activeUser}\033[0m")
-                self.socketio.emit('heartbeat_disconnect', {'data': 'Heartbeat timeout'})
-                self.sessionActive = False
-                self.activeUser = None
-                self.heartbeat_retries = 0
+                print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m - Connection lost with peer \033[94m{active_user}\033[0m")
+                self.socketio.emit('heartbeat_disconnect', {'data': 'Heartbeat timeout'}, room=active_user)
+                self._clear_active_session()
 
             eventlet.spawn_after(self.heartbeat_time_between_retries, self.send_heartbeat)
         else:

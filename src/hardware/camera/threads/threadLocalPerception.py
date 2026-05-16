@@ -825,6 +825,14 @@ class threadLocalPerception(ThreadWithStop):
             return
 
         now = time.time()
+        if self.stream_to_dashboard and (
+            self._last_result is None
+            or not bool(self._last_result.get("model_ready", False))
+        ):
+            # First paint matters in monitor mode: publish a raw frame before
+            # the first lazy model load/warmup can block for seconds.
+            self._publish_dashboard_frame(None, frame, now)
+
         if now - self.last_infer_time < self.local_ai_interval:
             return
         self.last_infer_time = now

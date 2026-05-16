@@ -63,6 +63,7 @@ class LocalPerceptionEngine:
         self.model = None
         self.model_ready = False
         self.init_error = None
+        self._predict_lock = threading.RLock()
         self._vis_lock = threading.Lock()
         self._last_debug = {}
         self._warned_fallback_labels = False
@@ -75,6 +76,11 @@ class LocalPerceptionEngine:
             # nunca se setea → brain atascado en "PLEASE WAIT".
             # Debe setearse ANTES de importar ultralytics/torch para que tome efecto.
             os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+            # Nunca instalar dependencias desde el robot en runtime. En Jetson,
+            # Ultralytics intenta `pip install onnxruntime-gpu` cuando se le pide
+            # CUDA con un .onnx y eso bloquea/ensucia el arranque. Si falta algo,
+            # debe resolverse en setup.sh/requirements, no dentro del thread.
+            os.environ.setdefault("YOLO_AUTOINSTALL", "false")
             from ultralytics import YOLO
             import torch
             # Prevent LLVM libomp from spinning up a thread pool in the forked child.
@@ -290,15 +296,16 @@ class LocalPerceptionEngine:
         dummy = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)
         try:
             start_time = time.time()
-            self.model.predict(
-                dummy,
-                conf=self.min_confidence,
-                iou=self.nms_iou,
-                imgsz=self.imgsz,
-                max_det=self.max_detections,
-                device=self.device,
-                verbose=False,
-            )
+            with self._predict_lock:
+                self.model.predict(
+                    dummy,
+                    conf=self.min_confidence,
+                    iou=self.nms_iou,
+                    imgsz=self.imgsz,
+                    max_det=self.max_detections,
+                    device=self.device,
+                    verbose=False,
+                )
             warmup_ms = (time.time() - start_time) * 1000
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mINFO\033[0m - Warm-up {warmup_ms:.0f}ms")
         except Exception as e:
@@ -1149,15 +1156,16 @@ class LocalPerceptionEngine:
             }
 
         try:
-            results = self.model.predict(
-                frame,
-                conf=self.min_confidence,
-                iou=self.nms_iou,
-                imgsz=self.imgsz,
-                max_det=self.max_detections,
-                device=self.device,
-                verbose=False,
-            )
+            with self._predict_lock:
+                results = self.model.predict(
+                    frame,
+                    conf=self.min_confidence,
+                    iou=self.nms_iou,
+                    imgsz=self.imgsz,
+                    max_det=self.max_detections,
+                    device=self.device,
+                    verbose=False,
+                )
             result = results[0] if results else None
             if result is None:
                 raise RuntimeError("YOLO returned no results")

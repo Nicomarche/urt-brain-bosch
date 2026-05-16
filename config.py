@@ -516,7 +516,10 @@ LOCSYS_PORT          = 4691
 # No es la IP del TrafficCommunicationServer; esa se controla con TRAFFIC_COMM_HOST.
 # Este valor queda ignorado mientras LOCSYS_DIRECT_FALLBACK_ENABLED=False.
 LOCSYS_HOST_COMP     = "192.168.50.2"
-TRAFFIC_COMM_HOST    = "127.0.0.1" if _SIM_MODE else "auto"
+TRAFFIC_COMM_HOST    = _os.environ.get(
+    "URT_TRAFFIC_COMM_HOST",
+    "127.0.0.1" if _SIM_MODE else "auto",
+)
 TRAFFIC_COMM_PORT    = 5000
 TRAFFIC_COMM_AUTODISCOVERY_ENABLED = str(TRAFFIC_COMM_HOST).strip().lower() == "auto"
 TRAFFIC_COMM_DISCOVERY_PORT = 9000
@@ -549,11 +552,11 @@ TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M = "auto"
 SIM_LOCSYS_HOST      = "localhost"
 SIM_LOCSYS_PORT      = 4691
 LOCSYS_USE_TRAFFIC_COMM_SERVER = False if _SIM_MODE else True
-LOCSYS_DIRECT_FALLBACK_ENABLED = False
+LOCSYS_DIRECT_FALLBACK_ENABLED = _os.environ.get("URT_LOCSYS_DIRECT_FALLBACK", "0") == "1"
 TRAFFIC_COMM_SEND_EGO_DATA = False if _SIM_MODE else True
 TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 
-GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
+GPS_ENABLED          = _os.environ.get("URT_GPS_ENABLED", "1") == "1"  # habilitar threadLocSys
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
 
 # DEPRECATED: el bridge nativo ahora hace toda la conversión `brain_map ↔ gz`
@@ -661,9 +664,16 @@ BEHAVIOR_THREAD_PAUSE_S = 0.05
 # ===================== 2D LIDAR =====================
 # Native 2D LiDAR input. Hardware reads LD19/STL-19P over serial; sim/mac reads
 # LaserScan snapshots from Gazebo through sim_bridge.py over ZMQ.
-LIDAR_ENABLED = True
-LIDAR_BACKEND = "zmq" if _SIM_MODE else "serial"
-LIDAR_SERIAL_PORT = None
+# En hardware queda opt-in por defecto: si no se fija el puerto, el autodetect
+# puede abrir el mismo /dev/ttyUSB* que usa el Nucleo y producir errores de
+# "device disconnected or multiple access". Activar con:
+#   URT_LIDAR_ENABLED=1 URT_LIDAR_SERIAL_PORT=/dev/ttyUSB0 ./run.sh
+LIDAR_ENABLED = _os.environ.get("URT_LIDAR_ENABLED", "1" if _SIM_MODE else "0") == "1"
+LIDAR_BACKEND = _os.environ.get(
+    "URT_LIDAR_BACKEND",
+    "zmq" if _SIM_MODE else "serial",
+).strip().lower()
+LIDAR_SERIAL_PORT = _os.environ.get("URT_LIDAR_SERIAL_PORT") or None
 LIDAR_SERIAL_BAUD = 230400
 LIDAR_SERIAL_TIMEOUT_S = 0.5
 LIDAR_BINS = 720
@@ -1060,13 +1070,21 @@ SIGN_STOP_TURN_DURATION    = 21   # Segundos para completar el arco de 90° — 
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
-# best.pt funciona en CPU/MPS/CUDA (dev en Mac, Jetson con GPU).
-# Para producción TensorRT en Jetson Nano:
-#   export URT_LOCAL_AI_MODEL_PATH=models/lane_segmentation/Best_weights_reentrenado_416px.engine
+# best.pt/ONNX funcionan en CPU/MPS/CUDA (dev en Mac). En Linux hardware
+# preferimos TensorRT si el engine existe, para no caer a ONNX Runtime CPU en
+# Jetson ni disparar auto-installs de onnxruntime-gpu durante el arranque.
+# Para regenerar producción TensorRT en Jetson:
 #   cd models/lane_segmentation && python build_trt.py  # genera el engine en la misma placa
+_LOCAL_AI_TRT_MODEL_PATH = "models/lane_segmentation/Best_weights_reentrenado_416px.engine"
+_LOCAL_AI_ONNX_MODEL_PATH = "models/lane_segmentation/Best weights_reentrenado.onnx"
+_LOCAL_AI_DEFAULT_MODEL_PATH = _LOCAL_AI_ONNX_MODEL_PATH
+if not _SIM_MODE and _sys.platform.startswith("linux"):
+    _candidate = _os.path.join(_os.path.dirname(__file__), _LOCAL_AI_TRT_MODEL_PATH)
+    if _os.path.isfile(_candidate):
+        _LOCAL_AI_DEFAULT_MODEL_PATH = _LOCAL_AI_TRT_MODEL_PATH
 LOCAL_AI_MODEL_PATH = _os.environ.get(
     "URT_LOCAL_AI_MODEL_PATH",
-    "models/lane_segmentation/Best weights_reentrenado.onnx"
+    _LOCAL_AI_DEFAULT_MODEL_PATH
 )
 LOCAL_AI_MIN_CONFIDENCE = 0.35
 LOCAL_AI_IMGSZ = 416

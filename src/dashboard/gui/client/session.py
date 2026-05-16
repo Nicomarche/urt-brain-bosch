@@ -51,6 +51,8 @@ class SessionManager(QObject):
     lost = pyqtSignal(str)                    # connection lost mid-session
 
     HEARTBEAT_TIMEOUT_MS = 60_000  # 3 missed heartbeats at 20s each
+    LOGIN_RETRY_INITIAL_MS = 2_000
+    LOGIN_RETRY_MAX_MS = 10_000
 
     def __init__(self, client: SocketIOClient, password_md5: str = "",
                  skip_login: bool = False, parent: Optional[QObject] = None):
@@ -66,6 +68,8 @@ class SessionManager(QObject):
         # Bonus: this also re-authenticates automatically after a mid-session
         # reconnect, which the backend treats as a fresh socket.
         self._pending_login = False
+        self._session_access_in_flight = False
+        self._login_retry_delay_ms = self.LOGIN_RETRY_INITIAL_MS
 
         # Watchdog: if no heartbeat arrives within HEARTBEAT_TIMEOUT_MS we
         # assume the link is gone. The backend's own watchdog is similar
@@ -73,6 +77,14 @@ class SessionManager(QObject):
         self._heartbeat_watchdog = QTimer(self)
         self._heartbeat_watchdog.setSingleShot(True)
         self._heartbeat_watchdog.timeout.connect(self._on_heartbeat_timeout)
+
+        # If the backend denies us because a stale socket still owns the
+        # single-session lock, retry politely. This is common on lossy Wi-Fi:
+        # the backend clears the old lock on disconnect/heartbeat timeout, but
+        # the new monitor would otherwise sit forever in "busy".
+        self._login_retry_timer = QTimer(self)
+        self._login_retry_timer.setSingleShot(True)
+        self._login_retry_timer.timeout.connect(self._retry_pending_login)
 
         # Wire backend → here.
         self._client.session_access_signal.connect(self._on_session_access)
@@ -118,6 +130,8 @@ class SessionManager(QObject):
             self._client.emit_message(ev.CMD_SESSION_END, True)
         self._is_authenticated = False
         self._pending_login = False
+        self._session_access_in_flight = False
+        self._login_retry_timer.stop()
         self._heartbeat_watchdog.stop()
 
     # ------------------------------------------------------------------
@@ -127,24 +141,48 @@ class SessionManager(QObject):
         """Emit SessionAccess now if the socket is up; otherwise wait for
         the ``connected`` status signal to replay it.
         """
-        if self._client.is_connected():
-            self._client.emit_message(ev.CMD_SESSION_ACCESS)
-        else:
+        if not self._client.is_connected():
             _logger.info("Login queued — will fire once SocketIO connects")
+            return
+        if self._session_access_in_flight:
+            return
+        self._session_access_in_flight = True
+        self._client.emit_message(ev.CMD_SESSION_ACCESS)
+
+    def _schedule_login_retry(self) -> None:
+        if not self._pending_login or self._is_authenticated:
+            return
+        if not self._client.is_connected():
+            return
+        delay = int(self._login_retry_delay_ms)
+        self._login_retry_delay_ms = min(
+            self.LOGIN_RETRY_MAX_MS,
+            max(self.LOGIN_RETRY_INITIAL_MS, delay * 2),
+        )
+        self._login_retry_timer.start(delay)
+
+    def _retry_pending_login(self) -> None:
+        if self._pending_login and not self._is_authenticated:
+            _logger.info("Retrying SessionAccess after busy/stale lock")
+            self._send_session_access_if_connected()
 
     # ------------------------------------------------------------------
     # Backend → here
     # ------------------------------------------------------------------
     def _on_session_access(self, granted: bool) -> None:
+        self._session_access_in_flight = False
         if granted:
             _logger.info("Session granted")
             self._is_authenticated = True
+            self._login_retry_delay_ms = self.LOGIN_RETRY_INITIAL_MS
+            self._login_retry_timer.stop()
             self._heartbeat_watchdog.start(self.HEARTBEAT_TIMEOUT_MS)
             self.authenticated.emit()
         else:
             _logger.warning("Session denied (single-session lock?)")
             self._is_authenticated = False
             self.denied.emit("busy")
+            self._schedule_login_retry()
 
     def _on_heartbeat(self, _payload) -> None:
         """Backend asked for a heartbeat → bounce one back and reset watchdog."""
@@ -156,13 +194,17 @@ class SessionManager(QObject):
     def _on_heartbeat_disconnect(self, _payload) -> None:
         _logger.warning("Backend reported heartbeat disconnect")
         self._is_authenticated = False
+        self._session_access_in_flight = False
         self._heartbeat_watchdog.stop()
         self.lost.emit("heartbeat")
+        self._schedule_login_retry()
 
     def _on_heartbeat_timeout(self) -> None:
         _logger.warning("Local heartbeat watchdog tripped")
         self._is_authenticated = False
+        self._session_access_in_flight = False
         self.lost.emit("watchdog")
+        self._schedule_login_retry()
 
     def _on_connection_status(self, status: str) -> None:
         if status == "connected":
@@ -172,12 +214,17 @@ class SessionManager(QObject):
             # session on disconnect, so we must re-issue SessionAccess.
             if self._pending_login and not self._is_authenticated:
                 _logger.info("SocketIO connected — sending queued SessionAccess")
-                self._client.emit_message(ev.CMD_SESSION_ACCESS)
-        elif status == "disconnected" and self._is_authenticated:
+                self._send_session_access_if_connected()
+        elif status == "disconnected":
             # The socket dropped — the backend will eventually reset our
             # session. Flag the user immediately rather than letting the
             # watchdog tick down. ``_pending_login`` stays True so reconnect
             # automatically re-authenticates.
+            was_authenticated = self._is_authenticated
             self._is_authenticated = False
+            self._session_access_in_flight = False
             self._heartbeat_watchdog.stop()
-            self.lost.emit("disconnected")
+            if was_authenticated:
+                self.lost.emit("disconnected")
+        elif status == "error":
+            self._session_access_in_flight = False
