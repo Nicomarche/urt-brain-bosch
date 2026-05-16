@@ -60,17 +60,18 @@ from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 # Defaults que se sobreescriben con los valores de config.py si está disponible.
 _LOCSYS_PORT        = 4691
 _LOCSYS_HOST_COMP   = "192.168.50.11"
-_TRAFFIC_COMM_HOST  = "192.168.1.1"
+_TRAFFIC_COMM_HOST  = "auto"
 _TRAFFIC_COMM_PORT  = 5000
-_TRAFFIC_COMM_AUTODISCOVERY_ENABLED = False
+_TRAFFIC_COMM_AUTODISCOVERY_ENABLED = True
 _TRAFFIC_COMM_DISCOVERY_PORT = 9000
-_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 3.0
+_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 5.0
 _TRAFFIC_COMM_PUBLIC_KEY_PATH = "auto"
 _LOCSYS_DEVICE_ID   = 1
 _SIM_LOCSYS_HOST    = "localhost"
 _SIM_LOCSYS_PORT    = 4691
 _GPS_RECONNECT_S    = 2.0
 _LOCSYS_USE_TRAFFIC_COMM_SERVER = True
+_LOCSYS_DIRECT_FALLBACK_ENABLED = False
 _TRAFFIC_COMM_SEND_EGO_DATA = True
 _TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 
@@ -89,6 +90,7 @@ try:
         SIM_LOCSYS_PORT    as _SIM_LOCSYS_PORT,
         GPS_RECONNECT_S    as _GPS_RECONNECT_S,
         LOCSYS_USE_TRAFFIC_COMM_SERVER as _LOCSYS_USE_TRAFFIC_COMM_SERVER,
+        LOCSYS_DIRECT_FALLBACK_ENABLED as _LOCSYS_DIRECT_FALLBACK_ENABLED,
         TRAFFIC_COMM_SEND_EGO_DATA as _TRAFFIC_COMM_SEND_EGO_DATA,
         TRAFFIC_COMM_SEND_PERIOD_S as _TRAFFIC_COMM_SEND_PERIOD_S,
     )
@@ -289,6 +291,8 @@ class threadLocSys(ThreadWithStop):
         """
         if self._sim_mode and not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
             return _SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT
+        if not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
+            return _LOCSYS_HOST_COMP, _LOCSYS_PORT
 
         try:
             traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
@@ -319,20 +323,28 @@ class threadLocSys(ThreadWithStop):
                 host, port_str = address.rsplit(":", 1)
                 return host.strip(), int(port_str.strip())
         except Exception as exc:
-            fallback_host, fallback_port = (
-                (_SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT)
-                if self._sim_mode
-                else (_LOCSYS_HOST_COMP, _LOCSYS_PORT)
-            )
             endpoint_label = (
                 "auto"
                 if _is_auto_traffic_host(str(_TRAFFIC_COMM_HOST))
                 else f"{_TRAFFIC_COMM_HOST}:{_TRAFFIC_COMM_PORT}"
             )
+            fallback_host, fallback_port = (
+                (_SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT)
+                if self._sim_mode
+                else (_LOCSYS_HOST_COMP, _LOCSYS_PORT)
+            )
+            if not _LOCSYS_DIRECT_FALLBACK_ENABLED:
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - traffic server ({endpoint_label}) "
+                    f"error: {exc}; sin fallback directo a {fallback_host}:{fallback_port}. "
+                    f"Reintentando discovery."
+                )
+                raise
             print(
                 f"\033[1;97m[ LocSys ] :\033[0m "
                 f"\033[1;93mWARN\033[0m - traffic server ({endpoint_label}) "
-                f"error: {exc} — usando {fallback_host}:{fallback_port}"
+                f"error: {exc} — usando fallback directo {fallback_host}:{fallback_port}"
             )
             return fallback_host, fallback_port
 
@@ -479,7 +491,18 @@ class threadLocSys(ThreadWithStop):
         if self._blocker.is_set():
             return
 
-        host, port = self._resolve_locsys_address()
+        try:
+            host, port = self._resolve_locsys_address()
+        except Exception as exc:
+            if not self._blocker.is_set():
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;93mWARN\033[0m - No se pudo resolver locsys vía "
+                    f"TrafficCommunicationServer ({exc}); reintentando en "
+                    f"{_GPS_RECONNECT_S:.0f}s"
+                )
+                self._blocker.wait(_GPS_RECONNECT_S)
+            return
         print(
             f"\033[1;97m[ LocSys ] :\033[0m "
             f"\033[1;92mINFO\033[0m - Conectando a {host}:{port}"

@@ -506,6 +506,9 @@ EKF_GPS_MAX_AGE_S = 0.5
 # world_x/world_y (coordenadas OSM directas, sin conversión de imagen).
 
 LOCSYS_PORT          = int(_os.environ.get("URT_LOCSYS_PORT", "4691"))
+# Fallback directo al locsys device. En competencia normal NO debería usarse:
+# el coche debe pedir esa IP al TrafficCommunicationServer. Queda como escape
+# manual sólo si `LOCSYS_DIRECT_FALLBACK_ENABLED=True`.
 LOCSYS_HOST_COMP     = _os.environ.get("URT_LOCSYS_HOST_COMP", "192.168.50.11")
 TRAFFIC_COMM_HOST    = _os.environ.get(
     "URT_TRAFFIC_COMM_HOST",
@@ -522,7 +525,7 @@ TRAFFIC_COMM_DISCOVERY_PORT = int(
     _os.environ.get("URT_TRAFFIC_COMM_DISCOVERY_PORT", "9000")
 )
 TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = float(
-    _os.environ.get("URT_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S", "3.0")
+    _os.environ.get("URT_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S", "5.0")
 )
 TRAFFIC_COMM_PUBLIC_KEY_PATH = _os.environ.get(
     "URT_TRAFFIC_COMM_PUBLIC_KEY_PATH",
@@ -536,6 +539,12 @@ LOCSYS_USE_TRAFFIC_COMM_SERVER = (
     _os.environ.get(
         "URT_LOCSYS_USE_TRAFFIC_COMM_SERVER",
         "0" if _SIM_MODE else "1",
+    ) == "1"
+)
+LOCSYS_DIRECT_FALLBACK_ENABLED = (
+    _os.environ.get(
+        "URT_LOCSYS_DIRECT_FALLBACK_ENABLED",
+        "0",
     ) == "1"
 )
 TRAFFIC_COMM_SEND_EGO_DATA = (
