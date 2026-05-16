@@ -122,6 +122,9 @@ class threadPoseEstimator(threadTracking):
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
+        self._last_gps_raw_xy: tuple[float, float] | None = None
+        self._last_gps_raw_monotonic = 0.0
+        self._gps_calibration_offset_xy: tuple[float, float] | None = None
         self._startup_world_pose = self._resolve_initial_world_pose()
         self._apply_start_pose_override()
         self._send_sim_relocalize()
@@ -133,6 +136,134 @@ class threadPoseEstimator(threadTracking):
         except ImportError:
             return False
         return MOTOR_OUTPUT == "zmq"
+
+    @staticmethod
+    def _gps_dashboard_calibration_enabled() -> bool:
+        try:
+            from config import MOTOR_OUTPUT
+        except ImportError:
+            return True
+        return MOTOR_OUTPUT != "zmq"
+
+    @staticmethod
+    def _payload_xy(payload: dict) -> tuple[float, float] | None:
+        for x_key, y_key in (("world_x", "world_y"), ("x", "y"), ("posA", "posB")):
+            if payload.get(x_key) is None or payload.get(y_key) is None:
+                continue
+            try:
+                return float(payload[x_key]), float(payload[y_key])
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _raw_gps_xy_from_calibration_payload(payload: dict) -> tuple[float, float] | None:
+        for x_key, y_key in (
+            ("gps_raw_world_x", "gps_raw_world_y"),
+            ("raw_gps_world_x", "raw_gps_world_y"),
+            ("gps_raw_posA", "gps_raw_posB"),
+        ):
+            if payload.get(x_key) is None or payload.get(y_key) is None:
+                continue
+            try:
+                return float(payload[x_key]), float(payload[y_key])
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _localisation_source(payload: dict, meta: dict, default_source: str) -> str:
+        return str(meta.get("source") or payload.get("source") or default_source)
+
+    def _remember_gps_raw_fix(self, payload: dict) -> None:
+        xy = self._payload_xy(payload)
+        if xy is None:
+            return
+        self._last_gps_raw_xy = xy
+        self._last_gps_raw_monotonic = time.monotonic()
+
+    def _latest_gps_raw_xy_for_calibration(self, payload: dict) -> tuple[float, float] | None:
+        xy = self._raw_gps_xy_from_calibration_payload(payload)
+        if xy is not None:
+            return xy
+        if self._last_gps_raw_xy is None:
+            return None
+        if time.monotonic() - self._last_gps_raw_monotonic > 3.0:
+            return None
+        return self._last_gps_raw_xy
+
+    def _should_calibrate_gps_from_dashboard(self, payload: dict, meta: dict) -> bool:
+        if not self._gps_dashboard_calibration_enabled():
+            return False
+        if not bool(meta.get("manual")):
+            return False
+        source = self._localisation_source(payload, meta, "manual_localisation").strip().lower()
+        return bool(meta.get("gps_calibration")) or source.startswith("manual_dashboard")
+
+    def _apply_gps_dashboard_calibration(self, payload: dict, meta: dict, current_yaw: float):
+        raw_xy = self._latest_gps_raw_xy_for_calibration(payload)
+        if raw_xy is None:
+            print(
+                "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;93mWARNING\033[0m"
+                " - GPS calibration ignored: no recent raw LoCSys fix available"
+            )
+            return False, None
+
+        old_x, old_y, _ = self._dr.get_state()
+        pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
+        if pose is None:
+            return False, None
+
+        target_x, target_y, yaw = pose
+        raw_x, raw_y = raw_xy
+        offset_x = float(target_x) - float(raw_x)
+        offset_y = float(target_y) - float(raw_y)
+        self._gps_calibration_offset_xy = (offset_x, offset_y)
+
+        self._dr.reset(float(target_x), float(target_y), float(yaw))
+        self._last_yaw_rad = float(yaw)
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        self._last_absolute_yaw_fix_monotonic = time.monotonic()
+        self._last_absolute_yaw_fix_source = "gps_dashboard_calibration"
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
+
+        print(
+            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - GPS calibrated: raw ({raw_x:.3f}, {raw_y:.3f}) -> "
+            f"map ({float(target_x):.3f}, {float(target_y):.3f}); "
+            f"offset=({offset_x:.3f}, {offset_y:.3f})"
+        )
+        return True, {
+            "mode": "gps_calibration",
+            "source": "manual_dashboard:gps_calibration",
+            "error_m": float(math.hypot(float(target_x) - float(old_x), float(target_y) - float(old_y))),
+        }
+
+    def _apply_gps_calibration_offset(self, payload: dict, meta: dict) -> tuple[dict, dict]:
+        if self._gps_calibration_offset_xy is None or not self._gps_dashboard_calibration_enabled():
+            return payload, meta
+        xy = self._payload_xy(payload)
+        if xy is None:
+            return payload, meta
+        raw_x, raw_y = xy
+        offset_x, offset_y = self._gps_calibration_offset_xy
+        adjusted_x = float(raw_x) + float(offset_x)
+        adjusted_y = float(raw_y) + float(offset_y)
+
+        adjusted_payload = dict(payload)
+        adjusted_meta = dict(meta)
+        adjusted_payload["world_x"] = adjusted_x
+        adjusted_payload["world_y"] = adjusted_y
+        adjusted_payload["posA"] = adjusted_x
+        adjusted_payload["posB"] = adjusted_y
+        adjusted_payload["gps_raw_world_x"] = float(raw_x)
+        adjusted_payload["gps_raw_world_y"] = float(raw_y)
+        adjusted_meta["gps_calibrated"] = True
+        adjusted_meta["gps_calibration_offset_x"] = float(offset_x)
+        adjusted_meta["gps_calibration_offset_y"] = float(offset_y)
+        adjusted_payload["meta"] = adjusted_meta
+        return adjusted_payload, adjusted_meta
 
     def _resolve_initial_world_pose(self) -> tuple[float, float, float] | None:
         if self._graph is None:
@@ -420,6 +551,14 @@ class threadPoseEstimator(threadTracking):
         if not isinstance(meta, dict):
             meta = {}
 
+        default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
+        source = self._localisation_source(payload, meta, default_source)
+        if source.strip().lower() == "gps_localisation":
+            self._remember_gps_raw_fix(payload)
+            payload, meta = self._apply_gps_calibration_offset(payload, meta)
+        elif self._should_calibrate_gps_from_dashboard(payload, meta):
+            return self._apply_gps_dashboard_calibration(payload, meta, current_yaw)
+
         old_x, old_y, _ = self._dr.get_state()
         pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
         if pose is None:
@@ -435,8 +574,9 @@ class threadPoseEstimator(threadTracking):
         if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
             self.tracking_state.set_lane_measurement_state(False, 0.0)
 
-        default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
-        source = str(meta.get("source") or payload.get("source") or default_source)
+        source = self._localisation_source(payload, meta, default_source)
+        if bool(meta.get("gps_calibrated")):
+            source = f"{source}:calibrated"
         resolved_node_id = self._graph.resolve_node_id(meta.get("node_id") or payload.get("node_id"))
         if resolved_node_id is not None:
             source = f"{source}:{resolved_node_id}"
@@ -497,6 +637,39 @@ class threadPoseEstimator(threadTracking):
             camera_lateral_correction_m=float(camera_lateral_correction_m or 0.0),
             imu_received=bool(self._imu_received),
         )
+
+    def _publish_location_from_pose_estimate(
+        self,
+        pose_estimate: PoseEstimate,
+        route_context: RouteContext | None,
+    ) -> None:
+        fused = pose_estimate.fused_pose
+        raw = pose_estimate.raw_pose
+        matched = route_context.matched_pose if route_context is not None else fused
+        try:
+            self._loc_sender.send({
+                "x": round(float(fused.x), 4),
+                "y": round(float(fused.y), 4),
+                "yaw": round(math.degrees(float(fused.yaw)), 2),
+                "yaw_rad": float(fused.yaw),
+                "raw_x": round(float(raw.x), 4),
+                "raw_y": round(float(raw.y), 4),
+                "raw_yaw": round(math.degrees(float(raw.yaw)), 2),
+                "matched_x": round(float(matched.x), 4),
+                "matched_y": round(float(matched.y), 4),
+                "matched_yaw": round(math.degrees(float(matched.yaw)), 2),
+                "meta": {
+                    "source": "ego_pose_pose_estimator",
+                    "frame": "osm_map",
+                    "pose_source": "PoseEstimate.fused_pose",
+                    "relocalization_mode": pose_estimate.relocalization_mode,
+                    "last_relocalization_source": pose_estimate.last_relocalization_source,
+                    "last_relocalization_error_m": float(pose_estimate.last_relocalization_error_m),
+                    "localization_confidence": float(pose_estimate.localization_confidence),
+                },
+            })
+        except Exception:
+            pass
 
     def thread_work(self):
         now = time.monotonic()
@@ -668,6 +841,7 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer.write(pose_estimate, timestamp=pose_estimate.timestamp)
         if self.tracking_state is not None and hasattr(self.tracking_state, "update_from_pose_estimate"):
             self.tracking_state.update_from_pose_estimate(pose_estimate)
+        self._publish_location_from_pose_estimate(pose_estimate, route_context)
 
         live_log(
             "pose_estimator", event="pose_published",

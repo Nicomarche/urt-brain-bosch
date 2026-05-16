@@ -50,6 +50,7 @@ import json
 import math
 import socket
 import time
+from pathlib import Path
 
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.allMessages import CurrentSpeed, Localisation, Location
@@ -61,6 +62,10 @@ _LOCSYS_PORT        = 4691
 _LOCSYS_HOST_COMP   = "192.168.50.11"
 _TRAFFIC_COMM_HOST  = "192.168.1.1"
 _TRAFFIC_COMM_PORT  = 5000
+_TRAFFIC_COMM_AUTODISCOVERY_ENABLED = False
+_TRAFFIC_COMM_DISCOVERY_PORT = 9000
+_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 3.0
+_TRAFFIC_COMM_PUBLIC_KEY_PATH = "auto"
 _LOCSYS_DEVICE_ID   = 1
 _SIM_LOCSYS_HOST    = "localhost"
 _SIM_LOCSYS_PORT    = 4691
@@ -75,6 +80,10 @@ try:
         LOCSYS_HOST_COMP   as _LOCSYS_HOST_COMP,
         TRAFFIC_COMM_HOST  as _TRAFFIC_COMM_HOST,
         TRAFFIC_COMM_PORT  as _TRAFFIC_COMM_PORT,
+        TRAFFIC_COMM_AUTODISCOVERY_ENABLED as _TRAFFIC_COMM_AUTODISCOVERY_ENABLED,
+        TRAFFIC_COMM_DISCOVERY_PORT as _TRAFFIC_COMM_DISCOVERY_PORT,
+        TRAFFIC_COMM_DISCOVERY_TIMEOUT_S as _TRAFFIC_COMM_DISCOVERY_TIMEOUT_S,
+        TRAFFIC_COMM_PUBLIC_KEY_PATH as _TRAFFIC_COMM_PUBLIC_KEY_PATH,
         LOCSYS_DEVICE_ID   as _LOCSYS_DEVICE_ID,
         SIM_LOCSYS_HOST    as _SIM_LOCSYS_HOST,
         SIM_LOCSYS_PORT    as _SIM_LOCSYS_PORT,
@@ -90,6 +99,8 @@ except ImportError:
 # waiting for the GPS stream.
 _SOCKET_TIMEOUT_S = 1.5
 _JSON_DECODER = json.JSONDecoder()
+_AUTO_HOST_TOKENS = {"", "auto", "autodiscover", "autodiscovery", "discover"}
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _extract_json_objects(buffer: str) -> tuple[list[dict], str]:
@@ -110,6 +121,56 @@ def _extract_json_objects(buffer: str) -> tuple[list[dict], str]:
         if isinstance(obj, dict):
             objects.append(obj)
         buffer = stripped[index:]
+
+
+def _is_auto_traffic_host(host: str) -> bool:
+    return str(host or "").strip().lower() in _AUTO_HOST_TOKENS
+
+
+def _traffic_public_key_candidates() -> list[Path]:
+    configured = str(_TRAFFIC_COMM_PUBLIC_KEY_PATH or "").strip()
+    if configured and configured.lower() != "auto":
+        path = Path(configured).expanduser()
+        return [path if path.is_absolute() else _WORKSPACE_ROOT / path]
+
+    key_dir = _WORKSPACE_ROOT / "src" / "data" / "TrafficCommunication" / "useful"
+    return [
+        key_dir / "publickey_server.pem",
+        key_dir / "publickey_server_test.pem",
+    ]
+
+
+def _verify_traffic_broadcast(plaintext: bytes, signature: bytes) -> bool:
+    try:
+        from src.data.TrafficCommunication.useful import keyDealer
+    except Exception:
+        return False
+
+    for key_path in _traffic_public_key_candidates():
+        try:
+            pub_key = keyDealer.load_public_key(str(key_path))
+            if keyDealer.verify_data(pub_key, plaintext, signature):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _parse_traffic_broadcast(datagram: bytes) -> int | None:
+    parts = datagram.split(b"(-.-)", 1)
+    if len(parts) != 2:
+        return None
+    signature, plaintext = parts
+    if not _verify_traffic_broadcast(plaintext, signature):
+        return None
+    try:
+        text = plaintext.decode("utf-8", errors="strict").strip()
+        prefix = "listening on:"
+        if not text.startswith(prefix):
+            return None
+        return int(text[len(prefix):].strip())
+    except (UnicodeDecodeError, ValueError):
+        return None
 
 
 class threadLocSys(ThreadWithStop):
@@ -149,8 +210,76 @@ class threadLocSys(ThreadWithStop):
         self._traffic_data_sock: socket.socket | None = None
         self._traffic_next_connect_t = 0.0
         self._traffic_last_send_t = 0.0
+        self._traffic_comm_endpoint: tuple[str, int] | None = None
 
     # ------------------------------------------------------------------
+
+    def _discover_traffic_comm_endpoint(
+        self,
+        timeout_s: float | None = None,
+    ) -> tuple[str, int] | None:
+        timeout = (
+            float(_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S)
+            if timeout_s is None
+            else float(timeout_s)
+        )
+        deadline = time.monotonic() + max(timeout, 0.1)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("", int(_TRAFFIC_COMM_DISCOVERY_PORT)))
+            except OSError as exc:
+                if self.debugger:
+                    print(
+                        f"\033[1;97m[ LocSys ] :\033[0m "
+                        f"traffic autodiscovery bind error on UDP:{_TRAFFIC_COMM_DISCOVERY_PORT}: {exc}"
+                    )
+                return None
+            sock.settimeout(0.25)
+            if self.debugger:
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"Buscando TrafficCommunicationServer por UDP:{_TRAFFIC_COMM_DISCOVERY_PORT}"
+                )
+            while time.monotonic() < deadline and not self._blocker.is_set():
+                try:
+                    datagram, address = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                port = _parse_traffic_broadcast(datagram)
+                if port is None:
+                    continue
+                host = str(address[0])
+                return host, int(port)
+        return None
+
+    def _resolve_traffic_comm_endpoint(
+        self,
+        *,
+        discovery_timeout_s: float | None = None,
+    ) -> tuple[str, int]:
+        if self._traffic_comm_endpoint is not None:
+            return self._traffic_comm_endpoint
+
+        auto_host = _is_auto_traffic_host(str(_TRAFFIC_COMM_HOST))
+        if auto_host or _TRAFFIC_COMM_AUTODISCOVERY_ENABLED:
+            endpoint = self._discover_traffic_comm_endpoint(discovery_timeout_s)
+            if endpoint is not None:
+                self._traffic_comm_endpoint = endpoint
+                print(
+                    f"\033[1;97m[ LocSys ] :\033[0m "
+                    f"\033[1;92mINFO\033[0m - TrafficCommunicationServer descubierto en "
+                    f"{endpoint[0]}:{endpoint[1]}"
+                )
+                return endpoint
+            if auto_host:
+                raise TimeoutError(
+                    "TrafficCommunicationServer autodiscovery timed out"
+                )
+
+        endpoint = (str(_TRAFFIC_COMM_HOST), int(_TRAFFIC_COMM_PORT))
+        self._traffic_comm_endpoint = endpoint
+        return endpoint
 
     def _resolve_locsys_address(self) -> tuple[str, int]:
         """Devuelve (host, port) del locsys device.
@@ -162,8 +291,9 @@ class threadLocSys(ThreadWithStop):
             return _SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT
 
         try:
+            traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
             with socket.create_connection(
-                (_TRAFFIC_COMM_HOST, _TRAFFIC_COMM_PORT), timeout=3.0
+                (traffic_host, traffic_port), timeout=3.0
             ) as s:
                 s.settimeout(3.0)
                 req = json.dumps({
@@ -194,9 +324,14 @@ class threadLocSys(ThreadWithStop):
                 if self._sim_mode
                 else (_LOCSYS_HOST_COMP, _LOCSYS_PORT)
             )
+            endpoint_label = (
+                "auto"
+                if _is_auto_traffic_host(str(_TRAFFIC_COMM_HOST))
+                else f"{_TRAFFIC_COMM_HOST}:{_TRAFFIC_COMM_PORT}"
+            )
             print(
                 f"\033[1;97m[ LocSys ] :\033[0m "
-                f"\033[1;93mWARN\033[0m - traffic server ({_TRAFFIC_COMM_HOST}:{_TRAFFIC_COMM_PORT}) "
+                f"\033[1;93mWARN\033[0m - traffic server ({endpoint_label}) "
                 f"error: {exc} — usando {fallback_host}:{fallback_port}"
             )
             return fallback_host, fallback_port
@@ -228,8 +363,11 @@ class threadLocSys(ThreadWithStop):
         if now < self._traffic_next_connect_t:
             return None
         try:
+            traffic_host, traffic_port = self._resolve_traffic_comm_endpoint(
+                discovery_timeout_s=min(float(_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S), 1.0)
+            )
             sock = socket.create_connection(
-                (_TRAFFIC_COMM_HOST, _TRAFFIC_COMM_PORT), timeout=0.5
+                (traffic_host, traffic_port), timeout=0.5
             )
             sock.settimeout(0.5)
             self._traffic_data_sock = sock

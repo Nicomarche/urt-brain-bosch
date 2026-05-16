@@ -513,9 +513,9 @@ class MapView(QWidget):
             self._relocate_btn = QToolButton()
             self._relocate_btn.setText("Relocate")
             self._relocate_btn.setToolTip(
-                "Stop only: when ON, left-click on the map sends a "
-                "Localisation command to the car and teleports the simulator "
-                "pose in sim mode."
+                "Stop only: in sim, left-click relocalizes and teleports the "
+                "simulator pose. On the real car, the same click calibrates GPS "
+                "so the latest LoCSys fix is treated as that map point."
             )
             self._relocate_btn.setCheckable(True)
             self._relocate_btn.toggled.connect(self._on_relocate_toggled)
@@ -636,6 +636,7 @@ class MapView(QWidget):
 
         # GPS state — updated by _on_gps_fix, polled by _gps_age_timer.
         self._last_gps_fix_time: float = 0.0
+        self._last_gps_fix_payload: dict[str, object] | None = None
         self._last_location_time: float = 0.0
         self._last_location_yaw_deg: float = 0.0
         self._gps_age_timer = QTimer(self)
@@ -1170,6 +1171,39 @@ class MapView(QWidget):
                 best_heading_deg = math.degrees(math.atan2(float(by_m) - float(ay_m), float(bx_m) - float(ax_m)))
         return float(best_heading_deg)
 
+    @staticmethod
+    def _payload_xy(payload: dict[str, object]) -> tuple[float, float] | None:
+        for x_key, y_key in (("world_x", "world_y"), ("x", "y"), ("posA", "posB")):
+            if payload.get(x_key) is None or payload.get(y_key) is None:
+                continue
+            try:
+                return float(payload[x_key]), float(payload[y_key])
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _gps_calibration_sample(self) -> dict[str, float] | None:
+        payload = self._last_gps_fix_payload
+        if not isinstance(payload, dict) or self._last_gps_fix_time <= 0.0:
+            return None
+        age_s = _time.monotonic() - self._last_gps_fix_time
+        if age_s > 3.0:
+            return None
+        xy = self._payload_xy(payload)
+        if xy is None:
+            return None
+        raw_x, raw_y = xy
+        sample: dict[str, float] = {
+            "gps_raw_world_x": round(float(raw_x), 6),
+            "gps_raw_world_y": round(float(raw_y), 6),
+            "gps_raw_age_s": round(float(age_s), 3),
+        }
+        try:
+            sample["gps_raw_timestamp"] = float(payload.get("timestamp", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            pass
+        return sample
+
     def _manual_localisation_payload(self, x_m: float, y_m: float) -> dict[str, object]:
         lanelet_id = self._resolve_lanelet_id_for_pose(
             x_m,
@@ -1191,8 +1225,15 @@ class MapView(QWidget):
             "rotB": 0.0,
             "yaw_deg": round(float(yaw_deg), 3),
             "timestamp": _time.time(),
-            "meta": {"source": "manual_dashboard", "manual": True},
+            "meta": {
+                "source": "manual_dashboard",
+                "manual": True,
+                "gps_calibration": True,
+            },
         }
+        gps_sample = self._gps_calibration_sample()
+        if gps_sample is not None:
+            payload.update(gps_sample)
         if lanelet_id is not None:
             payload["lanelet_id"] = str(lanelet_id)
         return payload
@@ -1427,11 +1468,10 @@ class MapView(QWidget):
     def _on_gps_fix(self, payload) -> None:
         if not isinstance(payload, dict):
             return
-        try:
-            x_m = float(payload.get("world_x") or payload.get("posA") or 0.0)
-            y_m = float(payload.get("world_y") or payload.get("posB") or 0.0)
-        except (TypeError, ValueError):
+        xy = self._payload_xy(payload)
+        if xy is None:
             return
+        x_m, y_m = xy
         px, py = self._data.world_to_pixel(x_m, y_m)
         self._gps_dot.setPos(px, py)
         self._gps_dot.setVisible(True)
@@ -1446,8 +1486,10 @@ class MapView(QWidget):
             )
         except (TypeError, ValueError):
             gps_yaw_deg = float(self._last_location_yaw_deg)
-        self._set_cursor_pose(x_m, y_m, gps_yaw_deg)
         self._last_gps_fix_time = _time.monotonic()
+        self._last_gps_fix_payload = dict(payload)
+        if self._last_location_time <= 0.0:
+            self._set_cursor_pose(x_m, y_m, gps_yaw_deg)
         self._update_gps_age_label()
 
     def _update_gps_age_label(self) -> None:
@@ -1498,8 +1540,9 @@ class MapView(QWidget):
     def _on_map_click(self, x_m: float, y_m: float) -> None:
         # Two behaviours:
         #
-        # 1. Relocate mode: any click → ``Localisation`` (drop-car-here).
-        #    Uses the full world_x/world_y format expected by the PoseEstimator.
+        # 1. Relocate mode: any click → ``Localisation``. In sim this drops the
+        #    car there; on the real car it calibrates the latest GPS fix to the
+        #    clicked map point.
         # 2. Normal click → ``NavigationCommand`` (plan a route to this point).
         #    This includes AUTO mode + known node — the user wants navigation,
         #    not a teleport.
@@ -1519,8 +1562,16 @@ class MapView(QWidget):
             )
             self._set_cursor_pose(x_m, y_m, yaw_deg)
             self._client.emit_message(ev.CMD_LOCALISATION, payload)
+            gps_raw_x = payload.get("gps_raw_world_x")
+            gps_raw_y = payload.get("gps_raw_world_y")
+            if gps_raw_x is not None and gps_raw_y is not None:
+                self._location_label.setText(
+                    f"Relocate/calibrate → ({x_m:.2f}, {y_m:.2f}) m "
+                    f"from GPS ({float(gps_raw_x):.2f}, {float(gps_raw_y):.2f})"
+                )
+                return
             self._location_label.setText(
-                f"Relocated → ({x_m:.2f}, {y_m:.2f}) m"
+                f"Relocate/calibrate → ({x_m:.2f}, {y_m:.2f}) m"
             )
             return
         lanelet_id = resolve_click_destination_lanelet(
