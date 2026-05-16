@@ -123,35 +123,23 @@ class threadRead(ThreadWithStop):
                     return
 
                 waiting = serial_con.in_waiting
-                if waiting > 0:
-                    try:
-                        data = serial_con.read(waiting).decode("ascii", errors="ignore")
-                        before_len = len(self.buffer)
-                        self.buffer += data
-                        self._read_bytes_total += len(data)
-                        self._read_empty_ticks = 0
-                        self._log_serial_read(data, waiting, before_len, len(self.buffer))
+                read_size = waiting if waiting > 0 else 512
+                try:
+                    data = serial_con.read(read_size).decode("ascii", errors="ignore")
+                except Exception as e:
+                    if self._should_send_error():
+                        self.serialConnectionStateSender.send(False)
+                        print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Reading from serial ({e})")
+                    return
 
-                    except Exception as e:
-                        if self._should_send_error():
-                            self.serialConnectionStateSender.send(False)
-                            print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m - Reading from serial ({e})")
-                        return
+                if data:
+                    before_len = len(self.buffer)
+                    self.buffer += data
+                    self._read_bytes_total += len(data)
+                    self._read_empty_ticks = 0
+                    self._log_serial_read(data, read_size, before_len, len(self.buffer))
                 else:
                     self._read_empty_ticks += 1
-                    if self._read_empty_ticks % 25 == 0:
-                        probe_data = self._probe_idle_serial(serial_con)
-                        if probe_data:
-                            before_len = len(self.buffer)
-                            self.buffer += probe_data
-                            self._read_bytes_total += len(probe_data)
-                            self._read_empty_ticks = 0
-                            self._log_serial_read(
-                                probe_data,
-                                "probe",
-                                before_len,
-                                len(self.buffer),
-                            )
                     self._log_read_status(serial_con, reason="idle", waiting=waiting)
 
             while ";;" in self.buffer:
@@ -438,28 +426,6 @@ class threadRead(ThreadWithStop):
             f" threadRead read bytes={len(data)} requested={waiting}"
             f" buffer={before_len}->{after_len} chunk={self._preview(data)}"
         )
-
-    def _probe_idle_serial(self, serial_con):
-        """Try a one-byte nonblocking read when in_waiting stays at zero."""
-        old_timeout = None
-        try:
-            old_timeout = serial_con.timeout
-            serial_con.timeout = 0
-            raw = serial_con.read(1)
-            serial_con.timeout = old_timeout
-        except Exception as exc:
-            try:
-                serial_con.timeout = old_timeout
-            except Exception:
-                pass
-            print(
-                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARN\033[0m"
-                f" RX-PROBE failed ({exc})"
-            )
-            return ""
-        if not raw:
-            return ""
-        return raw.decode("ascii", errors="ignore")
 
     def _log_read_status(self, serial_con, reason, waiting=None):
         if not self._serial_debug_enabled:

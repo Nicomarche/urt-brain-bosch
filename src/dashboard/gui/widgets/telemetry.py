@@ -326,6 +326,49 @@ class CommandStatusReadout(QFrame):
         return f"{deg:+.1f}°"
 
 
+class MeasuredFeedbackReadout(QFrame):
+    """Explicit Nucleo feedback readout: Hall speed + applied steer."""
+
+    def __init__(self, client: SocketIOClient, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._speed_cm_s: Optional[float] = None
+        self._steer_deg: Optional[float] = None
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background:#1a1a1a; border:1px solid #333; border-radius:6px; }"
+        )
+        self._title = QLabel("Measured")
+        self._title.setStyleSheet("color:#888; font-size:9pt;")
+        self._value = QLabel("Hall -- | Steer --")
+        self._value.setStyleSheet("color:#eee; font-size:14pt; font-weight:600;")
+        self._hint = QLabel("from @speed / @steer")
+        self._hint.setStyleSheet("color:#aaa; font-size:9pt;")
+        self._value.setAlignment(Qt.AlignCenter)
+        self._hint.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.addWidget(self._title)
+        layout.addWidget(self._value)
+        layout.addWidget(self._hint)
+
+        client.current_speed_signal.connect(self._on_speed)
+        client.current_steer_signal.connect(self._on_steer)
+
+    def _on_speed(self, cm_s: float) -> None:
+        self._speed_cm_s = float(cm_s)
+        self._render()
+
+    def _on_steer(self, deg: float) -> None:
+        self._steer_deg = float(deg)
+        self._render()
+
+    def _render(self) -> None:
+        speed = "--" if self._speed_cm_s is None else f"{self._speed_cm_s:.1f} cm/s"
+        steer = "--" if self._steer_deg is None else f"{self._steer_deg:+.1f}°"
+        self._value.setText(f"Hall {speed} | Steer {steer}")
+
+
 class ImuReadout(QFrame):
     """Roll/pitch/yaw from Nucleo @imu telemetry."""
 
@@ -520,6 +563,7 @@ class TelemetryCluster(QWidget):
         feedback_row = QHBoxLayout()
         feedback_row.setSpacing(8)
         feedback_row.addWidget(CommandStatusReadout(client), 1)
+        feedback_row.addWidget(MeasuredFeedbackReadout(client), 1)
         feedback_row.addWidget(ImuReadout(client), 1)
 
         layout = QVBoxLayout(self)

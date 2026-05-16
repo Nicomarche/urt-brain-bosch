@@ -232,14 +232,14 @@ class DrivingModel(QObject):
 
     def _emit_steer(self) -> None:
         wire = round(self._steer * 10)
-        # Solo logueamos cuando el wire CAMBIA (la rampa tickea cada
-        # 50ms ⇒ 20Hz). Sin esto floodearíamos stdout durante hold.
-        if wire != getattr(self, "_last_emit_steer_wire", None):
-            print(
-                f"\033[1;97m[ DrivingModel ] :\033[0m \033[1;96mEMIT\033[0m"
-                f" CMD_STEER wire={wire} (deg={self._steer:+.1f}°)"
-            )
-            self._last_emit_steer_wire = wire
+        if wire == getattr(self, "_last_emit_steer_wire", None):
+            self.steer_changed.emit(int(round(self._steer)))
+            return
+        print(
+            f"\033[1;97m[ DrivingModel ] :\033[0m \033[1;96mEMIT\033[0m"
+            f" CMD_STEER wire={wire} (deg={self._steer:+.1f}°)"
+        )
+        self._last_emit_steer_wire = wire
         self._client.emit_message(ev.CMD_STEER, str(wire))
         self.steer_changed.emit(int(round(self._steer)))
 

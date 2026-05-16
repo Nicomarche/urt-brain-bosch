@@ -184,7 +184,7 @@ class processSerialHandler(WorkerProcess):
                         self._last_port_scan_log = now
                     return
 
-                self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0.1)
+                self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0)
                 self.serialCon.reset_input_buffer()
                 self.serialCon.reset_output_buffer()
                 self.serialConnected = True

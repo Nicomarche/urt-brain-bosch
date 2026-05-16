@@ -99,6 +99,8 @@ class threadWrite(ThreadWithStop):
         self._last_status_send_time = 0.0
         self._last_continuous_motion_send_monotonic = 0.0
         self._last_forced_feedback_enable = 0.0
+        self._last_serial_motion_pair = None
+        self._last_duplicate_motion_log = 0.0
         self._auto_kl_run_in_sim = False
         # En ZMQ sim el bridge espera comandos refrescados con cierta
         # frecuencia; si dejamos de reenviar porque speed/steer quedaron
@@ -391,13 +393,24 @@ class threadWrite(ThreadWithStop):
         return sent
 
     def _handle_continuous_motion_command(self, speed_x10, steer_x10):
+        pair = (int(speed_x10), int(steer_x10))
+        if self.motor_output != "zmq" and pair == self._last_serial_motion_pair:
+            now = time.monotonic()
+            if now - self._last_duplicate_motion_log >= 1.0:
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mDROP-DUP\033[0m"
+                    f" repeated speed={pair[0]} steer={pair[1]} already sent to serial"
+                )
+                self._last_duplicate_motion_log = now
+            return True
+
         speed_command = {
             "action": "speed",
-            "speed": int(speed_x10),
+            "speed": pair[0],
         }
         steer_command = {
             "action": "steer",
-            "steerAngle": int(steer_x10),
+            "steerAngle": pair[1],
         }
 
         speed_sent, speed_raw_command = self.send_to_serial(speed_command)
@@ -414,27 +427,19 @@ class threadWrite(ThreadWithStop):
         self._record_motion_command(
             "speed_steer",
             raw_command,
-            speed_x10=int(speed_x10),
-            steer_x10=int(steer_x10),
+            speed_x10=pair[0],
+            steer_x10=pair[1],
             blocked_reason=blocked_reason,
             force=True,
         )
 
         if speed_sent and steer_sent and self.debugger:
             self.logger.info(
-                f"Continuous command sent: speed={int(speed_x10)} steer={int(steer_x10)}"
+                f"Continuous command sent: speed={pair[0]} steer={pair[1]}"
             )
         if speed_sent and steer_sent:
             self._last_continuous_motion_send_monotonic = time.monotonic()
 
-        # Visibilidad sin --debugger: imprimimos solo cuando el par
-        # (speed, steer) cambia respecto al último despachado. Así
-        # el operador VE el carril manual flowing (CMD_SPEED del dashboard
-        # → IPC → este punto → firmware/ZMQ) sin floodear stdout durante
-        # el ramp de steer (50 ms ticks). Esto NO confunde con el log del
-        # `[ Dispatcher ]`, que muestra el output de MotionController y
-        # NUNCA escribe motors en MANUAL.
-        pair = (int(speed_x10), int(steer_x10))
         if pair != getattr(self, "_last_motion_log_pair", None):
             tag = "\033[1;92mSENT\033[0m" if (speed_sent and steer_sent) else "\033[1;91mBLOCK\033[0m"
             raw_note = f" raw={raw_command}" if raw_command else ""
@@ -445,10 +450,13 @@ class threadWrite(ThreadWithStop):
                 f"{raw_note}"
             )
             self._last_motion_log_pair = pair
+        if speed_sent and steer_sent and self.motor_output != "zmq":
+            self._last_serial_motion_pair = pair
 
         return speed_sent and steer_sent
 
     def _handle_brake_command(self, brake_value):
+        self._last_serial_motion_pair = None
         command = {"action": "brake", "steerAngle": int(brake_value)}
         sent, raw_command = self.send_to_serial(command)
         blocked_reason = None if sent else "serial_disconnected"
@@ -557,6 +565,7 @@ class threadWrite(ThreadWithStop):
                     self.engineEnabled = True
                     self.currentKlemMode = 30
                     self.last_blocked_reason = None
+                    self._last_serial_motion_pair = None
                     command = {"action": "kl", "mode": 30}
                     self.send_to_serial(command)
                     self.load_config("sensors")
@@ -570,6 +579,7 @@ class threadWrite(ThreadWithStop):
                     self.engineEnabled = False
                     self.currentKlemMode = 15
                     self.last_blocked_reason = "klem_not_30"
+                    self._last_serial_motion_pair = None
                     command = {"action": "kl", "mode": 15}
                     self.send_to_serial(command)
                     self.load_config("sensors")
@@ -580,6 +590,7 @@ class threadWrite(ThreadWithStop):
                     self.engineEnabled = False
                     self.currentKlemMode = 0
                     self.last_blocked_reason = "klem_off"
+                    self._last_serial_motion_pair = None
                     command = {"action": "kl", "mode": 0}
                     self.send_to_serial(command)
                     self._publish_actuator_status(force=True)
