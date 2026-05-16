@@ -175,6 +175,25 @@ def _parse_traffic_broadcast(datagram: bytes) -> int | None:
         return None
 
 
+def _extract_locsys_address_from_response(resp: dict) -> str | None:
+    for key in ("response", "value", "value1", "address", "locsysDevice"):
+        value = resp.get(key)
+        if value is not None:
+            text = str(value).strip()
+            if ":" in text:
+                return text
+    data = resp.get("data")
+    if isinstance(data, dict):
+        nested = _extract_locsys_address_from_response(data)
+        if nested is not None:
+            return nested
+    host = resp.get("host", resp.get("ip"))
+    port = resp.get("port")
+    if host is not None and port is not None:
+        return f"{str(host).strip()}:{str(port).strip()}"
+    return None
+
+
 class threadLocSys(ThreadWithStop):
     """Cliente TCP del servidor locsys BFMC.
 
@@ -319,7 +338,14 @@ class threadLocSys(ThreadWithStop):
                         resp = objects[0]
                 if resp is None:
                     raise TimeoutError("traffic server did not return a JSON response")
-                address = str(resp["response"])
+                if resp.get("error") is not None:
+                    raise ValueError(
+                        f"traffic server locsysDevice DeviceID={_LOCSYS_DEVICE_ID} "
+                        f"error: {resp.get('error')} response={resp!r}"
+                    )
+                address = _extract_locsys_address_from_response(resp)
+                if address is None:
+                    raise ValueError(f"traffic server returned no locsys address: {resp!r}")
                 host, port_str = address.rsplit(":", 1)
                 return host.strip(), int(port_str.strip())
         except Exception as exc:

@@ -497,7 +497,8 @@ EKF_GPS_MAX_AGE_S = 0.5
 # para obtener la IP del locsys device, luego conecta al locsys device
 # (TCP:4691) y recibe {"x": float, "y": float}\n a 1 Hz.
 # `TRAFFIC_COMM_HOST="auto"` escucha el broadcast UDP del servidor (puerto
-# 9000 por defecto). También se puede fijar una IP explícita desde config/env.
+# 9000 por defecto). Para fijar la IP de competencia, cambiarlo acá a algo
+# como "192.168.50.2".
 #
 # En simulación: sim_bridge expone el servidor locsys en localhost:4691
 # y usa el ground truth de Gazebo transformado al frame del mapa OSM.
@@ -505,57 +506,25 @@ EKF_GPS_MAX_AGE_S = 0.5
 # El cliente (threadLocSys) envía el fix como Localisation IPC con
 # world_x/world_y (coordenadas OSM directas, sin conversión de imagen).
 
-LOCSYS_PORT          = int(_os.environ.get("URT_LOCSYS_PORT", "4691"))
+LOCSYS_PORT          = 4691
 # Fallback directo al locsys device. En competencia normal NO debería usarse:
 # el coche debe pedir esa IP al TrafficCommunicationServer. Queda como escape
 # manual sólo si `LOCSYS_DIRECT_FALLBACK_ENABLED=True`.
-LOCSYS_HOST_COMP     = _os.environ.get("URT_LOCSYS_HOST_COMP", "192.168.50.11")
-TRAFFIC_COMM_HOST    = _os.environ.get(
-    "URT_TRAFFIC_COMM_HOST",
-    "127.0.0.1" if _SIM_MODE else "auto",
-)
-TRAFFIC_COMM_PORT    = int(_os.environ.get("URT_TRAFFIC_COMM_PORT", "5000"))
-TRAFFIC_COMM_AUTODISCOVERY_ENABLED = (
-    _os.environ.get(
-        "URT_TRAFFIC_COMM_AUTODISCOVERY_ENABLED",
-        "1" if str(TRAFFIC_COMM_HOST).strip().lower() == "auto" else "0",
-    ) == "1"
-)
-TRAFFIC_COMM_DISCOVERY_PORT = int(
-    _os.environ.get("URT_TRAFFIC_COMM_DISCOVERY_PORT", "9000")
-)
-TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = float(
-    _os.environ.get("URT_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S", "5.0")
-)
-TRAFFIC_COMM_PUBLIC_KEY_PATH = _os.environ.get(
-    "URT_TRAFFIC_COMM_PUBLIC_KEY_PATH",
-    "auto",
-)
-LOCSYS_DEVICE_ID     = int(_os.environ.get("URT_LOCSYS_DEVICE_ID", "1"))
+LOCSYS_HOST_COMP     = "192.168.50.2"
+TRAFFIC_COMM_HOST    = "127.0.0.1" if _SIM_MODE else "auto"
+TRAFFIC_COMM_PORT    = 5000
+TRAFFIC_COMM_AUTODISCOVERY_ENABLED = str(TRAFFIC_COMM_HOST).strip().lower() == "auto"
+TRAFFIC_COMM_DISCOVERY_PORT = 9000
+TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 5.0
+TRAFFIC_COMM_PUBLIC_KEY_PATH = "auto"
+LOCSYS_DEVICE_ID     = 5
 
-SIM_LOCSYS_HOST      = _os.environ.get("URT_SIM_LOCSYS_HOST", "localhost")
-SIM_LOCSYS_PORT      = int(_os.environ.get("URT_SIM_LOCSYS_PORT", "4691"))
-LOCSYS_USE_TRAFFIC_COMM_SERVER = (
-    _os.environ.get(
-        "URT_LOCSYS_USE_TRAFFIC_COMM_SERVER",
-        "0" if _SIM_MODE else "1",
-    ) == "1"
-)
-LOCSYS_DIRECT_FALLBACK_ENABLED = (
-    _os.environ.get(
-        "URT_LOCSYS_DIRECT_FALLBACK_ENABLED",
-        "0",
-    ) == "1"
-)
-TRAFFIC_COMM_SEND_EGO_DATA = (
-    _os.environ.get(
-        "URT_TRAFFIC_COMM_SEND_EGO_DATA",
-        "0" if _SIM_MODE else "1",
-    ) == "1"
-)
-TRAFFIC_COMM_SEND_PERIOD_S = float(
-    _os.environ.get("URT_TRAFFIC_COMM_SEND_PERIOD_S", "0.25")
-)
+SIM_LOCSYS_HOST      = "localhost"
+SIM_LOCSYS_PORT      = 4691
+LOCSYS_USE_TRAFFIC_COMM_SERVER = False if _SIM_MODE else True
+LOCSYS_DIRECT_FALLBACK_ENABLED = False
+TRAFFIC_COMM_SEND_EGO_DATA = False if _SIM_MODE else True
+TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 
 GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión

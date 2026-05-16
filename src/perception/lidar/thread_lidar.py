@@ -84,9 +84,15 @@ class threadLidar(ThreadWithStop):
         except Exception as exc:
             self._last_detail = str(exc)
             self._publish_status("error", str(exc))
+            if self._backend == "serial" and self._reader is not None:
+                try:
+                    self._reader.close()
+                except Exception:
+                    pass
+                self._reader = None
             if self.logging is not None:
                 self.logging.exception("threadLidar failed")
-            time.sleep(0.1)
+            time.sleep(1.0 if self._backend == "serial" else 0.1)
             return
 
         if scan is None:
