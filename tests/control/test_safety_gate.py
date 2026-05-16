@@ -138,6 +138,24 @@ def test_pose_stale_falls_back() -> None:
     assert out.reason.startswith("pose_stale_")
 
 
+def test_motor_command_stale_falls_back() -> None:
+    cfg = SafetyGateConfig(
+        behavior_stale_timeout_s=0.5,
+        pose_stale_timeout_s=0.3,
+        motor_command_stale_timeout_s=0.3,
+    )
+    gate = SafetyGate(cfg)
+    now = 1000.0
+    out = gate.evaluate(
+        motor_command=_good_cmd(now - 0.5),
+        behavior_timestamp=now - 0.1,
+        pose_timestamp=now - 0.05,
+        now=now,
+    )
+    assert out.source == "safety_gate"
+    assert out.reason.startswith("motor_command_stale_")
+
+
 def test_manual_fallback_returns_stop() -> None:
     gate = SafetyGate()
     out = gate.fallback()

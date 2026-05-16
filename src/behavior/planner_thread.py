@@ -34,7 +34,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 
 from src.behavior.context import PlanningContext
@@ -246,27 +246,30 @@ class threadBehaviorPlanner(ThreadWithStop):
             self._publish_empty(reason="mode_not_auto")
             return
 
-        # Avanza el ramp de velocidad antes de construir el contexto.
-        # La velocidad de referencia sube a _accel_mps2 m/s² hasta alcanzar
-        # el nominal. Se resetea a 0 cuando el plan pide parar (ver abajo).
-        self._current_speed_mps = min(
-            self._nominal_speed_mps,
-            max(
-                self._min_moving_speed_mps,
-                self._current_speed_mps + self._accel_mps2 * self._dt_s,
-            ),
-        )
-
         ctx = self._build_context(now_s=time.time())
         if ctx is None:
             # Inputs incompletos — emitir BehaviorOutput vacío para que el
             # downstream pare. NO arrancar a inventar plan basura.
+            self._current_speed_mps = 0.0
             self._publish_empty(reason="inputs_unavailable")
+            return
+        if str(getattr(ctx.pose, "relocalization_mode", "") or "") == "auto_gps_entry_pending":
+            self._current_speed_mps = 0.0
+            self._publish_empty(reason="auto_gps_entry_pending")
             return
         if not bool(getattr(ctx.route, "route_active", False)):
             self._current_speed_mps = 0.0
             self._publish_empty(reason="route_inactive")
             return
+
+        # Avanza el ramp de velocidad solo cuando AUTO ya tiene pose y ruta.
+        # Subimos desde 0 de verdad; el piso de movimiento se aplica aguas abajo
+        # recién cuando el target ya llegó a ese umbral.
+        self._current_speed_mps = min(
+            self._nominal_speed_mps,
+            max(0.0, self._current_speed_mps + self._accel_mps2 * self._dt_s),
+        )
+        ctx = replace(ctx, nominal_speed_mps=self._current_speed_mps)
 
         live_log(
             "behavior_planner", event="context_snapshot",

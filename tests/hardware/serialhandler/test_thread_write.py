@@ -55,3 +55,25 @@ def test_send_to_serial_does_not_flush_cdc_acm_descriptor():
     assert serial_con.writes == [b"#kl:30;;\r\n"]
     assert writer.logFile.messages == ["#kl:30;;\r\n"]
     assert serial_con.flush_calls == 0
+
+
+def test_send_to_serial_formats_speed_reset_command():
+    serial_con = _FakeSerial()
+    writer = _make_writer(serial_con)
+
+    sent, raw_command = writer.send_to_serial({"action": "speed", "speed": 0})
+
+    assert sent is True
+    assert raw_command == "#speed:0;;\r\n"
+    assert serial_con.writes == [b"#speed:0;;\r\n"]
+
+
+def test_send_to_serial_formats_odometer_reset_command():
+    serial_con = _FakeSerial()
+    writer = _make_writer(serial_con)
+
+    sent, raw_command = writer.send_to_serial({"action": "odoreset", "request": 1})
+
+    assert sent is True
+    assert raw_command == "#odoreset:1;;\r\n"
+    assert serial_con.writes == [b"#odoreset:1;;\r\n"]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import math
 import time
+from collections import deque
 from types import SimpleNamespace
 
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
@@ -35,7 +36,7 @@ from src.localization.relocalization_thread import (
     _YAW_EKF_R_STEER_K,
     threadTracking,
 )
-from src.core.messaging.allMessages import Localisation
+from src.core.messaging.allMessages import Localisation, OdoReset
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -43,6 +44,19 @@ _WAYPOINT_TWO_LINE_LATERAL_RELOCALIZATION_SPEED_MIN_MPS = 0.02
 _SINGLE_LINE_ROUTE_STRAIGHT_TOL_RAD = math.radians(6.0)
 _SINGLE_LINE_ROUTE_DIRECTION_MARGIN_RAD = math.radians(10.0)
 _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD = math.radians(18.0)
+
+try:
+    import config as _cfg_auto
+except Exception:  # pragma: no cover - isolated imports in tests
+    _cfg_auto = None
+
+_AUTO_GPS_SAMPLE_COUNT = max(1, int(getattr(_cfg_auto, "AUTO_GPS_SAMPLE_COUNT", 3)))
+_AUTO_GPS_COLLECTION_TIMEOUT_S = float(getattr(_cfg_auto, "AUTO_GPS_COLLECTION_TIMEOUT_S", 2.0))
+_AUTO_GPS_MAX_FIX_AGE_S = float(getattr(_cfg_auto, "AUTO_GPS_MAX_FIX_AGE_S", 1.0))
+_AUTO_GPS_MAX_SPREAD_M = float(getattr(_cfg_auto, "AUTO_GPS_MAX_SPREAD_M", 0.35))
+_AUTO_GPS_MAX_LANELET_DISTANCE_M = float(getattr(_cfg_auto, "AUTO_GPS_MAX_LANELET_DISTANCE_M", 0.50))
+_AUTO_GPS_MAX_YAW_DIFF_RAD = float(getattr(_cfg_auto, "AUTO_GPS_MAX_YAW_DIFF_RAD", math.pi / 2.0))
+_AUTO_GPS_STATUS_HOLD_S = 0.25
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -122,6 +136,7 @@ class threadPoseEstimator(threadTracking):
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
+        self._odo_reset_sender = messageHandlerSender(queuesList, OdoReset)
         print(
             f"[GPS-DBG] PoseEstimatorThread.__init__: _localisation_fix_sub "
             f"registered (Owner={Localisation.Owner.value} "
@@ -131,6 +146,14 @@ class threadPoseEstimator(threadTracking):
         self._last_gps_raw_xy: tuple[float, float] | None = None
         self._last_gps_raw_monotonic = 0.0
         self._gps_calibration_offset_xy: tuple[float, float] | None = None
+        self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
+        self._auto_gps_pending = False
+        self._auto_gps_started_monotonic = 0.0
+        self._auto_gps_deadline_monotonic = 0.0
+        self._auto_gps_last_mode: str | None = None
+        self._auto_gps_last_source: str | None = None
+        self._auto_gps_last_error_m = 0.0
+        self._auto_gps_last_mode_monotonic = 0.0
         self._pending_yaw_offset_target_rad: float | None = None
         self._startup_world_pose = self._resolve_initial_world_pose()
         self._apply_start_pose_override()
@@ -188,6 +211,217 @@ class threadPoseEstimator(threadTracking):
             return
         self._last_gps_raw_xy = xy
         self._last_gps_raw_monotonic = time.monotonic()
+
+    def _consume_state_change(self) -> tuple[str, str] | None:
+        transition = super()._consume_state_change()
+        if transition is None:
+            return None
+        previous_state, state_name = transition
+        if state_name == "AUTO" and previous_state != "AUTO":
+            self._begin_auto_gps_entry()
+        return transition
+
+    def _begin_auto_gps_entry(self) -> None:
+        now = time.monotonic()
+        self._auto_gps_pending = True
+        self._auto_gps_started_monotonic = now
+        self._auto_gps_deadline_monotonic = now + max(0.0, _AUTO_GPS_COLLECTION_TIMEOUT_S)
+        self._auto_gps_last_mode = None
+        self._auto_gps_last_source = None
+        self._auto_gps_last_error_m = 0.0
+        self._auto_gps_last_mode_monotonic = 0.0
+        try:
+            self._gps_fix_history.clear()
+        except Exception:
+            self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
+        try:
+            self._localisation_fix_sub.empty()
+        except Exception:
+            pass
+        try:
+            self._odo_reset_sender.send("1")
+        except Exception:
+            if self.logging is not None:
+                self.logging.exception("failed to send OdoReset on AUTO entry")
+        live_log(
+            "pose_estimator",
+            event="auto_gps_entry_started",
+            sample_count=int(_AUTO_GPS_SAMPLE_COUNT),
+            timeout_s=float(_AUTO_GPS_COLLECTION_TIMEOUT_S),
+        )
+
+    def _finish_auto_gps_entry(self, *, mode: str, source: str, error_m: float = 0.0) -> None:
+        self._auto_gps_pending = False
+        self._auto_gps_last_mode = str(mode)
+        self._auto_gps_last_source = str(source)
+        self._auto_gps_last_error_m = float(error_m or 0.0)
+        self._auto_gps_last_mode_monotonic = time.monotonic()
+        live_log(
+            "pose_estimator",
+            event="auto_gps_entry_finished",
+            mode=str(mode),
+            source=str(source),
+            error_m=float(error_m or 0.0),
+        )
+
+    def _auto_gps_recent_status(self, now: float) -> tuple[str, str, float] | None:
+        if self._auto_gps_pending:
+            return "auto_gps_entry_pending", "gps_waiting_for_samples", 0.0
+        last_t = float(getattr(self, "_auto_gps_last_mode_monotonic", 0.0) or 0.0)
+        mode = getattr(self, "_auto_gps_last_mode", None)
+        if mode and now - last_t <= _AUTO_GPS_STATUS_HOLD_S:
+            return (
+                str(mode),
+                str(getattr(self, "_auto_gps_last_source", None) or "auto_gps_entry"),
+                float(getattr(self, "_auto_gps_last_error_m", 0.0) or 0.0),
+            )
+        return None
+
+    @staticmethod
+    def _meta_marks_gps_out_of_bounds(payload: dict, meta: dict) -> bool:
+        for source in (payload, meta):
+            if not isinstance(source, dict):
+                continue
+            value = source.get("gps_frame_in_bounds")
+            if value is False:
+                return True
+        return False
+
+    def _remember_auto_gps_fix(self, payload: dict, meta: dict, now: float) -> None:
+        xy = self._payload_xy(payload)
+        if xy is None:
+            return
+        x, y = xy
+        if not (math.isfinite(float(x)) and math.isfinite(float(y))):
+            return
+        if self._meta_marks_gps_out_of_bounds(payload, meta):
+            return
+        ts = payload.get("timestamp")
+        if ts is not None:
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                ts_f = 0.0
+            if ts_f > 0.0 and (time.time() - ts_f) > _AUTO_GPS_MAX_FIX_AGE_S:
+                return
+        history = getattr(self, "_gps_fix_history", None)
+        if history is None:
+            self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
+            history = self._gps_fix_history
+        history.append({
+            "x": float(x),
+            "y": float(y),
+            "received_monotonic": float(now),
+            "payload": dict(payload),
+            "meta": dict(meta),
+        })
+
+    def _recent_auto_gps_samples(self, now: float) -> list[dict]:
+        history = list(getattr(self, "_gps_fix_history", []) or [])
+        fresh = [
+            sample
+            for sample in history
+            if now - float(sample.get("received_monotonic", 0.0)) <= _AUTO_GPS_MAX_FIX_AGE_S
+        ]
+        return fresh[-_AUTO_GPS_SAMPLE_COUNT:]
+
+    @staticmethod
+    def _gps_sample_spread(samples: list[dict]) -> float:
+        if len(samples) <= 1:
+            return 0.0
+        max_spread = 0.0
+        for i, first in enumerate(samples):
+            for second in samples[i + 1:]:
+                max_spread = max(
+                    max_spread,
+                    math.hypot(float(first["x"]) - float(second["x"]), float(first["y"]) - float(second["y"])),
+                )
+        return float(max_spread)
+
+    @staticmethod
+    def _lanelet_point_and_yaw(lanelet, arc_m: float) -> tuple[float, float, float] | None:
+        cl = getattr(lanelet, "centerline", None)
+        if cl is None or getattr(cl, "shape", (0,))[0] < 1:
+            return None
+        if cl.shape[0] == 1:
+            return float(cl[0, 0]), float(cl[0, 1]), 0.0
+        target_arc = max(0.0, min(float(arc_m), float(getattr(lanelet, "length_m", arc_m) or arc_m)))
+        cumulative = 0.0
+        for idx in range(cl.shape[0] - 1):
+            ax, ay = float(cl[idx, 0]), float(cl[idx, 1])
+            bx, by = float(cl[idx + 1, 0]), float(cl[idx + 1, 1])
+            seg_len = math.hypot(bx - ax, by - ay)
+            if seg_len <= 1e-9:
+                continue
+            if cumulative + seg_len >= target_arc:
+                ratio = (target_arc - cumulative) / seg_len
+                x = ax + ratio * (bx - ax)
+                y = ay + ratio * (by - ay)
+                return float(x), float(y), math.atan2(by - ay, bx - ax)
+            cumulative += seg_len
+        ax, ay = float(cl[-2, 0]), float(cl[-2, 1])
+        bx, by = float(cl[-1, 0]), float(cl[-1, 1])
+        return bx, by, math.atan2(by - ay, bx - ax)
+
+    def _try_apply_auto_gps_relocalization(self, current_yaw: float, now: float):
+        if not bool(getattr(self, "_auto_gps_pending", False)):
+            return False, None
+        samples = self._recent_auto_gps_samples(now)
+        deadline_expired = now > float(getattr(self, "_auto_gps_deadline_monotonic", 0.0) or 0.0)
+        if len(samples) < _AUTO_GPS_SAMPLE_COUNT:
+            if deadline_expired:
+                self._finish_auto_gps_entry(mode="auto_gps_unavailable", source="not_enough_fresh_gps_samples")
+            return False, None
+
+        spread_m = self._gps_sample_spread(samples)
+        if spread_m > _AUTO_GPS_MAX_SPREAD_M:
+            if deadline_expired:
+                self._finish_auto_gps_entry(mode="auto_gps_unavailable", source="gps_spread_too_large", error_m=spread_m)
+            return False, None
+
+        avg_x = sum(float(sample["x"]) for sample in samples) / float(len(samples))
+        avg_y = sum(float(sample["y"]) for sample in samples) / float(len(samples))
+        lanelet_map = getattr(getattr(self, "_graph", None), "lanelet_map", None)
+        lanelet_id = None
+        if lanelet_map is not None and hasattr(lanelet_map, "at_pose"):
+            lanelet_id = lanelet_map.at_pose(
+                avg_x,
+                avg_y,
+                max_distance_m=_AUTO_GPS_MAX_LANELET_DISTANCE_M,
+                yaw_rad=float(current_yaw),
+                max_yaw_diff_rad=_AUTO_GPS_MAX_YAW_DIFF_RAD,
+            )
+        lanelet = lanelet_map.get_lanelet(lanelet_id) if lanelet_map is not None and lanelet_id is not None else None
+        if lanelet is None:
+            self._finish_auto_gps_entry(mode="auto_gps_lanelet_unmatched", source="no_yaw_compatible_lanelet")
+            return False, None
+
+        old_x, old_y, _ = self._dr.get_state()
+        arc_m, lateral_m = lanelet.project_arclength(avg_x, avg_y)
+        snapped = self._lanelet_point_and_yaw(lanelet, arc_m)
+        if snapped is None:
+            self._finish_auto_gps_entry(mode="auto_gps_lanelet_unmatched", source="lanelet_projection_failed")
+            return False, None
+        snap_x, snap_y, snap_yaw = snapped
+        self._dr.reset(float(snap_x), float(snap_y), float(snap_yaw))
+        self._last_yaw_rad = float(snap_yaw)
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        self._last_absolute_yaw_fix_monotonic = float(now)
+        self._last_absolute_yaw_fix_source = "auto_gps_entry"
+        self._calibrate_imu_yaw_offset_to(float(snap_yaw))
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
+        source = f"auto_gps_entry:{lanelet_id}"
+        error_m = math.hypot(float(snap_x) - float(old_x), float(snap_y) - float(old_y))
+        self._send_sim_relocalize_pose(float(snap_x), float(snap_y), float(snap_yaw), source=source)
+        self._finish_auto_gps_entry(mode="auto_gps_entry", source=source, error_m=error_m)
+        return True, {
+            "mode": "auto_gps_entry",
+            "source": source,
+            "error_m": float(error_m),
+            "gps_spread_m": float(spread_m),
+            "gps_lateral_m": float(lateral_m),
+        }
 
     def _latest_gps_raw_xy_for_calibration(self, payload: dict) -> tuple[float, float] | None:
         xy = self._raw_gps_xy_from_calibration_payload(payload)
@@ -576,11 +810,13 @@ class threadPoseEstimator(threadTracking):
         source = f"stopline_visual:{stopline_observation.expected_node_id or 'matched_pose'}"
         return True, (source, float(correction_m))
 
-    def _apply_localisation_fix(self, current_yaw: float):
+    def _apply_localisation_fix(self, current_yaw: float, now: float | None = None):
         if self._dr is None or self._graph is None:
             return False, None
+        now_mono = time.monotonic() if now is None else float(now)
         payload = self._localisation_fix_sub.receive()
         if not isinstance(payload, dict):
+            self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
             return False, None
 
         meta = payload.get("meta")
@@ -599,6 +835,8 @@ class threadPoseEstimator(threadTracking):
         if source.strip().lower() == "gps_localisation":
             self._remember_gps_raw_fix(payload)
             payload, meta = self._apply_gps_calibration_offset(payload, meta)
+            self._remember_auto_gps_fix(payload, meta, now_mono)
+            return self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
         elif self._should_calibrate_gps_from_dashboard(payload, meta):
             return self._apply_gps_dashboard_calibration(payload, meta, current_yaw)
 
@@ -818,7 +1056,7 @@ class threadPoseEstimator(threadTracking):
         if not isinstance(stopline_observation, StoplineObservation):
             stopline_observation = None
 
-        gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw)
+        gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw, now)
         if gps_relocalized:
             raw_x, raw_y, raw_yaw = self._dr.get_state()
             raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
@@ -867,10 +1105,13 @@ class threadPoseEstimator(threadTracking):
         relocalization_mode = "dead_reckoning"
         relocalization_source = "dead_reckoning"
         relocalization_error_m = 0.0
+        auto_gps_status = self._auto_gps_recent_status(now)
         if gps_relocalized and isinstance(gps_match, dict):
             relocalization_mode = str(gps_match.get("mode") or "gps_fix")
             relocalization_source = str(gps_match.get("source") or "gps_localisation")
             relocalization_error_m = float(gps_match.get("error_m") or 0.0)
+        elif auto_gps_status is not None:
+            relocalization_mode, relocalization_source, relocalization_error_m = auto_gps_status
         elif stopline_relocalized and stopline_match is not None:
             relocalization_mode = "visual_stopline"
             relocalization_source, relocalization_error_m = stopline_match

@@ -3,6 +3,7 @@ Configuracion general del proyecto URT Brain.
 Modifica estos valores para cambiar el comportamiento del auto.
 """
 
+import math as _math
 import os as _os, sys as _sys
 # Sim mode: defaults ON for macOS (no Jetson HW), OFF for Linux. Override with
 # URT_SIM_MODE=1/0. Used downstream to flip CAMERA_TYPE, MOTOR_OUTPUT, and
@@ -644,6 +645,18 @@ BEHAVIOR_ACCEL_MPS2 = 0.25
 # Garantiza arranque gradual independientemente del solver.
 # 0.25 m/s² → 0→0.15 m/s en ~0.6 s (12 ticks).
 BEHAVIOR_MAX_SPEED_RATE_MPS2 = 0.25
+
+# Entrada a AUTO: relocalización GPS, ruta y lanzamiento suave.
+AUTO_GPS_SAMPLE_COUNT = 3
+AUTO_GPS_COLLECTION_TIMEOUT_S = 2.0
+AUTO_GPS_MAX_FIX_AGE_S = 1.0
+AUTO_GPS_MAX_SPREAD_M = 0.35
+AUTO_GPS_MAX_LANELET_DISTANCE_M = 0.50
+AUTO_GPS_MAX_YAW_DIFF_RAD = _math.pi / 2.0
+AUTO_ENTRY_ROUTE_RESET_ENABLED = True
+AUTO_LAUNCH_READY_TICKS = 3
+AUTO_LAUNCH_HOLD_TIMEOUT_S = 3.0
+MOTOR_COMMAND_STALE_TIMEOUT_S = 0.30
 
 # Velocidad máxima de cambio del ángulo de steering [°/s].
 # A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~8 ticks (0.4 s).

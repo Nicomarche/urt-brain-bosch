@@ -1258,19 +1258,21 @@ class threadTracking(ThreadWithStop):
         self._last_speed_source = "none"
         return 0.0
 
-    def _consume_state_change(self) -> None:
+    def _consume_state_change(self) -> tuple[str, str] | None:
         message = self._state_sub.receive()
         if message is None:
-            return
+            return None
         state_name = str(message or "").strip().upper() or "DEFAULT"
         if state_name == self._current_state_message:
-            return
+            return None
+        previous_state = self._current_state_message
         self._current_state_message = state_name
         # Avoid carrying a stale command-held speed between modes.
         self._last_speed = 0.0
         self._last_speed_source = "none"
         self._last_cmd_speed_raw = 0.0
         self._last_cmd_speed_t = None
+        return previous_state, state_name
 
     def _resolve_steer_rad(self, now: float) -> float:
         steer_feedback_raw = self._steer_feedback_sub.receive()

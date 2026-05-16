@@ -116,6 +116,7 @@ class threadWrite(ThreadWithStop):
         self._init_senders()
         self._init_subscribers()
         self._init_motor_output()
+        self._send_startup_speed_reset()
         self.load_config("init")
 
         if example:
@@ -216,6 +217,21 @@ class threadWrite(ThreadWithStop):
             )
 
     # ==================================== SENDING =======================================
+
+    def _send_startup_speed_reset(self) -> None:
+        """Force the Nucleo/sim bridge to start from a zero speed command."""
+        sent, raw_command = self.send_to_serial({"action": "speed", "speed": 0})
+        self.last_speed_cmd = 0
+        self.last_speed_ts = time.monotonic()
+        self._last_serial_motion_pair = None
+        self._record_motion_command(
+            "startup_speed_reset",
+            raw_command,
+            speed_x10=0,
+            steer_x10=self.last_steer_cmd,
+            blocked_reason=None if sent else self.last_blocked_reason,
+            force=True,
+        )
 
     def send_to_serial(self, msg):
         action = msg.get("action")

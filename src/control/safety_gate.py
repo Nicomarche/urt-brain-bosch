@@ -61,6 +61,10 @@ class SafetyGateConfig:
     # (encoder + IMU), así que 300 ms ya indica falla del bus serial.
     pose_stale_timeout_s: float = 0.3
 
+    # El dispatcher corre más rápido que el MotionController; si el último
+    # MotorCommand quedó viejo, no debe seguir re-despachándose.
+    motor_command_stale_timeout_s: float = float(getattr(_cfg, "MOTOR_COMMAND_STALE_TIMEOUT_S", 0.30))
+
     lidar_required: bool = bool(getattr(_cfg, "LIDAR_REQUIRED", False))
     lidar_stale_timeout_s: float = float(getattr(_cfg, "LIDAR_STALE_TIMEOUT_S", 0.5))
     lidar_emergency_obstacle_enabled: bool = bool(getattr(_cfg, "LIDAR_EMERGENCY_OBSTACLE_ENABLED", False))
@@ -100,6 +104,7 @@ class SafetyGate:
         motor_command: MotorCommand | None,
         behavior_timestamp: float | None,
         pose_timestamp: float | None,
+        motor_command_timestamp: float | None = None,
         lidar_timestamp: float | None = None,
         lidar_obstacles: tuple[LidarObstacle, ...] | list[LidarObstacle] = (),
         now: float | None = None,
@@ -132,6 +137,16 @@ class SafetyGate:
         if not motor_command.valid:
             reason = motor_command.reason or "motor_command_invalid"
             return self._fallback(t_now, reason)
+        cmd_timestamp = (
+            float(motor_command_timestamp)
+            if motor_command_timestamp is not None
+            else float(getattr(motor_command, "timestamp", 0.0) or 0.0)
+        )
+        if cmd_timestamp <= 0.0:
+            return self._fallback(t_now, "no_motor_command_timestamp")
+        cmd_age = t_now - cmd_timestamp
+        if cmd_age > self._config.motor_command_stale_timeout_s:
+            return self._fallback(t_now, f"motor_command_stale_{cmd_age:.2f}s")
 
         # Regla 1 — behavior stale.
         if behavior_timestamp is None:

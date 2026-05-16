@@ -940,12 +940,14 @@ class MotionController(IMotionController):
             )
         if not behavior_output.valid:
             reason = f"behavior_invalid/{notes_reason}" if notes_reason else "behavior_invalid"
+            self._reset_command_memory()
             return self._invalid(reason, backend=self._backend_name)
 
         # 2. Stop request: el scenario o el overlay decidieron frenar.
         #    Devolvemos un MotorCommand explícito de stop — el dispatcher
         #    decide si eso es un fallback (safety) o un freno deseado.
         if behavior_output.stop_required:
+            self._reset_command_memory()
             return MotorCommand(
                 timestamp=time.time(),
                 steering_deg=0.0,
@@ -968,6 +970,7 @@ class MotionController(IMotionController):
         # 3. Solver listo? Si no, no hay forma de calcular un δ — el
         #    safety_gate aguas abajo se hará cargo.
         if not self._solver.ready:
+            self._reset_command_memory()
             return self._invalid("mpc_solver_not_ready", backend=self._backend_name)
 
         # 4. Construir arrays de referencia. target_path es (N+1, 3) y
@@ -979,8 +982,10 @@ class MotionController(IMotionController):
 
         n = int(speed_profile.shape[0])
         if state_refs.shape != (n + 1, 3):
+            self._reset_command_memory()
             return self._invalid("dimension_mismatch_target_path", backend=self._backend_name)
         if n != self._solver.N:
+            self._reset_command_memory()
             return self._invalid("horizon_mismatch", backend=self._backend_name)
 
         # The planner publishes the path in the OSM/map frame (y-down, yaw CW+),
@@ -1035,6 +1040,7 @@ class MotionController(IMotionController):
             delta_prev=math.radians(float(self._prev_steer_deg)),
         )
         if result is None:
+            self._reset_command_memory()
             return self._invalid("mpc_solver_failure", backend=self._backend_name)
 
         v_opt, delta_deg = result
@@ -1043,6 +1049,7 @@ class MotionController(IMotionController):
         #    defensivo: cualquier NaN/inf por solver inestable se atrapa
         #    acá y se traduce a inválido (mejor parar que mover absurdo).
         if not (math.isfinite(v_opt) and math.isfinite(delta_deg)):
+            self._reset_command_memory()
             return self._invalid("mpc_nonfinite_output", backend=self._backend_name)
 
         requested_speed_mps = max(0.0, float(speed_profile[0]))
@@ -1064,6 +1071,7 @@ class MotionController(IMotionController):
             speed_mps <= 1e-6
             and float(v_opt) < 0.0
             and requested_speed_mps > 1e-6
+            and requested_speed_mps >= float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
             and path_source == "route_waypoints"
         ):
             forward_recovery_hint = _first_forward_reference_hint(
@@ -1096,14 +1104,24 @@ class MotionController(IMotionController):
         # la bajada se aplica en el mismo tick para no quedar por encima
         # del target actual.
         max_speed_step = self._max_speed_rate_mps2 * self._steer_dt_s
+        prev_speed_mps = float(self._prev_speed_mps)
+        limited_by_accel = False
         if speed_mps > self._prev_speed_mps:
-            speed_mps = min(self._prev_speed_mps + max_speed_step, speed_mps)
+            limited_speed_mps = min(self._prev_speed_mps + max_speed_step, speed_mps)
+            limited_by_accel = limited_speed_mps < (speed_mps - 1e-9)
+            speed_mps = limited_speed_mps
+        min_moving_speed_mps = float(
+            _effective_min_moving_speed_mps(behavior_output, self._min_moving_speed_mps)
+        )
         if (
             requested_speed_mps > 1e-6
             and speed_mps > 1e-6
-            and speed_mps < float(_effective_min_moving_speed_mps(behavior_output, self._min_moving_speed_mps))
+            and requested_speed_mps >= min_moving_speed_mps
+            and not limited_by_accel
+            and (prev_speed_mps >= min_moving_speed_mps or max_speed_step >= requested_speed_mps)
+            and speed_mps < min_moving_speed_mps
         ):
-            speed_mps = float(_effective_min_moving_speed_mps(behavior_output, self._min_moving_speed_mps))
+            speed_mps = min_moving_speed_mps
         self._prev_speed_mps = speed_mps
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
@@ -1158,6 +1176,9 @@ class MotionController(IMotionController):
 
     def reset(self) -> None:
         self._solver.reset()
+        self._reset_command_memory()
+
+    def _reset_command_memory(self) -> None:
         self._prev_steer_deg = 0.0
         self._prev_speed_mps = 0.0
 

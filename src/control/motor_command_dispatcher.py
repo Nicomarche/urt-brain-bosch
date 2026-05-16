@@ -48,8 +48,15 @@ from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.control import MotorCommand
 from src.core.types.lidar import LidarObstacle, LidarScan
+from src.core.types.pose import PoseEstimate
+from src.core.types.routing import RouteContext
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
+
+try:
+    import config as _cfg
+except Exception:  # pragma: no cover - isolated imports in tests
+    _cfg = None
 
 
 class threadMotorCommandDispatcher(ThreadWithStop):
@@ -63,6 +70,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         safety_gate: SafetyGate | None = None,
         behavior_output_buffer=None,
         pose_estimate_buffer=None,
+        route_context_buffer=None,
         lidar_scan_buffer=None,
         lidar_obstacles_buffer=None,
         pause_s: float = 0.02,
@@ -76,6 +84,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._motor_cmd_buf = motor_command_buffer
         self._behavior_buf = behavior_output_buffer
         self._pose_buf = pose_estimate_buffer
+        self._route_buf = route_context_buffer
         self._lidar_scan_buf = lidar_scan_buffer
         self._lidar_obs_buf = lidar_obstacles_buffer
         self._gate = safety_gate or SafetyGate()
@@ -120,6 +129,16 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._stats_last_reason = ""
         self._stats_last_speed = 0.0
         self._stats_last_steer = 0.0
+        self._auto_launch_ready_ticks_required = max(
+            1,
+            int(getattr(_cfg, "AUTO_LAUNCH_READY_TICKS", 3)),
+        )
+        self._auto_launch_hold_timeout_s = float(
+            getattr(_cfg, "AUTO_LAUNCH_HOLD_TIMEOUT_S", 3.0)
+        )
+        self._auto_launch_hold_started_t: float | None = None
+        self._auto_launch_ready_ticks = 0
+        self._auto_launch_released = False
 
     # ----------------------------------------------------------------
     def thread_work(self) -> None:
@@ -127,7 +146,14 @@ class threadMotorCommandDispatcher(ThreadWithStop):
 
         # Lee el último MotorCommand. Si todavía no hay nada, el gate emite
         # fallback con razón "no_motor_command".
-        motor_cmd = self._motor_cmd_buf.read_latest() if self._motor_cmd_buf else None
+        motor_cmd = None
+        motor_cmd_ts = None
+        if self._motor_cmd_buf:
+            try:
+                motor_cmd, motor_cmd_ts, _ = self._motor_cmd_buf.read_latest(with_metadata=True)
+            except Exception:
+                motor_cmd = self._motor_cmd_buf.read_latest()
+                motor_cmd_ts = getattr(motor_cmd, "timestamp", None)
 
         # Timestamps de los inputs upstream (para el watchdog).
         behavior_ts = (
@@ -143,15 +169,20 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             motor_command=motor_cmd if isinstance(motor_cmd, MotorCommand) else None,
             behavior_timestamp=behavior_ts,
             pose_timestamp=pose_ts,
+            motor_command_timestamp=motor_cmd_ts,
             lidar_timestamp=lidar_ts,
             lidar_obstacles=lidar_obstacles,
         )
+        pose_estimate = self._read_pose_estimate()
+        route_context = self._read_route_context()
+        auto_hold_reason = self._auto_launch_hold_reason(cmd, pose_estimate, route_context, now_t := time.time())
+        if auto_hold_reason is not None:
+            cmd = self._stop_command(auto_hold_reason, now_t)
         self._last_dispatched = cmd
 
         # Live JSONL: cada decisión del SafetyGate. Si state != AUTO, igual
         # logueamos para ver por qué el dispatcher no manda nada (típico:
         # el operador olvidó clickear AUTO).
-        now_t = time.time()
         live_log(
             "dispatcher", event="dispatch_decision",
             state=self._current_state,
@@ -160,12 +191,20 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             cmd_reason=str(getattr(cmd, "reason", "")),
             speed_mps=float(cmd.speed_mps),
             steering_deg=float(cmd.steering_deg),
+            motor_command_age_s=(now_t - float(motor_cmd_ts)) if motor_cmd_ts else None,
             behavior_age_s=(now_t - behavior_ts) if behavior_ts else None,
             pose_age_s=(now_t - pose_ts) if pose_ts else None,
             lidar_age_s=(now_t - lidar_ts) if lidar_ts else None,
             lidar_obstacles=len(lidar_obstacles),
             dispatched=(self._current_state in {"AUTO", "PARKING"}),
             had_motor_cmd=isinstance(motor_cmd, MotorCommand),
+            route_active=bool(route_context.route_active) if route_context is not None else False,
+            pose_relocalization_mode=(
+                str(pose_estimate.relocalization_mode)
+                if pose_estimate is not None
+                else None
+            ),
+            auto_launch_hold_reason=auto_hold_reason,
         )
 
         # Acumulación para el log periódico. Se hace ANTES del state-gate
@@ -249,6 +288,68 @@ class threadMotorCommandDispatcher(ThreadWithStop):
 
     # ----------------------------------------------------------------
     @staticmethod
+    def _stop_command(reason: str, now: float) -> MotorCommand:
+        return MotorCommand(
+            timestamp=float(now),
+            steering_deg=0.0,
+            speed_mps=0.0,
+            valid=True,
+            source="dispatcher",
+            reason=str(reason),
+        )
+
+    def _start_auto_launch_hold(self) -> None:
+        self._auto_launch_hold_started_t = time.time()
+        self._auto_launch_ready_ticks = 0
+        self._auto_launch_released = False
+
+    def _reset_auto_launch_hold(self) -> None:
+        self._auto_launch_hold_started_t = None
+        self._auto_launch_ready_ticks = 0
+        self._auto_launch_released = False
+
+    def _auto_launch_hold_reason(
+        self,
+        cmd: MotorCommand,
+        pose_estimate: PoseEstimate | None,
+        route_context: RouteContext | None,
+        now: float,
+    ) -> str | None:
+        if self._current_state != "AUTO":
+            return None
+        if self._auto_launch_hold_started_t is None and not self._auto_launch_released:
+            self._start_auto_launch_hold()
+        if self._auto_launch_released:
+            return None
+        started_t = float(self._auto_launch_hold_started_t or now)
+        if now - started_t >= self._auto_launch_hold_timeout_s:
+            self._auto_launch_released = True
+            return None
+
+        route_ready = route_context is not None and bool(route_context.route_active)
+        pose_ready = (
+            pose_estimate is not None
+            and str(pose_estimate.relocalization_mode or "") != "auto_gps_entry_pending"
+        )
+        command_ready = bool(cmd.valid) and str(cmd.source) != "safety_gate"
+        if route_ready and pose_ready and command_ready:
+            self._auto_launch_ready_ticks += 1
+        else:
+            self._auto_launch_ready_ticks = 0
+
+        if self._auto_launch_ready_ticks >= self._auto_launch_ready_ticks_required:
+            self._auto_launch_released = True
+            return None
+        if not pose_ready:
+            return "auto_launch_hold_pose_pending"
+        if not route_ready:
+            return "auto_launch_hold_route_pending"
+        if not command_ready:
+            return "auto_launch_hold_command_pending"
+        return "auto_launch_hold_debounce"
+
+    # ----------------------------------------------------------------
+    @staticmethod
     def _steer_deg_to_wire_x10(steering_deg: float) -> int:
         """Traduce `+izquierda` (MPC) a `+derecha` (wire legacy)."""
         return int(round(-float(steering_deg) * 10.0))
@@ -262,8 +363,13 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         try:
             msg = self._stateChangeSubscriber.receive()
             if msg is not None:
+                previous_state = self._current_state
                 self._current_state = str(msg).upper()
                 self._ipc_mode_received = True
+                if self._current_state == "AUTO" and previous_state != "AUTO":
+                    self._start_auto_launch_hold()
+                elif self._current_state != "AUTO":
+                    self._reset_auto_launch_hold()
                 return
         except Exception:
             pass
@@ -277,7 +383,10 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             try:
                 mode = self._sm_state.get("mode", None)
                 if mode is not None:
+                    previous_state = self._current_state
                     self._current_state = mode.name.upper()
+                    if self._current_state == "AUTO" and previous_state != "AUTO":
+                        self._start_auto_launch_hold()
             except Exception:
                 pass
 
@@ -314,6 +423,24 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         if isinstance(payload, list) and all(isinstance(o, LidarObstacle) for o in payload):
             return tuple(payload)
         return ()
+
+    def _read_pose_estimate(self) -> PoseEstimate | None:
+        if self._pose_buf is None:
+            return None
+        try:
+            payload = self._pose_buf.read_latest()
+        except Exception:
+            return None
+        return payload if isinstance(payload, PoseEstimate) else None
+
+    def _read_route_context(self) -> RouteContext | None:
+        if self._route_buf is None:
+            return None
+        try:
+            payload = self._route_buf.read_latest()
+        except Exception:
+            return None
+        return payload if isinstance(payload, RouteContext) else None
 
     # ----------------------------------------------------------------
     @staticmethod

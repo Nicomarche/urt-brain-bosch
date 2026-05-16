@@ -461,6 +461,7 @@ class processCamera(WorkerProcess):
             safety_gate=SafetyGate(),
             behavior_output_buffer=behavior_output_buffer,
             pose_estimate_buffer=pose_estimate_buffer,
+            route_context_buffer=route_context_buffer,
             lidar_scan_buffer=lidar_scan_buffer,
             lidar_obstacles_buffer=lidar_obstacles_buffer,
             logging=self.logging,

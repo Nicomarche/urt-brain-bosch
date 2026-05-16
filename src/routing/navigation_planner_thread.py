@@ -24,7 +24,7 @@ from src.localization.relocalization_thread import (
 )
 from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import NavigationCommand, NavigationStatus
+from src.core.messaging.allMessages import NavigationCommand, NavigationStatus, StateChange
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
@@ -148,6 +148,9 @@ class threadNavigationPlanner(ThreadWithStop):
         self._nav_cmd_sub = messageHandlerSubscriber(
             queuesList, NavigationCommand, "lastOnly", subscribe=True
         )
+        self._state_sub = messageHandlerSubscriber(
+            queuesList, StateChange, "lastOnly", subscribe=True
+        )
         self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
         self._graph = self._load_graph()
         self._path_manager = PathManager(self._graph) if self._graph is not None else None
@@ -173,6 +176,8 @@ class threadNavigationPlanner(ThreadWithStop):
         self._auto_lap_last_attempt_ts: float = 0.0
         self._auto_lap_activated: bool = False
         self._pose_ever_valid: bool = False
+        self._current_state: str = "DEFAULT"
+        self._auto_entry_route_reset_pending: bool = False
         self._no_entry_consumed_keys: set[str] = set()
         self._no_entry_candidate_key: str | None = None
         self._no_entry_candidate_hits: int = 0
@@ -802,9 +807,69 @@ class threadNavigationPlanner(ThreadWithStop):
             heading_weight=_MAP_MATCH_HEADING_W,
         )
 
+    def _consume_state_change(self) -> None:
+        try:
+            msg = self._state_sub.receive()
+        except Exception:
+            return
+        if msg is None:
+            return
+        state_name = str(msg or "").strip().upper() or "DEFAULT"
+        if state_name == self._current_state:
+            return
+        previous_state = self._current_state
+        self._current_state = state_name
+        if state_name == "AUTO" and previous_state != "AUTO":
+            self._auto_entry_route_reset_pending = True
+        elif state_name != "AUTO":
+            self._auto_entry_route_reset_pending = False
+
+    def _maybe_reset_route_on_auto_entry(self, pose_estimate: PoseEstimate | None) -> None:
+        if not self._auto_entry_route_reset_pending:
+            return
+        try:
+            from config import AUTO_ENTRY_ROUTE_RESET_ENABLED
+        except ImportError:
+            AUTO_ENTRY_ROUTE_RESET_ENABLED = True
+        if not bool(AUTO_ENTRY_ROUTE_RESET_ENABLED):
+            self._auto_entry_route_reset_pending = False
+            return
+        if self._current_state != "AUTO":
+            return
+        if self._path_manager is None or self._user_nav_cmd_received:
+            self._auto_entry_route_reset_pending = False
+            return
+        if bool(getattr(self._path_manager, "route_active", False)):
+            self._auto_entry_route_reset_pending = False
+            return
+        if not self._pose_ever_valid or not isinstance(pose_estimate, PoseEstimate):
+            return
+        if str(pose_estimate.relocalization_mode or "") == "auto_gps_entry_pending":
+            return
+
+        ok = self._path_manager.reset_route(
+            current_pose={
+                "x": float(self._last_pose.x),
+                "y": float(self._last_pose.y),
+                "yaw_rad": float(self._last_pose.yaw),
+            },
+        )
+        self._auto_entry_route_reset_pending = False
+        live_log(
+            "nav_planner",
+            event="auto_entry_route_reset",
+            ok=bool(ok),
+            pose_x=float(self._last_pose.x),
+            pose_y=float(self._last_pose.y),
+            pose_yaw_rad=float(self._last_pose.yaw),
+            route_id=getattr(self._path_manager, "route_id", None),
+        )
+
     def thread_work(self):
         if self._path_manager is None:
             return
+
+        self._consume_state_change()
 
         pose_estimate, _, _ = self.pose_estimate_buffer.read_latest(with_metadata=True)
         if isinstance(pose_estimate, PoseEstimate):
@@ -854,6 +919,9 @@ class threadNavigationPlanner(ThreadWithStop):
             if handled and (mode in ("go_to", "go_to_multiple") or ("x" in nav_cmd and "y" in nav_cmd)):
                 self._user_nav_cmd_received = True
 
+        self._maybe_reset_route_on_auto_entry(
+            pose_estimate if isinstance(pose_estimate, PoseEstimate) else None
+        )
         self._ensure_auto_lap_route()
 
         path_update = self._update_path_manager()

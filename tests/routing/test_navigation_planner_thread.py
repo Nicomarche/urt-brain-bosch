@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.core.types.pose import Pose2D
+from src.core.types.pose import Pose2D, PoseEstimate
 from src.core.types.routing import RouteContext
 from src.routing.lanelet.attributes import ATTR_NORMAL
 from src.routing.lanelet.lanelet_map import from_track_graph
@@ -158,6 +158,19 @@ class _NoSafeRouteManager:
         self.active_route = None
         self.route_active = False
         self.cleared = True
+
+
+class _AutoEntryRouteManager:
+    def __init__(self, *, route_active: bool = False) -> None:
+        self.route_active = bool(route_active)
+        self.route_id = None
+        self.reset_calls: list[dict] = []
+
+    def reset_route(self, current_pose):
+        self.reset_calls.append(dict(current_pose))
+        self.route_active = True
+        self.route_id = "reference-1"
+        return True
 
 
 def _make_path_update(
@@ -425,3 +438,57 @@ def test_resolve_initial_pose_prefers_saved_sim_start_pose(monkeypatch) -> None:
     pose = thread._resolve_initial_pose()
 
     assert pose == Pose2D(1.2, -0.8, 0.45)
+
+
+def test_auto_entry_route_reset_creates_reference_route_from_current_pose() -> None:
+    manager = _AutoEntryRouteManager(route_active=False)
+    thread = threadNavigationPlanner.__new__(threadNavigationPlanner)
+    thread._auto_entry_route_reset_pending = True
+    thread._current_state = "AUTO"
+    thread._path_manager = manager
+    thread._user_nav_cmd_received = False
+    thread._pose_ever_valid = True
+    thread._last_pose = Pose2D(x=1.2, y=2.3, yaw=0.4)
+
+    thread._maybe_reset_route_on_auto_entry(
+        PoseEstimate(
+            fused_pose=thread._last_pose,
+            relocalization_mode="dead_reckoning",
+        )
+    )
+
+    assert manager.reset_calls == [{"x": 1.2, "y": 2.3, "yaw_rad": 0.4}]
+    assert manager.route_active is True
+    assert thread._auto_entry_route_reset_pending is False
+
+
+def test_auto_entry_route_reset_waits_for_gps_pending_and_preserves_manual_route() -> None:
+    manager = _AutoEntryRouteManager(route_active=False)
+    thread = threadNavigationPlanner.__new__(threadNavigationPlanner)
+    thread._auto_entry_route_reset_pending = True
+    thread._current_state = "AUTO"
+    thread._path_manager = manager
+    thread._user_nav_cmd_received = False
+    thread._pose_ever_valid = True
+    thread._last_pose = Pose2D(x=1.2, y=2.3, yaw=0.4)
+
+    thread._maybe_reset_route_on_auto_entry(
+        PoseEstimate(
+            fused_pose=thread._last_pose,
+            relocalization_mode="auto_gps_entry_pending",
+        )
+    )
+
+    assert manager.reset_calls == []
+    assert thread._auto_entry_route_reset_pending is True
+
+    thread._user_nav_cmd_received = True
+    thread._maybe_reset_route_on_auto_entry(
+        PoseEstimate(
+            fused_pose=thread._last_pose,
+            relocalization_mode="dead_reckoning",
+        )
+    )
+
+    assert manager.reset_calls == []
+    assert thread._auto_entry_route_reset_pending is False

@@ -417,11 +417,32 @@ def test_visual_left_route_in_osm_frame_produces_positive_left_steer() -> None:
     assert cmd.steering_deg > 0.0
 
 
-def test_speed_rate_limit_only_applies_when_accelerating() -> None:
-    """El rate limiter no debe bajar un comando de avance debajo del mínimo."""
+def test_speed_rate_limit_starts_from_zero_without_min_speed_jump() -> None:
+    """El primer tick de arranque no debe saltar directo al piso competitivo."""
     mc = MotionController(solver=_FakeSolver(result=(0.30, 0.0)))
     cmd = mc.compute(_bo(speed_mps=0.30), _pose())
-    assert cmd.speed_mps == pytest.approx(0.20)
+    assert cmd.speed_mps == pytest.approx(0.0125)
+
+
+def test_invalid_and_stop_reset_command_memory() -> None:
+    mc = MotionController(solver=_FakeSolver(result=(0.30, 5.0)))
+    mc._prev_speed_mps = 0.25
+    mc._prev_steer_deg = 10.0
+
+    invalid = mc.compute(_bo(valid=False), _pose())
+
+    assert invalid.valid is False
+    assert mc._prev_speed_mps == 0.0
+    assert mc._prev_steer_deg == 0.0
+
+    mc._prev_speed_mps = 0.25
+    mc._prev_steer_deg = 10.0
+    stop = mc.compute(_bo(stop=True), _pose())
+
+    assert stop.valid is True
+    assert stop.speed_mps == 0.0
+    assert mc._prev_speed_mps == 0.0
+    assert mc._prev_steer_deg == 0.0
 
 
 def test_reset_propagates_to_solver() -> None:

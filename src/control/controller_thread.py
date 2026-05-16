@@ -32,6 +32,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from src.core.messaging.allMessages import StateChange
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.behavior import BehaviorOutput
 from src.core.types.pose import PoseEstimate
 from src.templates.threadwithstop import ThreadWithStop
@@ -64,6 +66,10 @@ class threadMotionController(ThreadWithStop):
         self._motor_cmd_buf = motor_command_buffer
         self.logging = logging
         self.debugging = bool(debugging)
+        self._state_sub = messageHandlerSubscriber(
+            queuesList, StateChange, "lastOnly", subscribe=True
+        )
+        self._current_state = "DEFAULT"
 
         # Sequence guard: no recomputamos si el behavior_output no cambió.
         # Recordá que el `BehaviorPlanner` puede correr más lento que el
@@ -72,6 +78,8 @@ class threadMotionController(ThreadWithStop):
 
     # ----------------------------------------------------------------
     def thread_work(self) -> None:
+        self._consume_state_change()
+
         # 1. Leer último BehaviorOutput. Si es el mismo seq que el anterior,
         #    saltamos (ya fue computado).
         behavior, _, b_seq = self._behavior_buf.read_latest(with_metadata=True)
@@ -102,6 +110,25 @@ class threadMotionController(ThreadWithStop):
 
         # 4. Publicar al buffer. El dispatcher lee desde acá.
         self._motor_cmd_buf.write(cmd, timestamp=cmd.timestamp)
+
+    def _consume_state_change(self) -> None:
+        try:
+            msg = self._state_sub.receive()
+        except Exception:
+            return
+        if msg is None:
+            return
+        state_name = str(msg or "").strip().upper() or "DEFAULT"
+        if state_name == self._current_state:
+            return
+        self._current_state = state_name
+        reset = getattr(self._controller, "reset", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                if self.logging is not None:
+                    self.logging.exception("MotionController.reset failed on state change")
 
     # ----------------------------------------------------------------
     def _publish_invalid(self, reason: str) -> None:
