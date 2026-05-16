@@ -246,7 +246,11 @@ class threadWrite(ThreadWithStop):
                     if serialCon and self.process.serialConnected and serialCon.is_open:
                         payload = command_msg.encode("ascii")
                         written = serialCon.write(payload)
-                        serialCon.flush()
+                        # No llamar a serialCon.flush() (tcdrain). En el CDC ACM
+                        # de la Jetson el flush sincroniza fd internamente con
+                        # operaciones que matan el path de RX para el mismo fd,
+                        # quedando in_waiting=0 indefinido. Master nunca hizo
+                        # flush y leía bien. El write ya queda en el OS buffer.
                         if written != len(payload):
                             self.last_blocked_reason = "serial_short_write"
                             print(
