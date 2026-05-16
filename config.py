@@ -1234,6 +1234,12 @@ ZMQ_CAMERA_TOPIC    = b"frame"
 #   "serial" — UART al Nucleo STM32 (produccion, default Jetson)
 #   "zmq"    — publish JSON al sim_bridge en ZMQ_MOTOR_ENDPOINT (modo simulador)
 MOTOR_OUTPUT        = "zmq" if _SIM_MODE else "serial"
+
+# Puerto de la Nucleo/F401RE. Si queda vacío, processSerialHandler autodetecta
+# priorizando /dev/ttyACM* y luego /dev/ttyUSB*. En Jetson conviene fijarlo con
+# URT_SERIAL_PORT=/dev/serial/by-id/... para no confundirlo con otros USB serial.
+SERIAL_PORT = _os.environ.get("URT_SERIAL_PORT") or None
+
 ZMQ_MOTOR_ENDPOINT  = "tcp://localhost:5576"
 ZMQ_MOTOR_TOPIC     = b"cmd"
 

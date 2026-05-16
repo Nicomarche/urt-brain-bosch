@@ -34,6 +34,7 @@ import re
 import serial
 import serial.tools.list_ports
 import threading
+import time
 from threading import Lock
 
 from src.templates.workerprocess import WorkerProcess
@@ -72,6 +73,7 @@ class processSerialHandler(WorkerProcess):
         self.serialDevice = None
         self.serialLock = Lock()
         self.reconnecting = False
+        self._last_port_scan_log = 0.0
 
         try:
             from config import MOTOR_OUTPUT
@@ -135,25 +137,72 @@ class processSerialHandler(WorkerProcess):
                 # clean up existing connection safely
                 self._safe_close_serial()
 
-                # Match /dev/ttyACM* (Nucleo via USB) or /dev/ttyUSB* (USB-serial adapter)
-                self.serialDevice = next(
-                    (
-                        port.device
-                        for port in serial.tools.list_ports.comports()
-                        if re.match(r"/dev/tty(ACM|USB)\d+", port.device)
-                    ),
-                    None,
-                )
+                try:
+                    from config import SERIAL_PORT, LIDAR_SERIAL_PORT
+                except ImportError:
+                    SERIAL_PORT = None
+                    LIDAR_SERIAL_PORT = None
+
+                configured_port = str(SERIAL_PORT).strip() if SERIAL_PORT else None
+                lidar_port = str(LIDAR_SERIAL_PORT).strip() if LIDAR_SERIAL_PORT else None
+                ports = list(serial.tools.list_ports.comports())
+
+                if configured_port:
+                    self.serialDevice = configured_port
+                    selected_from = "URT_SERIAL_PORT"
+                else:
+                    # Match /dev/ttyACM* (Nucleo via USB) or /dev/ttyUSB*
+                    # (USB-serial adapter). Prefer ACM because STM32 Nucleo
+                    # boards usually enumerate there; USB devices can be LiDAR
+                    # adapters and may accept writes while motors never move.
+                    candidates = [
+                        port
+                        for port in ports
+                        if re.match(r"/dev/tty(ACM|USB)\d+$", port.device)
+                        and port.device != lidar_port
+                    ]
+                    candidates.sort(
+                        key=lambda port: (
+                            0 if re.match(r"/dev/ttyACM\d+$", port.device) else 1,
+                            port.device,
+                        )
+                    )
+                    self.serialDevice = candidates[0].device if candidates else None
+                    selected_from = "autodetect"
 
                 if self.serialDevice is None:
                     self.serialConnected = False
+                    now = time.monotonic()
+                    if self.debugging or (now - self._last_port_scan_log) >= 5.0:
+                        available = ", ".join(
+                            f"{port.device} ({port.description})" for port in ports
+                        ) or "none"
+                        print(
+                            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m"
+                            f" - No Nucleo serial port found. Available: {available}"
+                        )
+                        self._last_port_scan_log = now
                     return
 
                 self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0.1)
                 self.serialCon.reset_input_buffer()
                 self.serialCon.reset_output_buffer()
                 self.serialConnected = True
-                print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m - Connected to \033[94m{self.serialDevice}\033[0m")
+                available = ", ".join(
+                    f"{port.device} ({port.description})" for port in ports
+                ) or self.serialDevice
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
+                    f" - Connected to \033[94m{self.serialDevice}\033[0m"
+                    f" via {selected_from}. Ports: {available}"
+                )
+                if selected_from == "autodetect" and re.match(r"/dev/ttyUSB\d+$", self.serialDevice):
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m"
+                        " - Selected a ttyUSB port. If KL/speed logs appear but the Nucleo"
+                        " does not move, run with URT_SERIAL_PORT=/dev/ttyACM0 or a"
+                        " stable /dev/serial/by-id/... path for the F401RE."
+                    )
 
             except PermissionError as e:
                 self._safe_close_serial()
@@ -169,8 +218,13 @@ class processSerialHandler(WorkerProcess):
                 self._safe_close_serial()
                 self.serialCon = None
                 self.serialConnected = False
-                if self.debugging:
-                    print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Serial connect failed: {e}")
+                now = time.monotonic()
+                if self.debugging or (now - self._last_port_scan_log) >= 5.0:
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m"
+                        f" - Serial connect failed on \033[94m{self.serialDevice}\033[0m: {e}"
+                    )
+                    self._last_port_scan_log = now
 
     def _try_reconnect(self):
         """Try to reconnect to serial device (called by timer)."""

@@ -237,7 +237,18 @@ class threadWrite(ThreadWithStop):
                 with self.process.serialLock:
                     serialCon = self.process.serialCon
                     if serialCon and self.process.serialConnected and serialCon.is_open:
-                        serialCon.write(command_msg.encode("ascii"))
+                        payload = command_msg.encode("ascii")
+                        written = serialCon.write(payload)
+                        serialCon.flush()
+                        if written != len(payload):
+                            self.last_blocked_reason = "serial_short_write"
+                            print(
+                                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mERROR\033[0m"
+                                f" - Short serial write for \033[94m{action.upper() if action else 'UNKNOWN'}\033[0m:"
+                                f" wrote {written}/{len(payload)} bytes ({command_msg.strip()})"
+                            )
+                            self._publish_actuator_status(force=True)
+                            return False, command_msg
                         self.logFile.write(command_msg)
                         if action == "kl":
                             print(
@@ -377,10 +388,12 @@ class threadWrite(ThreadWithStop):
         pair = (int(speed_x10), int(steer_x10))
         if pair != getattr(self, "_last_motion_log_pair", None):
             tag = "\033[1;92mSENT\033[0m" if (speed_sent and steer_sent) else "\033[1;91mBLOCK\033[0m"
+            raw_note = f" raw={raw_command}" if raw_command else ""
             print(
                 f"\033[1;97m[ Serial Handler ] :\033[0m {tag} "
                 f"speed={pair[0]} steer={pair[1]} "
                 f"(KL={self.currentKlemMode}, engineEnabled={self.engineEnabled})"
+                f"{raw_note}"
             )
             self._last_motion_log_pair = pair
 

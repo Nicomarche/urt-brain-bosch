@@ -141,6 +141,7 @@ if [[ "$PLATFORM" == "Darwin" ]]; then
 else
     # Jetson / Linux — full CUDA + Tegra runtime paths.
     export URT_SIM_MODE="${URT_SIM_MODE:-0}"
+    export URT_SERIAL_PORT="${URT_SERIAL_PORT:-/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066DFF495177514867205427-if02}"
     export CUDA_HOME=/usr/local/cuda
     export PATH="/usr/local/cuda/bin:/home/urt/.local/bin:$PATH"
     export LD_LIBRARY_PATH="/home/urt/.local/lib/cusparselt:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/tegra:${LD_LIBRARY_PATH}"
