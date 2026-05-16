@@ -269,6 +269,116 @@ class DistanceReadout(_NumericReadout):
         client.current_distance_signal.connect(self.set_value)
 
 
+class CommandStatusReadout(QFrame):
+    """Last command acknowledged by the brain writer, before Nucleo feedback."""
+
+    def __init__(self, client: SocketIOClient, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background:#1a1a1a; border:1px solid #333; border-radius:6px; }"
+        )
+        self._title = QLabel("Commanded")
+        self._title.setStyleSheet("color:#888; font-size:9pt;")
+        self._value = QLabel("Speed -- | Steer --")
+        self._value.setStyleSheet("color:#eee; font-size:14pt; font-weight:600;")
+        self._state = QLabel("serial -- | KL --")
+        self._state.setStyleSheet("color:#aaa; font-size:9pt;")
+        self._value.setAlignment(Qt.AlignCenter)
+        self._state.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.addWidget(self._title)
+        layout.addWidget(self._value)
+        layout.addWidget(self._state)
+        client.actuator_status_signal.connect(self._on_status)
+
+    def _on_status(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        speed_text = self._speed_text(payload.get("speed_x10"))
+        steer_text = self._steer_text(payload.get("steer_x10"))
+        self._value.setText(f"Speed {speed_text} | Steer {steer_text}")
+
+        serial = "serial ok" if payload.get("serial_connected") else "serial off"
+        engine = "drive" if payload.get("engine_enabled") else "idle"
+        kl = payload.get("klem_mode", "--")
+        blocked = payload.get("blocked_reason") or "tx ok"
+        self._state.setText(f"{serial} | KL {kl} | {engine} | {blocked}")
+        raw = payload.get("raw_command") or payload.get("last_serial_command") or ""
+        self.setToolTip(str(raw))
+
+    @staticmethod
+    def _speed_text(raw) -> str:
+        try:
+            mm_s = float(raw)
+        except (TypeError, ValueError):
+            return "--"
+        return f"{mm_s / 10.0:.1f} cm/s"
+
+    @staticmethod
+    def _steer_text(raw) -> str:
+        try:
+            deg = float(raw) / 10.0
+        except (TypeError, ValueError):
+            return "--"
+        return f"{deg:+.1f}°"
+
+
+class ImuReadout(QFrame):
+    """Roll/pitch/yaw from Nucleo @imu telemetry."""
+
+    def __init__(self, client: SocketIOClient, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.StyledPanel)
+        self.setStyleSheet(
+            "QFrame { background:#1a1a1a; border:1px solid #333; border-radius:6px; }"
+        )
+        self._title = QLabel("IMU")
+        self._title.setStyleSheet("color:#888; font-size:9pt;")
+        self._value = QLabel("R -- | P -- | Y --")
+        self._value.setStyleSheet("color:#eee; font-size:14pt; font-weight:600;")
+        self._accel = QLabel("acc --")
+        self._accel.setStyleSheet("color:#aaa; font-size:9pt;")
+        self._value.setAlignment(Qt.AlignCenter)
+        self._accel.setAlignment(Qt.AlignCenter)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.addWidget(self._title)
+        layout.addWidget(self._value)
+        layout.addWidget(self._accel)
+        client.imu_data_signal.connect(self._on_imu)
+
+    def _on_imu(self, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        roll = self._fmt_angle(payload.get("roll"))
+        pitch = self._fmt_angle(payload.get("pitch"))
+        yaw = self._fmt_angle(payload.get("yaw"))
+        self._value.setText(f"R {roll} | P {pitch} | Y {yaw}")
+
+        accx = self._fmt_plain(payload.get("accelx"))
+        accy = self._fmt_plain(payload.get("accely"))
+        accz = self._fmt_plain(payload.get("accelz"))
+        self._accel.setText(f"acc {accx}, {accy}, {accz}")
+
+    @staticmethod
+    def _fmt_angle(value) -> str:
+        try:
+            return f"{float(value):+.1f}°"
+        except (TypeError, ValueError):
+            return "--"
+
+    @staticmethod
+    def _fmt_plain(value) -> str:
+        try:
+            return f"{float(value):+.2f}"
+        except (TypeError, ValueError):
+            return "--"
+
+
 # ----------------------------------------------------------------------
 # Hardware data — CPU usage / CPU temp / RAM, three small gauges.
 # ----------------------------------------------------------------------
@@ -407,10 +517,16 @@ class TelemetryCluster(QWidget):
         readouts_row.addWidget(InstantConsumption(client))
         readouts_row.addWidget(DistanceReadout(client))
 
+        feedback_row = QHBoxLayout()
+        feedback_row.setSpacing(8)
+        feedback_row.addWidget(CommandStatusReadout(client), 1)
+        feedback_row.addWidget(ImuReadout(client), 1)
+
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
         layout.addLayout(gauges_row)
         layout.addLayout(readouts_row)
+        layout.addLayout(feedback_row)
         layout.addWidget(HardwareData(client))
         if footer_widget is not None:
             layout.addWidget(footer_widget, 1)

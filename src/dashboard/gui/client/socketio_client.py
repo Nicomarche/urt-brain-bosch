@@ -35,6 +35,7 @@ Envelope conventions (mirrors ``processDashboard.py`` ↔ Angular contract):
 
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import logging
@@ -82,6 +83,22 @@ def _unwrap_payload(payload: Any) -> Any:
         if "data" in payload:
             return payload["data"]
     return payload
+
+
+def _coerce_object_payload(payload: Any) -> Any:
+    """Unwrap and parse payloads that arrive as JSON or Python-dict strings."""
+    value = _unwrap_payload(payload)
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text:
+        return value
+    for parser in (json.loads, ast.literal_eval):
+        try:
+            return parser(text)
+        except (ValueError, TypeError, SyntaxError, json.JSONDecodeError):
+            continue
+    return value
 
 
 def _decode_jpeg_bytes(data: bytes) -> Optional[QImage]:
@@ -156,6 +173,8 @@ class SocketIOClient(QObject):
     current_speed_signal = pyqtSignal(int)
     current_steer_signal = pyqtSignal(int)
     current_distance_signal = pyqtSignal(float)
+    actuator_status_signal = pyqtSignal(object)
+    imu_data_signal = pyqtSignal(object)
     steering_limits_signal = pyqtSignal(object)  # {"upper": int, "lower": int}
     state_change_signal = pyqtSignal(str)
     warning_signal_signal = pyqtSignal(str)
@@ -390,9 +409,10 @@ class SocketIOClient(QObject):
             # consumers (Speedometer, chart, futuros readouts) reciban la
             # misma unidad declarada por la UI: cm/s.
             try:
-                self.current_speed_signal.emit(
-                    int(round(float(_unwrap_payload(data)) / 10.0))
-                )
+                raw = float(_unwrap_payload(data))
+                cm_s = int(round(raw / 10.0))
+                print(f"[ GUI SocketIO ] : RECV CurrentSpeed raw_mm_s={raw:.1f} ui_cm_s={cm_s}")
+                self.current_speed_signal.emit(cm_s)
             except (TypeError, ValueError):
                 pass
 
@@ -404,9 +424,10 @@ class SocketIOClient(QObject):
             # SteeringIndicator y la curva del chart quedan saturados al
             # primer toque de flecha.
             try:
-                self.current_steer_signal.emit(
-                    int(round(float(_unwrap_payload(data)) / 10.0))
-                )
+                raw = float(_unwrap_payload(data))
+                deg = int(round(raw / 10.0))
+                print(f"[ GUI SocketIO ] : RECV CurrentSteer raw_x10={raw:.1f} ui_deg={deg}")
+                self.current_steer_signal.emit(deg)
             except (TypeError, ValueError):
                 pass
 
@@ -415,9 +436,24 @@ class SocketIOClient(QObject):
             # Nucleo odometer publishes millimetres accumulated since the last
             # #odoreset. GUI widgets display metres.
             try:
-                self.current_distance_signal.emit(float(_unwrap_payload(data)) / 1000.0)
+                raw = float(_unwrap_payload(data))
+                metres = raw / 1000.0
+                print(f"[ GUI SocketIO ] : RECV CurrentDistance raw_mm={raw:.1f} ui_m={metres:.3f}")
+                self.current_distance_signal.emit(metres)
             except (TypeError, ValueError):
                 pass
+
+        @self._sio.on(ev.EVT_ACTUATOR_COMMAND_STATUS)
+        def _on_actuator_status(data):  # noqa: ANN001
+            payload = _coerce_object_payload(data)
+            print(f"[ GUI SocketIO ] : RECV ActuatorCommandStatus payload={payload!r}")
+            self.actuator_status_signal.emit(payload)
+
+        @self._sio.on(ev.EVT_IMU_DATA)
+        def _on_imu(data):  # noqa: ANN001
+            payload = _coerce_object_payload(data)
+            print(f"[ GUI SocketIO ] : RECV ImuData payload={payload!r}")
+            self.imu_data_signal.emit(payload)
 
         @self._sio.on(ev.EVT_STEERING_LIMITS)
         def _on_limits(data):  # noqa: ANN001

@@ -139,6 +139,19 @@ class threadRead(ThreadWithStop):
                         return
                 else:
                     self._read_empty_ticks += 1
+                    if self._read_empty_ticks % 25 == 0:
+                        probe_data = self._probe_idle_serial(serial_con)
+                        if probe_data:
+                            before_len = len(self.buffer)
+                            self.buffer += probe_data
+                            self._read_bytes_total += len(probe_data)
+                            self._read_empty_ticks = 0
+                            self._log_serial_read(
+                                probe_data,
+                                "probe",
+                                before_len,
+                                len(self.buffer),
+                            )
                     self._log_read_status(serial_con, reason="idle", waiting=waiting)
 
             while ";;" in self.buffer:
@@ -164,13 +177,14 @@ class threadRead(ThreadWithStop):
         threading.Timer(1, self.queue_sending).start()
 
     def send_queue(self, buff):
-        """This function select which type of message we receive from NUCLEO and send the data further."""
+        """Select which Nucleo message we received and forward it."""
 
+        buff = self._normalise_serial_frame(buff)
         if ':' not in buff:
             self._log_ignored_frame(buff, "missing ':' separator")
             return
 
-        raw_action, value = buff.split(":", 1)  # Limit to first colon only
+        raw_action, value = buff.split(":", 1)
         marker = raw_action[0] if raw_action[:1] in ("@", "#") else ""
         action = re.sub(r'[^a-zA-Z0-9]', '', raw_action)
         if not action:
@@ -190,26 +204,28 @@ class threadRead(ThreadWithStop):
             self.logger.info(buff)
 
         if action == "imu":
-            splittedValue = value.split(";")
-            if(len(buff)>20):
+            fields = self._payload_fields(value)
+            if len(fields) >= 6:
                 data = {
-                    "roll": splittedValue[0],
-                    "pitch": splittedValue[1],
-                    "yaw": splittedValue[2],
-                    "accelx": splittedValue[3],
-                    "accely": splittedValue[4],
-                    "accelz": splittedValue[5],
+                    "roll": fields[0],
+                    "pitch": fields[1],
+                    "yaw": fields[2],
+                    "accelx": fields[3],
+                    "accely": fields[4],
+                    "accelz": fields[5],
                 }
                 self._send_and_log(ImuData, self.imuDataSender, str(data), action, buff)
+            elif fields:
+                self._send_and_log(ImuAck, self.imuAckSender, fields[0], action, buff)
             else:
-                self._send_and_log(ImuAck, self.imuAckSender, splittedValue[0], action, buff)
+                self._log_ignored_frame(buff, "imu payload is empty", warning=True)
 
         elif action == "brake":
             self._send_and_log(CurrentSpeed, self.currentSpeedSender, 0.0, action, buff)
             self._send_and_log(CurrentSteer, self.currentSteerSender, 0.0, action, buff)
 
         elif action == "speed":
-            speed = value.split(",")[0]
+            speed = self._first_payload_field(value)
             if self.is_float(speed):
                 speed_value = float(speed)
                 self._send_and_log(CurrentSpeed, self.currentSpeedSender, speed_value, action, buff)
@@ -218,7 +234,7 @@ class threadRead(ThreadWithStop):
                 self._log_ignored_frame(buff, f"speed is not numeric: {speed!r}", warning=True)
 
         elif action == "steer":
-            steer = value.split(",")[0]
+            steer = self._first_payload_field(value)
             if self.is_float(steer):
                 steer_value = float(steer)
                 self._send_and_log(CurrentSteer, self.currentSteerSender, steer_value, action, buff)
@@ -227,7 +243,7 @@ class threadRead(ThreadWithStop):
                 self._log_ignored_frame(buff, f"steer is not numeric: {steer!r}", warning=True)
 
         elif action == "odo":
-            distance = value.split(";")[0]
+            distance = self._first_payload_field(value)
             if self.is_float(distance):
                 distance_mm = int(float(distance))
                 self._send_and_log(
@@ -238,13 +254,20 @@ class threadRead(ThreadWithStop):
                     buff,
                 )
                 self._log_feedback_value("odo_mm", distance_mm)
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mODO\033[0m"
+                    f" distance_mm={distance_mm} distance_m={distance_mm / 1000.0:.3f}"
+                )
             else:
                 self._log_ignored_frame(buff, f"odo is not numeric: {distance!r}", warning=True)
 
         elif action == "vcdCalib":
-            splittedValue = value.split(";")
-            speedPWM = splittedValue[0]
-            steerPWM = splittedValue[1]
+            fields = self._payload_fields(value)
+            if len(fields) < 2:
+                self._log_ignored_frame(buff, "vcdCalib payload has fewer than 2 fields", warning=True)
+                return
+            speedPWM = fields[0]
+            steerPWM = fields[1]
 
             if speedPWM == "0" and steerPWM == "0":
                 self._send_and_log(CalibRunDone, self.calibRunDoneSender, True, action, buff)
@@ -264,9 +287,12 @@ class threadRead(ThreadWithStop):
             self._send_and_log(AliveSignal, self.aliveSignalSender, True, action, buff)
 
         elif action == "steerLimits":
-            splittedValue = value.split(";")
-            lowerLimit = splittedValue[0]
-            upperLimit = splittedValue[1]
+            fields = self._payload_fields(value)
+            if len(fields) < 2:
+                self._log_ignored_frame(buff, "steerLimits payload has fewer than 2 fields", warning=True)
+                return
+            lowerLimit = fields[0]
+            upperLimit = fields[1]
             self._send_and_log(
                 SteeringLimits,
                 self.steeringLimitsSender,
@@ -276,20 +302,21 @@ class threadRead(ThreadWithStop):
             )
 
         elif action == "instant":
-            if self.check_valid_value(action, value):
+            current = self._first_payload_field(value)
+            if self.check_valid_value(action, current):
                 self._send_and_log(
                     InstantConsumption,
                     self.instantConsumptionSender,
-                    float(value),
+                    float(current),
                     action,
                     buff,
                 )
 
         elif action == "battery":
-            if self.check_valid_value(action, value):
-                percentage = (int(value)-7000)/14
+            voltage = self._first_payload_field(value)
+            if self.check_valid_value(action, voltage):
+                percentage = (int(float(voltage)) - 7000) / 14
                 percentage = max(0, min(100, round(percentage)))
-
                 self._send_and_log(BatteryLvl, self.batteryLvlSender, percentage, action, buff)
 
         elif action == "resourceMonitor":
@@ -323,7 +350,37 @@ class threadRead(ThreadWithStop):
 
         else:
             self._log_ignored_frame(buff, f"unknown action={action!r}", warning=True)
-            
+
+    def _normalise_serial_frame(self, buff):
+        """Trim CR/LF/NUL noise and keep the first real protocol marker."""
+        original = str(buff).replace("\x00", "").strip()
+        if not original:
+            return ""
+        marker_positions = [pos for pos in (original.find("@"), original.find("#")) if pos >= 0]
+        if not marker_positions:
+            return original
+        start = min(marker_positions)
+        if start > 0:
+            print(
+                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARN\033[0m"
+                f" threadRead trimming prefix={self._preview(original[:start])}"
+                f" frame={self._preview(original)}"
+            )
+        return original[start:].strip()
+
+    def _payload_fields(self, value):
+        """Split Nucleo payloads on ';' or ',' and drop CR/LF/empty fields."""
+        text = str(value).replace("\x00", "").strip()
+        return [
+            item.strip()
+            for item in re.split(r"[;,]", text)
+            if item.strip() != ""
+        ]
+
+    def _first_payload_field(self, value):
+        fields = self._payload_fields(value)
+        return fields[0] if fields else ""
+
     def check_valid_value(self, action, message):
         if message == "syntax error":
             print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Invalid \033[94m{action.upper()}\033[0m value (expected {self.expectedValues[action]})")
@@ -381,6 +438,28 @@ class threadRead(ThreadWithStop):
             f" threadRead read bytes={len(data)} requested={waiting}"
             f" buffer={before_len}->{after_len} chunk={self._preview(data)}"
         )
+
+    def _probe_idle_serial(self, serial_con):
+        """Try a one-byte nonblocking read when in_waiting stays at zero."""
+        old_timeout = None
+        try:
+            old_timeout = serial_con.timeout
+            serial_con.timeout = 0
+            raw = serial_con.read(1)
+            serial_con.timeout = old_timeout
+        except Exception as exc:
+            try:
+                serial_con.timeout = old_timeout
+            except Exception:
+                pass
+            print(
+                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARN\033[0m"
+                f" RX-PROBE failed ({exc})"
+            )
+            return ""
+        if not raw:
+            return ""
+        return raw.decode("ascii", errors="ignore")
 
     def _log_read_status(self, serial_con, reason, waiting=None):
         if not self._serial_debug_enabled:

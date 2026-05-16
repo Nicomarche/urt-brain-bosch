@@ -98,6 +98,7 @@ class threadWrite(ThreadWithStop):
         self._last_status_snapshot = None
         self._last_status_send_time = 0.0
         self._last_continuous_motion_send_monotonic = 0.0
+        self._last_forced_feedback_enable = 0.0
         self._auto_kl_run_in_sim = False
         # En ZMQ sim el bridge espera comandos refrescados con cierta
         # frecuencia; si dejamos de reenviar porque speed/steer quedaron
@@ -254,6 +255,7 @@ class threadWrite(ThreadWithStop):
                             self._publish_actuator_status(force=True)
                             return False, command_msg
                         self.logFile.write(command_msg)
+                        self._log_serial_tx(action, command_msg, written, serialCon)
                         if action == "kl":
                             print(
                                 f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
@@ -329,6 +331,43 @@ class threadWrite(ThreadWithStop):
         self.last_motion_raw_command = raw_command
         self.last_blocked_reason = blocked_reason
         self._publish_actuator_status(force=force)
+
+    def _log_serial_tx(self, action, command_msg, written, serial_con):
+        """Print every successful wire write so RX silence can be diagnosed."""
+        try:
+            waiting = serial_con.in_waiting
+        except Exception as exc:
+            waiting = f"err:{exc}"
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mTX\033[0m"
+            f" action={action!r} raw={self._preview(command_msg.strip())}"
+            f" bytes={written} device={getattr(self.process, 'serialDevice', None)!r}"
+            f" connected={getattr(self.process, 'serialConnected', None)}"
+            f" open={getattr(serial_con, 'is_open', None)} rx_waiting_after_write={waiting}"
+        )
+
+    def _force_feedback_streams(self, source):
+        """Make Nucleo feedback explicit after KL changes.
+
+        The current firmware fork should boot with hallspeed active, but sending
+        these toggles removes ambiguity when the dashboard shows RX-IDLE.
+        """
+        now = time.monotonic()
+        if now - self._last_forced_feedback_enable < 0.5:
+            return
+        self._last_forced_feedback_enable = now
+        commands = (
+            {"action": "hallspeed", "activate": 1},
+            {"action": "imu", "activate": 1},
+        )
+        for command in commands:
+            sent, raw_command = self.send_to_serial(command)
+            print(
+                f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mFEEDBACK-ENABLE\033[0m"
+                f" source={source} action={command['action']!r} sent={sent}"
+                f" raw={self._preview(raw_command.strip() if raw_command else raw_command)}"
+            )
+            time.sleep(0.05)
 
     def _handle_vcd_command(self, speed_x10, steer_x10):
         command = {
@@ -447,6 +486,10 @@ class threadWrite(ThreadWithStop):
                 value = 0 if str(value_str) == "False" else 1
                 command_name = toggle["command"]
                 command = {"action": command_name, "activate": value}
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mCONFIG-TX\033[0m"
+                    f" config={key} action={command_name!r} value={value}"
+                )
                 self.send_to_serial(command)
                 time.sleep(0.05)
 
@@ -517,6 +560,7 @@ class threadWrite(ThreadWithStop):
                     command = {"action": "kl", "mode": 30}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    self._force_feedback_streams("kl30")
                     if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
                         self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
                     else:
@@ -529,6 +573,7 @@ class threadWrite(ThreadWithStop):
                     command = {"action": "kl", "mode": 15}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    self._force_feedback_streams("kl15")
                     self._publish_actuator_status(force=True)
                 elif kl_value == "0":
                     self.running = False
