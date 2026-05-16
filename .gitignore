@@ -1,10 +1,19 @@
 docs/build/
 
-# Run logs (brain.jsonl etc.; large and machine-local)
+# Runtime logs and recordings (large and machine-local)
+*.log
+*.jsonl
+*.stdout
+*.stderr
+logs/
+**/logs/
 temp/logs/
+output_video*.avi
+temp/**/*.avi
 
 # Campaign / line-following dumps (runtime; can exceed GitHub's 100MB limit)
 temp/line_following_*_last_run.txt
+temp/**/*_last_run.txt
 
 # Legacy Angular build cache (do not commit)
 legacy/dashboard-frontend/.angular/
