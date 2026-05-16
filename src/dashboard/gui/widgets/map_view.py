@@ -1467,12 +1467,27 @@ class MapView(QWidget):
 
     def _on_gps_fix(self, payload) -> None:
         if not isinstance(payload, dict):
+            print(
+                f"[GPS-DBG] map_view._on_gps_fix: payload not dict "
+                f"(type={type(payload).__name__})",
+                flush=True,
+            )
             return
         xy = self._payload_xy(payload)
         if xy is None:
+            print(
+                f"[GPS-DBG] map_view._on_gps_fix: _payload_xy returned None "
+                f"(payload keys={list(payload.keys())})",
+                flush=True,
+            )
             return
         x_m, y_m = xy
         px, py = self._data.world_to_pixel(x_m, y_m)
+        print(
+            f"[GPS-DBG] map_view._on_gps_fix: world=({x_m:.4f}, {y_m:.4f}) m "
+            f"-> pixel=({px:.1f}, {py:.1f})",
+            flush=True,
+        )
         self._gps_dot.setPos(px, py)
         self._gps_dot.setVisible(True)
         self._ensure_scene_contains(px, py)

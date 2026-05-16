@@ -742,6 +742,11 @@ class threadLocSys(ThreadWithStop):
             "x": x * scale,
             "y": y * scale,
         }
+        print(
+            f"[GPS-DBG] _traffic_subscription_fix_from_message: RAW from server "
+            f"x={x} y={y} -> AFTER scale={scale} fix x={fix['x']:.6f} y={fix['y']:.6f}",
+            flush=True,
+        )
 
         yaw_rad = self._as_float(data.get("yaw_rad"))
         if yaw_rad is not None:

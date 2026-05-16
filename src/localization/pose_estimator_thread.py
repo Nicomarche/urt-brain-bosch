@@ -605,9 +605,22 @@ class threadPoseEstimator(threadTracking):
         old_x, old_y, _ = self._dr.get_state()
         pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
         if pose is None:
+            print(
+                f"[GPS-DBG] PoseEstimatorThread._apply_localisation_fix: "
+                f"localisation_to_world_pose returned None for payload "
+                f"world_x={payload.get('world_x')} world_y={payload.get('world_y')}",
+                flush=True,
+            )
             return False, None
 
         x, y, yaw = pose
+        print(
+            f"[GPS-DBG] PoseEstimatorThread._apply_localisation_fix: "
+            f"world_pose=({float(x):.3f}, {float(y):.3f}, {math.degrees(float(yaw)):+.1f}deg) "
+            f"applied to DR; prev=({old_x:.3f}, {old_y:.3f}) "
+            f"jump={math.hypot(float(x)-float(old_x), float(y)-float(old_y)):.3f} m",
+            flush=True,
+        )
         self._dr.reset(float(x), float(y), float(yaw))
         self._last_yaw_rad = float(yaw)
         self._yaw_ekf_p = _YAW_EKF_P_INIT
