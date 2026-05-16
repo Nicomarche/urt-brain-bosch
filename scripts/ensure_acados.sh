@@ -70,7 +70,38 @@ _has_solver() {
     else
         local lib_path="$PROJECT_ROOT/src/control/c_generated_code/libacados_ocp_solver_bfmc_bicycle.so"
     fi
-    [[ -f "$lib_path" ]]
+    [[ -f "$lib_path" ]] || return 1
+
+    local expected_solver_dir="$PROJECT_ROOT/src/control/c_generated_code"
+    local expected_lib_path="$ACADOS_INSTALL_DIR/lib"
+    local expected_shared_ext=".$LIB_EXT"
+    "$PYTHON_BIN" - "$SOLVER_JSON" "$expected_solver_dir" "$expected_lib_path" "$expected_shared_ext" <<'PY'
+import json
+import os
+import sys
+
+json_file, expected_solver_dir, expected_lib_path, expected_shared_ext = sys.argv[1:5]
+
+try:
+    with open(json_file, "r", encoding="utf-8") as fh:
+        code_gen_opts = json.load(fh).get("code_gen_opts", {})
+except Exception:
+    sys.exit(1)
+
+
+def real(path: object) -> str:
+    return os.path.realpath(os.path.expanduser(str(path or "")))
+
+
+checks = [
+    real(code_gen_opts.get("code_export_directory")) == real(expected_solver_dir),
+    real(code_gen_opts.get("json_file")) == real(json_file),
+    real(code_gen_opts.get("acados_lib_path")) == real(expected_lib_path),
+    str(code_gen_opts.get("shared_lib_ext") or "") == expected_shared_ext,
+]
+
+sys.exit(0 if all(checks) else 1)
+PY
 }
 _solver_loads() {
     cd "$PROJECT_ROOT"
@@ -187,7 +218,7 @@ fi
 
 # ── 5. Generar solver si falta ────────────────────────────────────────────────
 if ! _has_solver; then
-    log "Paso 4b/4 — generando solver OCP (bicicleta BFMC, N=30)…"
+    log "Paso 4b/4 — generando solver OCP (bicicleta BFMC)…"
     cd "$PROJECT_ROOT"
     ACADOS_SOURCE_DIR="$ACADOS_INSTALL_DIR" \
     DYLD_LIBRARY_PATH="$ACADOS_INSTALL_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \

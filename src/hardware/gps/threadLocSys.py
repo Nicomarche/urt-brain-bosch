@@ -37,6 +37,9 @@ Variante locIDsub:
 1. Conectar al TrafficCommunicationServer TCP:5000
 2. Enviar {"reqORinfo": "info", "type": "locIDsub", "locID": <ID>, "freq": 0.25}
 3. Recibir {"type": "location", "x": m, "y": m, "z": m}
+   Ese stream usa el frame de la pista: (0,0) abajo-izquierda,
+   x+ hacia la derecha, y+ hacia arriba. Antes de emitir Localisation se
+   transforma al frame world del Lanelet/OSM.
 
 En simulación (MOTOR_OUTPUT == "zmq"):
 por defecto se conecta directo al LoCSys expuesto por `sim_bridge`
@@ -53,8 +56,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import socket
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from src.templates.threadwithstop import ThreadWithStop
@@ -82,6 +87,13 @@ _TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 _TRAFFIC_COMM_LOCSYS_MODE = "auto"
 _TRAFFIC_COMM_LOCSYS_SUB_FREQ = 0.25
 _TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 1.0
+_TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME = "track_bottom_left"
+_TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X = "auto"
+_TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y = "auto"
+_TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M = "auto"
+_TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M = "auto"
+_TRACKING_LANELET2_OSM = ""
+_TRACKING_META_JSON = ""
 
 try:
     from config import (
@@ -104,6 +116,13 @@ try:
         TRAFFIC_COMM_LOCSYS_MODE as _TRAFFIC_COMM_LOCSYS_MODE,
         TRAFFIC_COMM_LOCSYS_SUB_FREQ as _TRAFFIC_COMM_LOCSYS_SUB_FREQ,
         TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE as _TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE,
+        TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME as _TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME,
+        TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X,
+        TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y,
+        TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M,
+        TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M,
+        TRACKING_LANELET2_OSM as _TRACKING_LANELET2_OSM,
+        TRACKING_META_JSON as _TRACKING_META_JSON,
     )
 except ImportError:
     pass
@@ -114,6 +133,7 @@ _SOCKET_TIMEOUT_S = 1.5
 _JSON_DECODER = json.JSONDecoder()
 _AUTO_HOST_TOKENS = {"", "auto", "autodiscover", "autodiscovery", "discover"}
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
+_TRACK_WORLD_BOUNDS_CACHE: dict[str, float] | None = None
 
 
 class _TrafficRequestNotRecognised(RuntimeError):
@@ -156,6 +176,98 @@ def _traffic_locsys_mode() -> str:
         "subscription": "subscribe",
     }
     return aliases.get(mode, mode)
+
+
+def _repo_path(path_like: str | os.PathLike[str]) -> Path:
+    path = Path(path_like).expanduser()
+    return path if path.is_absolute() else _WORKSPACE_ROOT / path
+
+
+def _optional_float(value) -> float | None:
+    try:
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"", "auto", "none", "null"}:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bounds_from_track_meta() -> dict[str, float] | None:
+    if not _TRACKING_META_JSON:
+        return None
+    meta_path = _repo_path(str(_TRACKING_META_JSON))
+    if not meta_path.exists():
+        return None
+    try:
+        with meta_path.open("r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(meta, dict):
+        return None
+    bounds = meta.get("world_bounds")
+    if isinstance(bounds, dict):
+        try:
+            x_min = float(bounds["x_min"])
+            x_max = float(bounds["x_max"])
+            y_min = float(bounds["y_min"])
+            y_max = float(bounds["y_max"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            return {"x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max}
+
+    try:
+        width_m = float(meta.get("imgW")) * float(meta.get("metersPerPixel"))
+        height_m = float(meta.get("imgH")) * float(meta.get("metersPerPixel"))
+    except (TypeError, ValueError):
+        return None
+    if width_m <= 0.0 or height_m <= 0.0:
+        return None
+    return {"x_min": 0.0, "x_max": width_m, "y_min": 0.0, "y_max": height_m}
+
+
+def _bounds_from_lanelet_osm() -> dict[str, float] | None:
+    if not _TRACKING_LANELET2_OSM:
+        return None
+    osm_path = _repo_path(str(_TRACKING_LANELET2_OSM))
+    if not osm_path.exists():
+        return None
+    xs: list[float] = []
+    ys: list[float] = []
+    try:
+        root = ET.parse(osm_path).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    for node in root.findall("node"):
+        tags = {
+            str(tag.get("k") or ""): str(tag.get("v") or "")
+            for tag in node.findall("tag")
+        }
+        try:
+            x = float(tags["local_x"])
+            y = float(tags["local_y"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        xs.append(x)
+        ys.append(y)
+    if not xs or not ys:
+        return None
+    return {"x_min": min(xs), "x_max": max(xs), "y_min": min(ys), "y_max": max(ys)}
+
+
+def _tracking_world_bounds() -> dict[str, float] | None:
+    global _TRACK_WORLD_BOUNDS_CACHE
+    if _TRACK_WORLD_BOUNDS_CACHE is not None:
+        return dict(_TRACK_WORLD_BOUNDS_CACHE)
+    bounds = _bounds_from_track_meta() or _bounds_from_lanelet_osm()
+    if bounds is None:
+        return None
+    _TRACK_WORLD_BOUNDS_CACHE = dict(bounds)
+    return dict(bounds)
 
 
 def _traffic_public_key_candidates() -> list[Path]:
@@ -547,6 +659,129 @@ class threadLocSys(ThreadWithStop):
         except (TypeError, ValueError):
             return None
 
+    def _traffic_subscription_xy_to_world(self, x: float, y: float) -> tuple[float, float, dict[str, object]]:
+        """Convert locIDsub coordinates into the Lanelet/OSM world frame.
+
+        The BFMC TrafficCommunicationServer reports its `location` stream in a
+        track image frame: (0, 0) at the lower-left corner, +x to the right and
+        +y upward. The rest of the brain consumes Lanelet/OSM world coordinates.
+        """
+        coord_scale = float(_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE)
+        raw_x_m = float(x) * coord_scale
+        raw_y_m = float(y) * coord_scale
+        frame = str(_TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME or "world").strip().lower()
+        if frame in {"world", "map", "osm", "lanelet", "lanelet_world"}:
+            return raw_x_m, raw_y_m, {
+                "coord_scale": coord_scale,
+                "coord_frame": frame,
+                "frame_scale_x": 1.0,
+                "frame_scale_y": 1.0,
+                "origin_world_x": 0.0,
+                "origin_world_y": 0.0,
+                "frame_width_m": None,
+                "frame_height_m": None,
+                "world_bounds_x_min": None,
+                "world_bounds_x_max": None,
+                "world_bounds_y_min": None,
+                "world_bounds_y_max": None,
+                "frame_in_bounds": True,
+            }
+
+        bounds = _tracking_world_bounds() or {}
+        x_min = _optional_float(_TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X)
+        y_min = _optional_float(_TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y)
+        if x_min is None:
+            x_min = float(bounds.get("x_min", 0.0) or 0.0)
+        if y_min is None:
+            y_min = float(bounds.get("y_min", 0.0) or 0.0)
+
+        frame_scale_x = 1.0
+        frame_scale_y = 1.0
+        map_width_m = _optional_float(_TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M)
+        map_height_m = _optional_float(_TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M)
+        world_width = None
+        world_height = None
+        try:
+            world_width = float(bounds["x_max"]) - float(bounds["x_min"])
+        except (KeyError, TypeError, ValueError):
+            world_width = None
+        try:
+            world_height = float(bounds["y_max"]) - float(bounds["y_min"])
+        except (KeyError, TypeError, ValueError):
+            world_height = None
+
+        if map_width_m is None:
+            map_width_m = world_width
+        if map_height_m is None:
+            map_height_m = world_height
+        if (
+            map_width_m is not None
+            and map_width_m > 1e-9
+            and world_width is not None
+            and world_width > 1e-9
+        ):
+            frame_scale_x = float(world_width) / float(map_width_m)
+        if (
+            map_height_m is not None
+            and map_height_m > 1e-9
+            and world_height is not None
+            and world_height > 1e-9
+        ):
+            frame_scale_y = float(world_height) / float(map_height_m)
+
+        if frame not in {"track_bottom_left", "bottom_left", "traffic", "traffic_map"}:
+            print(
+                f"[GPS-DBG] _traffic_subscription_xy_to_world: unknown "
+                f"coord frame {frame!r}; using track_bottom_left semantics",
+                flush=True,
+            )
+        world_x = float(x_min) + raw_x_m * frame_scale_x
+        world_y = float(y_min) + raw_y_m * frame_scale_y
+        in_bounds = True
+        if map_width_m is not None and map_width_m > 1e-9:
+            in_bounds = in_bounds and (-0.05 <= raw_x_m <= float(map_width_m) + 0.05)
+        if map_height_m is not None and map_height_m > 1e-9:
+            in_bounds = in_bounds and (-0.05 <= raw_y_m <= float(map_height_m) + 0.05)
+        if not in_bounds:
+            print(
+                f"[GPS-DBG] _traffic_subscription_xy_to_world: WARN raw traffic "
+                f"coord ({raw_x_m:.3f}, {raw_y_m:.3f}) m outside configured "
+                f"frame {float(map_width_m or 0.0):.3f}x"
+                f"{float(map_height_m or 0.0):.3f} m",
+                flush=True,
+            )
+        return world_x, world_y, {
+            "coord_scale": coord_scale,
+            "coord_frame": frame or "track_bottom_left",
+            "frame_scale_x": frame_scale_x,
+            "frame_scale_y": frame_scale_y,
+            "origin_world_x": float(x_min),
+            "origin_world_y": float(y_min),
+            "frame_width_m": float(map_width_m) if map_width_m is not None else None,
+            "frame_height_m": float(map_height_m) if map_height_m is not None else None,
+            "world_bounds_x_min": float(bounds["x_min"]) if "x_min" in bounds else None,
+            "world_bounds_x_max": float(bounds["x_max"]) if "x_max" in bounds else None,
+            "world_bounds_y_min": float(bounds["y_min"]) if "y_min" in bounds else None,
+            "world_bounds_y_max": float(bounds["y_max"]) if "y_max" in bounds else None,
+            "frame_in_bounds": bool(in_bounds),
+        }
+
+    def _world_xy_to_traffic_subscription_frame(self, x: float, y: float) -> tuple[float, float]:
+        """Inverse of _traffic_subscription_xy_to_world for devicePos echo."""
+        frame = str(_TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME or "world").strip().lower()
+        if frame in {"world", "map", "osm", "lanelet", "lanelet_world"}:
+            return float(x), float(y)
+
+        _world_x0, _world_y0, transform_meta = self._traffic_subscription_xy_to_world(0.0, 0.0)
+        coord_scale = max(1e-12, float(transform_meta["coord_scale"]))
+        frame_scale_x = max(1e-12, float(transform_meta["frame_scale_x"]))
+        frame_scale_y = max(1e-12, float(transform_meta["frame_scale_y"]))
+        origin_x = float(transform_meta["origin_world_x"])
+        origin_y = float(transform_meta["origin_world_y"])
+        traffic_x = (float(x) - origin_x) / frame_scale_x / coord_scale
+        traffic_y = (float(y) - origin_y) / frame_scale_y / coord_scale
+        return traffic_x, traffic_y
+
     def _receive_traffic_inputs(self) -> None:
         if self._traffic_location_sub is not None:
             location = self._traffic_location_sub.receive()
@@ -629,8 +864,10 @@ class threadLocSys(ThreadWithStop):
         if speed is None:
             speed = 0.0
 
+        traffic_x, traffic_y = self._world_xy_to_traffic_subscription_frame(x, y)
+
         messages = [
-            {"reqORinfo": "info", "type": "devicePos", "value1": x, "value2": y},
+            {"reqORinfo": "info", "type": "devicePos", "value1": traffic_x, "value2": traffic_y},
             {"reqORinfo": "info", "type": "deviceRot", "value1": yaw},
             {"reqORinfo": "info", "type": "deviceSpeed", "value1": speed},
         ]
@@ -644,7 +881,9 @@ class threadLocSys(ThreadWithStop):
             self._traffic_last_send_t = now
             print(
                 f"[GPS-DBG] _send_ego_data_to_traffic_server: SEND ego "
-                f"x={x:.3f} y={y:.3f} yaw_rad={yaw:.3f} speed_mps={speed:.3f}",
+                f"world=({x:.3f},{y:.3f}) "
+                f"traffic=({traffic_x:.3f},{traffic_y:.3f}) "
+                f"yaw_rad={yaw:.3f} speed_mps={speed:.3f}",
                 flush=True,
             )
         except OSError as exc:
@@ -686,6 +925,26 @@ class threadLocSys(ThreadWithStop):
                 payload["yaw_deg"] = float(data["yaw_deg"])
         except (TypeError, ValueError):
             pass
+        for key in (
+            "gps_raw_traffic_x",
+            "gps_raw_traffic_y",
+            "gps_raw_traffic_z",
+            "gps_coord_frame",
+            "gps_coord_scale",
+            "gps_frame_scale_x",
+            "gps_frame_scale_y",
+            "gps_origin_world_x",
+            "gps_origin_world_y",
+            "gps_frame_width_m",
+            "gps_frame_height_m",
+            "gps_world_bounds_x_min",
+            "gps_world_bounds_x_max",
+            "gps_world_bounds_y_min",
+            "gps_world_bounds_y_max",
+            "gps_frame_in_bounds",
+        ):
+            if key in data:
+                payload[key] = data[key]
         self.localisationSender.send(payload)
         print(
             f"[GPS-DBG] _emit_fix: SENT Localisation IPC "
@@ -737,14 +996,41 @@ class threadLocSys(ThreadWithStop):
         if x is None or y is None:
             return None
 
-        scale = float(_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE)
+        world_x, world_y, transform_meta = self._traffic_subscription_xy_to_world(x, y)
         fix = {
-            "x": x * scale,
-            "y": y * scale,
+            "x": world_x,
+            "y": world_y,
+            "gps_raw_traffic_x": x,
+            "gps_raw_traffic_y": y,
+            "gps_coord_frame": transform_meta["coord_frame"],
+            "gps_coord_scale": transform_meta["coord_scale"],
+            "gps_frame_scale_x": transform_meta["frame_scale_x"],
+            "gps_frame_scale_y": transform_meta["frame_scale_y"],
+            "gps_origin_world_x": transform_meta["origin_world_x"],
+            "gps_origin_world_y": transform_meta["origin_world_y"],
+            "gps_frame_width_m": transform_meta["frame_width_m"],
+            "gps_frame_height_m": transform_meta["frame_height_m"],
+            "gps_world_bounds_x_min": transform_meta["world_bounds_x_min"],
+            "gps_world_bounds_x_max": transform_meta["world_bounds_x_max"],
+            "gps_world_bounds_y_min": transform_meta["world_bounds_y_min"],
+            "gps_world_bounds_y_max": transform_meta["world_bounds_y_max"],
+            "gps_frame_in_bounds": transform_meta["frame_in_bounds"],
         }
+        z = self._as_float(data.get("z"))
+        if z is not None:
+            fix["gps_raw_traffic_z"] = z
         print(
             f"[GPS-DBG] _traffic_subscription_fix_from_message: RAW from server "
-            f"x={x} y={y} -> AFTER scale={scale} fix x={fix['x']:.6f} y={fix['y']:.6f}",
+            f"x={x} y={y} -> frame={transform_meta['coord_frame']} "
+            f"origin=({float(transform_meta['origin_world_x']):.3f},"
+            f"{float(transform_meta['origin_world_y']):.3f}) "
+            f"coord_scale={float(transform_meta['coord_scale']):.6f} "
+            f"frame_scale=({float(transform_meta['frame_scale_x']):.6f},"
+            f"{float(transform_meta['frame_scale_y']):.6f}) "
+            f"frame_size=({float(transform_meta['frame_width_m'] or 0.0):.3f},"
+            f"{float(transform_meta['frame_height_m'] or 0.0):.3f}) "
+            f"in_bounds={bool(transform_meta['frame_in_bounds'])} "
+            f"world x={fix['x']:.6f} y={fix['y']:.6f}",
             flush=True,
         )
 

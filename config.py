@@ -356,8 +356,11 @@ TRACKING_META_JSON = _os.path.join(TRACK_MAP_DIR, "track_meta.json")
 # truth); falls back to PNG/JPG with the same basename if cairosvg is not
 # available at runtime. See src/routing/visualizer.py:_load_background.
 TRACKING_BG_SVG    = _os.path.join(TRACK_MAP_DIR, "track.svg")
+_TRACKING_BG_PNG = _os.path.join(TRACK_MAP_DIR, "track.png")
+_TRACKING_BG_JPG = _os.path.join(TRACK_MAP_DIR, "track.jpg")
 TRACKING_BG_RASTER = _os.path.join(
-    TRACK_MAP_DIR, "track.png" if _SIM_MODE else "track.jpg"
+    TRACK_MAP_DIR,
+    "track.png" if _SIM_MODE or _os.path.exists(_TRACKING_BG_PNG) else "track.jpg",
 )
 
 # Spline interpolation step (metres).  Smaller → denser waypoints, more CPU.
@@ -528,8 +531,20 @@ LOCSYS_DEVICE_ID     = 10
 TRAFFIC_COMM_LOCSYS_MODE = "auto"
 TRAFFIC_COMM_LOCSYS_SUB_FREQ = 0.25
 # El stream locIDsub del TrafficCommunicationServer llega en metros.
-# Mantener 1.0 para publicar world_x/world_y en el mismo frame del mapa.
+# El frame del server usa origen abajo-izquierda, x+ hacia la derecha e y+
+# hacia arriba. El GPS thread lo transforma al frame world del Lanelet/OSM.
 TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 1.0
+TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME = "track_bottom_left"
+# "auto" usa el lower-left de TRACKING_LANELET2_OSM/track_meta como origen
+# world correspondiente al (0,0) del TrafficCommunicationServer.
+TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X = "auto"
+TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y = "auto"
+# Si el server usa una extension distinta a la del OSM, completar estos
+# valores para normalizar: world_width / server_width y world_height / server_height.
+# "auto" usa el ancho/alto de track_meta.world_bounds, que coincide con los
+# ejes amarillos de la pista.
+TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M = "auto"
+TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M = "auto"
 
 SIM_LOCSYS_HOST      = "localhost"
 SIM_LOCSYS_PORT      = 4691
