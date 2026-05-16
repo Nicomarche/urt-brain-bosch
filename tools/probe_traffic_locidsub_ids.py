@@ -312,8 +312,8 @@ def main() -> int:
     parser.add_argument(
         "--coord-scale",
         type=float,
-        default=float(_config_value("TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE", 0.001)),
-        help="Scale for displayed coordinates. BFMC locIDsub is usually millimeters.",
+        default=float(_config_value("TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE", 1.0)),
+        help="Scale for displayed coordinates. Default expects locIDsub meters.",
     )
     args = parser.parse_args()
 

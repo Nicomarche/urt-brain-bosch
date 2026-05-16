@@ -36,7 +36,7 @@ Protocolo de competencia (ECC-BFMC Computer), variante locsysDevice:
 Variante locIDsub:
 1. Conectar al TrafficCommunicationServer TCP:5000
 2. Enviar {"reqORinfo": "info", "type": "locIDsub", "locID": <ID>, "freq": 0.25}
-3. Recibir {"type": "location", "x": mm, "y": mm, "z": mm}
+3. Recibir {"type": "location", "x": m, "y": m, "z": m}
 
 En simulación (MOTOR_OUTPUT == "zmq"):
 por defecto se conecta directo al LoCSys expuesto por `sim_bridge`
@@ -81,7 +81,7 @@ _TRAFFIC_COMM_SEND_EGO_DATA = True
 _TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 _TRAFFIC_COMM_LOCSYS_MODE = "auto"
 _TRAFFIC_COMM_LOCSYS_SUB_FREQ = 0.25
-_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 0.001
+_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE = 1.0
 
 try:
     from config import (
