@@ -19,7 +19,7 @@ from src.perception.lidar.processing import (
     signed_angle_rad,
     transform_obstacles_to_world,
 )
-from src.perception.lidar.reader import LidarReader
+from src.perception.lidar.reader import LidarPortNotConfigured, LidarReader
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
 
@@ -81,6 +81,14 @@ class threadLidar(ThreadWithStop):
                 self._publish_status("error", f"unknown backend {self._backend!r}")
                 time.sleep(0.2)
                 return
+        except LidarPortNotConfigured as exc:
+            # Configuration miss, not a runtime fault. Stay silent in the log
+            # (no stack trace) and back off hard: re-trying every 100 ms would
+            # spam the status bus while nothing on the system can fix it.
+            self._last_detail = str(exc)
+            self._publish_status("no_port_configured", str(exc))
+            time.sleep(5.0)
+            return
         except Exception as exc:
             self._last_detail = str(exc)
             self._publish_status("error", str(exc))

@@ -664,9 +664,11 @@ BEHAVIOR_THREAD_PAUSE_S = 0.05
 # ===================== 2D LIDAR =====================
 # Native 2D LiDAR input. Hardware reads LD19/STL-19P over serial; sim/mac reads
 # LaserScan snapshots from Gazebo through sim_bridge.py over ZMQ.
-# En hardware queda opt-in por defecto: si no se fija el puerto, el autodetect
-# puede abrir el mismo /dev/ttyUSB* que usa el Nucleo y producir errores de
-# "device disconnected or multiple access". Activar con:
+# En hardware queda opt-in por defecto. El reader YA NO autodetecta el puerto:
+# antes globbeaba /dev/ttyACM* y se quedaba con los bytes que la Nucleo le
+# mandaba al serial handler, dejando al brain ciego a la telemetría. Sin
+# URT_LIDAR_SERIAL_PORT el thread publica `no_port_configured` y no abre nada.
+# Activar con:
 #   URT_LIDAR_ENABLED=1 URT_LIDAR_SERIAL_PORT=/dev/ttyUSB0 ./run.sh
 LIDAR_ENABLED = _os.environ.get("URT_LIDAR_ENABLED", "1" if _SIM_MODE else "0") == "1"
 LIDAR_BACKEND = _os.environ.get(

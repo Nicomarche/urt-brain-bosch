@@ -142,6 +142,13 @@ else
     # Jetson / Linux — full CUDA + Tegra runtime paths.
     export URT_SIM_MODE="${URT_SIM_MODE:-0}"
     export URT_SERIAL_PORT="${URT_SERIAL_PORT:-/dev/serial/by-id/usb-STMicroelectronics_STM32_STLink_066DFF495177514867205427-if02}"
+    # LiDAR (LD19/STL-19P): must be on a DIFFERENT device than the Nucleo
+    # above — sharing a tty makes both readers fight for bytes and the brain
+    # ends up blind to telemetry. Set the env explicitly; the reader refuses
+    # to autodetect. Override URT_LIDAR_ENABLED=0 to skip the LiDAR subsystem
+    # (threadLidar will just publish no_port_configured).
+    export URT_LIDAR_ENABLED="${URT_LIDAR_ENABLED:-1}"
+    export URT_LIDAR_SERIAL_PORT="${URT_LIDAR_SERIAL_PORT:-/dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0}"
     export CUDA_HOME=/usr/local/cuda
     export PATH="/usr/local/cuda/bin:/home/urt/.local/bin:$PATH"
     export LD_LIBRARY_PATH="/home/urt/.local/lib/cusparselt:/usr/local/cuda/lib64:/usr/lib/aarch64-linux-gnu/tegra:${LD_LIBRARY_PATH}"

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import glob
 import time
-from typing import Iterable
 
 from src.perception.lidar.protocol import (
     LD19_HEADER,
@@ -13,12 +11,12 @@ from src.perception.lidar.protocol import (
 )
 
 
-DEFAULT_PORT_PATTERNS = (
-    "/dev/ttyUSB*",
-    "/dev/ttyACM*",
-    "/dev/tty.wchusbserial*",
-    "/dev/cu.wchusbserial*",
-)
+# Sentinel used by callers to detect "no port configured" without catching
+# generic RuntimeError. The reader refuses to autodetect: an unset port used
+# to silently glob /dev/ttyACM* and steal the Nucleo's bytes from the serial
+# handler, leaving the brain blind to telemetry.
+class LidarPortNotConfigured(RuntimeError):
+    pass
 
 
 class LidarReader:
@@ -30,9 +28,8 @@ class LidarReader:
         port: str | None = None,
         baudrate: int = 230400,
         timeout_s: float = 0.5,
-        port_patterns: Iterable[str] = DEFAULT_PORT_PATTERNS,
     ) -> None:
-        self.port = port or autodetect_port(port_patterns)
+        self.port = port or None
         self.baudrate = int(baudrate)
         self.timeout_s = float(timeout_s)
         self.crc_errors = 0
@@ -43,7 +40,10 @@ class LidarReader:
         if self._ser is not None:
             return
         if not self.port:
-            raise RuntimeError("no LiDAR serial port found")
+            raise LidarPortNotConfigured(
+                "LIDAR_SERIAL_PORT not set; export URT_LIDAR_SERIAL_PORT=/dev/ttyUSBn "
+                "(or set URT_LIDAR_ENABLED=0 if no LiDAR is attached)"
+            )
         try:
             import serial
         except ImportError as exc:
@@ -93,11 +93,3 @@ class LidarReader:
                 continue
             return parsed
         return None
-
-
-def autodetect_port(patterns: Iterable[str] = DEFAULT_PORT_PATTERNS) -> str | None:
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern))
-        if matches:
-            return matches[0]
-    return None
