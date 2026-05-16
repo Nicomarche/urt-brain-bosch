@@ -618,8 +618,8 @@ void bfmc_bicycle_acados_setup_nlp_in(bfmc_bicycle_solver_capsule* capsule, cons
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
-    lbu[0] = -0.5;
-    ubu[0] = 0.5;
+    lbu[0] = -0.1;
+    ubu[0] = 0.1;
     lbu[1] = -0.4363323129985824;
     ubu[1] = 0.4363323129985824;
 
