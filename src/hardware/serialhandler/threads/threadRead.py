@@ -122,10 +122,17 @@ class threadRead(ThreadWithStop):
                     self._log_read_status(serial_con, reason="not_connected")
                     return
 
+                # Patrón de master: leer EXACTAMENTE in_waiting bytes solo si hay.
+                # Con timeout=0.1 (no O_NONBLOCK) este chequeo es confiable en el
+                # CDC ACM de la Jetson. Pedir más bytes que in_waiting bloquearía
+                # hasta 100 ms y traba threadWrite (compite por serialLock).
                 waiting = serial_con.in_waiting
-                read_size = waiting if waiting > 0 else 512
+                if waiting <= 0:
+                    self._read_empty_ticks += 1
+                    self._log_read_status(serial_con, reason="idle", waiting=waiting)
+                    return
                 try:
-                    data = serial_con.read(read_size).decode("ascii", errors="ignore")
+                    data = serial_con.read(waiting).decode("ascii", errors="ignore")
                 except Exception as e:
                     if self._should_send_error():
                         self.serialConnectionStateSender.send(False)
@@ -137,10 +144,7 @@ class threadRead(ThreadWithStop):
                     self.buffer += data
                     self._read_bytes_total += len(data)
                     self._read_empty_ticks = 0
-                    self._log_serial_read(data, read_size, before_len, len(self.buffer))
-                else:
-                    self._read_empty_ticks += 1
-                    self._log_read_status(serial_con, reason="idle", waiting=waiting)
+                    self._log_serial_read(data, waiting, before_len, len(self.buffer))
 
             while ";;" in self.buffer:
                 msg, self.buffer = self.buffer.split(";;", 1)

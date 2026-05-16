@@ -184,7 +184,12 @@ class processSerialHandler(WorkerProcess):
                         self._last_port_scan_log = now
                     return
 
-                self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0)
+                # Mantener `timeout=0.1` como en master. Un fork puso `timeout=0`
+                # en algún momento y eso rompe la RX en el CDC ACM de la Jetson:
+                # con O_NONBLOCK la cola de RX nunca entrega bytes (in_waiting=0
+                # eterno) aunque la nucleo esté transmitiendo. Con 0.1 s pyserial
+                # no setea O_NONBLOCK y el driver funciona como se espera.
+                self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0.1)
                 self.serialCon.reset_input_buffer()
                 self.serialCon.reset_output_buffer()
                 self.serialConnected = True
