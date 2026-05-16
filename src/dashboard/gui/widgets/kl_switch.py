@@ -69,9 +69,9 @@ class KlSwitch(QWidget):
         self._buttons[ev.KL_OFF].setChecked(True)
 
         self._client.enable_button_signal.connect(self._on_enable_button)
-        # Send KL=0 once on startup so the backend's enable-on-Klem-ack code
-        # path runs and emits EnableButton back. Mirrors what the Angular
-        # kl-switch does in its ngOnInit.
+        # Never emit a KL value automatically on reconnect. A silent Klem=0
+        # can leave the UI believing KL=30 while the firmware is actually off.
+        # The backend emits EnableButton on connect and once per second.
         self._client.connection_status_changed.connect(self._on_connection_status)
 
     # ------------------------------------------------------------------
@@ -91,9 +91,8 @@ class KlSwitch(QWidget):
             # Bounce back: re-check the current button.
             self._buttons[self._current].setChecked(True)
             return
-        self._current = value
+        self._set_current(value)
         self._client.emit_message(ev.CMD_KLEM, value)
-        self.kl_changed.emit(value)
 
     def _on_enable_button(self, enabled: bool) -> None:
         self._enabled_by_backend = bool(enabled)
@@ -102,10 +101,17 @@ class KlSwitch(QWidget):
         self._buttons[ev.KL_RUN].setEnabled(self._enabled_by_backend)
 
     def _on_connection_status(self, status: str) -> None:
-        if status == "connected":
-            # Match Angular: send Klem=0 right after connect to bootstrap the
-            # backend's EnableButton emission.
-            self._client.emit_message(ev.CMD_KLEM, ev.KL_OFF)
+        if status in {"disconnected", "error"}:
+            self._enabled_by_backend = False
+            self._set_current(ev.KL_OFF)
+            self._on_enable_button(False)
+
+    def _set_current(self, value: str) -> None:
+        if value not in self._buttons:
+            return
+        self._current = value
+        self._buttons[value].setChecked(True)
+        self.kl_changed.emit(value)
 
     # ------------------------------------------------------------------
     @property

@@ -431,6 +431,23 @@ class threadWrite(ThreadWithStop):
             return 0
         
     # ===================================== RUN ==========================================
+    def _block_motion_command(self, command_type, speed=None, steer=None, reason=None):
+        reason = reason or ("klem_off" if int(self.currentKlemMode) == 0 else "klem_not_30")
+        self.last_blocked_reason = reason
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;91mBLOCK\033[0m "
+            f"{command_type} speed={speed} steer={steer} "
+            f"(KL={self.currentKlemMode}, engineEnabled={self.engineEnabled}, reason={reason})"
+        )
+        self._record_motion_command(
+            command_type,
+            None,
+            speed_x10=speed,
+            steer_x10=steer,
+            blocked_reason=reason,
+            force=True,
+        )
+
     def thread_work(self):
         """In this function we check if we got the enable engine signal. After we got it we will start getting messages from raspberry PI. It will transform them into NUCLEO commands and send them."""
         try:
@@ -514,6 +531,37 @@ class threadWrite(ThreadWithStop):
             if simRelocalizeRecv is not None and self.motor_output == "zmq":
                 self.send_to_serial({"action": "set_pose", **simRelocalizeRecv})
 
+            if not self.running:
+                brakeRecv = self.brakeSubscriber.receive()
+                speedRecv = self.speedMotorSubscriber.receive()
+                steerRecv = self.steerMotorSubscriber.receive()
+                controlRecv = self.controlSubscriber.receive()
+
+                if speedRecv is not None:
+                    self._block_motion_command(
+                        "speed_steer",
+                        speed=int(float(speedRecv)),
+                        steer=self.last_steer_cmd,
+                    )
+                if steerRecv is not None:
+                    self._block_motion_command(
+                        "speed_steer",
+                        speed=self.last_speed_cmd,
+                        steer=int(float(steerRecv)),
+                    )
+                if brakeRecv is not None:
+                    self._block_motion_command(
+                        "brake",
+                        speed=0,
+                        steer=int(float(brakeRecv)),
+                    )
+                if controlRecv is not None:
+                    self._block_motion_command(
+                        "vcd",
+                        speed=int(controlRecv.get("Speed", 0)),
+                        steer=int(controlRecv.get("Steer", 0)),
+                    )
+
             if self.running:
                 brakeRecv = self.brakeSubscriber.receive()
                 speedRecv = self.speedMotorSubscriber.receive()
@@ -555,14 +603,10 @@ class threadWrite(ThreadWithStop):
                     if self.engineEnabled:
                         self._handle_brake_command(int(float(brakeRecv)))
                     else:
-                        self.last_blocked_reason = "klem_not_30"
-                        self._record_motion_command(
+                        self._block_motion_command(
                             "brake",
-                            None,
-                            speed_x10=None,
-                            steer_x10=int(float(brakeRecv)),
-                            blocked_reason=self.last_blocked_reason,
-                            force=True,
+                            speed=0,
+                            steer=int(float(brakeRecv)),
                         )
 
                 speed_or_steer_updated = speedRecv is not None or steerRecv is not None
@@ -579,14 +623,10 @@ class threadWrite(ThreadWithStop):
                         steer_to_send = self.last_steer_cmd if self.last_steer_cmd is not None else 0
                         self._handle_continuous_motion_command(speed_to_send, steer_to_send)
                     else:
-                        self.last_blocked_reason = "klem_not_30"
-                        self._record_motion_command(
+                        self._block_motion_command(
                             "speed_steer",
-                            None,
-                            speed_x10=self.last_speed_cmd,
-                            steer_x10=self.last_steer_cmd,
-                            blocked_reason=self.last_blocked_reason,
-                            force=True,
+                            speed=self.last_speed_cmd,
+                            steer=self.last_steer_cmd,
                         )
 
                 controlRecv = self.controlSubscriber.receive()
@@ -616,14 +656,10 @@ class threadWrite(ThreadWithStop):
                             force=True,
                         )
                     else:
-                        self.last_blocked_reason = "klem_not_30"
-                        self._record_motion_command(
+                        self._block_motion_command(
                             "vcd",
-                            None,
-                            speed_x10=speed_value,
-                            steer_x10=steer_value,
-                            blocked_reason=self.last_blocked_reason,
-                            force=True,
+                            speed=speed_value,
+                            steer=steer_value,
                         )
 
                 controlCalibRecv = self.controlCalibSubscriber.receive()
@@ -651,14 +687,10 @@ class threadWrite(ThreadWithStop):
                             force=True,
                         )
                     else:
-                        self.last_blocked_reason = "klem_not_30"
-                        self._record_motion_command(
+                        self._block_motion_command(
                             "vcdCalib",
-                            None,
-                            speed_x10=speed_value,
-                            steer_x10=steer_value,
-                            blocked_reason=self.last_blocked_reason,
-                            force=True,
+                            speed=speed_value,
+                            steer=steer_value,
                         )
 
                 should_refresh_continuous_motion = (
