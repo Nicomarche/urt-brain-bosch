@@ -731,6 +731,10 @@ class threadLocalPerception(ThreadWithStop):
         así que en la práctica publicamos un frame por inferencia.
         """
         if not self.stream_to_dashboard:
+            if not getattr(self, "_warned_stream_off", False):
+                print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mDIAG\033[0m"
+                      f" - _publish_dashboard_frame: stream_to_dashboard=False (URT_STREAM_CAMERA=0?)")
+                self._warned_stream_off = True
             return
         if (now - self._last_dashboard_publish_time) < self._dashboard_publish_interval:
             return
@@ -746,6 +750,10 @@ class threadLocalPerception(ThreadWithStop):
         # actual de `thread_work`.
         img = overlay if overlay is not None else frame
         if img is None:
+            if not getattr(self, "_warned_img_none", False):
+                print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mDIAG\033[0m"
+                      f" - _publish_dashboard_frame: img is None (overlay y frame ambos None)")
+                self._warned_img_none = True
             return
 
         try:
@@ -753,10 +761,18 @@ class threadLocalPerception(ThreadWithStop):
                 ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self._dashboard_jpeg_quality]
             )
             if not ok:
+                if not getattr(self, "_warned_imencode", False):
+                    print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mDIAG\033[0m"
+                          f" - _publish_dashboard_frame: cv2.imencode falló (ok=False)")
+                    self._warned_imencode = True
                 return
             b64_data = base64.b64encode(encoded).decode("utf-8")
             self.serialCameraSender.send(b64_data)
             self._last_dashboard_publish_time = now
+            self._diag_pub_count = getattr(self, "_diag_pub_count", 0) + 1
+            if self._diag_pub_count % 30 == 1:  # log cada 30 frames (~3s a 10Hz)
+                print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mDIAG\033[0m"
+                      f" - serialCamera publicado #{self._diag_pub_count} ({len(b64_data)} bytes b64, shape={img.shape})")
         except Exception as exc:
             # Nunca dejar que un error de encoding mate el thread: la
             # inferencia/pub de control debe seguir aunque el preview falle.

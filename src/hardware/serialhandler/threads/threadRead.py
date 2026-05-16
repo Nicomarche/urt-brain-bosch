@@ -48,7 +48,8 @@ from src.core.messaging.allMessages import (
     CalibPWMData,
     CalibRunDone,
     SteeringLimits,
-    AliveSignal
+    AliveSignal,
+    OdometerDistance,
 )
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -102,6 +103,7 @@ class threadRead(ThreadWithStop):
         self.calibRunDoneSender = messageHandlerSender(self.queuesList, CalibRunDone)
         self.steeringLimitsSender = messageHandlerSender(self.queuesList, SteeringLimits)
         self.aliveSignalSender = messageHandlerSender(self.queuesList, AliveSignal)
+        self.odometerDistanceSender = messageHandlerSender(self.queuesList, OdometerDistance)
 
     # ====================================== RUN ==========================================
     def thread_work(self):
@@ -198,7 +200,14 @@ class threadRead(ThreadWithStop):
                 lowerLimit = splittedValue[0]
                 upperLimit = splittedValue[1]
                 self.steeringLimitsSender.send({"lowerLimit": lowerLimit, "upperLimit": upperLimit})
-                
+
+            elif action == "odo":
+                distance_mm = int(value.split(";")[0])
+                self.odometerDistanceSender.send(distance_mm)
+
+            elif action == "odoreset":
+                self.odometerDistanceSender.send(0)
+
             elif action == "instant":
                 if self.check_valid_value(action, value):
                     self.instantConsumptionSender.send(float(value))

@@ -148,6 +148,9 @@ else
     # acados en Jetson vive en el mismo lugar que en Mac.
     export ACADOS_SOURCE_DIR="${ACADOS_SOURCE_DIR:-$HOME/acados_install}"
     export LD_LIBRARY_PATH="${ACADOS_SOURCE_DIR}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    # onnxruntime PyPI ARM64 trae solo CPUExecutionProvider; el .onnx caería a CPU.
+    # El engine TensorRT corre nativo en la GPU (Orin) vía ultralytics+TRT 10.3.
+    export URT_LOCAL_AI_MODEL_PATH="${URT_LOCAL_AI_MODEL_PATH:-models/lane_segmentation/Best_weights_reentrenado_416px.engine}"
 fi
 
 export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"

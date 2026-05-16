@@ -382,6 +382,12 @@ class SteeringLimits(Enum):
     msgID = 12
     msgType = "dict"
 
+class OdometerDistance(Enum):
+    Queue = "General"
+    Owner = "threadRead"
+    msgID = 13
+    msgType = "int"
+
 
 ################################# From Locsys ##################################
 class Location(Enum):

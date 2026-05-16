@@ -645,7 +645,7 @@ BEHAVIOR_THREAD_PAUSE_S = 0.05
 # ===================== 2D LIDAR =====================
 # Native 2D LiDAR input. Hardware reads LD19/STL-19P over serial; sim/mac reads
 # LaserScan snapshots from Gazebo through sim_bridge.py over ZMQ.
-LIDAR_ENABLED = True
+LIDAR_ENABLED = False  # Lidar no conectado; evita conflicto con /dev/ttyACM0 del Nucleo
 LIDAR_BACKEND = "zmq" if _SIM_MODE else "serial"
 LIDAR_SERIAL_PORT = None
 LIDAR_SERIAL_BAUD = 230400

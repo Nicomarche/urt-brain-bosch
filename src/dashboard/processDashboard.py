@@ -639,6 +639,11 @@ class processDashboard(WorkerProcess):
         if not self.running:
             return
 
+        self._diag_loop_count = getattr(self, "_diag_loop_count", 0) + 1
+        if self._diag_loop_count % 100 == 1:  # cada ~15s a 7Hz
+            print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mDIAG\033[0m"
+                  f" - send_continuous_messages loop #{self._diag_loop_count} alive")
+
         for msg, subscriber in self.messages.items():
             try:
                 resp = subscriber["obj"].receive()
@@ -668,13 +673,17 @@ class processDashboard(WorkerProcess):
                     try:
                         jpg_bytes = base64.b64decode(resp)
                         self.socketio.emit("serialCamera_bin", jpg_bytes)
+                        self._diag_cam_count = getattr(self, "_diag_cam_count", 0) + 1
+                        if self._diag_cam_count % 30 == 1:
+                            print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;92mDIAG\033[0m"
+                                  f" - serialCamera forwarded #{self._diag_cam_count} ({len(jpg_bytes)} bytes bin)")
                     except Exception as exc:
-                        # If decoding fails, fall through and at least emit
-                        # the legacy text frame so something still shows.
-                        if self.debugging:
-                            self.logger.warning(
-                                f"serialCamera_bin decode failed: {exc}")
-                    self.socketio.emit(msg, {"value": resp})
+                        print(f"\033[1;97m[ Dashboard ] :\033[0m \033[1;91mDIAG\033[0m"
+                              f" - serialCamera_bin emit failed: {exc}")
+                    # Eliminado el emit JSON `serialCamera` redundante:
+                    # cada frame eran ~64KB (binario + base64 JSON). Solo binario
+                    # = ~27KB/frame, ~50% menos bandwidth → evita back-pressure
+                    # de WebSocket cuando hay WiFi lento.
                     continue
 
                 if msg == "Location" and isinstance(resp, dict):
