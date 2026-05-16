@@ -247,6 +247,20 @@ def test_router_trims_first_lanelet_to_current_pose(tmp_path: Path) -> None:
     assert float(route.waypoints[0][0]) > 1.45
 
 
+def test_router_avoids_blocked_no_entry_lanelet(tmp_path: Path) -> None:
+    osm_path = tmp_path / "chain_lanelets.osm"
+    osm_path.write_text(_LOCAL_XY_CHAIN_OSM, encoding="utf-8")
+
+    router = OsmRouteGraph(str(osm_path), step_m=0.10, start_lanelet_id="100")
+    assert router.shortest_path("100", "200") == ["100", "200"]
+
+    router.set_blocked_lanelets({"200"})
+
+    assert router.shortest_path("100", "200") == []
+    assert router.reference_path_between("100", "200") == []
+    assert router.go_to({"lanelet_id": "100"}, {"lanelet_id": "200"}).waypoints.size == 0
+
+
 def test_path_manager_starts_without_implicit_route(tmp_path: Path) -> None:
     osm_path = tmp_path / "chain_lanelets.osm"
     osm_path.write_text(_LOCAL_XY_CHAIN_OSM, encoding="utf-8")

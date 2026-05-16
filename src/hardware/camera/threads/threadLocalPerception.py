@@ -28,6 +28,7 @@ from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.perception import DetectedObject
 from src.core.types.pose import PoseEstimate
 from src.perception.lidar.processing import distance_in_sector
+from src.utils.live_log import live_log
 
 
 class threadLocalPerception(ThreadWithStop):
@@ -297,7 +298,13 @@ class threadLocalPerception(ThreadWithStop):
         except (TypeError, ValueError):
             return None
 
-    def _estimate_lidar_distance_cm(self, box, *, broad_sector: bool = False) -> float | None:
+    def _estimate_lidar_distance_cm(
+        self,
+        box,
+        *,
+        broad_sector: bool = False,
+        sign_sector: bool = False,
+    ) -> float | None:
         scan = self.lidar_scan_buffer.read_latest() if self.lidar_scan_buffer is not None else None
         angle = self._bbox_center_angle_rad(box)
         if scan is None or angle is None:
@@ -313,6 +320,10 @@ class threadLocalPerception(ThreadWithStop):
             min_half_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_MIN_HALF_WIDTH_DEG", 24.0))
             extra_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_EXTRA_DEG", 4.0))
             max_half_deg = float(getattr(config, "LIDAR_AI_OBJECT_SECTOR_MAX_HALF_WIDTH_DEG", 30.0))
+        elif sign_sector:
+            min_half_deg = float(getattr(config, "LIDAR_AI_SIGN_SECTOR_MIN_HALF_WIDTH_DEG", 6.0))
+            extra_deg = float(getattr(config, "LIDAR_AI_SIGN_SECTOR_EXTRA_DEG", 2.0))
+            max_half_deg = float(getattr(config, "LIDAR_AI_SIGN_SECTOR_MAX_HALF_WIDTH_DEG", 16.0))
         else:
             min_half_deg = float(getattr(config, "LIDAR_AI_SECTOR_MIN_HALF_WIDTH_DEG", 2.0))
             extra_deg = float(getattr(config, "LIDAR_AI_SECTOR_EXTRA_DEG", 0.0))
@@ -458,7 +469,7 @@ class threadLocalPerception(ThreadWithStop):
         box_area = max(0.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
 
         img_height = img_shape[0] if img_shape is not None else None
-        lidar_distance_cm = self._estimate_lidar_distance_cm(box)
+        lidar_distance_cm = self._estimate_lidar_distance_cm(box, sign_sector=True)
         camera_distance_cm = self._estimate_sign_distance_cm(box, img_height)
         if lidar_distance_cm is not None:
             distance_cm = lidar_distance_cm
@@ -484,12 +495,35 @@ class threadLocalPerception(ThreadWithStop):
         if self.sign_hints_buffer is not None:
             hint = {
                 "kind": sign_name,
+                "raw_class": raw_sign_name,
                 "distance_m": (float(distance_cm) * 0.01) if distance_cm is not None else None,
                 "distance_source": distance_source,
                 "timestamp": now,
                 "confidence": round(confidence, 3),
+                "box_area": round(box_area, 5),
             }
             self.sign_hints_buffer.write((hint,), timestamp=now)
+            live_log(
+                "local_perception",
+                event="sign_hint_published",
+                kind=hint["kind"],
+                raw_class=hint["raw_class"],
+                confidence=float(hint["confidence"]),
+                box_area=float(hint["box_area"]),
+                distance_m=hint["distance_m"],
+                distance_source=hint["distance_source"],
+            )
+        else:
+            live_log(
+                "local_perception",
+                event="sign_detected_no_hint_buffer",
+                kind=sign_name,
+                raw_class=raw_sign_name,
+                confidence=float(confidence),
+                box_area=float(box_area),
+                distance_m=(float(distance_cm) * 0.01) if distance_cm is not None else None,
+                distance_source=distance_source,
+            )
 
         effective_min_box = self.sign_min_box_area_per_sign.get(
             sign_name, self.sign_min_box_area

@@ -473,23 +473,47 @@ class PathOptimizer:
             if not path_source_visual:
                 sampled_xy[0] = pose_xy
 
-        sampled_xy, visual_lane_notes = _apply_visual_lane_reentry_bias(
-            sampled_xy=sampled_xy,
-            path_plan=path_plan,
-            ctx=ctx,
-        )
+        overtake_corridor_escape = _path_note_bool(path_plan, "overtake_corridor_escape")
+        if overtake_corridor_escape:
+            visual_lane_notes = {
+                "visual_lane_reentry_active": False,
+                "visual_lane_reentry_reason": "overtake_corridor_escape",
+                "visual_lane_measurement_mode": "",
+                "visual_lane_reentry_applied": False,
+                "visual_lane_error_m": 0.0,
+                "visual_lane_quality": 0.0,
+                "visual_lane_shift_m": 0.0,
+                "visual_lane_prefix_samples": 0,
+            }
+            visual_route_blend_notes = {
+                "visual_route_blend_applied": False,
+                "visual_route_blend_points": 0,
+                "visual_route_blend_max_shift_m": 0.0,
+                "visual_route_blend_reason": "overtake_corridor_escape",
+            }
+            visual_prefix_notes = {
+                "visual_prefix_stabilization_applied": False,
+                "visual_prefix_stabilization_points": 0,
+                "visual_prefix_stabilization_reason": "overtake_corridor_escape",
+            }
+        else:
+            sampled_xy, visual_lane_notes = _apply_visual_lane_reentry_bias(
+                sampled_xy=sampled_xy,
+                path_plan=path_plan,
+                ctx=ctx,
+            )
 
-        sampled_xy, visual_route_blend_notes = _maybe_blend_route_with_visual_waypoints(
-            sampled_xy=sampled_xy,
-            path_plan=path_plan,
-            ctx=ctx,
-        )
+            sampled_xy, visual_route_blend_notes = _maybe_blend_route_with_visual_waypoints(
+                sampled_xy=sampled_xy,
+                path_plan=path_plan,
+                ctx=ctx,
+            )
 
-        sampled_xy, visual_prefix_notes = _stabilize_visual_path_prefix(
-            sampled_xy=sampled_xy,
-            path_plan=path_plan,
-            ctx=ctx,
-        )
+            sampled_xy, visual_prefix_notes = _stabilize_visual_path_prefix(
+                sampled_xy=sampled_xy,
+                path_plan=path_plan,
+                ctx=ctx,
+            )
 
         live_log(
             "path_optimizer",
@@ -531,6 +555,62 @@ class PathOptimizer:
             protected_prefix_samples=int(protected_prefix_samples),
             path_points=int(sampled_xy.shape[0]),
         )
+
+        if overtake_corridor_escape:
+            self._single_line_transition_hold_ticks = 0
+            self._route_tracking_visual_hold_ticks = 0
+            headings = _compute_headings(sampled_xy, initial_yaw=float(ctx.pose.fused_pose.yaw))
+            target_path = np.column_stack([sampled_xy, headings])
+            left_bound, right_bound = _synthetic_bounds_from_xy(
+                sampled_xy,
+                half_width_m=_DRIVABLE_HALF_WIDTH_M,
+            )
+            optimizer_notes = dict(visual_lane_notes)
+            optimizer_notes.update(dict(visual_route_blend_notes))
+            optimizer_notes.update(dict(visual_prefix_notes))
+            optimizer_notes.update(
+                {
+                    "containment_mode": "overtake_escape",
+                    "corridor_source": "overtake_escape_bounds",
+                    "corridor_required": False,
+                    "corridor_required_missing": False,
+                    "corridor_violation_m": 0.0,
+                    "corridor_left_bound": np.array(left_bound, copy=True),
+                    "corridor_right_bound": np.array(right_bound, copy=True),
+                    "ego_corridor_error_m": 0.0,
+                    "corridor_max_abs_offset_m": 0.0,
+                    "corridor_touches_bound": False,
+                    "used_prev_safe_path": False,
+                    "containment_infeasible_ticks": 0,
+                    "containment_stop_after_ticks": _CONTAINMENT_INFEASIBLE_STOP_TICKS,
+                    "overtake_corridor_escape": True,
+                }
+            )
+            live_log(
+                "path_optimizer",
+                event="overtake_escape",
+                path_points=int(target_path.shape[0]),
+                max_abs_y_m=float(np.max(np.abs(target_path[:, 1]))) if target_path.size else 0.0,
+                lateral_offset_m=_path_note_float(path_plan, "overtake_effective_lateral_offset_m"),
+            )
+            self._prev_target_path = np.array(target_path, copy=True)
+            self._prev_blend_signature = blend_signature
+            self._prev_target_path_source = _path_note_str(path_plan, "path_source")
+            self._prev_safe_target_path = np.array(target_path, copy=True)
+            self._prev_safe_left_bound = np.array(left_bound, copy=True)
+            self._prev_safe_right_bound = np.array(right_bound, copy=True)
+            self._prev_safe_blend_signature = blend_signature
+            self._prev_safe_path_source = self._prev_target_path_source
+            lane_observation = getattr(ctx, "lane_observation", None)
+            self._prev_lane_measurement_mode = str(
+                getattr(lane_observation, "measurement_mode", "none") or "none"
+            )
+            return OptimizedPathResult(
+                target_path=target_path,
+                drivable_left_bound=left_bound,
+                drivable_right_bound=right_bound,
+                notes=optimizer_notes,
+            )
 
         single_line_transition_hold = _maybe_hold_previous_path_on_single_line_transition(
             sampled_xy=sampled_xy,
@@ -932,6 +1012,18 @@ def _path_note_float(path_plan: BehaviorPathPlan, key: str) -> float:
         return float(notes.get(key) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _path_note_bool(path_plan: BehaviorPathPlan, key: str) -> bool:
+    notes = getattr(path_plan, "notes", None)
+    if not isinstance(notes, dict):
+        return False
+    value = notes.get(key)
+    if isinstance(value, bool):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _visual_lane_reentry_state(ctx: PlanningContext) -> _VisualLaneReentryState:

@@ -240,8 +240,8 @@ class threadBehaviorPlanner(ThreadWithStop):
         except Exception:
             pass
 
-        # Fuera de AUTO no planear ni correr el MPC.
-        if self._current_mode != "AUTO":
+        # Fuera de AUTO/PARKING no planear ni correr el MPC.
+        if self._current_mode not in {"AUTO", "PARKING"}:
             self._current_speed_mps = 0.0
             self._publish_empty(reason="mode_not_auto")
             return
@@ -294,6 +294,8 @@ class threadBehaviorPlanner(ThreadWithStop):
             tracked_object_count=int(len(ctx.tracked_objects or ())),
             lidar_obstacle_count=int(len(ctx.lidar_obstacles or ())),
             lidar_scan_age_s=(ctx.now_s - ctx.lidar_scan.timestamp) if ctx.lidar_scan is not None else None,
+            sign_hints_count=int(len(ctx.sign_hints or ())),
+            sign_hints=_slim_sign_hints(ctx.sign_hints),
             pose_x=float(ctx.pose.fused_pose.x),
             pose_y=float(ctx.pose.fused_pose.y),
             pose_yaw_rad=float(ctx.pose.fused_pose.yaw),
@@ -340,6 +342,32 @@ class threadBehaviorPlanner(ThreadWithStop):
                         if isinstance(plan.notes, dict) else None)
         path_source = (plan.notes.get("path_source")
                        if isinstance(plan.notes, dict) else None)
+        stop_mode = (plan.notes.get("stop_mode")
+                     if isinstance(plan.notes, dict) else None)
+        stop_source = (plan.notes.get("stop_source")
+                       if isinstance(plan.notes, dict) else None)
+        distance_source = (plan.notes.get("distance_source")
+                           if isinstance(plan.notes, dict) else None)
+        stop_distance_m = (plan.notes.get("distance_m")
+                           if isinstance(plan.notes, dict) else None)
+        candidate_modules = (plan.notes.get("candidate_modules")
+                             if isinstance(plan.notes, dict) else None)
+        approved_module = (plan.notes.get("approved_module")
+                           if isinstance(plan.notes, dict) else None)
+        overtake_corridor_escape = (plan.notes.get("overtake_corridor_escape")
+                                    if isinstance(plan.notes, dict) else None)
+        overtake_effective_lateral_offset_m = (
+            plan.notes.get("overtake_effective_lateral_offset_m")
+            if isinstance(plan.notes, dict) else None
+        )
+        overtake_clearance_m = (plan.notes.get("overtake_clearance_m")
+                                if isinstance(plan.notes, dict) else None)
+        containment_mode = (plan.notes.get("containment_mode")
+                            if isinstance(plan.notes, dict) else None)
+        corridor_touches_bound = (plan.notes.get("corridor_touches_bound")
+                                  if isinstance(plan.notes, dict) else None)
+        velocity_modules = (plan.notes.get("velocity_modules")
+                            if isinstance(plan.notes, dict) else None)
         sp0 = float(plan.speed_profile[0]) if len(plan.speed_profile) > 0 else 0.0
         live_log(
             "behavior_planner", event="plan_output",
@@ -353,6 +381,18 @@ class threadBehaviorPlanner(ThreadWithStop):
             sp_first3=sp_first3,
             tp_first3=tp_first3,
             notes_reason=notes_reason,
+            stop_mode=stop_mode,
+            stop_source=stop_source,
+            distance_source=distance_source,
+            stop_distance_m=_simple(stop_distance_m),
+            candidate_modules=_simple(candidate_modules),
+            approved_module=approved_module,
+            overtake_corridor_escape=_simple(overtake_corridor_escape),
+            overtake_effective_lateral_offset_m=_simple(overtake_effective_lateral_offset_m),
+            overtake_clearance_m=_simple(overtake_clearance_m),
+            containment_mode=containment_mode,
+            corridor_touches_bound=_simple(corridor_touches_bound),
+            velocity_modules=_simple(velocity_modules),
             route_id=ctx.route.route_id,
             route_source=ctx.route.route_source,
             current_lanelet_id=ctx.route.current_lanelet_id,
@@ -460,7 +500,7 @@ class threadBehaviorPlanner(ThreadWithStop):
         if self._sign_hints_buf is not None:
             payload = self._sign_hints_buf.read_latest()
             if isinstance(payload, (list, tuple)):
-                sign_hints = tuple(dict(item) for item in payload if isinstance(item, dict))
+                sign_hints = _filter_recent_sign_hints(payload, now_s=now_s)
 
         return PlanningContext(
             now_s=float(now_s),
@@ -490,6 +530,11 @@ class threadBehaviorPlanner(ThreadWithStop):
             "scenario_name": str(plan.scenario_name),
             "valid": bool(plan.valid),
             "stop_required": bool(plan.stop_required),
+            "min_moving_speed_mps": (
+                float(plan.min_moving_speed_mps)
+                if plan.min_moving_speed_mps is not None
+                else None
+            ),
             "target_path": plan.target_path.tolist(),
             "speed_profile": plan.speed_profile.tolist(),
             "notes": _serialize_notes(plan.notes),
@@ -571,6 +616,44 @@ def _serialize_notes(notes: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _slim_sign_hints(sign_hints: tuple[dict, ...]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for hint in tuple(sign_hints or ())[:6]:
+        if not isinstance(hint, dict):
+            continue
+        out.append({
+            "kind": _simple(hint.get("kind")),
+            "raw_class": _simple(hint.get("raw_class")),
+            "distance_m": _simple(hint.get("distance_m")),
+            "distance_source": _simple(hint.get("distance_source")),
+            "confidence": _simple(hint.get("confidence")),
+            "box_area": _simple(hint.get("box_area")),
+            "timestamp": _simple(hint.get("timestamp")),
+        })
+    return out
+
+
+def _filter_recent_sign_hints(payload, *, now_s: float) -> tuple[dict, ...]:
+    try:
+        import config as _cfg
+        max_age_s = float(getattr(_cfg, "SIGN_HINT_MAX_AGE_S", 1.5))
+    except Exception:
+        max_age_s = 1.5
+    hints: list[dict] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        hint = dict(item)
+        try:
+            ts = float(hint.get("timestamp", now_s))
+        except (TypeError, ValueError):
+            ts = float(now_s)
+        if (float(now_s) - ts) > max_age_s:
+            continue
+        hints.append(hint)
+    return tuple(hints)
+
+
 def _simple(v: Any) -> Any:
     if isinstance(v, (str, int, float, bool)) or v is None:
         return v
@@ -578,4 +661,8 @@ def _simple(v: Any) -> Any:
         return v.tolist()
     if hasattr(v, "__dataclass_fields__"):
         return asdict(v)
+    if isinstance(v, (list, tuple)):
+        return [_simple(item) for item in v]
+    if isinstance(v, dict):
+        return {str(key): _simple(value) for key, value in v.items()}
     return str(v)

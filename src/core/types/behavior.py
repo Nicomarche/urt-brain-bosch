@@ -45,6 +45,7 @@ class ScenarioName(str, Enum):
     CROSSWALK = "crosswalk"
     HIGHWAY = "highway"
     ROUNDABOUT = "roundabout"
+    STOP = "stop"
     OVERTAKE = "overtake"
     # FALLBACK no es un scenario propiamente dicho — lo usa el planner
     # cuando ningún scenario está activo, para emitir un BehaviorOutput
@@ -129,6 +130,7 @@ class BehaviorOutput:
     scenario_name: str = ScenarioName.FALLBACK.value
     valid: bool = False
     stop_required: bool = False
+    min_moving_speed_mps: float | None = None
     notes: dict[str, Any] = field(default_factory=dict)
 
     @property

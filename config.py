@@ -503,14 +503,32 @@ EKF_GPS_MAX_AGE_S = 0.5
 # El cliente (threadLocSys) envía el fix como Localisation IPC con
 # world_x/world_y (coordenadas OSM directas, sin conversión de imagen).
 
-LOCSYS_PORT          = 4691
-LOCSYS_HOST_COMP     = "192.168.50.11"  # IP locsys device en competencia BFMC
-TRAFFIC_COMM_HOST    = "192.168.1.1"    # TrafficCommunicationServer en competencia
-TRAFFIC_COMM_PORT    = 5000
-LOCSYS_DEVICE_ID     = 1               # ID del coche en la red BFMC (1–4)
+LOCSYS_PORT          = int(_os.environ.get("URT_LOCSYS_PORT", "4691"))
+LOCSYS_HOST_COMP     = _os.environ.get("URT_LOCSYS_HOST_COMP", "192.168.50.11")
+TRAFFIC_COMM_HOST    = _os.environ.get(
+    "URT_TRAFFIC_COMM_HOST",
+    "127.0.0.1" if _SIM_MODE else "192.168.1.1",
+)
+TRAFFIC_COMM_PORT    = int(_os.environ.get("URT_TRAFFIC_COMM_PORT", "5000"))
+LOCSYS_DEVICE_ID     = int(_os.environ.get("URT_LOCSYS_DEVICE_ID", "1"))
 
-SIM_LOCSYS_HOST      = "localhost"
-SIM_LOCSYS_PORT      = 4691
+SIM_LOCSYS_HOST      = _os.environ.get("URT_SIM_LOCSYS_HOST", "localhost")
+SIM_LOCSYS_PORT      = int(_os.environ.get("URT_SIM_LOCSYS_PORT", "4691"))
+LOCSYS_USE_TRAFFIC_COMM_SERVER = (
+    _os.environ.get(
+        "URT_LOCSYS_USE_TRAFFIC_COMM_SERVER",
+        "0" if _SIM_MODE else "1",
+    ) == "1"
+)
+TRAFFIC_COMM_SEND_EGO_DATA = (
+    _os.environ.get(
+        "URT_TRAFFIC_COMM_SEND_EGO_DATA",
+        "0" if _SIM_MODE else "1",
+    ) == "1"
+)
+TRAFFIC_COMM_SEND_PERIOD_S = float(
+    _os.environ.get("URT_TRAFFIC_COMM_SEND_PERIOD_S", "0.25")
+)
 
 GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
@@ -548,6 +566,22 @@ ACADOS_MPC_REFERENCE_MAX_PREVIEW_M = 0.85
 # Límites competitivos de velocidad. 0.0 sigue siendo válido para STOP; cuando
 # el auto está en movimiento no debe mandar menos de 20 cm/s.
 BEHAVIOR_MIN_SPEED_MPS = 0.20       # velocidad mínima de movimiento = 20 cm/s
+BEHAVIOR_CITY_MIN_SPEED_MPS = 0.20  # ciudad: mínimo de movimiento = 20 cm/s
+BEHAVIOR_HIGHWAY_MIN_SPEED_MPS = 0.40  # autopista: mínimo de movimiento = 40 cm/s
+TRAFFIC_SIGN_LOW_SPEED_MPS = 0.10   # parking/crosswalk: excepción visible = 10 cm/s
+TRAFFIC_SIGN_STOP_HOLD_S = 3.0      # STOP: tiempo detenido antes de continuar
+SIGN_HINT_MAX_AGE_S = 1.5           # vida útil de hints de señales en BehaviorPlanner
+TRAFFIC_SIGN_STOP_COMMAND_DISTANCE_M = 0.40  # STOP: con lidar <= 40cm, frenar y sostener
+TRAFFIC_SIGN_STOP_CAMERA_FALLBACK_DISTANCE_M = 0.40  # STOP: fallback si no hubo asociación lidar
+TRAFFIC_SIGN_STOP_CAMERA_FALLBACK_MIN_CONFIDENCE = 0.65
+TRAFFIC_SIGN_STOP_CAMERA_FALLBACK_MIN_BOX_AREA = 0.010
+TRAFFIC_SIGN_STOP_RETRIGGER_SUPPRESS_S = 5.0
+TRAFFIC_SIGN_NO_ENTRY_MIN_CONFIDENCE = 0.70  # no-entry debe ser estable/fuerte para bloquear ruta
+TRAFFIC_SIGN_NO_ENTRY_MIN_BOX_AREA = 0.003   # 0.3% del frame, evita falsos positivos chicos
+TRAFFIC_SIGN_NO_ENTRY_CONFIRM_TICKS = 2      # detecciones consecutivas antes de bloquear lanelet
+LIDAR_AI_SIGN_SECTOR_MIN_HALF_WIDTH_DEG = 6.0
+LIDAR_AI_SIGN_SECTOR_EXTRA_DEG = 2.0
+LIDAR_AI_SIGN_SECTOR_MAX_HALF_WIDTH_DEG = 16.0
 
 # Velocidad nominal de lane_keep "limpio" (sin signs, sin regulators).
 BEHAVIOR_NOMINAL_SPEED_MPS = 0.25   # target base; Acados re-temporiza preview con v_ref.
@@ -628,8 +662,10 @@ LIDAR_EMERGENCY_HALF_WIDTH_M = 0.14
 LIDAR_OBSTACLE_STOP_ENABLED = False
 LIDAR_OBSTACLE_STOP_DISTANCE_M = 0.45
 LIDAR_OBSTACLE_SLOW_DISTANCE_M = 0.90
+LIDAR_OBSTACLE_CLOSE_SLOW_DISTANCE_M = 0.35
+LIDAR_OBSTACLE_CLOSE_SLOW_SPEED_MPS = BEHAVIOR_MIN_SPEED_MPS
 LIDAR_OBSTACLE_CORRIDOR_HALF_WIDTH_M = 0.14
-LIDAR_OBSTACLE_MIN_FORWARD_X_M = 0.0
+LIDAR_OBSTACLE_MIN_FORWARD_X_M = 0.12
 LIDAR_AI_SECTOR_MIN_HALF_WIDTH_DEG = 2.0
 LIDAR_AI_SECTOR_EXTRA_DEG = 0.0
 LIDAR_AI_SECTOR_MAX_HALF_WIDTH_DEG = 12.0
@@ -647,12 +683,21 @@ ZMQ_LIDAR_TOPIC = b"lidar"
 
 # ===================== OVERTAKE =====================
 OVERTAKE_ENABLED = True
-OVERTAKE_FORWARD_MIN_M = 0.25
+OVERTAKE_FORWARD_MIN_M = LIDAR_OBSTACLE_MIN_FORWARD_X_M
 OVERTAKE_FORWARD_MAX_M = 1.25
 OVERTAKE_LATERAL_OFFSET_M = 0.16
+OVERTAKE_MIN_OBSTACLE_CLEARANCE_M = 0.04
+OVERTAKE_MAX_LATERAL_OFFSET_M = 0.28
 OVERTAKE_SIDE_CLEAR_FORWARD_M = 1.25
 OVERTAKE_SIDE_CLEAR_HALF_WIDTH_M = 0.12
 OVERTAKE_SPEED_MPS = 0.30
+OVERTAKE_RAW_LIDAR_FALLBACK_ENABLED = True
+OVERTAKE_RAW_LIDAR_REQUIRES_HIGHWAY = True
+OVERTAKE_RAW_LIDAR_FORWARD_MAX_M = 0.70
+OVERTAKE_RAW_LIDAR_CONFIRM_TICKS = 3
+OVERTAKE_RAW_LIDAR_MIN_POINTS = 12
+OVERTAKE_RAW_LIDAR_MIN_WIDTH_DEG = 8.0
+OVERTAKE_RAW_LIDAR_MIN_CONFIDENCE = 0.55
 
 # ----------------------------------------------------------------------------
 # Auto-lap mode (sim/demo): el coche da vueltas siguiendo el loop de lanelets

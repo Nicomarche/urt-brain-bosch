@@ -132,6 +132,10 @@ class DashboardClient:
         )
         self.session_granted = False
         self.latest_nav_status: dict[str, Any] = {}
+        self.sign_events: list[dict[str, Any]] = []
+        self.behavior_output_events: list[dict[str, Any]] = []
+        self.motor_command_events: list[dict[str, Any]] = []
+        self.nav_status_events: list[dict[str, Any]] = []
         self.response_count = 0
         self.last_response: dict[str, Any] = {}
         self._setup_handlers()
@@ -159,6 +163,31 @@ class DashboardClient:
             payload = _unwrap_payload(data)
             if isinstance(payload, dict):
                 self.latest_nav_status = payload
+                self.nav_status_events.append(
+                    _slim_socket_event("NavigationStatus", _slim_nav_status(payload))
+                )
+
+        @self.sio.on("SignDetected")
+        def _on_sign_detected(data: Any) -> None:
+            payload = _unwrap_payload(data)
+            if isinstance(payload, dict):
+                self.sign_events.append(_slim_socket_event("SignDetected", payload))
+
+        @self.sio.on("BehaviorOutputMsg")
+        def _on_behavior_output(data: Any) -> None:
+            payload = _unwrap_payload(data)
+            if isinstance(payload, dict):
+                self.behavior_output_events.append(
+                    _slim_socket_event("BehaviorOutputMsg", _slim_behavior_output(payload))
+                )
+
+        @self.sio.on("MotorCommandMsg")
+        def _on_motor_command(data: Any) -> None:
+            payload = _unwrap_payload(data)
+            if isinstance(payload, dict):
+                self.motor_command_events.append(
+                    _slim_socket_event("MotorCommandMsg", _slim_motor_command(payload))
+                )
 
         @self.sio.on("response")
         def _on_response(data: Any) -> None:
@@ -210,6 +239,116 @@ class DashboardClient:
                 return True
             time.sleep(0.1)
         return False
+
+
+def _slim_socket_event(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+    source_ts = _safe_float(payload.get("timestamp"))
+    return {
+        "ts": time.time(),
+        "source_timestamp": source_ts,
+        "event": name,
+        "payload": payload,
+    }
+
+
+def _slim_behavior_output(payload: dict[str, Any]) -> dict[str, Any]:
+    speed_profile = payload.get("speed_profile")
+    speeds: list[float] = []
+    if isinstance(speed_profile, list):
+        for item in speed_profile[:40]:
+            value = _safe_float(item)
+            if value is not None:
+                speeds.append(value)
+    notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+    return {
+        "timestamp": _safe_float(payload.get("timestamp")),
+        "scenario_name": payload.get("scenario_name"),
+        "valid": bool(payload.get("valid", False)),
+        "stop_required": bool(payload.get("stop_required", False)),
+        "min_moving_speed_mps": _safe_float(payload.get("min_moving_speed_mps")),
+        "speed_first": speeds[0] if speeds else None,
+        "speed_min": min(speeds) if speeds else None,
+        "speed_max": max(speeds) if speeds else None,
+        "notes": _pick_dict(
+            notes,
+            (
+                "reason",
+                "stop_mode",
+                "stop_source",
+                "distance_source",
+                "distance_m",
+                "stop_key",
+                "hold_until_s",
+                "min_moving_speed_mps",
+                "velocity_modules",
+                "direct_motor_command",
+                "parking_state",
+                "candidate_modules",
+                "candidate_priorities",
+                "approved_module",
+                "path_source",
+                "containment_mode",
+                "corridor_touches_bound",
+                "corridor_violation_m",
+                "overtake",
+                "overtake_corridor_escape",
+                "overtake_nominal_lateral_offset_m",
+                "overtake_effective_lateral_offset_m",
+                "overtake_clearance_m",
+                "lateral_offset_m",
+            ),
+        ),
+    }
+
+
+def _slim_motor_command(payload: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        payload,
+        (
+            "timestamp",
+            "steering_deg",
+            "speed_mps",
+            "valid",
+            "source",
+            "reason",
+            "debug",
+        ),
+    )
+
+
+def _slim_nav_status(payload: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        payload,
+        (
+            "timestamp",
+            "route_active",
+            "route_id",
+            "route_progress",
+            "route_completed",
+            "current_lanelet_id",
+            "next_lanelet_ids",
+            "current_node_id",
+            "upcoming_node_id",
+            "next_semantic_type",
+            "next_semantic_distance_m",
+            "expected_control_type",
+            "pose_x",
+            "pose_y",
+            "speed_mps",
+        ),
+    )
+
+
+def _pick_dict(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if math.isfinite(out) else None
 
 
 def _unwrap_payload(data: Any) -> Any:
@@ -949,6 +1088,628 @@ def _compute_metrics(
     }
 
 
+def _build_sign_debug(
+    *,
+    brain_events: list[dict[str, Any]],
+    dashboard_sign_events: list[dict[str, Any]],
+    dashboard_behavior_events: list[dict[str, Any]],
+    dashboard_motor_events: list[dict[str, Any]],
+    dashboard_nav_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    timeline: list[dict[str, Any]] = []
+
+    def add(stage: str, source: str, payload: dict[str, Any], *, ts: float | None = None) -> None:
+        event_ts = ts if ts is not None else _event_ts(payload)
+        item = {
+            "ts": event_ts,
+            "stage": stage,
+            "source": source,
+            "payload": payload,
+        }
+        timeline.append(item)
+
+    for event in dashboard_sign_events:
+        payload = dict(event.get("payload") or {})
+        add("dashboard_sign_detected", "socketio", payload, ts=_event_ts(event))
+
+    for event in dashboard_behavior_events:
+        payload = dict(event.get("payload") or {})
+        scenario = str(payload.get("scenario_name") or "")
+        notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+        if (
+            scenario == "stop"
+            or str(notes.get("reason") or "") == "stop_policy"
+            or bool(payload.get("stop_required", False))
+        ):
+            add("dashboard_behavior_output", "socketio", payload, ts=_event_ts(event))
+
+    for event in dashboard_motor_events:
+        payload = dict(event.get("payload") or {})
+        speed = _safe_float(payload.get("speed_mps"))
+        reason = str(payload.get("reason") or "")
+        if (speed is not None and abs(speed) <= 0.02) or "stop" in reason.lower():
+            add("dashboard_motor_command", "socketio", payload, ts=_event_ts(event))
+
+    for event in dashboard_nav_events:
+        payload = dict(event.get("payload") or {})
+        if payload.get("current_lanelet_id") is not None:
+            add("dashboard_navigation_status", "socketio", payload, ts=_event_ts(event))
+
+    for ev in brain_events:
+        thread = str(ev.get("thread") or "")
+        event = str(ev.get("event") or "")
+        if thread == "local_perception" and event.startswith("sign_"):
+            add("brain_sign_event", "brain_jsonl", _pick_sign_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "behavior_planner" and event == "context_snapshot":
+            if int(ev.get("sign_hints_count", 0) or 0) > 0:
+                add("behavior_context_sign_hints", "brain_jsonl", _pick_behavior_context_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "behavior_planner" and event in {"plan_output", "plan_empty"}:
+            scenario = str(ev.get("scenario") or "")
+            reason = str(ev.get("notes_reason") or ev.get("reason") or "")
+            sp0 = _safe_float(ev.get("sp0"))
+            if scenario == "stop" or reason == "stop_policy" or bool(ev.get("stop_required", False)) or (sp0 is not None and sp0 <= 0.02):
+                add("behavior_plan", "brain_jsonl", _pick_behavior_plan_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "nav_planner" and (
+            event in {"no_entry_blocked_lanelet", "route_replanned", "route_replan_failed"}
+            or (event in {"route_update", "lanelet_resolution"} and ev.get("route_active") is False)
+        ):
+            add("navigation", "brain_jsonl", _pick_navigation_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "mpc" and event in {"compute_in", "compute_out"}:
+            scenario = str(ev.get("scenario") or "")
+            speed = _safe_float(ev.get("speed_mps"))
+            sp0 = _safe_float(ev.get("sp0"))
+            if scenario == "stop" or bool(ev.get("stop_req", False)) or (speed is not None and abs(speed) <= 0.02) or (sp0 is not None and sp0 <= 0.02):
+                add("mpc", "brain_jsonl", _pick_mpc_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "dispatcher" and event == "dispatch_decision":
+            speed = _safe_float(ev.get("speed_mps"))
+            reason = str(ev.get("cmd_reason") or "")
+            if (speed is not None and abs(speed) <= 0.02) or "stop" in reason.lower():
+                add("dispatcher", "brain_jsonl", _pick_dispatcher_fields(ev), ts=_event_ts(ev))
+
+    timeline.sort(key=lambda item: (float(item.get("ts") or 0.0), str(item.get("stage") or "")))
+    sign_records = [
+        item
+        for item in timeline
+        if item.get("stage") in {"dashboard_sign_detected", "brain_sign_event"}
+    ]
+    stop_sign_records = [
+        item
+        for item in sign_records
+        if _normalized_sign_name(dict(item.get("payload") or {})) == "stop"
+    ]
+    lidar_stop_records = [
+        item
+        for item in stop_sign_records
+        if str((item.get("payload") or {}).get("distance_source") or "").lower() == "lidar"
+    ]
+    behavior_stop_records = [
+        item
+        for item in timeline
+        if item.get("stage") in {"behavior_plan", "dashboard_behavior_output"}
+        and (
+            str((item.get("payload") or {}).get("scenario") or (item.get("payload") or {}).get("scenario_name") or "") == "stop"
+            or str((item.get("payload") or {}).get("notes_reason") or _dict_value((item.get("payload") or {}).get("notes"), "reason") or "") == "stop_policy"
+        )
+    ]
+    stop_required_records = [
+        item
+        for item in timeline
+        if bool((item.get("payload") or {}).get("stop_required", False))
+    ]
+    zero_command_records = [
+        item
+        for item in timeline
+        if item.get("stage") in {"dispatcher", "dashboard_motor_command", "mpc"}
+        and (_safe_float((item.get("payload") or {}).get("speed_mps")) is not None)
+        and abs(float((item.get("payload") or {}).get("speed_mps"))) <= 0.02
+    ]
+    no_entry_route_block_records = [
+        item
+        for item in timeline
+        if item.get("stage") == "navigation"
+        and str((item.get("payload") or {}).get("event") or "") == "no_entry_blocked_lanelet"
+    ]
+    route_inactive_records = [
+        item
+        for item in timeline
+        if (
+            str((item.get("payload") or {}).get("reason") or "") == "route_inactive"
+            or (item.get("stage") == "navigation" and (item.get("payload") or {}).get("route_active") is False)
+        )
+    ]
+    signs_by_kind: dict[str, int] = {}
+    signs_by_source: dict[str, int] = {}
+    for item in sign_records:
+        payload = dict(item.get("payload") or {})
+        kind = _normalized_sign_name(payload) or "unknown"
+        source = str(payload.get("distance_source") or "unknown")
+        signs_by_kind[kind] = signs_by_kind.get(kind, 0) + 1
+        signs_by_source[source] = signs_by_source.get(source, 0) + 1
+
+    diagnosis: list[str] = []
+    if not stop_sign_records:
+        diagnosis.append("no_stop_sign_detected")
+    elif not lidar_stop_records:
+        diagnosis.append("stop_sign_detected_without_lidar_distance")
+    elif not behavior_stop_records:
+        first_stop_ts = _safe_float(lidar_stop_records[0].get("ts"))
+        if first_stop_ts is not None and any(
+            (_safe_float(item.get("ts")) or 0.0) <= first_stop_ts
+            for item in no_entry_route_block_records
+        ):
+            diagnosis.append("no_entry_blocked_route_before_stop_sign")
+        if route_inactive_records:
+            diagnosis.append("route_inactive_while_stop_sign_visible")
+        diagnosis.append("lidar_stop_sign_seen_but_behavior_stop_not_selected")
+    elif not zero_command_records:
+        diagnosis.append("behavior_stop_seen_but_no_zero_speed_command")
+    else:
+        diagnosis.append("stop_pipeline_reached_zero_command")
+
+    return {
+        "summary": {
+            "sign_events": len(sign_records),
+            "stop_sign_events": len(stop_sign_records),
+            "lidar_stop_sign_events": len(lidar_stop_records),
+            "behavior_stop_events": len(behavior_stop_records),
+            "stop_required_events": len(stop_required_records),
+            "zero_speed_command_events": len(zero_command_records),
+            "no_entry_route_block_events": len(no_entry_route_block_records),
+            "route_inactive_events": len(route_inactive_records),
+            "signs_by_kind": signs_by_kind,
+            "signs_by_distance_source": signs_by_source,
+            "diagnosis": diagnosis,
+            "first_lidar_stop": lidar_stop_records[0] if lidar_stop_records else None,
+            "last_lidar_stop": lidar_stop_records[-1] if lidar_stop_records else None,
+        },
+        "timeline": timeline,
+    }
+
+
+def _build_overtake_debug(
+    *,
+    brain_events: list[dict[str, Any]],
+    dashboard_behavior_events: list[dict[str, Any]],
+    dashboard_motor_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    timeline: list[dict[str, Any]] = []
+
+    def add(stage: str, source: str, payload: dict[str, Any], *, ts: float | None = None) -> None:
+        timeline.append(
+            {
+                "ts": ts if ts is not None else _event_ts(payload),
+                "stage": stage,
+                "source": source,
+                "payload": payload,
+            }
+        )
+
+    for event in dashboard_behavior_events:
+        payload = dict(event.get("payload") or {})
+        notes = payload.get("notes") if isinstance(payload.get("notes"), dict) else {}
+        scenario = str(payload.get("scenario_name") or "")
+        candidate_modules = tuple(str(item) for item in (notes.get("candidate_modules") or ()))
+        if (
+            scenario == "overtake"
+            or bool(notes.get("overtake", False))
+            or bool(notes.get("overtake_corridor_escape", False))
+            or "overtake" in candidate_modules
+        ):
+            add("dashboard_behavior_output", "socketio", payload, ts=_event_ts(event))
+
+    for event in dashboard_motor_events:
+        payload = dict(event.get("payload") or {})
+        debug = payload.get("debug") if isinstance(payload.get("debug"), dict) else {}
+        scenario = str(debug.get("scenario") or debug.get("scenario_name") or "")
+        if scenario == "overtake":
+            add("dashboard_motor_command", "socketio", payload, ts=_event_ts(event))
+
+    for ev in brain_events:
+        thread = str(ev.get("thread") or "")
+        event = str(ev.get("event") or "")
+        if thread == "overtake" and event == "activation_check":
+            add("overtake_activation_check", "brain_jsonl", _pick_overtake_activation_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "behavior_planner" and event == "context_snapshot":
+            if int(ev.get("lidar_obstacle_count", 0) or 0) > 0 or int(ev.get("tracked_object_count", 0) or 0) > 0:
+                add("behavior_context_obstacles", "brain_jsonl", _pick_overtake_context_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "behavior_planner" and event in {"plan_output", "plan_empty"}:
+            scenario = str(ev.get("scenario") or "")
+            candidates = tuple(str(item) for item in (ev.get("candidate_modules") or ()))
+            if (
+                scenario == "overtake"
+                or bool(ev.get("overtake_corridor_escape", False))
+                or "overtake" in candidates
+            ):
+                add("behavior_plan", "brain_jsonl", _pick_overtake_plan_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "path_optimizer" and event in {"overtake_escape", "containment", "blend_decision"}:
+            payload = _pick_overtake_path_optimizer_fields(ev)
+            if event == "overtake_escape" or payload.get("current_scenario_name") == "overtake":
+                add("path_optimizer", "brain_jsonl", payload, ts=_event_ts(ev))
+            continue
+        if thread == "mpc" and event in {"compute_in", "compute_out"}:
+            if str(ev.get("scenario") or "") == "overtake":
+                add("mpc", "brain_jsonl", _pick_mpc_fields(ev), ts=_event_ts(ev))
+            continue
+        if thread == "dispatcher" and event == "dispatch_decision":
+            if str(ev.get("scenario") or ev.get("active_scenario") or "") == "overtake":
+                add("dispatcher", "brain_jsonl", _pick_dispatcher_fields(ev), ts=_event_ts(ev))
+
+    timeline.sort(key=lambda item: (float(item.get("ts") or 0.0), str(item.get("stage") or "")))
+
+    activation_records = [
+        item for item in timeline if item.get("stage") == "overtake_activation_check"
+    ]
+    active_records = [
+        item for item in activation_records if bool((item.get("payload") or {}).get("active", False))
+    ]
+    front_records = [
+        item for item in activation_records
+        if bool((item.get("payload") or {}).get("front_vehicle_or_obstacle", False))
+    ]
+    blocked_records = [
+        item for item in activation_records
+        if bool((item.get("payload") or {}).get("front_vehicle_or_obstacle", False))
+        and not bool((item.get("payload") or {}).get("left_corridor_clear", False))
+    ]
+    behavior_overtake_records = [
+        item for item in timeline
+        if item.get("stage") in {"behavior_plan", "dashboard_behavior_output"}
+        and str((item.get("payload") or {}).get("scenario") or (item.get("payload") or {}).get("scenario_name") or "") == "overtake"
+    ]
+    overtake_escape_records = [
+        item for item in timeline
+        if item.get("stage") == "path_optimizer"
+        and str((item.get("payload") or {}).get("event") or "") == "overtake_escape"
+    ]
+    active_but_not_approved_records = [
+        item for item in timeline
+        if item.get("stage") in {"behavior_plan", "dashboard_behavior_output"}
+        and "overtake" in tuple(str(candidate) for candidate in ((item.get("payload") or {}).get("candidate_modules") or ()))
+        and str((item.get("payload") or {}).get("approved_module") or (item.get("payload") or {}).get("scenario") or (item.get("payload") or {}).get("scenario_name") or "") != "overtake"
+    ]
+    speed_values = [
+        value
+        for item in behavior_overtake_records
+        for value in [_safe_float((item.get("payload") or {}).get("sp0") or (item.get("payload") or {}).get("speed_first"))]
+        if value is not None
+    ]
+    lateral_offsets = [
+        value
+        for item in behavior_overtake_records
+        for value in [_safe_float((item.get("payload") or {}).get("overtake_effective_lateral_offset_m") or _dict_value((item.get("payload") or {}).get("notes"), "overtake_effective_lateral_offset_m"))]
+        if value is not None
+    ]
+
+    diagnosis: list[str] = []
+    if active_but_not_approved_records:
+        diagnosis.append("overtake_active_but_masked_by_higher_priority_module")
+    if not activation_records:
+        diagnosis.append("no_overtake_activation_checks_logged")
+    elif not front_records:
+        diagnosis.append("no_front_obstacle_seen_by_overtake")
+    elif blocked_records and not active_records:
+        diagnosis.append("front_obstacle_seen_but_left_corridor_blocked")
+    elif active_records and not behavior_overtake_records:
+        diagnosis.append("overtake_active_but_not_approved")
+    elif behavior_overtake_records and not overtake_escape_records:
+        diagnosis.append("overtake_selected_but_path_escape_missing")
+    elif speed_values and max(speed_values) <= 0.02:
+        diagnosis.append("overtake_selected_but_speed_zero")
+    elif behavior_overtake_records:
+        diagnosis.append("overtake_pipeline_selected")
+    else:
+        diagnosis.append("overtake_not_selected_unknown")
+
+    return {
+        "summary": {
+            "activation_checks": len(activation_records),
+            "active_checks": len(active_records),
+            "front_obstacle_checks": len(front_records),
+            "left_corridor_blocked_checks": len(blocked_records),
+            "behavior_overtake_events": len(behavior_overtake_records),
+            "overtake_escape_events": len(overtake_escape_records),
+            "active_but_not_approved_events": len(active_but_not_approved_records),
+            "overtake_speed_mps": _summary(speed_values),
+            "overtake_lateral_offset_m": _summary(lateral_offsets),
+            "diagnosis": diagnosis,
+            "first_activation_check": activation_records[0] if activation_records else None,
+            "first_front_obstacle": front_records[0] if front_records else None,
+            "first_left_blocker": blocked_records[0] if blocked_records else None,
+            "first_overtake_plan": behavior_overtake_records[0] if behavior_overtake_records else None,
+            "first_active_but_not_approved": active_but_not_approved_records[0] if active_but_not_approved_records else None,
+        },
+        "timeline": timeline,
+    }
+
+
+def _write_overtake_debug_artifacts(run_dir: Path, overtake_debug: dict[str, Any]) -> dict[str, str]:
+    json_path = run_dir / "overtake_debug.json"
+    timeline_path = run_dir / "overtake_timeline.jsonl"
+    json_path.write_text(
+        json.dumps(overtake_debug, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    with timeline_path.open("w", encoding="utf-8") as fh:
+        for item in overtake_debug.get("timeline", []):
+            fh.write(json.dumps(item, sort_keys=True, default=str) + "\n")
+    return {
+        "overtake_debug_json": str(json_path),
+        "overtake_timeline_jsonl": str(timeline_path),
+    }
+
+
+def _write_sign_debug_artifacts(run_dir: Path, sign_debug: dict[str, Any]) -> dict[str, str]:
+    json_path = run_dir / "sign_debug.json"
+    timeline_path = run_dir / "sign_timeline.jsonl"
+    json_path.write_text(
+        json.dumps(sign_debug, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    with timeline_path.open("w", encoding="utf-8") as fh:
+        for item in sign_debug.get("timeline", []):
+            fh.write(json.dumps(item, sort_keys=True, default=str) + "\n")
+    return {
+        "sign_debug_json": str(json_path),
+        "sign_timeline_jsonl": str(timeline_path),
+    }
+
+
+def _event_ts(payload: dict[str, Any]) -> float:
+    for key in ("ts", "source_timestamp", "timestamp"):
+        value = _safe_float(payload.get(key))
+        if value is not None:
+            return value
+    nested = payload.get("payload")
+    if isinstance(nested, dict):
+        for key in ("timestamp", "ts"):
+            value = _safe_float(nested.get(key))
+            if value is not None:
+                return value
+    return 0.0
+
+
+def _normalized_sign_name(payload: dict[str, Any]) -> str:
+    raw = payload.get("kind", payload.get("sign", ""))
+    return str(raw or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _dict_value(value: Any, key: str) -> Any:
+    return value.get(key) if isinstance(value, dict) else None
+
+
+def _pick_sign_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "kind",
+            "sign",
+            "raw_class",
+            "confidence",
+            "box_area",
+            "distance_m",
+            "distance_cm",
+            "distance_source",
+            "current_lanelet_id",
+        ),
+    )
+
+
+def _pick_behavior_context_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "route_id",
+            "current_lanelet_id",
+            "next_lanelet_ids",
+            "route_active",
+            "sign_hints_count",
+            "sign_hints",
+            "pose_x",
+            "pose_y",
+            "nominal_speed_mps",
+        ),
+    )
+
+
+def _pick_overtake_context_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "route_id",
+            "current_lanelet_id",
+            "next_lanelet_ids",
+            "route_active",
+            "tracked_object_count",
+            "lidar_obstacle_count",
+            "lidar_scan_age_s",
+            "pose_x",
+            "pose_y",
+            "pose_yaw_rad",
+            "nominal_speed_mps",
+        ),
+    )
+
+
+def _pick_behavior_plan_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "scenario",
+            "valid",
+            "stop_required",
+            "sp0",
+            "sp_first3",
+            "notes_reason",
+            "stop_mode",
+            "stop_source",
+            "distance_source",
+            "stop_distance_m",
+            "current_lanelet_id",
+            "pose_x",
+            "pose_y",
+        ),
+    )
+
+
+def _pick_overtake_activation_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "enabled",
+            "active",
+            "front_vehicle_or_obstacle",
+            "left_corridor_clear",
+            "decision_reason",
+            "effective_lateral_offset_m",
+            "clearance_m",
+            "corridor_half_width_m",
+            "tracked_corridor_half_width_m",
+            "front_semantic_required",
+            "raw_lidar_fallback_enabled",
+            "raw_lidar_fallback_allowed",
+            "raw_lidar_confirm_ticks",
+            "front_forward_min_m",
+            "front_forward_max_m",
+            "raw_lidar_forward_max_m",
+            "front_half_width_m",
+            "side_forward_max_m",
+            "lidar_obstacle_count",
+            "tracked_object_count",
+            "front_candidates",
+            "raw_lidar_front_candidates",
+            "ignored_lidar_front_candidates",
+            "left_blockers",
+        ),
+    )
+
+
+def _pick_overtake_plan_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "scenario",
+            "scenario_name",
+            "valid",
+            "stop_required",
+            "sp0",
+            "speed_first",
+            "speed_min",
+            "speed_max",
+            "sp_first3",
+            "notes_reason",
+            "path_source",
+            "candidate_modules",
+            "candidate_priorities",
+            "approved_module",
+            "overtake_corridor_escape",
+            "overtake_effective_lateral_offset_m",
+            "overtake_clearance_m",
+            "containment_mode",
+            "corridor_touches_bound",
+            "velocity_modules",
+            "current_lanelet_id",
+            "next_lanelet_ids",
+            "pose_x",
+            "pose_y",
+        ),
+    )
+
+
+def _pick_overtake_path_optimizer_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "current_scenario_name",
+            "prev_scenario_name",
+            "path_points",
+            "max_abs_y_m",
+            "lateral_offset_m",
+            "mode",
+            "corridor_available",
+            "corridor_violation_m",
+            "corridor_touches_bound",
+            "used_prev_safe_path",
+            "infeasible",
+            "infeasible_ticks",
+        ),
+    )
+
+
+def _pick_navigation_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "reason",
+            "route_id",
+            "route_active",
+            "route_progress",
+            "current_lanelet_id",
+            "next_lanelet_ids",
+            "blocked_lanelet_id",
+            "blocked_lanelet_ids",
+            "destination_lanelet_id",
+            "destination_node_id",
+            "source",
+            "pose_x",
+            "pose_y",
+        ),
+    )
+
+
+def _pick_mpc_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "scenario",
+            "valid",
+            "stop_req",
+            "sp0",
+            "v_opt_raw",
+            "speed_mps",
+            "requested_speed_mps",
+            "reason",
+            "notes_reason",
+            "backend",
+        ),
+    )
+
+
+def _pick_dispatcher_fields(ev: dict[str, Any]) -> dict[str, Any]:
+    return _pick_dict(
+        ev,
+        (
+            "event",
+            "state",
+            "cmd_valid",
+            "cmd_source",
+            "cmd_reason",
+            "speed_mps",
+            "steering_deg",
+            "dispatched",
+            "had_motor_cmd",
+            "behavior_age_s",
+            "pose_age_s",
+        ),
+    )
+
+
 def _find_auto_start_ts(events: list[dict[str, Any]]) -> float | None:
     for ev in events:
         if ev.get("thread") == "dashboard" and ev.get("event") == "state_change_request":
@@ -1562,6 +2323,22 @@ def main() -> int:
             "navigation_command_json": str(brain_run_dir / "navigation_command.json"),
         }
     )
+    sign_debug = _build_sign_debug(
+        brain_events=brain_events,
+        dashboard_sign_events=(client.sign_events if client is not None else []),
+        dashboard_behavior_events=(client.behavior_output_events if client is not None else []),
+        dashboard_motor_events=(client.motor_command_events if client is not None else []),
+        dashboard_nav_events=(client.nav_status_events if client is not None else []),
+    )
+    metrics["sign_debug"] = sign_debug.get("summary", {})
+    metrics["artifacts"].update(_write_sign_debug_artifacts(brain_run_dir, sign_debug))
+    overtake_debug = _build_overtake_debug(
+        brain_events=brain_events,
+        dashboard_behavior_events=(client.behavior_output_events if client is not None else []),
+        dashboard_motor_events=(client.motor_command_events if client is not None else []),
+    )
+    metrics["overtake_debug"] = overtake_debug.get("summary", {})
+    metrics["artifacts"].update(_write_overtake_debug_artifacts(brain_run_dir, overtake_debug))
     metrics["run_id"] = run_id
     metrics["auto_start_ts"] = auto_start_ts
     metrics["record_start_ts"] = record_start_ts

@@ -18,7 +18,7 @@ from src.core.types.routing import RegulatoryElement
 from tests.behavior.conftest import make_context
 
 
-def test_velocity_planner_stops_for_stopline() -> None:
+def test_velocity_planner_ignores_stopline_for_stop_behavior() -> None:
     reg = RegulatoryElement(
         element_id="stop-1",
         kind="stopline",
@@ -49,8 +49,125 @@ def test_velocity_planner_stops_for_stopline() -> None:
         ctx=ctx,
     )
 
-    assert out.stop_required is True
-    assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
+    assert out.stop_required is False
+    assert out.speed_profile[-1] == pytest.approx(1.0, abs=1e-6)
+
+
+def test_velocity_planner_allows_low_speed_for_crosswalk() -> None:
+    ctx = make_context(horizon_n=10, dt=0.1, nominal_speed_mps=0.10, max_speed_mps=0.40)
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.CROSSWALK.value,
+        valid=True,
+        notes={"min_moving_speed_mps": 0.10},
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+
+    assert np.max(out.speed_profile) == pytest.approx(0.10, abs=1e-6)
+    assert out.min_moving_speed_mps == pytest.approx(0.10)
+
+
+def test_velocity_planner_raises_highway_to_highway_minimum() -> None:
+    ctx = make_context(horizon_n=10, dt=0.1, nominal_speed_mps=0.30, max_speed_mps=1.00)
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
+        scenario_name=ScenarioName.HIGHWAY.value,
+        valid=True,
+        notes={"min_moving_speed_mps": 0.40},
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+
+    assert np.min(out.speed_profile) == pytest.approx(0.40, abs=1e-6)
+    assert out.min_moving_speed_mps == pytest.approx(0.40)
+
+
+def test_lidar_front_obstacle_slowdown_overrides_highway_minimum_without_mpc_myopia() -> None:
+    ctx = make_context(
+        horizon_n=10,
+        dt=0.1,
+        nominal_speed_mps=0.40,
+        max_speed_mps=0.40,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.24, x_m=0.26, y_m=0.01, point_count=69),),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.40, dtype=float),
+        scenario_name=ScenarioName.HIGHWAY.value,
+        valid=True,
+        notes={"min_moving_speed_mps": 0.40},
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+
+    assert np.max(out.speed_profile) == pytest.approx(0.20, abs=1e-6)
+    assert out.min_moving_speed_mps == pytest.approx(0.20)
+    assert any(
+        note.get("mode") == "lidar_obstacle_close_slow"
+        and note.get("requested_cap_mps") == pytest.approx(0.20)
+        and note.get("motion_floor_mps") == pytest.approx(0.20)
+        for note in out.notes["velocity_modules"]
+    )
+
+
+def test_lidar_self_return_does_not_force_close_slow() -> None:
+    ctx = make_context(
+        horizon_n=10,
+        dt=0.1,
+        nominal_speed_mps=0.40,
+        max_speed_mps=0.40,
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.054, x_m=0.054, y_m=0.014, point_count=40),),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.40, dtype=float),
+        scenario_name=ScenarioName.HIGHWAY.value,
+        valid=True,
+        notes={"min_moving_speed_mps": 0.40},
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((11, 2), dtype=float),
+        drivable_right_bound=np.zeros((11, 2), dtype=float),
+        ctx=ctx,
+    )
+
+    assert np.max(out.speed_profile) == pytest.approx(0.40, abs=1e-6)
+    assert not any(
+        note.get("kind") == "lidar_obstacle"
+        for note in out.notes["velocity_modules"]
+    )
 
 
 def test_velocity_planner_slows_instead_of_stopping_for_lidar_obstacle_in_corridor() -> None:
@@ -59,7 +176,7 @@ def test_velocity_planner_slows_instead_of_stopping_for_lidar_obstacle_in_corrid
         dt=0.1,
         nominal_speed_mps=0.4,
         max_speed_mps=1.0,
-        lidar_obstacles=(LidarObstacle(distance_min_m=0.30, x_m=0.30, y_m=0.0, point_count=4),),
+        lidar_obstacles=(LidarObstacle(distance_min_m=0.50, x_m=0.50, y_m=0.0, point_count=4),),
     )
     target_path = np.column_stack([np.linspace(0.0, 1.0, 11), np.zeros(11), np.zeros(11)])
     plan = BehaviorPathPlan(
@@ -269,6 +386,40 @@ def test_velocity_planner_keeps_steering_for_future_infeasible_containment() -> 
     assert not np.allclose(out.speed_profile, 0.0)
     assert any(
         note.get("kind") == "lane_containment" and note.get("mode") == "future_horizon_crawl"
+        for note in out.notes.get("velocity_modules", [])
+    )
+
+
+def test_velocity_planner_keeps_steering_for_near_infeasible_when_ego_aligned() -> None:
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.25, max_speed_mps=0.40)
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.25, dtype=float),
+        scenario_name=ScenarioName.INTERSECTION.value,
+        valid=True,
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((21, 2), dtype=float),
+        drivable_right_bound=np.zeros((21, 2), dtype=float),
+        optimizer_notes={
+            "ego_corridor_error_m": 0.003,
+            "corridor_touches_bound": True,
+            "containment_infeasible_ticks": 1300,
+            "containment_stop_after_ticks": 4,
+            "first_infeasible_index": 1,
+        },
+        ctx=ctx,
+    )
+
+    assert out.stop_required is False
+    assert not np.allclose(out.speed_profile, 0.0)
+    assert any(
+        note.get("kind") == "lane_containment" and note.get("mode") == "near_horizon_crawl"
         for note in out.notes.get("velocity_modules", [])
     )
 

@@ -17,13 +17,17 @@ from dataclasses import replace
 
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
+from src.behavior.sign_utils import nearest_sign_hint
 from src.core.types.behavior import BehaviorOutput, ScenarioName
 from src.routing.lanelet.attributes import ATTR_CROSSWALK
 
 
 _CROSSWALK_ENTER_RANGE_M = 4.0
 _CROSSWALK_EXIT_RANGE_M = 1.5
-_CROSSWALK_SPEED_MPS = 0.30
+try:
+    from config import TRAFFIC_SIGN_LOW_SPEED_MPS as _CROSSWALK_SPEED_MPS
+except Exception:
+    _CROSSWALK_SPEED_MPS = 0.10
 _PEDESTRIAN_BLOCK_DISTANCE_M = 2.5
 
 
@@ -37,7 +41,14 @@ class Crosswalk(BaseScenario):
         self._active = False
 
     def is_active(self, ctx: PlanningContext) -> bool:
+        sign_hint = nearest_sign_hint(ctx, {"crosswalk"}, max_distance_m=_CROSSWALK_ENTER_RANGE_M)
+        if sign_hint is not None:
+            self._active = True
+            return True
+
         if ctx.lanelet_map is None or not ctx.route.current_lanelet_id:
+            if self._active:
+                self._active = False
             return False
 
         current = ctx.lanelet_map.get_lanelet(ctx.route.current_lanelet_id)
@@ -80,7 +91,7 @@ class Crosswalk(BaseScenario):
             ctx=ctx,
             target_speed_mps=_CROSSWALK_SPEED_MPS,
             scenario_name=self.name,
-            notes=notes,
+            notes={**notes, "min_moving_speed_mps": float(_CROSSWALK_SPEED_MPS)},
         )
 
     def _pedestrian_blocking(self, ctx: PlanningContext) -> bool:

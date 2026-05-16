@@ -17,10 +17,7 @@
 #   1. CAP global: speed_profile[i] = min(speed_profile[i], max_speed_mps).
 #   2. SLOWDOWN por crosswalk: si crosswalk dentro de
 #      `_CROSSWALK_SLOWDOWN_RANGE_M`, capear speed a `_CROSSWALK_SPEED_MPS`.
-#   3. STOP por stopline: si stopline dentro de
-#      `_STOPLINE_STOP_RANGE_M`, RAMPa lineal a 0 desde la velocidad
-#      actual hasta el stopline. `stop_required = True`.
-#   4. CAP por intersection: dentro de un intersection, capear a
+#   3. CAP por intersection: dentro de un intersection, capear a
 #      `_INTERSECTION_SPEED_MPS`.
 #
 # Todas las reglas son monotónicamente DECRECIENTES sobre speed: nunca
@@ -46,9 +43,11 @@ if TYPE_CHECKING:
 # Rangos en metros desde la posición actual del ego — distancias
 # relativas al inicio de la lanelet en la que está el ego (proxy
 # conservador, ver `LaneletMap.regulatory_within`).
-_STOPLINE_STOP_RANGE_M = 5.0
 _CROSSWALK_SLOWDOWN_RANGE_M = 4.0
-_CROSSWALK_SPEED_MPS = 0.30
+try:
+    from config import TRAFFIC_SIGN_LOW_SPEED_MPS as _CROSSWALK_SPEED_MPS
+except Exception:
+    _CROSSWALK_SPEED_MPS = 0.10
 _INTERSECTION_SPEED_MPS = 0.40
 _INTERSECTION_RANGE_M = 6.0
 
@@ -83,11 +82,7 @@ def apply_overlay(
         # a una distancia conservadora (el regulator está "cerca").
         distance_m = float(reg.data.get("distance_m", 0.0)) if reg.data else 0.0
 
-        if kind == "stopline" and distance_m <= _STOPLINE_STOP_RANGE_M:
-            speed = _ramp_to_zero(speed, dt=plan.dt, distance_to_stop_m=distance_m)
-            stop_required = True
-            notes_extra["overlay_caps"].append({"kind": "stopline", "distance_m": distance_m})
-        elif kind == "crosswalk" and distance_m <= _CROSSWALK_SLOWDOWN_RANGE_M:
+        if kind == "crosswalk" and distance_m <= _CROSSWALK_SLOWDOWN_RANGE_M:
             speed = np.minimum(speed, _CROSSWALK_SPEED_MPS)
             notes_extra["overlay_caps"].append(
                 {"kind": "crosswalk", "distance_m": distance_m, "cap": _CROSSWALK_SPEED_MPS}
@@ -108,44 +103,3 @@ def apply_overlay(
         stop_required=stop_required,
         notes=notes_extra,
     )
-
-
-def _ramp_to_zero(speed: np.ndarray, dt: float, distance_to_stop_m: float) -> np.ndarray:
-    """Genera un perfil de frenada lineal hasta 0 a la distancia indicada.
-
-    Aproximación:
-      - Calcular cuánto step_arc avanzaría el plan original a su velocidad.
-      - Identificar el step k* en el cual cumulamos `distance_to_stop_m`.
-      - Para steps <= k*: rampa lineal de v0 → 0 que termina exactamente en 0
-        en el step k*.
-      - Para steps > k*: 0.
-      - Si el horizonte es más corto que la distancia (k* >= n), la rampa
-        cubre todo el horizonte terminando en 0 en el último step. Esto
-        garantiza que `speed_profile[-1] == 0` siempre que se aplique el ramp.
-    Si `distance_to_stop_m <= 0`, devolvemos ceros completos.
-    """
-    n = speed.shape[0]
-    if distance_to_stop_m <= 0.0 or n == 0:
-        return np.zeros_like(speed)
-
-    cumulative_arc = 0.0
-    out = speed.copy()
-    stop_step = n
-    for k in range(n):
-        cumulative_arc += float(out[k]) * float(dt)
-        if cumulative_arc >= distance_to_stop_m:
-            stop_step = k
-            break
-
-    # ramp_end es el índice donde queremos llegar a 0. Si el horizonte
-    # es más corto que la distancia requerida, recortamos al último step.
-    ramp_end = min(stop_step, n - 1)
-    if ramp_end <= 0:
-        return np.zeros_like(speed)
-
-    v0 = float(out[0])
-    # Rampa lineal: ramp_end+1 puntos desde v0 hasta 0 (inclusive).
-    ramp = np.linspace(v0, 0.0, ramp_end + 1)
-    out[: ramp_end + 1] = np.minimum(out[: ramp_end + 1], ramp)
-    out[ramp_end + 1 :] = 0.0
-    return out

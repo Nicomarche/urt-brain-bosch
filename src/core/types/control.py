@@ -35,7 +35,8 @@ class MotorCommand:
     Invariantes:
       - `steering_deg ∈ [-25, +25]`. El `MotionController` ya aplica el clamp;
         el dispatcher confía en el rango y no re-clamps.
-      - `speed_mps >= 0` en operación normal. Reverse no se usa en BFMC.
+      - `speed_mps >= 0` en operación normal. La única reversa permitida es
+        una maniobra de parking emitida por el BehaviorPlanner/MotionController.
       - `valid == True` ⇔ los valores son utilizables. Si False, el
         dispatcher debe ignorar el comando y llamar a `safety_gate.fallback()`.
       - `source` documenta de dónde viene el comando — "motion_controller"

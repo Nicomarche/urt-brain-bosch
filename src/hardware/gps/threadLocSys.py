@@ -34,9 +34,10 @@ Protocolo de competencia (ECC-BFMC Computer):
 5. Recibir {"x": float, "y": float, "yaw_rad"?: float}\n
 
 En simulación (MOTOR_OUTPUT == "zmq"):
-Se omite el paso 1-3 y se conecta directamente a SIM_LOCSYS_HOST:SIM_LOCSYS_PORT
-donde sim_bridge.py expone el servidor usando el ground truth de Gazebo
-transformado al sistema de coordenadas del mapa OSM.
+por defecto se conecta directo al LoCSys expuesto por `sim_bridge`
+(SIM_LOCSYS_HOST:SIM_LOCSYS_PORT). Ese stream ya viene transformado desde
+Gazebo al frame `brain_map`; no se debe usar el `locsys_SIM.py` hardcodeado
+del repositorio Shared como fuente de GPS del simulador.
 
 El fix se emite como mensaje Localisation IPC con world_x/world_y y, si está
 disponible, yaw_rad/yaw_deg. Así evitamos el flip de imagen y trabajamos
@@ -46,12 +47,14 @@ directo en el frame del mapa OSM, sin necesitar conocer height_m.
 from __future__ import annotations
 
 import json
+import math
 import socket
 import time
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import Localisation
+from src.core.messaging.allMessages import CurrentSpeed, Localisation, Location
 from src.core.messaging.messageHandlerSender import messageHandlerSender
+from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
 # Defaults que se sobreescriben con los valores de config.py si está disponible.
 _LOCSYS_PORT        = 4691
@@ -62,6 +65,9 @@ _LOCSYS_DEVICE_ID   = 1
 _SIM_LOCSYS_HOST    = "localhost"
 _SIM_LOCSYS_PORT    = 4691
 _GPS_RECONNECT_S    = 2.0
+_LOCSYS_USE_TRAFFIC_COMM_SERVER = True
+_TRAFFIC_COMM_SEND_EGO_DATA = True
+_TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 
 try:
     from config import (
@@ -73,6 +79,9 @@ try:
         SIM_LOCSYS_HOST    as _SIM_LOCSYS_HOST,
         SIM_LOCSYS_PORT    as _SIM_LOCSYS_PORT,
         GPS_RECONNECT_S    as _GPS_RECONNECT_S,
+        LOCSYS_USE_TRAFFIC_COMM_SERVER as _LOCSYS_USE_TRAFFIC_COMM_SERVER,
+        TRAFFIC_COMM_SEND_EGO_DATA as _TRAFFIC_COMM_SEND_EGO_DATA,
+        TRAFFIC_COMM_SEND_PERIOD_S as _TRAFFIC_COMM_SEND_PERIOD_S,
     )
 except ImportError:
     pass
@@ -80,6 +89,27 @@ except ImportError:
 # Socket read timeout (s). Keeps thread_work responsive to stop() while
 # waiting for the GPS stream.
 _SOCKET_TIMEOUT_S = 1.5
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _extract_json_objects(buffer: str) -> tuple[list[dict], str]:
+    """Parse one or more adjacent JSON objects from a stream buffer."""
+    objects: list[dict] = []
+    while True:
+        stripped = buffer.lstrip()
+        if not stripped:
+            return objects, ""
+        try:
+            obj, index = _JSON_DECODER.raw_decode(stripped)
+        except json.JSONDecodeError:
+            first_json = stripped.find("{")
+            if first_json > 0:
+                buffer = stripped[first_json:]
+                continue
+            return objects, stripped
+        if isinstance(obj, dict):
+            objects.append(obj)
+        buffer = stripped[index:]
 
 
 class threadLocSys(ThreadWithStop):
@@ -104,40 +134,162 @@ class threadLocSys(ThreadWithStop):
             self._sim_mode = False
 
         self.localisationSender = messageHandlerSender(self.queuesList, Localisation)
+        self._traffic_location_sub = (
+            messageHandlerSubscriber(self.queuesList, Location, "lastOnly", True)
+            if _TRAFFIC_COMM_SEND_EGO_DATA
+            else None
+        )
+        self._traffic_speed_sub = (
+            messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
+            if _TRAFFIC_COMM_SEND_EGO_DATA
+            else None
+        )
+        self._latest_traffic_location: dict | None = None
+        self._latest_traffic_speed_mps: float | None = None
+        self._traffic_data_sock: socket.socket | None = None
+        self._traffic_next_connect_t = 0.0
+        self._traffic_last_send_t = 0.0
 
     # ------------------------------------------------------------------
 
     def _resolve_locsys_address(self) -> tuple[str, int]:
         """Devuelve (host, port) del locsys device.
 
-        Sim: directo a localhost:4691.
+        Sim: directo al LoCSys del sim_bridge.
         Competencia: pregunta al TrafficCommunicationServer por la IP real.
         """
-        if self._sim_mode:
+        if self._sim_mode and not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
             return _SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT
 
         try:
             with socket.create_connection(
                 (_TRAFFIC_COMM_HOST, _TRAFFIC_COMM_PORT), timeout=3.0
             ) as s:
+                s.settimeout(3.0)
                 req = json.dumps({
                     "reqORinfo": "request",
                     "type": "locsysDevice",
                     "DeviceID": _LOCSYS_DEVICE_ID,
                 })
                 s.sendall(req.encode("utf-8") + b"\n")
-                line = s.makefile("r").readline()
-                resp = json.loads(line)
+                buffer = ""
+                deadline = time.monotonic() + 3.0
+                resp = None
+                while time.monotonic() < deadline and resp is None:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    objects, buffer = _extract_json_objects(buffer)
+                    if objects:
+                        resp = objects[0]
+                if resp is None:
+                    raise TimeoutError("traffic server did not return a JSON response")
                 address = str(resp["response"])
                 host, port_str = address.rsplit(":", 1)
                 return host.strip(), int(port_str.strip())
         except Exception as exc:
+            fallback_host, fallback_port = (
+                (_SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT)
+                if self._sim_mode
+                else (_LOCSYS_HOST_COMP, _LOCSYS_PORT)
+            )
             print(
                 f"\033[1;97m[ LocSys ] :\033[0m "
                 f"\033[1;93mWARN\033[0m - traffic server ({_TRAFFIC_COMM_HOST}:{_TRAFFIC_COMM_PORT}) "
-                f"error: {exc} — usando {_LOCSYS_HOST_COMP}:{_LOCSYS_PORT}"
+                f"error: {exc} — usando {fallback_host}:{fallback_port}"
             )
-            return _LOCSYS_HOST_COMP, _LOCSYS_PORT
+            return fallback_host, fallback_port
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _as_float(value) -> float | None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _receive_traffic_inputs(self) -> None:
+        if self._traffic_location_sub is not None:
+            location = self._traffic_location_sub.receive()
+            if isinstance(location, dict):
+                self._latest_traffic_location = location
+
+        if self._traffic_speed_sub is not None:
+            speed_raw = self._traffic_speed_sub.receive()
+            speed = self._as_float(speed_raw)
+            if speed is not None:
+                self._latest_traffic_speed_mps = speed * 0.001
+
+    def _traffic_socket(self, now: float) -> socket.socket | None:
+        if self._traffic_data_sock is not None:
+            return self._traffic_data_sock
+        if now < self._traffic_next_connect_t:
+            return None
+        try:
+            sock = socket.create_connection(
+                (_TRAFFIC_COMM_HOST, _TRAFFIC_COMM_PORT), timeout=0.5
+            )
+            sock.settimeout(0.5)
+            self._traffic_data_sock = sock
+            return sock
+        except OSError:
+            self._traffic_next_connect_t = now + float(_GPS_RECONNECT_S)
+            return None
+
+    def _close_traffic_socket(self) -> None:
+        sock = self._traffic_data_sock
+        self._traffic_data_sock = None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _send_ego_data_to_traffic_server(self) -> None:
+        if not _TRAFFIC_COMM_SEND_EGO_DATA:
+            return
+
+        self._receive_traffic_inputs()
+        now = time.monotonic()
+        if now - self._traffic_last_send_t < float(_TRAFFIC_COMM_SEND_PERIOD_S):
+            return
+
+        location = self._latest_traffic_location
+        if not isinstance(location, dict):
+            return
+
+        x = self._as_float(location.get("x", location.get("world_x")))
+        y = self._as_float(location.get("y", location.get("world_y")))
+        if x is None or y is None:
+            return
+
+        yaw = self._as_float(location.get("yaw_rad"))
+        if yaw is None:
+            yaw_deg = self._as_float(location.get("yaw", location.get("yaw_deg")))
+            yaw = math.radians(yaw_deg) if yaw_deg is not None else 0.0
+
+        speed = self._latest_traffic_speed_mps
+        if speed is None:
+            speed = 0.0
+
+        messages = [
+            {"reqORinfo": "info", "type": "devicePos", "value1": x, "value2": y},
+            {"reqORinfo": "info", "type": "deviceRot", "value1": yaw},
+            {"reqORinfo": "info", "type": "deviceSpeed", "value1": speed},
+        ]
+        payload = "".join(json.dumps(msg) for msg in messages).encode("utf-8")
+        sock = self._traffic_socket(now)
+        if sock is None:
+            return
+
+        try:
+            sock.sendall(payload)
+            self._traffic_last_send_t = now
+        except OSError:
+            self._close_traffic_socket()
+            self._traffic_next_connect_t = now + float(_GPS_RECONNECT_S)
 
     # ------------------------------------------------------------------
 
@@ -202,28 +354,26 @@ class threadLocSys(ThreadWithStop):
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;92mINFO\033[0m - Conectado al servidor locsys {host}:{port}"
                 )
-                buffer = b""
+                buffer = ""
                 while not self._blocker.is_set():
                     try:
                         chunk = sock.recv(4096)
                     except socket.timeout:
                         # Sin datos en _SOCKET_TIMEOUT_S: check stop flag, seguir.
+                        self._send_ego_data_to_traffic_server()
                         continue
                     if not chunk:
                         # Conexión cerrada por el servidor.
                         break
-                    buffer += chunk
-                    while b"\n" in buffer:
-                        raw_line, buffer = buffer.split(b"\n", 1)
-                        line = raw_line.decode("utf-8", errors="replace").strip()
-                        if not line:
-                            continue
+                    buffer += chunk.decode("utf-8", errors="replace")
+                    objects, buffer = _extract_json_objects(buffer)
+                    for data in objects:
                         try:
-                            data = json.loads(line)
                             self._emit_fix(data)
-                        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                        except (KeyError, ValueError, TypeError):
                             if self.debugger:
-                                print(f"\033[1;97m[ LocSys ] :\033[0m parse error: {line!r}")
+                                print(f"\033[1;97m[ LocSys ] :\033[0m parse error: {data!r}")
+                    self._send_ego_data_to_traffic_server()
         except OSError as exc:
             if not self._blocker.is_set():
                 print(
@@ -232,3 +382,7 @@ class threadLocSys(ThreadWithStop):
                     f"reintentando en {_GPS_RECONNECT_S:.0f}s"
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
+
+    def stop(self) -> None:
+        self._close_traffic_socket()
+        super().stop()

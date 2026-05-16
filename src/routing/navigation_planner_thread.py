@@ -45,6 +45,30 @@ _ROUTE_LANELET_OVERRIDE_CONFIRM_TICKS = 3
 _ROUTE_LANELET_PROMOTION_MAX_ERROR_M = 0.20
 
 
+def _no_entry_min_confidence() -> float:
+    try:
+        import config as _cfg
+        return max(0.0, min(1.0, float(getattr(_cfg, "TRAFFIC_SIGN_NO_ENTRY_MIN_CONFIDENCE", 0.70))))
+    except Exception:
+        return 0.70
+
+
+def _no_entry_min_box_area() -> float:
+    try:
+        import config as _cfg
+        return max(0.0, float(getattr(_cfg, "TRAFFIC_SIGN_NO_ENTRY_MIN_BOX_AREA", 0.003)))
+    except Exception:
+        return 0.003
+
+
+def _no_entry_confirm_ticks() -> int:
+    try:
+        import config as _cfg
+        return max(1, int(getattr(_cfg, "TRAFFIC_SIGN_NO_ENTRY_CONFIRM_TICKS", 2)))
+    except Exception:
+        return 2
+
+
 def _summarize_nav_command(command: dict | None) -> dict:
     if not isinstance(command, dict):
         return {"type": "invalid"}
@@ -99,6 +123,7 @@ class threadNavigationPlanner(ThreadWithStop):
         route_context_buffer,
         *,
         lanelet_map=None,
+        sign_hints_buffer=None,
         logging=None,
         debugging: bool = False,
         visualizer=None,
@@ -108,6 +133,7 @@ class threadNavigationPlanner(ThreadWithStop):
         self.tracking_state = tracking_state
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
+        self.sign_hints_buffer = sign_hints_buffer
         # `lanelet_map` (Phase 3): si está presente, se usa para resolver
         # `RouteContext.current_lanelet_id` en cada tick vía `at_pose(x,y)`.
         # Sin esto, LaneKeep cae en `_fallback_plan(reason="no_lanelet_map_or_id")`
@@ -147,6 +173,10 @@ class threadNavigationPlanner(ThreadWithStop):
         self._auto_lap_last_attempt_ts: float = 0.0
         self._auto_lap_activated: bool = False
         self._pose_ever_valid: bool = False
+        self._no_entry_consumed_keys: set[str] = set()
+        self._no_entry_candidate_key: str | None = None
+        self._no_entry_candidate_hits: int = 0
+        self._no_entry_candidate_last_ts: float = 0.0
 
     def _load_graph(self):
         osm_path = _OSM_PATH
@@ -590,15 +620,187 @@ class threadNavigationPlanner(ThreadWithStop):
             regulatory_ahead=regulatory_ahead,
         )
 
+    def _recent_sign_hints(self, now_s: float) -> tuple[dict, ...]:
+        if self.sign_hints_buffer is None:
+            return ()
+        payload = self.sign_hints_buffer.read_latest()
+        if not isinstance(payload, (list, tuple)):
+            return ()
+        try:
+            import config as _cfg
+            max_age_s = float(getattr(_cfg, "SIGN_HINT_MAX_AGE_S", 1.5))
+        except Exception:
+            max_age_s = 1.5
+        hints: list[dict] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                ts = float(item.get("timestamp", now_s))
+            except (TypeError, ValueError):
+                ts = float(now_s)
+            if (float(now_s) - ts) <= max_age_s:
+                hints.append(dict(item))
+        return tuple(hints)
+
+    @staticmethod
+    def _sign_kind(hint: dict) -> str:
+        return str(hint.get("kind") or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    @staticmethod
+    def _sign_key(hint: dict) -> str:
+        try:
+            ts = f"{float(hint.get('timestamp')):.2f}"
+        except (TypeError, ValueError):
+            ts = "unknown"
+        try:
+            dist = f"{float(hint.get('distance_m')):.2f}"
+        except (TypeError, ValueError):
+            dist = "unknown"
+        return f"{threadNavigationPlanner._sign_kind(hint)}:{ts}:{dist}"
+
+    def _apply_no_entry_hint(self, route_context: RouteContext, now_s: float) -> bool:
+        if self._graph is None or self._path_manager is None:
+            return False
+
+        target_lanelet_id = None
+        if route_context.next_lanelet_ids:
+            target_lanelet_id = str(route_context.next_lanelet_ids[0])
+        elif route_context.current_lanelet_id:
+            target_lanelet_id = str(route_context.current_lanelet_id)
+        if not target_lanelet_id:
+            return False
+
+        hint = None
+        for item in self._recent_sign_hints(now_s):
+            if self._sign_kind(item) == "no_entry" and self._no_entry_hint_is_actionable(item):
+                hint = item
+                break
+        if hint is None:
+            self._no_entry_candidate_key = None
+            self._no_entry_candidate_hits = 0
+            return False
+
+        key = f"no_entry:{target_lanelet_id}"
+        if key in self._no_entry_consumed_keys:
+            return False
+
+        last_key = getattr(self, "_no_entry_candidate_key", None)
+        last_ts = float(getattr(self, "_no_entry_candidate_last_ts", 0.0) or 0.0)
+        if last_key == key and (float(now_s) - last_ts) <= 0.75:
+            self._no_entry_candidate_hits = int(getattr(self, "_no_entry_candidate_hits", 0) or 0) + 1
+        else:
+            self._no_entry_candidate_key = key
+            self._no_entry_candidate_hits = 1
+        self._no_entry_candidate_last_ts = float(now_s)
+
+        confirm_ticks = _no_entry_confirm_ticks()
+        if int(self._no_entry_candidate_hits) < int(confirm_ticks):
+            live_log(
+                "nav_planner",
+                event="no_entry_candidate_waiting",
+                lanelet_id=target_lanelet_id,
+                hits=int(self._no_entry_candidate_hits),
+                required_hits=int(confirm_ticks),
+                confidence=hint.get("confidence"),
+                box_area=hint.get("box_area"),
+                distance_m=hint.get("distance_m"),
+                distance_source=hint.get("distance_source"),
+            )
+            return False
+
+        self._no_entry_consumed_keys.add(key)
+
+        blocked = set(getattr(self._graph, "blocked_lanelet_ids", ()) or ())
+        blocked.add(target_lanelet_id)
+        self._graph.set_blocked_lanelets(blocked)
+        live_log(
+            "nav_planner",
+            event="no_entry_blocked_lanelet",
+            lanelet_id=target_lanelet_id,
+            blocked_lanelet_ids=sorted(blocked),
+            route_id=route_context.route_id,
+            current_lanelet_id=route_context.current_lanelet_id,
+            next_lanelet_ids=list(route_context.next_lanelet_ids or ()),
+            confidence=hint.get("confidence"),
+            box_area=hint.get("box_area"),
+            distance_m=hint.get("distance_m"),
+            distance_source=hint.get("distance_source"),
+        )
+        return self._replan_after_blocked_lanelet(target_lanelet_id)
+
+    @staticmethod
+    def _no_entry_hint_is_actionable(hint: dict) -> bool:
+        try:
+            confidence = float(hint.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        try:
+            box_area = float(hint.get("box_area", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            box_area = 0.0
+        return (
+            confidence >= _no_entry_min_confidence()
+            and box_area >= _no_entry_min_box_area()
+        )
+
+    def _replan_after_blocked_lanelet(self, blocked_lanelet_id: str) -> bool:
+        if self._path_manager is None:
+            return False
+        dest_specs = list(getattr(self._path_manager, "destination_specs", []) or [])
+        if not dest_specs:
+            self._path_manager.clear_route()
+            return True
+        current_pose = {
+            "x": float(self._last_pose.x),
+            "y": float(self._last_pose.y),
+            "yaw_rad": float(self._last_pose.yaw),
+        }
+        self._path_manager.replans += 1
+        if len(dest_specs) > 1:
+            handled = self._path_manager.set_route_queue(dest_specs, current_pose=current_pose)
+        else:
+            handled = self._path_manager.set_route(dest_specs[0], current_pose=current_pose)
+        active_route = getattr(self._path_manager, "active_route", None)
+        if (
+            not handled
+            or active_route is None
+            or blocked_lanelet_id in [str(item) for item in getattr(active_route, "node_ids", []) or []]
+        ):
+            self._path_manager.clear_route()
+        return True
+
     def _effective_map_metadata(self, path_update) -> dict:
+        metadata: dict = {}
         if self._lanelet_map is not None:
             try:
-                metadata = dict(self._lanelet_map.get_map_metadata() or {})
-                if metadata:
-                    return metadata
+                metadata.update(dict(self._lanelet_map.get_map_metadata() or {}))
             except Exception:
                 pass
+        if self._graph is not None:
+            try:
+                metadata.update(dict(self._graph.get_map_metadata() or {}))
+            except Exception:
+                pass
+        if metadata:
+            return metadata
         return dict(path_update.map_metadata or {})
+
+    def _update_path_manager(self):
+        return self._path_manager.update(
+            self._last_pose.x,
+            self._last_pose.y,
+            self._last_pose.yaw,
+            speed_mps=self._last_speed,
+            min_lookahead_m=_ADVANCE_DIST,
+            lookahead_time_s=_LOOKAHEAD_TIME_S,
+            max_lookahead_m=_MAX_LOOKAHEAD_M,
+            precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
+            lookahead_pts=_LOOKAHEAD_PTS,
+            search_window=_MAP_MATCH_SEARCH_WP,
+            distance_weight=_MAP_MATCH_DISTANCE_W,
+            heading_weight=_MAP_MATCH_HEADING_W,
+        )
 
     def thread_work(self):
         if self._path_manager is None:
@@ -654,22 +856,12 @@ class threadNavigationPlanner(ThreadWithStop):
 
         self._ensure_auto_lap_route()
 
-        path_update = self._path_manager.update(
-            self._last_pose.x,
-            self._last_pose.y,
-            self._last_pose.yaw,
-            speed_mps=self._last_speed,
-            min_lookahead_m=_ADVANCE_DIST,
-            lookahead_time_s=_LOOKAHEAD_TIME_S,
-            max_lookahead_m=_MAX_LOOKAHEAD_M,
-            precision_lookahead_m=_PRECISION_LOOKAHEAD_M,
-            lookahead_pts=_LOOKAHEAD_PTS,
-            search_window=_MAP_MATCH_SEARCH_WP,
-            distance_weight=_MAP_MATCH_DISTANCE_W,
-            heading_weight=_MAP_MATCH_HEADING_W,
-        )
+        path_update = self._update_path_manager()
 
         route_context = self._build_route_context(path_update, time.time())
+        if self._apply_no_entry_hint(route_context, time.time()):
+            path_update = self._update_path_manager()
+            route_context = self._build_route_context(path_update, time.time())
         lanelet_diag = dict(getattr(self, "_last_lanelet_resolution_diag", {}) or {})
         self.route_context_buffer.write(route_context, timestamp=route_context.timestamp)
         if self.tracking_state is not None and hasattr(self.tracking_state, "update_from_route_context"):

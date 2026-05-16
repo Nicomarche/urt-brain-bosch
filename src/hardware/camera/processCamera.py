@@ -136,6 +136,7 @@ class processCamera(WorkerProcess):
         from src.behavior.scenarios.overtake import Overtake
         from src.behavior.scenarios.parking import Parking
         from src.behavior.scenarios.roundabout import Roundabout
+        from src.behavior.scenarios.stop_sign import StopSign
         from src.control.controller_thread import threadMotionController
         from src.control.motion_controller import MotionController
         from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
@@ -327,6 +328,7 @@ class processCamera(WorkerProcess):
                 # (ese era el bug — feedback OK, comandos OK, pero el
                 # BehaviorPlanner sin lanelet_id caía en `_fallback_plan`).
                 lanelet_map=lanelet_map,
+                sign_hints_buffer=sign_hints_buffer,
                 logging=self.logging,
                 debugging=self.debugging,
                 visualizer=visualizer,
@@ -397,6 +399,7 @@ class processCamera(WorkerProcess):
 
         behavior_planner = BehaviorPlanner(
             scenarios=[
+                StopSign(),
                 Parking(),
                 Crosswalk(),
                 Intersection(),

@@ -113,6 +113,8 @@ def test_sign_distance_source_prefers_lidar_when_sector_has_point() -> None:
     assert msg["distance_source"] == "lidar"
     assert msg["distance_cm"] == pytest.approx(70.0)
     assert thread.sign_hints_buffer.value[0]["distance_source"] == "lidar"
+    assert thread.sign_hints_buffer.value[0]["raw_class"] == "stop"
+    assert thread.sign_hints_buffer.value[0]["box_area"] > 0.0
 
 
 def test_sign_distance_falls_back_to_camera() -> None:

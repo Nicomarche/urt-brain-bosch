@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from src.core.types.pose import Pose2D
+from src.core.types.routing import RouteContext
 from src.routing.lanelet.attributes import ATTR_NORMAL
 from src.routing.lanelet.lanelet_map import from_track_graph
 from src.routing import navigation_planner_thread as nav_thread_module
@@ -121,6 +122,44 @@ def _make_thread(*, lanelet_map, route_lanelet_ids: list[str], pose: Pose2D):
     return thread
 
 
+class _SignHintBuffer:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read_latest(self):
+        return self._payload
+
+
+class _NoEntryGraph:
+    def __init__(self) -> None:
+        self.blocked_lanelet_ids: tuple[str, ...] = ()
+
+    def set_blocked_lanelets(self, lanelet_ids) -> None:
+        self.blocked_lanelet_ids = tuple(sorted(str(item) for item in lanelet_ids))
+
+    def get_map_metadata(self) -> dict:
+        return {"blocked_lanelet_ids": list(self.blocked_lanelet_ids)}
+
+
+class _NoSafeRouteManager:
+    def __init__(self) -> None:
+        self.destination_specs = [{"lanelet_id": "200"}]
+        self.active_route = SimpleNamespace(node_ids=["100", "200"])
+        self.route_active = True
+        self.replans = 0
+        self.cleared = False
+
+    def set_route(self, destination, *, current_pose):
+        self.active_route = SimpleNamespace(node_ids=["100", "200"])
+        self.route_active = True
+        return True
+
+    def clear_route(self) -> None:
+        self.active_route = None
+        self.route_active = False
+        self.cleared = True
+
+
 def _make_path_update(
     *,
     matched_x: float,
@@ -198,6 +237,90 @@ def test_resolve_lanelet_context_holds_pose_lanelet_when_route_and_pose_share_su
 
     assert current_lanelet_id == "pose_start->merge"
     assert next_lanelet_ids == ("merge->shared", "shared->tail")
+
+
+def test_no_entry_hint_blocks_lanelet_and_clears_route_when_no_safe_replan() -> None:
+    graph = _NoEntryGraph()
+    manager = _NoSafeRouteManager()
+    thread = threadNavigationPlanner.__new__(threadNavigationPlanner)
+    thread._graph = graph
+    thread._path_manager = manager
+    thread._last_pose = Pose2D(0.0, 0.0, 0.0)
+    thread._no_entry_consumed_keys = set()
+    thread._no_entry_candidate_key = None
+    thread._no_entry_candidate_hits = 0
+    thread._no_entry_candidate_last_ts = 0.0
+    thread.sign_hints_buffer = _SignHintBuffer(
+        [{
+            "kind": "no-entry",
+            "distance_m": 0.4,
+            "timestamp": 10.0,
+            "confidence": 0.90,
+            "box_area": 0.02,
+        }]
+    )
+
+    applied = thread._apply_no_entry_hint(
+        RouteContext(
+            route_active=True,
+            route_id="route-1",
+            current_lanelet_id="100",
+            next_lanelet_ids=("200",),
+        ),
+        now_s=10.2,
+    )
+    assert applied is False
+
+    applied = thread._apply_no_entry_hint(
+        RouteContext(
+            route_active=True,
+            route_id="route-1",
+            current_lanelet_id="100",
+            next_lanelet_ids=("200",),
+        ),
+        now_s=10.3,
+    )
+
+    assert applied is True
+    assert graph.blocked_lanelet_ids == ("200",)
+    assert manager.cleared is True
+    assert manager.route_active is False
+
+
+def test_no_entry_hint_ignores_weak_single_frame_detection() -> None:
+    graph = _NoEntryGraph()
+    manager = _NoSafeRouteManager()
+    thread = threadNavigationPlanner.__new__(threadNavigationPlanner)
+    thread._graph = graph
+    thread._path_manager = manager
+    thread._last_pose = Pose2D(0.0, 0.0, 0.0)
+    thread._no_entry_consumed_keys = set()
+    thread._no_entry_candidate_key = None
+    thread._no_entry_candidate_hits = 0
+    thread._no_entry_candidate_last_ts = 0.0
+    thread.sign_hints_buffer = _SignHintBuffer(
+        [{
+            "kind": "no-entry",
+            "distance_m": 0.36,
+            "timestamp": 10.0,
+            "confidence": 0.55,
+            "box_area": 0.0028,
+        }]
+    )
+
+    applied = thread._apply_no_entry_hint(
+        RouteContext(
+            route_active=True,
+            route_id="route-1",
+            current_lanelet_id="100",
+            next_lanelet_ids=("200",),
+        ),
+        now_s=10.2,
+    )
+
+    assert applied is False
+    assert graph.blocked_lanelet_ids == ()
+    assert manager.cleared is False
 
 
 def test_resolve_lanelet_context_keeps_predecessor_pose_lanelet_before_route_lanelet() -> None:

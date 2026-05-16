@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from queue import Queue
 
 import pytest
@@ -53,3 +54,40 @@ def test_dispatcher_inverts_steering_sign_for_wire_protocol(
     assert speed_msg["Owner"] == SpeedMotor.Owner.value
     assert speed_msg["msgID"] == SpeedMotor.msgID.value
     assert speed_msg["msgValue"] == "420"
+
+
+def test_dispatcher_sends_negative_speed_for_parking_reverse() -> None:
+    queues = _queues()
+    dispatcher = threadMotorCommandDispatcher(queues, motor_command_buffer=None)
+
+    dispatcher._send(
+        MotorCommand(
+            timestamp=1.0,
+            steering_deg=-25.0,
+            speed_mps=-0.10,
+            valid=True,
+            source="motion_controller",
+            reason="parking_reversing_entry",
+        )
+    )
+
+    _steer_msg = queues["General"].get_nowait()
+    speed_msg = queues["General"].get_nowait()
+    assert speed_msg["Owner"] == SpeedMotor.Owner.value
+    assert speed_msg["msgValue"] == "-100"
+
+
+def test_thread_line_following_has_no_direct_motor_writers() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "hardware"
+        / "camera"
+        / "threads"
+        / "threadLineFollowing.py"
+    ).read_text(encoding="utf-8")
+
+    assert "messageHandlerSender(self.queuesList, SpeedMotor" not in source
+    assert "messageHandlerSender(self.queuesList, SteerMotor" not in source
+    assert "speedMotorSender.send" not in source
+    assert "steerMotorSender.send" not in source

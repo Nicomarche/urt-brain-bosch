@@ -90,16 +90,19 @@ def _bo(
     n: int = 5,
     speed_mps: float = 0.30,
     target_path: np.ndarray | None = None,
+    scenario_name: str = ScenarioName.LANE_KEEP.value,
     notes: dict | None = None,
+    min_moving_speed_mps: float | None = None,
 ) -> BehaviorOutput:
     return BehaviorOutput(
         timestamp=0.0,
         dt=0.05,
         target_path=np.zeros((n + 1, 3)) if target_path is None else target_path,
         speed_profile=np.full(n, speed_mps),
-        scenario_name=ScenarioName.LANE_KEEP.value,
+        scenario_name=scenario_name,
         valid=valid,
         stop_required=stop,
+        min_moving_speed_mps=min_moving_speed_mps,
         notes=dict(notes or {}),
     )
 
@@ -130,6 +133,62 @@ def test_stop_required_returns_stop_command() -> None:
     cmd = mc.compute(_bo(stop=True), _pose())
     assert cmd.valid is True
     assert cmd.steering_deg == 0.0
+    assert cmd.speed_mps == 0.0
+    assert cmd.reason == "stop_required"
+
+
+def test_low_speed_minimum_from_behavior_output_is_respected() -> None:
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.08, 0.0))))
+    cmd = mc.compute(
+        _bo(speed_mps=0.10, min_moving_speed_mps=0.10, notes={"min_moving_speed_mps": 0.10}),
+        _pose(),
+    )
+    assert cmd.valid is True
+    assert cmd.speed_mps == pytest.approx(0.10)
+
+
+def test_direct_parking_command_allows_reverse() -> None:
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver()))
+    cmd = mc.compute(
+        _bo(
+            speed_mps=0.10,
+            scenario_name=ScenarioName.PARKING.value,
+            notes={
+                "direct_motor_command": {
+                    "steering_deg": -25.0,
+                    "speed_mps": -0.10,
+                    "allow_reverse": True,
+                    "reason": "parking_reversing_entry",
+                }
+            },
+        ),
+        _pose(),
+    )
+    assert cmd.valid is True
+    assert cmd.speed_mps == pytest.approx(-0.10)
+    assert cmd.steering_deg == pytest.approx(-25.0)
+    assert cmd.reason == "parking_reversing_entry"
+
+
+def test_stop_required_overrides_direct_parking_command() -> None:
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver()))
+    cmd = mc.compute(
+        _bo(
+            stop=True,
+            scenario_name=ScenarioName.PARKING.value,
+            notes={
+                "direct_motor_command": {
+                    "steering_deg": -25.0,
+                    "speed_mps": -0.10,
+                    "allow_reverse": True,
+                    "reason": "parking_reversing_entry",
+                }
+            },
+        ),
+        _pose(),
+    )
+
+    assert cmd.valid is True
     assert cmd.speed_mps == 0.0
     assert cmd.reason == "stop_required"
 

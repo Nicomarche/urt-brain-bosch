@@ -959,6 +959,12 @@ class MotionController(IMotionController):
                 },
             )
 
+        direct_cmd = self._direct_motor_command_from_behavior(behavior_output)
+        if direct_cmd is not None:
+            self._prev_speed_mps = float(direct_cmd.speed_mps)
+            self._prev_steer_deg = float(direct_cmd.steering_deg)
+            return direct_cmd
+
         # 3. Solver listo? Si no, no hay forma de calcular un δ — el
         #    safety_gate aguas abajo se hará cargo.
         if not self._solver.ready:
@@ -1095,9 +1101,9 @@ class MotionController(IMotionController):
         if (
             requested_speed_mps > 1e-6
             and speed_mps > 1e-6
-            and speed_mps < float(self._min_moving_speed_mps)
+            and speed_mps < float(_effective_min_moving_speed_mps(behavior_output, self._min_moving_speed_mps))
         ):
-            speed_mps = float(self._min_moving_speed_mps)
+            speed_mps = float(_effective_min_moving_speed_mps(behavior_output, self._min_moving_speed_mps))
         self._prev_speed_mps = speed_mps
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
@@ -1155,6 +1161,46 @@ class MotionController(IMotionController):
         self._prev_steer_deg = 0.0
         self._prev_speed_mps = 0.0
 
+    def _direct_motor_command_from_behavior(
+        self,
+        behavior_output: BehaviorOutput,
+    ) -> MotorCommand | None:
+        notes = getattr(behavior_output, "notes", None)
+        if not isinstance(notes, dict):
+            return None
+        raw = notes.get("direct_motor_command")
+        if not isinstance(raw, dict):
+            return None
+
+        scenario = str(behavior_output.scenario_name or "").lower()
+        try:
+            steering_deg = float(raw.get("steering_deg", 0.0))
+            speed_mps = float(raw.get("speed_mps", 0.0))
+        except (TypeError, ValueError):
+            return self._invalid("bad_direct_motor_command", backend=self._backend_name)
+
+        allow_reverse = bool(raw.get("allow_reverse", False)) and scenario == "parking"
+        if not allow_reverse:
+            speed_mps = max(0.0, speed_mps)
+
+        steering_deg = max(
+            -self.max_steering_deg,
+            min(self.max_steering_deg, steering_deg),
+        )
+        return MotorCommand(
+            timestamp=time.time(),
+            steering_deg=steering_deg,
+            speed_mps=speed_mps,
+            valid=True,
+            source="motion_controller",
+            reason=str(raw.get("reason", "direct_behavior_command") or "direct_behavior_command"),
+            debug={
+                "scenario": behavior_output.scenario_name,
+                "backend": self._backend_name,
+                "direct_motor_command": dict(raw),
+            },
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -1185,3 +1231,16 @@ class MotionController(IMotionController):
     @property
     def horizon(self) -> int:
         return self._solver.N
+
+
+def _effective_min_moving_speed_mps(
+    behavior_output: BehaviorOutput,
+    default_min_mps: float,
+) -> float:
+    value = getattr(behavior_output, "min_moving_speed_mps", None)
+    if value is None and isinstance(getattr(behavior_output, "notes", None), dict):
+        value = behavior_output.notes.get("min_moving_speed_mps")
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return max(0.0, float(default_min_mps))

@@ -2,7 +2,7 @@
 #
 # Tests de velocity_overlay. Validamos:
 #   1. Cap global por max_speed_mps (siempre se aplica).
-#   2. Stoplines dentro del rango bajan velocidad a 0 con rampa.
+#   2. Stoplines no disparan STOP; STOP se decide por señal + lidar.
 #   3. Crosswalks dentro del rango capean a CROSSWALK_SPEED.
 #   4. Speed limits explícitos respetan el dato del regulator.
 #   5. El overlay nunca SUBE velocidad — sólo baja.
@@ -50,7 +50,7 @@ def test_overlay_passes_through_below_cap() -> None:
 # ---------- stopline -------------------------------------------------------
 
 
-def test_overlay_stopline_within_range_triggers_stop() -> None:
+def test_overlay_stopline_within_range_does_not_trigger_stop() -> None:
     plan = _plan(speed=0.5, n=20, dt=0.1)
     reg = RegulatoryElement(
         element_id="r1",
@@ -60,9 +60,8 @@ def test_overlay_stopline_within_range_triggers_stop() -> None:
     )
     route = RouteContext(regulatory_ahead=(reg,))
     out = apply_overlay(plan, route, max_speed_mps=1.0)
-    assert out.stop_required is True
-    # El final del speed_profile debe llegar a 0.
-    assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
+    assert out.stop_required is False
+    np.testing.assert_allclose(out.speed_profile, 0.5)
 
 
 def test_overlay_stopline_outside_range_no_stop() -> None:
@@ -91,7 +90,7 @@ def test_overlay_crosswalk_caps_speed_no_stop() -> None:
     )
     out = apply_overlay(plan, RouteContext(regulatory_ahead=(reg,)), max_speed_mps=1.0)
     assert out.stop_required is False
-    assert np.all(out.speed_profile <= 0.30 + 1e-6)
+    assert np.all(out.speed_profile <= 0.10 + 1e-6)
 
 
 # ---------- speed_limit ----------------------------------------------------

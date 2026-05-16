@@ -130,19 +130,19 @@ def test_planner_plan_crash_returns_fallback() -> None:
 
 
 def test_planner_applies_velocity_overlay() -> None:
-    """Si el scenario emite 1 m/s pero hay stopline cercano, output va a 0."""
+    """Si el scenario emite 1 m/s pero hay speed limit cercano, output baja."""
     s = _FakeScenario("lk", priority=0, active=True, speed=1.0)
     p = BehaviorPlanner([s])
     reg = RegulatoryElement(
         element_id="r1",
-        kind="stopline",
+        kind="speed_limit",
         position_xy=(0, 0),
-        data={"distance_m": 1.5},
+        data={"speed_mps": 0.4},
     )
     ctx = make_context(regulatory_ahead=(reg,), max_speed_mps=1.5, dt=0.1, horizon_n=20)
     out = p.plan(ctx)
-    assert out.stop_required is True
-    assert out.speed_profile[-1] == pytest.approx(0.0, abs=1e-6)
+    assert out.stop_required is False
+    assert np.max(out.speed_profile) == pytest.approx(0.4, abs=1e-6)
 
 
 def test_planner_returns_fallback_when_real_corridor_is_unavailable(monkeypatch) -> None:

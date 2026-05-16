@@ -10,12 +10,17 @@ from src.behavior.context import PlanningContext
 from src.core.types.behavior import BehaviorOutput, BehaviorPathPlan
 from src.utils.live_log import live_log
 
-_STOPLINE_STOP_RANGE_M = 5.0
 _CROSSWALK_SLOWDOWN_RANGE_M = 4.0
-_CROSSWALK_SPEED_MPS = 0.30
 _INTERSECTION_SPEED_MPS = 0.40
 _INTERSECTION_RANGE_M = 6.0
 _CURVATURE_A_LAT_MAX_MPS2 = 0.45
+
+try:
+    from config import TRAFFIC_SIGN_LOW_SPEED_MPS as _TRAFFIC_SIGN_LOW_SPEED_MPS
+except Exception:
+    _TRAFFIC_SIGN_LOW_SPEED_MPS = 0.10
+
+_CROSSWALK_SPEED_MPS = float(_TRAFFIC_SIGN_LOW_SPEED_MPS)
 
 try:
     from config import LIDAR_OBSTACLE_STOP_DISTANCE_M as _LIDAR_STOP_M
@@ -30,14 +35,36 @@ try:
 except Exception:
     _LIDAR_SLOW_M = 0.90
 try:
+    from config import LIDAR_OBSTACLE_CLOSE_SLOW_DISTANCE_M as _LIDAR_CLOSE_SLOW_M
+except Exception:
+    _LIDAR_CLOSE_SLOW_M = 0.35
+try:
+    from config import LIDAR_OBSTACLE_CLOSE_SLOW_SPEED_MPS as _LIDAR_CLOSE_SLOW_SPEED_MPS
+except Exception:
+    _LIDAR_CLOSE_SLOW_SPEED_MPS = 0.20
+try:
     from config import LIDAR_OBSTACLE_CORRIDOR_HALF_WIDTH_M as _LIDAR_CORRIDOR_HALF_WIDTH_M
 except Exception:
     _LIDAR_CORRIDOR_HALF_WIDTH_M = 0.14
+try:
+    from config import LIDAR_OBSTACLE_MIN_FORWARD_X_M as _LIDAR_MIN_FORWARD_X_M
+except Exception:
+    _LIDAR_MIN_FORWARD_X_M = 0.12
 
 try:
     from config import BEHAVIOR_MIN_SPEED_MPS as _BEHAVIOR_MIN_SPEED_MPS
 except Exception:
     _BEHAVIOR_MIN_SPEED_MPS = 0.20
+
+try:
+    from config import BEHAVIOR_CITY_MIN_SPEED_MPS as _BEHAVIOR_CITY_MIN_SPEED_MPS
+except Exception:
+    _BEHAVIOR_CITY_MIN_SPEED_MPS = _BEHAVIOR_MIN_SPEED_MPS
+
+try:
+    from config import BEHAVIOR_HIGHWAY_MIN_SPEED_MPS as _BEHAVIOR_HIGHWAY_MIN_SPEED_MPS
+except Exception:
+    _BEHAVIOR_HIGHWAY_MIN_SPEED_MPS = 0.40
 
 _CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
 # REGRESSION GUARD:
@@ -150,7 +177,10 @@ class CompetitionSpeedBoundsRule:
     ) -> VelocityRuleResult:
         bounded = _apply_competition_speed_bounds(
             speed_profile,
-            min_speed_mps=float(_BEHAVIOR_MIN_SPEED_MPS),
+            min_speed_mps=float(
+                planning_notes.get("min_moving_speed_mps", _BEHAVIOR_MIN_SPEED_MPS)
+                or _BEHAVIOR_MIN_SPEED_MPS
+            ),
             max_speed_mps=float(ctx.max_speed_mps),
         )
         triggered = bool(np.any(np.abs(bounded - np.asarray(speed_profile, dtype=float)) > 1e-9))
@@ -159,7 +189,10 @@ class CompetitionSpeedBoundsRule:
             stop_required=bool(stop_required),
             notes={
                 "kind": self.name,
-                "min_moving_mps": float(_BEHAVIOR_MIN_SPEED_MPS),
+                "min_moving_mps": float(
+                    planning_notes.get("min_moving_speed_mps", _BEHAVIOR_MIN_SPEED_MPS)
+                    or _BEHAVIOR_MIN_SPEED_MPS
+                ),
                 "max_mps": float(ctx.max_speed_mps),
             },
             triggered=triggered,
@@ -263,7 +296,11 @@ class LaneContainmentRule:
             and speed.shape[0] > 0
         ):
             zero_from_idx = max(0, min(speed.shape[0] - 1, int(first_infeasible_index) - 1))
-            if zero_from_idx <= 0:
+            ego_still_well_aligned = (
+                effective_error_m < float(_BEHAVIOR_CONTAINMENT_WARN_ERROR_M)
+                and not bool(used_prev_safe_path)
+            )
+            if zero_from_idx <= 0 and not ego_still_well_aligned:
                 speed[:] = 0.0
                 stop_req = True
                 note["mode"] = "stop"
@@ -273,7 +310,12 @@ class LaneContainmentRule:
             # No marcar stop_required cuando la inviabilidad es futura: el
             # MotionController traduce stop_required a steering=0, justo cuando
             # necesitamos mantener autoridad lateral para volver al corridor.
-            note["mode"] = "future_horizon_crawl"
+            note["mode"] = (
+                "near_horizon_crawl"
+                if zero_from_idx <= 0
+                else "future_horizon_crawl"
+            )
+            note["ego_still_well_aligned"] = bool(ego_still_well_aligned)
             note["zero_from_idx"] = int(zero_from_idx)
             note["cap_mps"] = float(_BEHAVIOR_CONTAINMENT_CRAWL_SPEED_MPS)
             return VelocityRuleResult(speed, stop_req, note, True)
@@ -351,17 +393,7 @@ class RegulatoryElementRule:
             kind = str(reg.kind or "").lower()
             distance_m = float(reg.data.get("distance_m", 0.0)) if reg.data else 0.0
 
-            if kind == "stopline" and distance_m <= _STOPLINE_STOP_RANGE_M:
-                obs_dist = getattr(ctx.stopline_observation, "distance_m", None)
-                if obs_dist is not None:
-                    try:
-                        distance_m = min(distance_m, float(obs_dist))
-                    except (TypeError, ValueError):
-                        pass
-                speed = _ramp_to_zero(speed, dt=ctx.dt, distance_to_stop_m=distance_m)
-                stop_req = True
-                notes.append({"kind": kind, "distance_m": float(distance_m)})
-            elif kind == "crosswalk" and distance_m <= _CROSSWALK_SLOWDOWN_RANGE_M:
+            if kind == "crosswalk" and distance_m <= _CROSSWALK_SLOWDOWN_RANGE_M:
                 speed = np.minimum(speed, _CROSSWALK_SPEED_MPS)
                 notes.append(
                     {"kind": kind, "distance_m": float(distance_m), "cap_mps": _CROSSWALK_SPEED_MPS}
@@ -404,7 +436,7 @@ class LidarObstacleRule:
         for obs in ctx.lidar_obstacles:
             x = float(getattr(obs, "x_m", 0.0))
             y = float(getattr(obs, "y_m", 0.0))
-            if x <= 0.0 or abs(y) > half_width:
+            if x < float(_LIDAR_MIN_FORWARD_X_M) or abs(y) > half_width:
                 continue
             if nearest is None or x < float(getattr(nearest, "x_m", math.inf)):
                 nearest = obs
@@ -417,6 +449,7 @@ class LidarObstacleRule:
                     "target_x_m": x,
                     "target_y_m": float(nearest.y_m),
                     "target_distance_m": float(nearest.distance_min_m),
+                    "min_forward_x_m": float(_LIDAR_MIN_FORWARD_X_M),
                 }
             )
             if bool(_LIDAR_STOP_ENABLED) and x <= float(_LIDAR_STOP_M):
@@ -425,10 +458,33 @@ class LidarObstacleRule:
                 notes["mode"] = "lidar_obstacle_stop"
                 return VelocityRuleResult(speed, stop_req, notes, True)
             if x <= float(_LIDAR_SLOW_M):
-                cap = min(float(_BEHAVIOR_MIN_SPEED_MPS), float(ctx.max_speed_mps))
+                close_slow = x <= float(_LIDAR_CLOSE_SLOW_M)
+                requested_cap = (
+                    float(_LIDAR_CLOSE_SLOW_SPEED_MPS)
+                    if close_slow
+                    else float(_BEHAVIOR_MIN_SPEED_MPS)
+                )
+                # Mantener autoridad lateral del MPC: los caps no-cero de LiDAR
+                # pueden bajar el mínimo de autopista, pero no el piso físico de
+                # movimiento usado para conservar preview suficiente.
+                motion_floor = float(_BEHAVIOR_MIN_SPEED_MPS)
+                cap = min(max(motion_floor, requested_cap), float(ctx.max_speed_mps))
                 speed = np.minimum(speed, cap)
-                notes["mode"] = "lidar_obstacle_slow"
+                notes["mode"] = (
+                    "lidar_obstacle_close_slow"
+                    if close_slow
+                    else "lidar_obstacle_slow"
+                )
                 notes["cap_mps"] = float(cap)
+                notes["requested_cap_mps"] = float(requested_cap)
+                notes["motion_floor_mps"] = float(motion_floor)
+                notes["close_slow_distance_m"] = float(_LIDAR_CLOSE_SLOW_M)
+                notes["target_x_m"] = float(x)
+                try:
+                    current_min = float(planning_notes.get("min_moving_speed_mps", _BEHAVIOR_MIN_SPEED_MPS))
+                except (TypeError, ValueError):
+                    current_min = float(_BEHAVIOR_MIN_SPEED_MPS)
+                planning_notes["min_moving_speed_mps"] = min(current_min, float(cap))
                 return VelocityRuleResult(speed, stop_req, notes, True)
 
         acc = _acc_target(ctx, half_width=half_width)
@@ -486,6 +542,11 @@ class BehaviorVelocityPlanner:
         if optimizer_notes:
             notes.update(dict(optimizer_notes))
         notes["turn_signal"] = str(path_plan.turn_signal)
+        min_moving_speed_mps = _resolve_min_moving_speed_mps(
+            scenario_name=str(path_plan.scenario_name),
+            notes=notes,
+        )
+        notes["min_moving_speed_mps"] = float(min_moving_speed_mps)
         notes["drivable_left_bound"] = np.asarray(drivable_left_bound, dtype=float)
         notes["drivable_right_bound"] = np.asarray(drivable_right_bound, dtype=float)
         notes.setdefault("velocity_modules", [])
@@ -503,6 +564,12 @@ class BehaviorVelocityPlanner:
             if result.triggered:
                 notes["velocity_modules"].append(result.notes)
 
+        min_moving_speed_mps = _resolve_min_moving_speed_mps(
+            scenario_name=str(path_plan.scenario_name),
+            notes=notes,
+        )
+        notes["min_moving_speed_mps"] = float(min_moving_speed_mps)
+
         return BehaviorOutput(
             timestamp=float(path_plan.timestamp or ctx.now_s),
             dt=float(ctx.dt),
@@ -511,8 +578,25 @@ class BehaviorVelocityPlanner:
             scenario_name=str(path_plan.scenario_name),
             valid=bool(path_plan.valid),
             stop_required=bool(stop_required),
+            min_moving_speed_mps=float(min_moving_speed_mps),
             notes=notes,
         )
+
+
+def _resolve_min_moving_speed_mps(*, scenario_name: str, notes: dict) -> float:
+    explicit = notes.get("min_moving_speed_mps")
+    if explicit is not None:
+        try:
+            return max(0.0, float(explicit))
+        except (TypeError, ValueError):
+            pass
+
+    scenario = str(scenario_name or "").lower()
+    if scenario in {"parking", "crosswalk"}:
+        return float(_TRAFFIC_SIGN_LOW_SPEED_MPS)
+    if scenario == "highway" or bool(notes.get("highway_active", False)):
+        return float(_BEHAVIOR_HIGHWAY_MIN_SPEED_MPS)
+    return float(_BEHAVIOR_CITY_MIN_SPEED_MPS)
 
 
 def _fit_speed_profile(
@@ -550,29 +634,9 @@ def _apply_competition_speed_bounds(
     speed = np.asarray(speed_profile, dtype=float)
     bounded = np.minimum(np.array(speed, copy=True), float(max_speed_mps))
     moving = bounded > 1e-6
-    bounded[moving] = np.maximum(bounded[moving], float(min_speed_mps))
+    effective_min = min(float(min_speed_mps), float(max_speed_mps))
+    bounded[moving] = np.maximum(bounded[moving], effective_min)
     return bounded
-
-
-def _ramp_to_zero(speed: np.ndarray, *, dt: float, distance_to_stop_m: float) -> np.ndarray:
-    n = int(speed.shape[0])
-    if n == 0 or distance_to_stop_m <= 0.0:
-        return np.zeros_like(speed)
-
-    out = np.array(speed, copy=True, dtype=float)
-    cumulative = 0.0
-    stop_step = n - 1
-    for idx in range(n):
-        cumulative += max(0.0, float(out[idx])) * float(dt)
-        if cumulative >= float(distance_to_stop_m):
-            stop_step = idx
-            break
-    ramp_end = max(0, min(stop_step, n - 1))
-    v0 = max(0.0, float(out[0]))
-    ramp = np.linspace(v0, 0.0, ramp_end + 1)
-    out[: ramp_end + 1] = np.minimum(out[: ramp_end + 1], ramp)
-    out[ramp_end + 1 :] = 0.0
-    return out
 
 
 def _visual_lane_error_m(ctx: PlanningContext) -> float | None:

@@ -159,6 +159,7 @@ def make_context(
     target_idx: int = 0,
     matched_pose: tuple[float, float, float] | None = None,
     map_match_error_m: float = 0.0,
+    now_s: float = 0.0,
 ) -> PlanningContext:
     """Factory para PlanningContext con defaults razonables."""
     pose = PoseEstimate(
@@ -188,7 +189,7 @@ def make_context(
         ),
     )
     return PlanningContext(
-        now_s=0.0,
+        now_s=float(now_s),
         dt=dt,
         horizon_n=horizon_n,
         nominal_speed_mps=nominal_speed_mps,

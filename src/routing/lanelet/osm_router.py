@@ -51,6 +51,7 @@ class OsmRouteGraph:
         self.step_m = float(step_m)
         self._osm_path = os.path.abspath(osm_path)
         self.lanelet_map = load_lanelet2_osm(self._osm_path, step_m=self.step_m)
+        self._blocked_lanelet_ids: set[str] = set()
         self.map_metadata = self._load_effective_map_metadata(self.lanelet_map.get_map_metadata())
         try:
             self.lanelet_map._map_metadata = dict(self.map_metadata)
@@ -70,7 +71,21 @@ class OsmRouteGraph:
         self.ordered_nodes = self._build_ordered_nodes()
 
     def get_map_metadata(self) -> dict:
-        return dict(self.map_metadata)
+        metadata = dict(self.map_metadata)
+        if self._blocked_lanelet_ids:
+            metadata["blocked_lanelet_ids"] = sorted(self._blocked_lanelet_ids)
+        return metadata
+
+    def set_blocked_lanelets(self, lanelet_ids: Iterable[str]) -> None:
+        self._blocked_lanelet_ids = {
+            str(item)
+            for item in (lanelet_ids or ())
+            if str(item) in self.lanelet_map.lanelet_ids
+        }
+
+    @property
+    def blocked_lanelet_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._blocked_lanelet_ids))
 
     def _load_effective_map_metadata(self, osm_metadata: dict) -> dict:
         metadata = dict(osm_metadata or {})
@@ -350,6 +365,8 @@ class OsmRouteGraph:
         dest_id = str(dest_id)
         if start_id not in self.lanelet_map.lanelet_ids or dest_id not in self.lanelet_map.lanelet_ids:
             return []
+        if dest_id in self._blocked_lanelet_ids:
+            return []
         if start_id == dest_id:
             return [start_id]
 
@@ -368,6 +385,8 @@ class OsmRouteGraph:
             if lanelet is None:
                 continue
             for succ in lanelet.successor_ids:
+                if str(succ) in self._blocked_lanelet_ids:
+                    continue
                 succ_ll = self.lanelet_map.get_lanelet(str(succ))
                 if succ_ll is None:
                     continue
@@ -439,8 +458,12 @@ class OsmRouteGraph:
         start_idx = ref_ids.index(start_id)
         dest_idx = ref_ids.index(dest_id)
         if start_idx <= dest_idx:
-            return ref_ids[start_idx:dest_idx + 1]
-        return ref_ids[start_idx:] + ref_ids[:dest_idx + 1]
+            path = ref_ids[start_idx:dest_idx + 1]
+        else:
+            path = ref_ids[start_idx:] + ref_ids[:dest_idx + 1]
+        if any(str(item) in self._blocked_lanelet_ids for item in path[1:]):
+            return []
+        return path
 
     def go_to(self, start_spec, dest_spec) -> RoutePath:
         start_id = self.resolve_node_id(start_spec)

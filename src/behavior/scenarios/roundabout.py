@@ -16,6 +16,7 @@ from dataclasses import replace
 
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
+from src.behavior.sign_utils import nearest_sign_hint
 from src.core.types.behavior import BehaviorOutput, ScenarioName
 from src.routing.lanelet.attributes import ATTR_ROUNDABOUT
 
@@ -31,6 +32,8 @@ class Roundabout(BaseScenario):
     priority = 50  # menor que crosswalk/intersection
 
     def is_active(self, ctx: PlanningContext) -> bool:
+        if nearest_sign_hint(ctx, {"roundabout"}, max_distance_m=5.0) is not None:
+            return True
         if ctx.lanelet_map is None or not ctx.route.current_lanelet_id:
             return False
         ll = ctx.lanelet_map.get_lanelet(ctx.route.current_lanelet_id)
