@@ -113,7 +113,7 @@ class threadRead(ThreadWithStop):
 
                 if serial_con.in_waiting > 0:
                     try:
-                        data = serial_con.read(serial_con.in_waiting).decode("ascii")
+                        data = serial_con.read(serial_con.in_waiting).decode("ascii", errors="ignore")
                         self.buffer += data
 
                     except Exception as e:

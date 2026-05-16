@@ -38,7 +38,8 @@ pyproj>=3.6,<4
 
 # ONNX Runtime — required by ultralytics when loading .onnx models (e.g. lane segmentation).
 onnxruntime>=1.16.0
-# For Raspberry Pi, use: pip install onnxruntime
+# For Raspberry Pi / generic ARM: pip install onnxruntime
+# For Jetson (JetPack 6 / L4T R36): pip install --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126 onnxruntime-gpu
 
 # Optional: Traffic sign detection (MobilenetV2 SSD)
 # ai-edge-litert         # Recommended (Google LiteRT, supports Python 3.13+)
