@@ -263,6 +263,20 @@ class threadLocSys(ThreadWithStop):
         self._traffic_comm_endpoint: tuple[str, int] | None = None
         self._traffic_locsys_runtime_mode: str | None = None
 
+        print(
+            f"[GPS-DBG] threadLocSys.__init__: sim_mode={self._sim_mode} "
+            f"USE_TRAFFIC_COMM_SERVER={_LOCSYS_USE_TRAFFIC_COMM_SERVER} "
+            f"TRAFFIC_COMM_HOST={_TRAFFIC_COMM_HOST!r} "
+            f"TRAFFIC_COMM_PORT={_TRAFFIC_COMM_PORT} "
+            f"AUTODISCOVERY={_TRAFFIC_COMM_AUTODISCOVERY_ENABLED} "
+            f"DISCOVERY_PORT={_TRAFFIC_COMM_DISCOVERY_PORT} "
+            f"LOCSYS_DEVICE_ID={_LOCSYS_DEVICE_ID} "
+            f"MODE={_TRAFFIC_COMM_LOCSYS_MODE!r} "
+            f"SEND_EGO_DATA={_TRAFFIC_COMM_SEND_EGO_DATA} "
+            f"DIRECT_FALLBACK={_LOCSYS_DIRECT_FALLBACK_ENABLED}",
+            flush=True,
+        )
+
     # ------------------------------------------------------------------
 
     def _discover_traffic_comm_endpoint(
@@ -275,33 +289,54 @@ class threadLocSys(ThreadWithStop):
             else float(timeout_s)
         )
         deadline = time.monotonic() + max(timeout, 0.1)
+        print(
+            f"[GPS-DBG] _discover_traffic_comm_endpoint: bind UDP:{_TRAFFIC_COMM_DISCOVERY_PORT} "
+            f"timeout={timeout:.2f}s",
+            flush=True,
+        )
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.bind(("", int(_TRAFFIC_COMM_DISCOVERY_PORT)))
             except OSError as exc:
-                if self.debugger:
-                    print(
-                        f"\033[1;97m[ LocSys ] :\033[0m "
-                        f"traffic autodiscovery bind error on UDP:{_TRAFFIC_COMM_DISCOVERY_PORT}: {exc}"
-                    )
+                print(
+                    f"[GPS-DBG] _discover_traffic_comm_endpoint: bind error on "
+                    f"UDP:{_TRAFFIC_COMM_DISCOVERY_PORT}: {exc}",
+                    flush=True,
+                )
                 return None
             sock.settimeout(0.25)
-            if self.debugger:
-                print(
-                    f"\033[1;97m[ LocSys ] :\033[0m "
-                    f"Buscando TrafficCommunicationServer por UDP:{_TRAFFIC_COMM_DISCOVERY_PORT}"
-                )
+            print(
+                f"[GPS-DBG] _discover_traffic_comm_endpoint: listening for broadcast",
+                flush=True,
+            )
+            datagrams_seen = 0
             while time.monotonic() < deadline and not self._blocker.is_set():
                 try:
                     datagram, address = sock.recvfrom(4096)
                 except socket.timeout:
                     continue
+                datagrams_seen += 1
                 port = _parse_traffic_broadcast(datagram)
+                print(
+                    f"[GPS-DBG] _discover_traffic_comm_endpoint: datagram from "
+                    f"{address[0]}:{address[1]} len={len(datagram)} parsed_port={port}",
+                    flush=True,
+                )
                 if port is None:
                     continue
                 host = str(address[0])
+                print(
+                    f"[GPS-DBG] _discover_traffic_comm_endpoint: MATCH server="
+                    f"{host}:{port}",
+                    flush=True,
+                )
                 return host, int(port)
+        print(
+            f"[GPS-DBG] _discover_traffic_comm_endpoint: TIMEOUT after {timeout:.2f}s "
+            f"(datagrams_seen={datagrams_seen})",
+            flush=True,
+        )
         return None
 
     def _resolve_traffic_comm_endpoint(
@@ -310,9 +345,20 @@ class threadLocSys(ThreadWithStop):
         discovery_timeout_s: float | None = None,
     ) -> tuple[str, int]:
         if self._traffic_comm_endpoint is not None:
+            print(
+                f"[GPS-DBG] _resolve_traffic_comm_endpoint: cached "
+                f"{self._traffic_comm_endpoint[0]}:{self._traffic_comm_endpoint[1]}",
+                flush=True,
+            )
             return self._traffic_comm_endpoint
 
         auto_host = _is_auto_traffic_host(str(_TRAFFIC_COMM_HOST))
+        print(
+            f"[GPS-DBG] _resolve_traffic_comm_endpoint: TRAFFIC_COMM_HOST="
+            f"{_TRAFFIC_COMM_HOST!r} auto_host={auto_host} "
+            f"AUTODISCOVERY_ENABLED={_TRAFFIC_COMM_AUTODISCOVERY_ENABLED}",
+            flush=True,
+        )
         if auto_host or _TRAFFIC_COMM_AUTODISCOVERY_ENABLED:
             endpoint = self._discover_traffic_comm_endpoint(discovery_timeout_s)
             if endpoint is not None:
@@ -320,16 +366,27 @@ class threadLocSys(ThreadWithStop):
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;92mINFO\033[0m - TrafficCommunicationServer descubierto en "
-                    f"{endpoint[0]}:{endpoint[1]}"
+                    f"{endpoint[0]}:{endpoint[1]}",
+                    flush=True,
                 )
                 return endpoint
             if auto_host:
+                print(
+                    f"[GPS-DBG] _resolve_traffic_comm_endpoint: discovery FAILED "
+                    f"and host is auto -> raising TimeoutError",
+                    flush=True,
+                )
                 raise TimeoutError(
                     "TrafficCommunicationServer autodiscovery timed out"
                 )
 
         endpoint = (str(_TRAFFIC_COMM_HOST), int(_TRAFFIC_COMM_PORT))
         self._traffic_comm_endpoint = endpoint
+        print(
+            f"[GPS-DBG] _resolve_traffic_comm_endpoint: using fixed endpoint "
+            f"{endpoint[0]}:{endpoint[1]}",
+            flush=True,
+        )
         return endpoint
 
     def _resolve_locsys_address(self) -> tuple[str, int]:
@@ -338,24 +395,57 @@ class threadLocSys(ThreadWithStop):
         Sim: directo al LoCSys del sim_bridge.
         Competencia: pregunta al TrafficCommunicationServer por la IP real.
         """
+        print(
+            f"[GPS-DBG] _resolve_locsys_address: entered sim_mode={self._sim_mode} "
+            f"USE_TRAFFIC_COMM_SERVER={_LOCSYS_USE_TRAFFIC_COMM_SERVER} "
+            f"mode={_traffic_locsys_mode()!r}",
+            flush=True,
+        )
         if self._sim_mode and not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
+            print(
+                f"[GPS-DBG] _resolve_locsys_address: SIM path -> "
+                f"{_SIM_LOCSYS_HOST}:{_SIM_LOCSYS_PORT} "
+                f"(SALTA TrafficCommunicationServer)",
+                flush=True,
+            )
             return _SIM_LOCSYS_HOST, _SIM_LOCSYS_PORT
         if not _LOCSYS_USE_TRAFFIC_COMM_SERVER:
+            print(
+                f"[GPS-DBG] _resolve_locsys_address: DIRECT path -> "
+                f"{_LOCSYS_HOST_COMP}:{_LOCSYS_PORT} "
+                f"(SALTA TrafficCommunicationServer)",
+                flush=True,
+            )
             return _LOCSYS_HOST_COMP, _LOCSYS_PORT
         if _traffic_locsys_mode() == "subscribe":
+            print(
+                f"[GPS-DBG] _resolve_locsys_address: mode=subscribe -> "
+                f"este path no aplica, raise para que thread_work tome subscribe",
+                flush=True,
+            )
             raise RuntimeError("TRAFFIC_COMM_LOCSYS_MODE=subscribe no usa locsys device address")
 
         try:
             traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
+            print(
+                f"[GPS-DBG] _resolve_locsys_address: connecting TCP to traffic server "
+                f"{traffic_host}:{traffic_port}",
+                flush=True,
+            )
             with socket.create_connection(
                 (traffic_host, traffic_port), timeout=3.0
             ) as s:
                 s.settimeout(3.0)
-                req = json.dumps({
+                req_dict = {
                     "reqORinfo": "request",
                     "type": "locsysDevice",
                     "DeviceID": _LOCSYS_DEVICE_ID,
-                })
+                }
+                req = json.dumps(req_dict)
+                print(
+                    f"[GPS-DBG] _resolve_locsys_address: SEND -> {req}",
+                    flush=True,
+                )
                 s.sendall(req.encode("utf-8") + b"\n")
                 buffer = ""
                 deadline = time.monotonic() + 3.0
@@ -363,17 +453,41 @@ class threadLocSys(ThreadWithStop):
                 while time.monotonic() < deadline and resp is None:
                     chunk = s.recv(4096)
                     if not chunk:
+                        print(
+                            f"[GPS-DBG] _resolve_locsys_address: server closed "
+                            f"connection (empty chunk), buffer_so_far={buffer!r}",
+                            flush=True,
+                        )
                         break
+                    print(
+                        f"[GPS-DBG] _resolve_locsys_address: RECV chunk len="
+                        f"{len(chunk)} bytes={chunk!r}",
+                        flush=True,
+                    )
                     buffer += chunk.decode("utf-8", errors="replace")
                     objects, buffer = _extract_json_objects(buffer)
                     if objects:
                         resp = objects[0]
                 if resp is None:
+                    print(
+                        f"[GPS-DBG] _resolve_locsys_address: NO JSON parsed in 3s, "
+                        f"buffer={buffer!r}",
+                        flush=True,
+                    )
                     raise TimeoutError("traffic server did not return a JSON response")
+                print(
+                    f"[GPS-DBG] _resolve_locsys_address: parsed response={resp!r}",
+                    flush=True,
+                )
                 if resp.get("error") is not None:
                     message = (
                         f"traffic server locsysDevice DeviceID={_LOCSYS_DEVICE_ID} "
                         f"error: {resp.get('error')} response={resp!r}"
+                    )
+                    print(
+                        f"[GPS-DBG] _resolve_locsys_address: server returned ERROR "
+                        f"-> {message}",
+                        flush=True,
                     )
                     if "request not recognised" in str(resp.get("error")).lower():
                         raise _TrafficRequestNotRecognised(message)
@@ -382,7 +496,13 @@ class threadLocSys(ThreadWithStop):
                 if address is None:
                     raise ValueError(f"traffic server returned no locsys address: {resp!r}")
                 host, port_str = address.rsplit(":", 1)
-                return host.strip(), int(port_str.strip())
+                resolved = (host.strip(), int(port_str.strip()))
+                print(
+                    f"[GPS-DBG] _resolve_locsys_address: resolved locsys device -> "
+                    f"{resolved[0]}:{resolved[1]}",
+                    flush=True,
+                )
+                return resolved
         except _TrafficRequestNotRecognised:
             raise
         except Exception as exc:
@@ -396,18 +516,25 @@ class threadLocSys(ThreadWithStop):
                 if self._sim_mode
                 else (_LOCSYS_HOST_COMP, _LOCSYS_PORT)
             )
+            print(
+                f"[GPS-DBG] _resolve_locsys_address: EXCEPTION type="
+                f"{type(exc).__name__} msg={exc}",
+                flush=True,
+            )
             if not _LOCSYS_DIRECT_FALLBACK_ENABLED:
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - traffic server ({endpoint_label}) "
                     f"error: {exc}; sin fallback directo a {fallback_host}:{fallback_port}. "
-                    f"Reintentando discovery."
+                    f"Reintentando discovery.",
+                    flush=True,
                 )
                 raise
             print(
                 f"\033[1;97m[ LocSys ] :\033[0m "
                 f"\033[1;93mWARN\033[0m - traffic server ({endpoint_label}) "
-                f"error: {exc} — usando fallback directo {fallback_host}:{fallback_port}"
+                f"error: {exc} — usando fallback directo {fallback_host}:{fallback_port}",
+                flush=True,
             )
             return fallback_host, fallback_port
 
@@ -441,13 +568,28 @@ class threadLocSys(ThreadWithStop):
             traffic_host, traffic_port = self._resolve_traffic_comm_endpoint(
                 discovery_timeout_s=min(float(_TRAFFIC_COMM_DISCOVERY_TIMEOUT_S), 1.0)
             )
+            print(
+                f"[GPS-DBG] _traffic_socket: opening ego-data sender socket -> "
+                f"{traffic_host}:{traffic_port}",
+                flush=True,
+            )
             sock = socket.create_connection(
                 (traffic_host, traffic_port), timeout=0.5
             )
             sock.settimeout(0.5)
             self._traffic_data_sock = sock
+            print(
+                f"[GPS-DBG] _traffic_socket: ego-data socket OPEN -> "
+                f"{traffic_host}:{traffic_port}",
+                flush=True,
+            )
             return sock
-        except OSError:
+        except OSError as exc:
+            print(
+                f"[GPS-DBG] _traffic_socket: connect FAILED ({exc}); "
+                f"next attempt in {_GPS_RECONNECT_S}s",
+                flush=True,
+            )
             self._traffic_next_connect_t = now + float(_GPS_RECONNECT_S)
             return None
 
@@ -500,7 +642,17 @@ class threadLocSys(ThreadWithStop):
         try:
             sock.sendall(payload)
             self._traffic_last_send_t = now
-        except OSError:
+            print(
+                f"[GPS-DBG] _send_ego_data_to_traffic_server: SEND ego "
+                f"x={x:.3f} y={y:.3f} yaw_rad={yaw:.3f} speed_mps={speed:.3f}",
+                flush=True,
+            )
+        except OSError as exc:
+            print(
+                f"[GPS-DBG] _send_ego_data_to_traffic_server: send FAILED ({exc}), "
+                f"closing socket",
+                flush=True,
+            )
             self._close_traffic_socket()
             self._traffic_next_connect_t = now + float(_GPS_RECONNECT_S)
 
@@ -535,6 +687,13 @@ class threadLocSys(ThreadWithStop):
         except (TypeError, ValueError):
             pass
         self.localisationSender.send(payload)
+        print(
+            f"[GPS-DBG] _emit_fix: SENT Localisation IPC "
+            f"world_x={x:.3f} world_y={y:.3f} "
+            f"yaw_rad={payload.get('yaw_rad')} yaw_deg={payload.get('yaw_deg')} "
+            f"meta.source=gps_localisation",
+            flush=True,
+        )
         if self.debugger:
             yaw_dbg = payload.get("yaw_deg")
             if yaw_dbg is None and payload.get("yaw_rad") is not None:
@@ -595,15 +754,26 @@ class threadLocSys(ThreadWithStop):
 
     def _thread_work_traffic_subscription(self) -> None:
         """Recibe GPS directo desde TrafficCommunicationServer usando locIDsub."""
+        print(
+            f"[GPS-DBG] _thread_work_traffic_subscription: entered, "
+            f"resolving traffic endpoint",
+            flush=True,
+        )
         try:
             traffic_host, traffic_port = self._resolve_traffic_comm_endpoint()
         except Exception as exc:
+            print(
+                f"[GPS-DBG] _thread_work_traffic_subscription: resolve FAILED "
+                f"({type(exc).__name__}: {exc})",
+                flush=True,
+            )
             if not self._blocker.is_set():
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - No se pudo resolver "
                     f"TrafficCommunicationServer para locIDsub ({exc}); reintentando en "
-                    f"{_GPS_RECONNECT_S:.0f}s"
+                    f"{_GPS_RECONNECT_S:.0f}s",
+                    flush=True,
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
             return
@@ -611,7 +781,8 @@ class threadLocSys(ThreadWithStop):
         print(
             f"\033[1;97m[ LocSys ] :\033[0m "
             f"\033[1;92mINFO\033[0m - Suscribiendo GPS locIDsub "
-            f"id={_LOCSYS_DEVICE_ID} en {traffic_host}:{traffic_port}"
+            f"id={_LOCSYS_DEVICE_ID} en {traffic_host}:{traffic_port}",
+            flush=True,
         )
 
         try:
@@ -623,12 +794,19 @@ class threadLocSys(ThreadWithStop):
                     "locID": _LOCSYS_DEVICE_ID,
                     "freq": float(_TRAFFIC_COMM_LOCSYS_SUB_FREQ),
                 }
+                print(
+                    f"[GPS-DBG] _thread_work_traffic_subscription: SEND locIDsub "
+                    f"-> {json.dumps(req)}",
+                    flush=True,
+                )
                 sock.sendall(json.dumps(req).encode("utf-8"))
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
-                    f"\033[1;92mINFO\033[0m - Conectado al stream GPS locIDsub"
+                    f"\033[1;92mINFO\033[0m - Conectado al stream GPS locIDsub",
+                    flush=True,
                 )
                 buffer = ""
+                chunks_seen = 0
                 while not self._blocker.is_set():
                     try:
                         chunk = sock.recv(4096)
@@ -636,32 +814,56 @@ class threadLocSys(ThreadWithStop):
                         self._send_ego_data_to_traffic_server()
                         continue
                     if not chunk:
+                        print(
+                            f"[GPS-DBG] _thread_work_traffic_subscription: "
+                            f"server closed stream (empty chunk after "
+                            f"{chunks_seen} chunks)",
+                            flush=True,
+                        )
                         break
+                    chunks_seen += 1
+                    print(
+                        f"[GPS-DBG] _thread_work_traffic_subscription: RECV chunk "
+                        f"#{chunks_seen} len={len(chunk)} bytes={chunk!r}",
+                        flush=True,
+                    )
                     buffer += chunk.decode("utf-8", errors="replace")
                     objects, buffer = _extract_json_objects(buffer)
                     for data in objects:
                         try:
                             fix = self._traffic_subscription_fix_from_message(data)
                             if fix is not None:
+                                print(
+                                    f"[GPS-DBG] _thread_work_traffic_subscription: "
+                                    f"parsed fix={fix!r}",
+                                    flush=True,
+                                )
                                 self._emit_fix(fix)
-                            elif self.debugger:
+                            else:
                                 print(
-                                    f"\033[1;97m[ LocSys ] :\033[0m "
-                                    f"traffic locIDsub ignored: {data!r}"
+                                    f"[GPS-DBG] _thread_work_traffic_subscription: "
+                                    f"non-location msg ignored: {data!r}",
+                                    flush=True,
                                 )
-                        except TypeError as exc:
-                            if self.debugger:
-                                print(
-                                    f"\033[1;97m[ LocSys ] :\033[0m "
-                                    f"traffic locIDsub parse error: {exc}"
-                                )
+                        except (TypeError, ValueError) as exc:
+                            print(
+                                f"[GPS-DBG] _thread_work_traffic_subscription: "
+                                f"parse error {type(exc).__name__}: {exc} on {data!r}",
+                                flush=True,
+                            )
                     self._send_ego_data_to_traffic_server()
         except Exception as exc:
+            print(
+                f"[GPS-DBG] _thread_work_traffic_subscription: stream EXCEPTION "
+                f"({type(exc).__name__}: {exc})",
+                flush=True,
+            )
             if not self._blocker.is_set():
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - Stream GPS locIDsub perdido ({exc}), "
-                    f"reintentando en {_GPS_RECONNECT_S:.0f}s"
+                    f"reintentando en {_GPS_RECONNECT_S:.0f}s",
+                    flush=True,
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
 
@@ -671,22 +873,37 @@ class threadLocSys(ThreadWithStop):
             return
 
         mode = self._traffic_locsys_runtime_mode or _traffic_locsys_mode()
+        print(
+            f"[GPS-DBG] thread_work: tick, effective_mode={mode!r} "
+            f"runtime_mode_override={self._traffic_locsys_runtime_mode!r}",
+            flush=True,
+        )
         if (
             mode == "subscribe"
             and _LOCSYS_USE_TRAFFIC_COMM_SERVER
             and not (self._sim_mode and not _LOCSYS_USE_TRAFFIC_COMM_SERVER)
         ):
+            print(
+                f"[GPS-DBG] thread_work: branching to locIDsub subscription",
+                flush=True,
+            )
             self._thread_work_traffic_subscription()
             return
 
         try:
             host, port = self._resolve_locsys_address()
         except _TrafficRequestNotRecognised as exc:
+            print(
+                f"[GPS-DBG] thread_work: server responded 'request not recognised' "
+                f"-> {exc}",
+                flush=True,
+            )
             if mode == "auto" and not self._blocker.is_set():
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - {exc}; el server descubierto "
-                    f"usa el protocolo locIDsub. Probando suscripcion directa."
+                    f"usa el protocolo locIDsub. Probando suscripcion directa.",
+                    flush=True,
                 )
                 self._traffic_locsys_runtime_mode = "subscribe"
                 self._thread_work_traffic_subscription()
@@ -695,23 +912,31 @@ class threadLocSys(ThreadWithStop):
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - TrafficCommunicationServer no "
                     f"reconoce locsysDevice ({exc}); reintentando en "
-                    f"{_GPS_RECONNECT_S:.0f}s"
+                    f"{_GPS_RECONNECT_S:.0f}s",
+                    flush=True,
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
             return
         except Exception as exc:
+            print(
+                f"[GPS-DBG] thread_work: _resolve_locsys_address raised "
+                f"{type(exc).__name__}: {exc} -> retry in {_GPS_RECONNECT_S}s",
+                flush=True,
+            )
             if not self._blocker.is_set():
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - No se pudo resolver locsys vía "
                     f"TrafficCommunicationServer ({exc}); reintentando en "
-                    f"{_GPS_RECONNECT_S:.0f}s"
+                    f"{_GPS_RECONNECT_S:.0f}s",
+                    flush=True,
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
             return
         print(
             f"\033[1;97m[ LocSys ] :\033[0m "
-            f"\033[1;92mINFO\033[0m - Conectando a {host}:{port}"
+            f"\033[1;92mINFO\033[0m - Conectando a {host}:{port}",
+            flush=True,
         )
 
         try:
@@ -719,9 +944,11 @@ class threadLocSys(ThreadWithStop):
                 sock.settimeout(_SOCKET_TIMEOUT_S)
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
-                    f"\033[1;92mINFO\033[0m - Conectado al servidor locsys {host}:{port}"
+                    f"\033[1;92mINFO\033[0m - Conectado al servidor locsys {host}:{port}",
+                    flush=True,
                 )
                 buffer = ""
+                chunks_seen = 0
                 while not self._blocker.is_set():
                     try:
                         chunk = sock.recv(4096)
@@ -731,22 +958,41 @@ class threadLocSys(ThreadWithStop):
                         continue
                     if not chunk:
                         # Conexión cerrada por el servidor.
+                        print(
+                            f"[GPS-DBG] thread_work: locsys device closed connection "
+                            f"after {chunks_seen} chunks",
+                            flush=True,
+                        )
                         break
+                    chunks_seen += 1
+                    print(
+                        f"[GPS-DBG] thread_work: RECV chunk #{chunks_seen} from "
+                        f"locsys device len={len(chunk)} bytes={chunk!r}",
+                        flush=True,
+                    )
                     buffer += chunk.decode("utf-8", errors="replace")
                     objects, buffer = _extract_json_objects(buffer)
                     for data in objects:
                         try:
                             self._emit_fix(data)
-                        except (KeyError, ValueError, TypeError):
-                            if self.debugger:
-                                print(f"\033[1;97m[ LocSys ] :\033[0m parse error: {data!r}")
+                        except (KeyError, ValueError, TypeError) as exc:
+                            print(
+                                f"[GPS-DBG] thread_work: parse/_emit_fix error "
+                                f"{type(exc).__name__}: {exc} on {data!r}",
+                                flush=True,
+                            )
                     self._send_ego_data_to_traffic_server()
         except OSError as exc:
+            print(
+                f"[GPS-DBG] thread_work: locsys device socket OSError ({exc})",
+                flush=True,
+            )
             if not self._blocker.is_set():
                 print(
                     f"\033[1;97m[ LocSys ] :\033[0m "
                     f"\033[1;93mWARN\033[0m - Conexión perdida ({exc}), "
-                    f"reintentando en {_GPS_RECONNECT_S:.0f}s"
+                    f"reintentando en {_GPS_RECONNECT_S:.0f}s",
+                    flush=True,
                 )
                 self._blocker.wait(_GPS_RECONNECT_S)
 

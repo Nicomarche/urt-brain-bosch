@@ -334,6 +334,11 @@ class processDashboard(WorkerProcess):
         self._gps_fix_subscriber = messageHandlerSubscriber(
             self.queueList, Localisation, "lastOnly", True
         )
+        print(
+            f"[GPS-DBG] processDashboard.subscribe: _gps_fix_subscriber registered "
+            f"(Owner={Localisation.Owner.value} msgID={Localisation.msgID.value})",
+            flush=True,
+        )
 
 
     def get_name_and_vals(self):
@@ -702,13 +707,41 @@ class processDashboard(WorkerProcess):
         # and only emit when the message comes from the GPS hardware.
         try:
             gps_payload = self._gps_fix_subscriber.receive()
-            if (
-                isinstance(gps_payload, dict)
-                and gps_payload.get("meta", {}).get("source") == "gps_localisation"
-            ):
-                self.socketio.emit("GpsFix", {"value": gps_payload})
-        except Exception:
-            pass
+            if gps_payload is not None:
+                meta_src = (
+                    gps_payload.get("meta", {}).get("source")
+                    if isinstance(gps_payload, dict)
+                    else None
+                )
+                print(
+                    f"[GPS-DBG] processDashboard.send_continuous_messages: "
+                    f"_gps_fix_subscriber.receive() got payload "
+                    f"type={type(gps_payload).__name__} meta.source={meta_src!r}",
+                    flush=True,
+                )
+                if (
+                    isinstance(gps_payload, dict)
+                    and meta_src == "gps_localisation"
+                ):
+                    self.socketio.emit("GpsFix", {"value": gps_payload})
+                    print(
+                        f"[GPS-DBG] processDashboard.send_continuous_messages: "
+                        f"EMIT GpsFix world_x={gps_payload.get('world_x')} "
+                        f"world_y={gps_payload.get('world_y')}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[GPS-DBG] processDashboard.send_continuous_messages: "
+                        f"payload IGNORED (no es gps_localisation)",
+                        flush=True,
+                    )
+        except Exception as exc:
+            print(
+                f"[GPS-DBG] processDashboard.send_continuous_messages: "
+                f"exception {type(exc).__name__}: {exc}",
+                flush=True,
+            )
 
         eventlet.spawn_after(0.15, self.send_continuous_messages)  # 150ms (~7Hz) — balance entre CPU y fluidez del stream
 

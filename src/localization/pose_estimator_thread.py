@@ -122,6 +122,12 @@ class threadPoseEstimator(threadTracking):
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
+        print(
+            f"[GPS-DBG] PoseEstimatorThread.__init__: _localisation_fix_sub "
+            f"registered (Owner={Localisation.Owner.value} "
+            f"msgID={Localisation.msgID.value})",
+            flush=True,
+        )
         self._last_gps_raw_xy: tuple[float, float] | None = None
         self._last_gps_raw_monotonic = 0.0
         self._gps_calibration_offset_xy: tuple[float, float] | None = None
@@ -580,6 +586,13 @@ class threadPoseEstimator(threadTracking):
         meta = payload.get("meta")
         if not isinstance(meta, dict):
             meta = {}
+
+        print(
+            f"[GPS-DBG] PoseEstimatorThread._apply_localisation_fix: GOT fix "
+            f"world_x={payload.get('world_x')} world_y={payload.get('world_y')} "
+            f"meta.source={meta.get('source')!r} manual={meta.get('manual')}",
+            flush=True,
+        )
 
         default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
         source = self._localisation_source(payload, meta, default_source)

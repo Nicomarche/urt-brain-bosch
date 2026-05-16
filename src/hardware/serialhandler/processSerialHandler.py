@@ -308,10 +308,27 @@ class processSerialHandler(WorkerProcess):
         except ImportError:
             GPS_ENABLED = False
 
+        print(
+            f"[GPS-DBG] processSerialHandler._init_threads: "
+            f"motor_output={self.motor_output!r} GPS_ENABLED={GPS_ENABLED}",
+            flush=True,
+        )
         if GPS_ENABLED:
             from src.hardware.gps.threadLocSys import threadLocSys
             gpsTh = threadLocSys(self.queuesList, self.logger, self.debugging)
             self.threads.append(gpsTh)
+            print(
+                f"[GPS-DBG] processSerialHandler._init_threads: threadLocSys "
+                f"INSTANTIATED y agregado a self.threads (total threads="
+                f"{len(self.threads)})",
+                flush=True,
+            )
+        else:
+            print(
+                f"[GPS-DBG] processSerialHandler._init_threads: GPS_ENABLED=False, "
+                f"threadLocSys NO ARRANCA",
+                flush=True,
+            )
 
 
 # =================================== EXAMPLE =========================================
