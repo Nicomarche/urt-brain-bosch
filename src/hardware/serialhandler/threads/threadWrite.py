@@ -98,14 +98,7 @@ class threadWrite(ThreadWithStop):
         self._init_senders()
         self._init_subscribers()
         self._init_motor_output()
-        # Sprint 7 bisect: el `_send_startup_speed_reset()` se ejecuta en el
-        # __init__ del thread (que corre en el thread principal del proceso
-        # ANTES de que threadRead.start() arranque). En la Jetson, ese write
-        # temprano al CDC ACM coincide con el síntoma `in_waiting=0` eterno.
-        # Comentamos para verificar si es la causa raíz. Si quitándolo la RX
-        # vuelve, el fix definitivo es enviar ese reset DESPUÉS de que
-        # threadRead esté corriendo (en thread_work del propio threadWrite).
-        # self._send_startup_speed_reset()
+        self._send_startup_speed_reset()
         self.load_config("init")
 
         if example:

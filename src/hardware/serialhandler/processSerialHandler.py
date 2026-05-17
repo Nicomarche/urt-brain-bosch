@@ -358,17 +358,21 @@ class processSerialHandler(WorkerProcess):
         writeTh = threadWrite(self, self.historyFile, self.queuesList, self.logger, self.debugging, self.example)
         self.threads.extend([readTh, writeTh])
 
-        # threadCalibration was previously instantiated inside processDashboard.
-        # It now lives in this process: the calibration FSM commands the motors
-        # via the same bus topics the dispatcher uses, and the wizard's reply
-        # stream goes back over the bus instead of SocketIO.
-        from src.hardware.serialhandler.threads.threadCalibration import threadCalibration
-        from src.hardware.serialhandler.threads.threadModeRouter import threadModeRouter
-        from src.hardware.serialhandler.threads.threadResourceMonitor import threadResourceMonitor
-        calibTh = threadCalibration(self.queuesList, self.logger, self.debugging)
-        modeRouterTh = threadModeRouter(self.queuesList, self.logger, self.debugging)
-        monitorTh = threadResourceMonitor(self.queuesList, self.logger, self.debugging)
-        self.threads.extend([calibTh, modeRouterTh, monitorTh])
+        # Sprint 7 bisect — entre el commit 0705a87a3 (RX serial OK) y HEAD
+        # se agregaron 3 threads en este proceso: threadCalibration y
+        # threadModeRouter materializan subscribers ZMQ eager en su
+        # __init__ (corren en el thread principal del proceso DESPUÉS de
+        # que el FD CDC ACM ya está abierto). En la Jetson ese orden
+        # de operaciones deja in_waiting=0 indefinido (RX muerta).
+        # Comentamos para validar: si la RX vuelve, el fix definitivo es
+        # mover estos 3 threads a un PROCESO separado (no en este).
+        # from src.hardware.serialhandler.threads.threadCalibration import threadCalibration
+        # from src.hardware.serialhandler.threads.threadModeRouter import threadModeRouter
+        # from src.hardware.serialhandler.threads.threadResourceMonitor import threadResourceMonitor
+        # calibTh = threadCalibration(self.queuesList, self.logger, self.debugging)
+        # modeRouterTh = threadModeRouter(self.queuesList, self.logger, self.debugging)
+        # monitorTh = threadResourceMonitor(self.queuesList, self.logger, self.debugging)
+        # self.threads.extend([calibTh, modeRouterTh, monitorTh])
 
         if self.motor_output == "zmq":
             simFeedbackTh = threadSimFeedback(self.queuesList, self.logger, self.debugging)
