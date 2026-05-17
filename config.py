@@ -525,7 +525,7 @@ TRAFFIC_COMM_AUTODISCOVERY_ENABLED = str(TRAFFIC_COMM_HOST).strip().lower() == "
 TRAFFIC_COMM_DISCOVERY_PORT = 9000
 TRAFFIC_COMM_DISCOVERY_TIMEOUT_S = 5.0
 TRAFFIC_COMM_PUBLIC_KEY_PATH = "auto"
-LOCSYS_DEVICE_ID     = 10
+LOCSYS_DEVICE_ID     = 3
 # Modo de GPS via TrafficCommunicationServer:
 #   "auto"      -> intenta request locsysDevice; si el server no lo reconoce,
 #                  usa suscripcion locIDsub directa al TrafficCommunicationServer.
