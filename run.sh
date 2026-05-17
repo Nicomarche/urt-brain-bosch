@@ -213,22 +213,25 @@ if [[ "$MODE" == "monitor" ]]; then
         --connect "$MONITOR_TARGET" "${GUI_ARGS[@]}"
 fi
 
-# ---- Asegurar dependencias Python ------------------------------------------
-# Chequeo barato (~0.1 s) de los módulos críticos del nuevo bus. Si falta
-# algo, corre ``pip install -r requirements.txt`` una sola vez. Saltear con
-# SKIP_PY_DEPS_CHECK=1 (p.ej. entornos sin red o pip bloqueado).
+# ---- Asegurar dependencias Python del bus ----------------------------------
+# Sólo instalamos las deps NUEVAS del Sprint 6 (pyzmq + msgpack) si faltan.
+# No corremos ``pip install -r requirements.txt`` entero porque arrastraría
+# PyQt5 / opencv / ultralytics — paquetes pesados que en Jetson aarch64 no
+# tienen wheel pre-compilado y fallan compilando desde fuente. El operador
+# resuelve esos por separado (PyQt5: ``sudo apt install python3-pyqt5``;
+# resto: ``pip install -r requirements.txt`` manual cuando lo necesite).
+# SKIP_PY_DEPS_CHECK=1 saltea el chequeo.
 if [[ "${SKIP_PY_DEPS_CHECK:-0}" != "1" ]]; then
-    if ! "$PYTHON_BIN" -c "import zmq, msgpack" 2>/dev/null; then
-        echo "[run.sh] Faltan dependencias Python — instalando requirements.txt…"
-        if ! "$PYTHON_BIN" -m pip install -r "$SCRIPT_DIR/requirements.txt"; then
-            echo "[run.sh]   pip install falló — reintentando con --user…"
-            "$PYTHON_BIN" -m pip install --user -r "$SCRIPT_DIR/requirements.txt" \
-                || { echo "[run.sh] no pude instalar requirements.txt — abortando."; exit 1; }
-        fi
-        # Verificar que la instalación cubrió lo que faltaba.
+    PY_DEPS_MISSING=()
+    "$PYTHON_BIN" -c "import zmq" 2>/dev/null   || PY_DEPS_MISSING+=("pyzmq>=26,<27")
+    "$PYTHON_BIN" -c "import msgpack" 2>/dev/null || PY_DEPS_MISSING+=("msgpack>=1.0,<2")
+    if [[ ${#PY_DEPS_MISSING[@]} -gt 0 ]]; then
+        echo "[run.sh] Faltan deps del bus — instalando: ${PY_DEPS_MISSING[*]}"
+        "$PYTHON_BIN" -m pip install --user "${PY_DEPS_MISSING[@]}" \
+            || { echo "[run.sh] pip install falló — instalá manualmente y reintentá."; exit 1; }
         "$PYTHON_BIN" -c "import zmq, msgpack" \
             || { echo "[run.sh] zmq/msgpack siguen faltando tras pip install — abortando."; exit 1; }
-        echo "[run.sh] requirements.txt OK."
+        echo "[run.sh] deps del bus OK."
     fi
 fi
 
