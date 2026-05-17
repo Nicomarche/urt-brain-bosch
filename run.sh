@@ -213,6 +213,25 @@ if [[ "$MODE" == "monitor" ]]; then
         --connect "$MONITOR_TARGET" "${GUI_ARGS[@]}"
 fi
 
+# ---- Asegurar dependencias Python ------------------------------------------
+# Chequeo barato (~0.1 s) de los módulos críticos del nuevo bus. Si falta
+# algo, corre ``pip install -r requirements.txt`` una sola vez. Saltear con
+# SKIP_PY_DEPS_CHECK=1 (p.ej. entornos sin red o pip bloqueado).
+if [[ "${SKIP_PY_DEPS_CHECK:-0}" != "1" ]]; then
+    if ! "$PYTHON_BIN" -c "import zmq, msgpack" 2>/dev/null; then
+        echo "[run.sh] Faltan dependencias Python — instalando requirements.txt…"
+        if ! "$PYTHON_BIN" -m pip install -r "$SCRIPT_DIR/requirements.txt"; then
+            echo "[run.sh]   pip install falló — reintentando con --user…"
+            "$PYTHON_BIN" -m pip install --user -r "$SCRIPT_DIR/requirements.txt" \
+                || { echo "[run.sh] no pude instalar requirements.txt — abortando."; exit 1; }
+        fi
+        # Verificar que la instalación cubrió lo que faltaba.
+        "$PYTHON_BIN" -c "import zmq, msgpack" \
+            || { echo "[run.sh] zmq/msgpack siguen faltando tras pip install — abortando."; exit 1; }
+        echo "[run.sh] requirements.txt OK."
+    fi
+fi
+
 # ---- Asegurar acados + solver (Mac y Jetson) --------------------------------
 # Si todo está OK tarda ~1 s. Si falta algo, compila/descarga/genera sólo
 # lo que falta. Pasar SKIP_ACADOS_CHECK=1 para saltear (CI sin red).
