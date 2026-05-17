@@ -442,6 +442,109 @@ def test_apply_localisation_fix_manual_pose_teleports_sim(monkeypatch) -> None:
     ]
 
 
+def test_manual_dashboard_relocates_even_without_recent_gps(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._dr = _FakeDR(x=0.0, y=0.0, yaw=0.0)
+    estimator._graph = SimpleNamespace(
+        localisation_to_world_pose=lambda payload, default_yaw=0.0: (
+            float(payload["world_x"]),
+            float(payload["world_y"]),
+            math.radians(float(payload["yaw_deg"])),
+        ),
+        resolve_node_id=lambda _value: None,
+    )
+    estimator._localisation_fix_sub = SimpleNamespace(
+        receive=lambda: {
+            "world_x": 2.5,
+            "world_y": -1.25,
+            "yaw_deg": 45.0,
+            "meta": {
+                "manual": True,
+                "source": "manual_dashboard",
+                "gps_calibration": True,
+            },
+        }
+    )
+    estimator._last_gps_raw_xy = None
+    estimator._last_gps_raw_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_source = None
+    estimator._last_yaw_rad = 0.0
+    estimator._yaw_ekf_p = 0.0
+    estimator.tracking_state = SimpleNamespace(
+        set_lane_measurement_state=lambda *_args, **_kwargs: None
+    )
+    estimator.queuesList = {"General": object()}
+
+    applied, info = estimator._apply_localisation_fix(current_yaw=0.0)
+
+    assert applied is True
+    assert info is not None
+    assert info["source"] == "manual_dashboard"
+    assert info["mode"] == "gps_fix"
+    assert estimator._dr.get_state() == pytest.approx(
+        (2.5, -1.25, math.radians(45.0)),
+        abs=1e-9,
+    )
+
+
+def test_manual_dashboard_calibrates_gps_when_recent_fix_exists(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._dr = _FakeDR(x=0.0, y=0.0, yaw=0.0)
+    estimator._graph = SimpleNamespace(
+        localisation_to_world_pose=lambda payload, default_yaw=0.0: (
+            float(payload["world_x"]),
+            float(payload["world_y"]),
+            math.radians(float(payload["yaw_deg"])),
+        ),
+        resolve_node_id=lambda _value: None,
+    )
+    estimator._localisation_fix_sub = SimpleNamespace(
+        receive=lambda: {
+            "world_x": 2.5,
+            "world_y": -1.25,
+            "yaw_deg": 45.0,
+            "meta": {
+                "manual": True,
+                "source": "manual_dashboard",
+                "gps_calibration": True,
+            },
+        }
+    )
+    estimator._last_gps_raw_xy = (2.0, -2.0)
+    estimator._last_gps_raw_monotonic = time.monotonic()
+    estimator._last_raw_imu = None
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_source = None
+    estimator._last_yaw_rad = 0.0
+    estimator._yaw_ekf_p = 0.0
+    estimator._yaw_offset_calibrated = False
+    estimator._pending_yaw_offset_target_rad = None
+    estimator.tracking_state = SimpleNamespace(
+        set_lane_measurement_state=lambda *_args, **_kwargs: None
+    )
+
+    applied, info = estimator._apply_localisation_fix(current_yaw=0.0)
+
+    assert applied is True
+    assert info is not None
+    assert info["mode"] == "gps_calibration"
+    assert info["source"] == "manual_dashboard:gps_calibration"
+    assert estimator._gps_calibration_offset_xy == pytest.approx((0.5, 0.75))
+    assert estimator._dr.get_state() == pytest.approx(
+        (2.5, -1.25, math.radians(45.0)),
+        abs=1e-9,
+    )
+
+
 def test_receive_localisation_fix_prefers_manual_over_newer_gps() -> None:
     class _FakeSubscriber:
         def __init__(self) -> None:

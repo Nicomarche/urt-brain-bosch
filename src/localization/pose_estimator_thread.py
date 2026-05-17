@@ -879,7 +879,15 @@ class threadPoseEstimator(threadTracking):
             self._remember_auto_gps_fix(payload, meta, now_mono)
             return self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
         elif self._should_calibrate_gps_from_dashboard(payload, meta):
-            return self._apply_gps_dashboard_calibration(payload, meta, current_yaw)
+            calibrated, calibration_info = self._apply_gps_dashboard_calibration(
+                payload,
+                meta,
+                current_yaw,
+            )
+            if calibrated:
+                return True, calibration_info
+            # Manual relocate must still work when LoCSys/TrafficCommunication is
+            # disconnected or stale. GPS calibration is an optional side effect.
 
         old_x, old_y, _ = self._dr.get_state()
         pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
