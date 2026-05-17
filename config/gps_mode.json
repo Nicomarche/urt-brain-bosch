@@ -1,4 +1,4 @@
 {
-  "disabled": false,
-  "source": "dashboard_enable_gps"
+  "disabled": true,
+  "source": "dashboard_no_gps_start"
 }

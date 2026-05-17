@@ -289,16 +289,6 @@ class processSerialHandler(WorkerProcess):
     # ===================================== RUN ==========================================
     def run(self):
         """Apply the initializing methods and start the threads."""
-        # Sprint 7 fix: materializar el zmq.Context del proceso ANTES de
-        # abrir el puerto serial. Sin esto, la primera materialización de
-        # un socket ZMQ (cuando threadCalibration / threadModeRouter piden
-        # un subscriber) instancia ``zmq.Context.instance()`` DESPUÉS de
-        # que el FD del CDC ACM ya está abierto, y la RX se queda en
-        # ``in_waiting=0`` indefinido en la Jetson (bytes_total=0). Forzar
-        # el orden — primero el context ZMQ con su epoll/reaper interno,
-        # después el FD serial — elimina la interferencia.
-        import zmq
-        zmq.Context.instance()
         self._try_serial_connection()
 
         if not self.serialConnected and self.motor_output != "zmq":
