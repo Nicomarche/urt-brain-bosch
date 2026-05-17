@@ -564,28 +564,241 @@ def test_initial_world_pose_uses_saved_start_for_real_and_sim(monkeypatch) -> No
     assert estimator._resolve_initial_world_pose() == saved_pose
 
 
-def test_startup_gps_calibration_anchors_first_fix_to_start(monkeypatch) -> None:
-    import config as cfg
-
-    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
-
+def _start_calibration_estimator() -> threadPoseEstimator:
     estimator = threadPoseEstimator.__new__(threadPoseEstimator)
-    estimator._startup_world_pose = (5.0, 7.5, math.radians(90.0))
-    estimator._startup_gps_calibration_pending = True
+    estimator._dr = _FakeDR(x=0.0, y=0.0, yaw=0.0)
+    estimator._graph = SimpleNamespace(
+        localisation_to_world_pose=lambda payload, default_yaw=0.0: (
+            float(payload["world_x"]),
+            float(payload["world_y"]),
+            math.radians(float(payload["yaw_deg"]))
+            if payload.get("yaw_deg") is not None
+            else float(payload.get("yaw_rad", default_yaw)),
+        ),
+        resolve_node_id=lambda _value: None,
+    )
     estimator._gps_calibration_offset_xy = None
+    estimator._last_gps_raw_xy = None
+    estimator._last_gps_raw_monotonic = 0.0
+    estimator._gps_disabled = False
     estimator._last_raw_imu = None
     estimator._last_imu_t = None
     estimator._pending_yaw_offset_target_rad = None
     estimator._yaw_offset_calibrated = False
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_source = None
+    estimator._last_yaw_rad = 0.0
+    estimator._yaw_ekf_p = 0.0
+    estimator._gps_fix_history = deque(maxlen=10)
+    estimator._auto_gps_pending = False
+    estimator._startup_gps_calibration_pending = False
+    estimator.tracking_state = SimpleNamespace(
+        set_lane_measurement_state=lambda *_args, **_kwargs: None
+    )
+    estimator.queuesList = {"General": object()}
+    return estimator
 
-    calibrated = estimator._apply_startup_gps_calibration_if_pending(
-        {"world_x": 4.5, "world_y": 8.0, "meta": {"source": "gps_localisation"}}
+
+def _gps_payload(x: float, y: float) -> dict:
+    return {
+        "world_x": float(x),
+        "world_y": float(y),
+        "timestamp": time.time(),
+        "meta": {"source": "gps_localisation", "gps_frame_in_bounds": True},
+    }
+
+
+def test_start_calibration_waits_for_five_fresh_gps_samples(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = _start_calibration_estimator()
+    estimator._localisation_fix_sub = _OneShotSub(
+        {
+            "world_x": 5.0,
+            "world_y": 7.5,
+            "yaw_deg": 90.0,
+            "meta": {
+                "manual": True,
+                "source": "manual_dashboard_start_calibration",
+                "gps_calibration": True,
+                "start_calibration": True,
+            },
+        }
     )
 
-    assert calibrated is True
-    assert estimator._startup_gps_calibration_pending is False
-    assert estimator._gps_calibration_offset_xy == pytest.approx((0.5, -0.5))
+    applied, info = estimator._apply_localisation_fix(current_yaw=0.0, now=10.0)
+
+    assert applied is False
+    assert info is None
+    assert estimator._start_gps_calibration_pending is True
+    assert estimator._dr.get_state() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
+
+    fixes = [(4.50, 8.00), (4.52, 8.02), (4.48, 7.98), (4.51, 8.01), (4.49, 7.99)]
+    for index, (x, y) in enumerate(fixes):
+        estimator._localisation_fix_sub = _OneShotSub(_gps_payload(x, y))
+        applied, info = estimator._apply_localisation_fix(current_yaw=0.0, now=10.1 + index * 0.1)
+
+    assert applied is True
+    assert info is not None
+    assert info["mode"] == "start_gps_calibration"
+    assert info["gps_sample_count"] == 5
+    assert estimator._start_gps_calibration_pending is False
+    assert estimator._gps_calibration_offset_xy == pytest.approx((0.5, -0.5), abs=1e-9)
+    assert estimator._dr.get_state() == pytest.approx(
+        (5.0, 7.5, math.radians(90.0)),
+        abs=1e-9,
+    )
     assert estimator._pending_yaw_offset_target_rad == pytest.approx(math.radians(90.0))
+
+
+def test_start_calibration_rejects_dispersed_gps_samples(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = _start_calibration_estimator()
+    estimator._begin_start_gps_calibration_for_pose(
+        (5.0, 7.5, math.radians(90.0)),
+        10.0,
+        source="manual_dashboard_start_calibration",
+    )
+    for index, (x, y) in enumerate(((4.0, 8.0), (4.1, 8.0), (4.2, 8.0), (4.3, 8.0), (5.2, 8.0))):
+        estimator._remember_start_gps_calibration_fix(
+            _gps_payload(x, y),
+            {"source": "gps_localisation", "gps_frame_in_bounds": True},
+            10.1 + index * 0.1,
+        )
+
+    applied, info = estimator._try_apply_start_gps_calibration(current_yaw=0.0, now=10.6)
+
+    assert applied is False
+    assert info is None
+    assert estimator._start_gps_calibration_pending is False
+    assert estimator._start_gps_calibration_last_mode == "start_gps_calibration_failed"
+    assert estimator._start_gps_calibration_last_source == "gps_spread_too_large"
+    assert estimator._gps_calibration_offset_xy is None
+    assert estimator._dr.get_state() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
+
+
+def test_start_calibration_times_out_without_gps(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = _start_calibration_estimator()
+    estimator._begin_start_gps_calibration_for_pose(
+        (5.0, 7.5, math.radians(90.0)),
+        10.0,
+        source="manual_dashboard_start_calibration",
+    )
+
+    applied, info = estimator._try_apply_start_gps_calibration(current_yaw=0.0, now=20.0)
+
+    assert applied is False
+    assert info is None
+    assert estimator._start_gps_calibration_pending is False
+    assert estimator._start_gps_calibration_last_mode == "start_gps_calibration_failed"
+    assert estimator._start_gps_calibration_last_source == "not_enough_fresh_gps_samples"
+    assert estimator._gps_calibration_offset_xy is None
+    assert estimator._dr.get_state() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
+
+
+def test_startup_gps_calibration_uses_sample_window(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = _start_calibration_estimator()
+    estimator._startup_world_pose = (5.0, 7.5, math.radians(90.0))
+    estimator._startup_gps_calibration_pending = True
+
+    started = estimator._apply_startup_gps_calibration_if_pending(
+        _gps_payload(4.5, 8.0),
+        now=10.0,
+    )
+
+    assert started is True
+    assert estimator._startup_gps_calibration_pending is False
+    assert estimator._start_gps_calibration_pending is True
+    assert estimator._gps_calibration_offset_xy is None
+
+    for index, (x, y) in enumerate(((4.50, 8.00), (4.52, 8.02), (4.48, 7.98), (4.51, 8.01), (4.49, 7.99))):
+        estimator._remember_start_gps_calibration_fix(
+            _gps_payload(x, y),
+            {"source": "gps_localisation", "gps_frame_in_bounds": True},
+            10.1 + index * 0.1,
+        )
+
+    calibrated, info = estimator._try_apply_start_gps_calibration(current_yaw=0.0, now=10.7)
+
+    assert calibrated is True
+    assert info is not None
+    assert info["source"] == "startup_start_calibration"
+    assert estimator._gps_calibration_offset_xy == pytest.approx((0.5, -0.5), abs=1e-9)
+    assert estimator._dr.get_state() == pytest.approx(
+        (5.0, 7.5, math.radians(90.0)),
+        abs=1e-9,
+    )
+
+
+def test_no_gps_start_mode_sets_start_and_ignores_later_gps(monkeypatch) -> None:
+    import config as cfg
+    import src.localization.pose_estimator_thread as pet
+
+    gps_mode = {"disabled": False, "source": None}
+
+    def fake_save_gps_disabled(disabled: bool, *, source: str = "test"):
+        gps_mode["disabled"] = bool(disabled)
+        gps_mode["source"] = str(source)
+        return dict(gps_mode)
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+    monkeypatch.setattr(pet, "is_gps_disabled", lambda: bool(gps_mode["disabled"]))
+    monkeypatch.setattr(pet, "save_gps_disabled", fake_save_gps_disabled)
+
+    estimator = _start_calibration_estimator()
+    estimator._localisation_fix_sub = _OneShotSub(
+        {
+            "world_x": 5.0,
+            "world_y": 7.5,
+            "yaw_deg": 90.0,
+            "meta": {
+                "manual": True,
+                "source": "manual_dashboard_no_gps_start",
+                "start_calibration": True,
+                "no_gps_mode": True,
+                "gps_disabled": True,
+            },
+        }
+    )
+
+    applied, info = estimator._apply_localisation_fix(current_yaw=0.0, now=10.0)
+
+    assert applied is True
+    assert info is not None
+    assert info["mode"] == "gps_disabled_start"
+    assert gps_mode == {
+        "disabled": True,
+        "source": "manual_dashboard_no_gps_start",
+    }
+    assert estimator._gps_disabled is True
+    assert estimator._dr.get_state() == pytest.approx(
+        (5.0, 7.5, math.radians(90.0)),
+        abs=1e-9,
+    )
+
+    estimator._localisation_fix_sub = _OneShotSub(_gps_payload(30.0, 40.0))
+    applied, info = estimator._apply_localisation_fix(current_yaw=math.radians(90.0), now=10.2)
+
+    assert applied is False
+    assert info is None
+    assert estimator._last_gps_raw_xy is None
+    assert estimator._dr.get_state() == pytest.approx(
+        (5.0, 7.5, math.radians(90.0)),
+        abs=1e-9,
+    )
 
 
 def test_receive_localisation_fix_prefers_manual_over_newer_gps() -> None:

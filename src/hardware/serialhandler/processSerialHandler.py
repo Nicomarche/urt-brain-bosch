@@ -366,13 +366,19 @@ class processSerialHandler(WorkerProcess):
             from config import GPS_ENABLED
         except ImportError:
             GPS_ENABLED = False
+        try:
+            from src.utils.gps_mode import is_gps_disabled
+            gps_disabled = is_gps_disabled()
+        except Exception:
+            gps_disabled = False
 
         print(
             f"[GPS-DBG] processSerialHandler._init_threads: "
-            f"motor_output={self.motor_output!r} GPS_ENABLED={GPS_ENABLED}",
+            f"motor_output={self.motor_output!r} GPS_ENABLED={GPS_ENABLED} "
+            f"gps_disabled={gps_disabled}",
             flush=True,
         )
-        if GPS_ENABLED:
+        if GPS_ENABLED and not gps_disabled:
             from src.hardware.gps.threadLocSys import threadLocSys
             gpsTh = threadLocSys(self.queuesList, self.logger, self.debugging)
             self.threads.append(gpsTh)
@@ -384,7 +390,7 @@ class processSerialHandler(WorkerProcess):
             )
         else:
             print(
-                f"[GPS-DBG] processSerialHandler._init_threads: GPS_ENABLED=False, "
+                f"[GPS-DBG] processSerialHandler._init_threads: GPS disabled, "
                 f"threadLocSys NO ARRANCA",
                 flush=True,
             )

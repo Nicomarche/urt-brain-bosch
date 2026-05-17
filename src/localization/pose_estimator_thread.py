@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from src.core.types import LaneObservation, Pose2D, PoseEstimate, RouteContext, StoplineObservation
 from src.core.types.perception import lane_observation_supports_lateral_relocalization
 from src.utils.live_log import live_log
+from src.utils.gps_mode import gps_mode_path, is_gps_disabled, save_gps_disabled
 from src.utils.sim_start_pose import resolve_saved_start_pose
 from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
@@ -49,6 +50,11 @@ _AUTO_GPS_MAX_SPREAD_M = float(getattr(_cfg_auto, "AUTO_GPS_MAX_SPREAD_M", 0.35)
 _AUTO_GPS_MAX_LANELET_DISTANCE_M = float(getattr(_cfg_auto, "AUTO_GPS_MAX_LANELET_DISTANCE_M", 0.50))
 _AUTO_GPS_MAX_YAW_DIFF_RAD = float(getattr(_cfg_auto, "AUTO_GPS_MAX_YAW_DIFF_RAD", math.pi / 2.0))
 _AUTO_GPS_STATUS_HOLD_S = 0.25
+_START_GPS_CALIBRATION_SAMPLE_COUNT = max(1, int(getattr(_cfg_auto, "START_GPS_CALIBRATION_SAMPLE_COUNT", 5)))
+_START_GPS_CALIBRATION_TIMEOUT_S = float(getattr(_cfg_auto, "START_GPS_CALIBRATION_TIMEOUT_S", 4.0))
+_START_GPS_CALIBRATION_MAX_FIX_AGE_S = float(getattr(_cfg_auto, "START_GPS_CALIBRATION_MAX_FIX_AGE_S", 1.5))
+_START_GPS_CALIBRATION_MAX_SPREAD_M = float(getattr(_cfg_auto, "START_GPS_CALIBRATION_MAX_SPREAD_M", _AUTO_GPS_MAX_SPREAD_M))
+_START_GPS_CALIBRATION_STATUS_HOLD_S = float(getattr(_cfg_auto, "START_GPS_CALIBRATION_STATUS_HOLD_S", 4.0))
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -140,6 +146,7 @@ class threadPoseEstimator(threadTracking):
         )
         self._last_gps_raw_xy: tuple[float, float] | None = None
         self._last_gps_raw_monotonic = 0.0
+        self._gps_disabled = is_gps_disabled()
         self._gps_calibration_offset_xy: tuple[float, float] | None = None
         self._startup_gps_calibration_pending = False
         self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
@@ -151,10 +158,23 @@ class threadPoseEstimator(threadTracking):
         self._auto_gps_last_error_m = 0.0
         self._auto_gps_last_mode_monotonic = 0.0
         self._pending_yaw_offset_target_rad: float | None = None
+        self._start_gps_calibration_pending = False
+        self._start_gps_calibration_target_pose: tuple[float, float, float] | None = None
+        self._start_gps_calibration_samples = deque(
+            maxlen=max(_START_GPS_CALIBRATION_SAMPLE_COUNT * 2, _START_GPS_CALIBRATION_SAMPLE_COUNT)
+        )
+        self._start_gps_calibration_deadline_monotonic = 0.0
+        self._start_gps_calibration_source: str | None = None
+        self._start_gps_calibration_last_mode: str | None = None
+        self._start_gps_calibration_last_source: str | None = None
+        self._start_gps_calibration_last_error_m = 0.0
+        self._start_gps_calibration_last_sample_count = 0
+        self._start_gps_calibration_last_mode_monotonic = 0.0
         self._startup_world_pose = self._resolve_initial_world_pose()
         self._startup_gps_calibration_pending = (
             self._startup_world_pose is not None
             and self._gps_dashboard_calibration_enabled()
+            and not self._gps_runtime_disabled()
         )
         self._apply_start_pose_override()
         self._send_sim_relocalize()
@@ -166,6 +186,19 @@ class threadPoseEstimator(threadTracking):
         except ImportError:
             return True
         return MOTOR_OUTPUT != "zmq"
+
+    def _gps_runtime_disabled(self) -> bool:
+        runtime_disabled = bool(getattr(self, "_gps_disabled", False))
+        try:
+            path = gps_mode_path()
+            if path.exists():
+                disabled = bool(is_gps_disabled())
+                self._gps_disabled = disabled
+                return self._gps_disabled
+        except Exception:
+            pass
+        self._gps_disabled = runtime_disabled
+        return self._gps_disabled
 
     @staticmethod
     def _payload_xy(payload: dict) -> tuple[float, float] | None:
@@ -261,7 +294,8 @@ class threadPoseEstimator(threadTracking):
 
     def _begin_auto_gps_entry(self) -> None:
         now = time.monotonic()
-        self._auto_gps_pending = True
+        gps_disabled = self._gps_runtime_disabled()
+        self._auto_gps_pending = not gps_disabled
         self._auto_gps_started_monotonic = now
         self._auto_gps_deadline_monotonic = now + max(0.0, _AUTO_GPS_COLLECTION_TIMEOUT_S)
         self._auto_gps_last_mode = None
@@ -281,6 +315,14 @@ class threadPoseEstimator(threadTracking):
         except Exception:
             if self.logging is not None:
                 self.logging.exception("failed to send OdoReset on AUTO entry")
+        if gps_disabled:
+            self._finish_auto_gps_entry(mode="auto_gps_disabled", source="no_gps_mode")
+            live_log(
+                "pose_estimator",
+                event="auto_gps_entry_skipped",
+                reason="no_gps_mode",
+            )
+            return
         live_log(
             "pose_estimator",
             event="auto_gps_entry_started",
@@ -461,6 +503,373 @@ class threadPoseEstimator(threadTracking):
             "gps_lateral_m": float(lateral_m),
         }
 
+    def _ensure_start_gps_calibration_state(self) -> None:
+        if not hasattr(self, "_start_gps_calibration_samples"):
+            self._start_gps_calibration_samples = deque(
+                maxlen=max(
+                    _START_GPS_CALIBRATION_SAMPLE_COUNT * 2,
+                    _START_GPS_CALIBRATION_SAMPLE_COUNT,
+                )
+            )
+        if not hasattr(self, "_start_gps_calibration_pending"):
+            self._start_gps_calibration_pending = False
+        if not hasattr(self, "_start_gps_calibration_target_pose"):
+            self._start_gps_calibration_target_pose = None
+        if not hasattr(self, "_start_gps_calibration_deadline_monotonic"):
+            self._start_gps_calibration_deadline_monotonic = 0.0
+        if not hasattr(self, "_start_gps_calibration_source"):
+            self._start_gps_calibration_source = None
+        if not hasattr(self, "_start_gps_calibration_last_mode"):
+            self._start_gps_calibration_last_mode = None
+            self._start_gps_calibration_last_source = None
+            self._start_gps_calibration_last_error_m = 0.0
+            self._start_gps_calibration_last_sample_count = 0
+            self._start_gps_calibration_last_mode_monotonic = 0.0
+
+    @staticmethod
+    def _is_start_calibration_request(payload: dict, meta: dict) -> bool:
+        return bool(meta.get("start_calibration") or payload.get("start_calibration"))
+
+    @staticmethod
+    def _is_no_gps_start_request(payload: dict, meta: dict) -> bool:
+        return bool(
+            meta.get("no_gps_mode")
+            or meta.get("gps_disabled")
+            or payload.get("no_gps_mode")
+            or payload.get("gps_disabled")
+        )
+
+    def _cancel_start_gps_calibration(self) -> None:
+        self._ensure_start_gps_calibration_state()
+        self._start_gps_calibration_pending = False
+        self._start_gps_calibration_target_pose = None
+        self._start_gps_calibration_source = None
+        self._start_gps_calibration_samples.clear()
+
+    def _apply_no_gps_start_mode(
+        self,
+        payload: dict,
+        meta: dict,
+        current_yaw: float,
+        now: float,
+    ) -> tuple[bool, dict | None]:
+        self._ensure_start_gps_calibration_state()
+        source = self._localisation_source(
+            payload,
+            meta,
+            "manual_dashboard_no_gps_start",
+        )
+        pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
+        if pose is None:
+            self._finish_start_gps_calibration(
+                mode="start_gps_calibration_failed",
+                source="invalid_no_gps_start_pose",
+                error_m=0.0,
+                sample_count=0,
+            )
+            return False, None
+
+        try:
+            save_gps_disabled(True, source=source)
+        except Exception as exc:
+            print(
+                "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;93mWARNING\033[0m"
+                f" - Could not persist no-GPS mode: {exc}"
+            )
+
+        self._gps_disabled = True
+        self._startup_gps_calibration_pending = False
+        self._auto_gps_pending = False
+        self._last_gps_raw_xy = None
+        self._last_gps_raw_monotonic = 0.0
+        self._gps_calibration_offset_xy = None
+        try:
+            self._gps_fix_history.clear()
+        except Exception:
+            self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
+        self._cancel_start_gps_calibration()
+
+        target_x, target_y, target_yaw = pose
+        old_x, old_y, _ = self._dr.get_state()
+        self._dr.reset(float(target_x), float(target_y), float(target_yaw))
+        self._last_yaw_rad = float(target_yaw)
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        self._last_absolute_yaw_fix_monotonic = float(now)
+        self._last_absolute_yaw_fix_source = "no_gps_start"
+        self._calibrate_imu_yaw_offset_to(float(target_yaw))
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
+        error_m = math.hypot(float(target_x) - float(old_x), float(target_y) - float(old_y))
+        self._send_sim_relocalize_pose(
+            float(target_x),
+            float(target_y),
+            float(target_yaw),
+            source="no_gps_start",
+        )
+        self._finish_start_gps_calibration(
+            mode="gps_disabled_start",
+            source=source,
+            error_m=error_m,
+            sample_count=0,
+        )
+        print(
+            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - No-GPS start mode active: pose set to "
+            f"({float(target_x):.3f}, {float(target_y):.3f}) "
+            f"yaw={math.degrees(float(target_yaw)):.1f}°; GPS fixes ignored"
+        )
+        return True, {
+            "mode": "gps_disabled_start",
+            "source": source,
+            "error_m": float(error_m),
+            "gps_disabled": True,
+        }
+
+    def _begin_start_gps_calibration_for_pose(
+        self,
+        target_pose: tuple[float, float, float],
+        now: float,
+        *,
+        source: str,
+    ) -> None:
+        self._ensure_start_gps_calibration_state()
+        target_x, target_y, target_yaw = target_pose
+        self._start_gps_calibration_pending = True
+        self._start_gps_calibration_target_pose = (
+            float(target_x),
+            float(target_y),
+            float(target_yaw),
+        )
+        self._start_gps_calibration_source = str(source)
+        self._start_gps_calibration_deadline_monotonic = (
+            float(now) + max(0.0, _START_GPS_CALIBRATION_TIMEOUT_S)
+        )
+        self._start_gps_calibration_samples.clear()
+        self._start_gps_calibration_last_mode = None
+        self._start_gps_calibration_last_source = None
+        self._start_gps_calibration_last_error_m = 0.0
+        self._start_gps_calibration_last_sample_count = 0
+        self._start_gps_calibration_last_mode_monotonic = 0.0
+        live_log(
+            "pose_estimator",
+            event="start_gps_calibration_started",
+            source=str(source),
+            target_x=float(target_x),
+            target_y=float(target_y),
+            sample_count=int(_START_GPS_CALIBRATION_SAMPLE_COUNT),
+            timeout_s=float(_START_GPS_CALIBRATION_TIMEOUT_S),
+        )
+        print(
+            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;96mINFO\033[0m"
+            f" - Start GPS calibration waiting for {_START_GPS_CALIBRATION_SAMPLE_COUNT} "
+            f"fresh GPS samples at start ({float(target_x):.3f}, {float(target_y):.3f})"
+        )
+
+    def _begin_start_gps_calibration(
+        self,
+        payload: dict,
+        meta: dict,
+        current_yaw: float,
+        now: float,
+        *,
+        source: str,
+    ) -> tuple[bool, dict | None]:
+        self._ensure_start_gps_calibration_state()
+        pose = self._graph.localisation_to_world_pose(payload, default_yaw=current_yaw)
+        if pose is None:
+            self._finish_start_gps_calibration(
+                mode="start_gps_calibration_failed",
+                source="invalid_start_pose",
+                error_m=0.0,
+                sample_count=0,
+            )
+            return False, None
+
+        self._begin_start_gps_calibration_for_pose(pose, now, source=source)
+        return False, None
+
+    def _finish_start_gps_calibration(
+        self,
+        *,
+        mode: str,
+        source: str,
+        error_m: float = 0.0,
+        sample_count: int | None = None,
+    ) -> None:
+        self._ensure_start_gps_calibration_state()
+        self._start_gps_calibration_pending = False
+        self._start_gps_calibration_target_pose = None
+        self._start_gps_calibration_source = None
+        if sample_count is None:
+            sample_count = len(self._recent_start_gps_calibration_samples(time.monotonic()))
+        self._start_gps_calibration_last_mode = str(mode)
+        self._start_gps_calibration_last_source = str(source)
+        self._start_gps_calibration_last_error_m = float(error_m or 0.0)
+        self._start_gps_calibration_last_sample_count = int(sample_count or 0)
+        self._start_gps_calibration_last_mode_monotonic = time.monotonic()
+        self._start_gps_calibration_samples.clear()
+        live_log(
+            "pose_estimator",
+            event="start_gps_calibration_finished",
+            mode=str(mode),
+            source=str(source),
+            error_m=float(error_m or 0.0),
+            sample_count=int(sample_count or 0),
+        )
+
+    def _start_gps_calibration_recent_status(self, now: float) -> tuple[str, str, float] | None:
+        self._ensure_start_gps_calibration_state()
+        if self._start_gps_calibration_pending:
+            sample_count = len(self._recent_start_gps_calibration_samples(now))
+            return (
+                "start_gps_calibration_pending",
+                f"gps_waiting_for_samples:{sample_count}/{_START_GPS_CALIBRATION_SAMPLE_COUNT}",
+                0.0,
+            )
+        last_t = float(getattr(self, "_start_gps_calibration_last_mode_monotonic", 0.0) or 0.0)
+        mode = getattr(self, "_start_gps_calibration_last_mode", None)
+        if mode and now - last_t <= _START_GPS_CALIBRATION_STATUS_HOLD_S:
+            source = str(getattr(self, "_start_gps_calibration_last_source", None) or "start_gps_calibration")
+            samples = int(getattr(self, "_start_gps_calibration_last_sample_count", 0) or 0)
+            return (
+                str(mode),
+                f"{source}:{samples}/{_START_GPS_CALIBRATION_SAMPLE_COUNT}",
+                float(getattr(self, "_start_gps_calibration_last_error_m", 0.0) or 0.0),
+            )
+        return None
+
+    def _remember_start_gps_calibration_fix(self, payload: dict, meta: dict, now: float) -> None:
+        self._ensure_start_gps_calibration_state()
+        if not bool(getattr(self, "_start_gps_calibration_pending", False)):
+            return
+        xy = self._payload_xy(payload)
+        if xy is None:
+            return
+        x, y = xy
+        if not (math.isfinite(float(x)) and math.isfinite(float(y))):
+            return
+        if self._meta_marks_gps_out_of_bounds(payload, meta):
+            return
+        ts = payload.get("timestamp")
+        if ts is not None:
+            try:
+                ts_f = float(ts)
+            except (TypeError, ValueError):
+                ts_f = 0.0
+            if ts_f > 0.0 and (time.time() - ts_f) > _START_GPS_CALIBRATION_MAX_FIX_AGE_S:
+                return
+        self._start_gps_calibration_samples.append({
+            "x": float(x),
+            "y": float(y),
+            "received_monotonic": float(now),
+            "payload": dict(payload),
+            "meta": dict(meta),
+        })
+
+    def _recent_start_gps_calibration_samples(self, now: float) -> list[dict]:
+        self._ensure_start_gps_calibration_state()
+        history = list(getattr(self, "_start_gps_calibration_samples", []) or [])
+        fresh = [
+            sample
+            for sample in history
+            if now - float(sample.get("received_monotonic", 0.0)) <= _START_GPS_CALIBRATION_MAX_FIX_AGE_S
+        ]
+        return fresh[-_START_GPS_CALIBRATION_SAMPLE_COUNT:]
+
+    def _try_apply_start_gps_calibration(self, current_yaw: float, now: float):
+        self._ensure_start_gps_calibration_state()
+        if not bool(getattr(self, "_start_gps_calibration_pending", False)):
+            return False, None
+
+        samples = self._recent_start_gps_calibration_samples(now)
+        deadline_expired = now > float(getattr(self, "_start_gps_calibration_deadline_monotonic", 0.0) or 0.0)
+        if len(samples) < _START_GPS_CALIBRATION_SAMPLE_COUNT:
+            if deadline_expired:
+                self._finish_start_gps_calibration(
+                    mode="start_gps_calibration_failed",
+                    source="not_enough_fresh_gps_samples",
+                    error_m=0.0,
+                    sample_count=len(samples),
+                )
+                print(
+                    "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;93mWARNING\033[0m"
+                    f" - Start GPS calibration failed: only {len(samples)}/"
+                    f"{_START_GPS_CALIBRATION_SAMPLE_COUNT} fresh GPS samples"
+                )
+            return False, None
+
+        spread_m = self._gps_sample_spread(samples)
+        if spread_m > _START_GPS_CALIBRATION_MAX_SPREAD_M:
+            self._finish_start_gps_calibration(
+                mode="start_gps_calibration_failed",
+                source="gps_spread_too_large",
+                error_m=spread_m,
+                sample_count=len(samples),
+            )
+            print(
+                "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;93mWARNING\033[0m"
+                f" - Start GPS calibration failed: GPS sample spread {spread_m:.3f} m "
+                f"> {_START_GPS_CALIBRATION_MAX_SPREAD_M:.3f} m"
+            )
+            return False, None
+
+        target_pose = getattr(self, "_start_gps_calibration_target_pose", None)
+        if target_pose is None:
+            self._finish_start_gps_calibration(
+                mode="start_gps_calibration_failed",
+                source="missing_start_pose",
+                error_m=0.0,
+                sample_count=len(samples),
+            )
+            return False, None
+
+        target_x, target_y, target_yaw = target_pose
+        avg_x = sum(float(sample["x"]) for sample in samples) / float(len(samples))
+        avg_y = sum(float(sample["y"]) for sample in samples) / float(len(samples))
+        offset_x = float(target_x) - float(avg_x)
+        offset_y = float(target_y) - float(avg_y)
+        old_x, old_y, _ = self._dr.get_state()
+        self._gps_calibration_offset_xy = (offset_x, offset_y)
+        self._dr.reset(float(target_x), float(target_y), float(target_yaw))
+        self._last_yaw_rad = float(target_yaw)
+        self._yaw_ekf_p = _YAW_EKF_P_INIT
+        self._last_absolute_yaw_fix_monotonic = time.monotonic()
+        self._last_absolute_yaw_fix_source = "start_gps_calibration"
+        self._calibrate_imu_yaw_offset_to(float(target_yaw))
+        if self.tracking_state is not None and hasattr(self.tracking_state, "set_lane_measurement_state"):
+            self.tracking_state.set_lane_measurement_state(False, 0.0)
+        error_m = math.hypot(float(target_x) - float(old_x), float(target_y) - float(old_y))
+        calibration_source = str(
+            getattr(self, "_start_gps_calibration_source", None)
+            or "manual_dashboard_start_calibration"
+        )
+        self._send_sim_relocalize_pose(
+            float(target_x),
+            float(target_y),
+            float(target_yaw),
+            source="start_gps_calibration",
+        )
+        self._finish_start_gps_calibration(
+            mode="start_gps_calibration",
+            source=calibration_source,
+            error_m=error_m,
+            sample_count=len(samples),
+        )
+        print(
+            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - Start GPS calibrated from {len(samples)} samples: "
+            f"avg raw ({avg_x:.3f}, {avg_y:.3f}) -> "
+            f"start ({float(target_x):.3f}, {float(target_y):.3f}); "
+            f"offset=({offset_x:.3f}, {offset_y:.3f}); spread={spread_m:.3f} m"
+        )
+        return True, {
+            "mode": "start_gps_calibration",
+            "source": calibration_source,
+            "error_m": float(error_m),
+            "gps_spread_m": float(spread_m),
+            "gps_sample_count": int(len(samples)),
+        }
+
     def _latest_gps_raw_xy_for_calibration(self, payload: dict) -> tuple[float, float] | None:
         xy = self._raw_gps_xy_from_calibration_payload(payload)
         if xy is not None:
@@ -473,6 +882,8 @@ class threadPoseEstimator(threadTracking):
 
     def _should_calibrate_gps_from_dashboard(self, payload: dict, meta: dict) -> bool:
         if not self._gps_dashboard_calibration_enabled():
+            return False
+        if self._gps_runtime_disabled():
             return False
         if not bool(meta.get("manual")):
             return False
@@ -549,7 +960,11 @@ class threadPoseEstimator(threadTracking):
         }
 
     def _apply_gps_calibration_offset(self, payload: dict, meta: dict) -> tuple[dict, dict]:
-        if self._gps_calibration_offset_xy is None or not self._gps_dashboard_calibration_enabled():
+        if (
+            self._gps_calibration_offset_xy is None
+            or not self._gps_dashboard_calibration_enabled()
+            or self._gps_runtime_disabled()
+        ):
             return payload, meta
         xy = self._payload_xy(payload)
         if xy is None:
@@ -573,8 +988,11 @@ class threadPoseEstimator(threadTracking):
         adjusted_payload["meta"] = adjusted_meta
         return adjusted_payload, adjusted_meta
 
-    def _apply_startup_gps_calibration_if_pending(self, payload: dict) -> bool:
+    def _apply_startup_gps_calibration_if_pending(self, payload: dict, now: float | None = None) -> bool:
         if not bool(getattr(self, "_startup_gps_calibration_pending", False)):
+            return False
+        if self._gps_runtime_disabled():
+            self._startup_gps_calibration_pending = False
             return False
         if not self._gps_dashboard_calibration_enabled():
             self._startup_gps_calibration_pending = False
@@ -583,21 +1001,15 @@ class threadPoseEstimator(threadTracking):
         if pose is None:
             self._startup_gps_calibration_pending = False
             return False
-        raw_xy = self._payload_xy(payload)
-        if raw_xy is None:
-            return False
-        target_x, target_y, target_yaw = pose
-        raw_x, raw_y = raw_xy
-        offset_x = float(target_x) - float(raw_x)
-        offset_y = float(target_y) - float(raw_y)
-        self._gps_calibration_offset_xy = (offset_x, offset_y)
         self._startup_gps_calibration_pending = False
-        self._calibrate_imu_yaw_offset_to(float(target_yaw))
-        print(
-            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
-            f" - Startup GPS calibrated to saved start: raw ({float(raw_x):.3f}, {float(raw_y):.3f}) -> "
-            f"start ({float(target_x):.3f}, {float(target_y):.3f}); "
-            f"offset=({offset_x:.3f}, {offset_y:.3f})"
+        self._begin_start_gps_calibration_for_pose(
+            (
+                float(pose[0]),
+                float(pose[1]),
+                float(pose[2]),
+            ),
+            time.monotonic() if now is None else float(now),
+            source="startup_start_calibration",
         )
         return True
 
@@ -880,6 +1292,7 @@ class threadPoseEstimator(threadTracking):
         now_mono = time.monotonic() if now is None else float(now)
         payload = self._receive_localisation_fix_payload()
         if not isinstance(payload, dict):
+            self._try_apply_start_gps_calibration(current_yaw, now_mono)
             self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
             return False, None
 
@@ -896,12 +1309,49 @@ class threadPoseEstimator(threadTracking):
 
         default_source = "manual_localisation" if bool(meta.get("manual")) else "gps_localisation"
         source = self._localisation_source(payload, meta, default_source)
+        if self._is_no_gps_start_request(payload, meta) and bool(meta.get("manual")):
+            return self._apply_no_gps_start_mode(
+                payload,
+                meta,
+                current_yaw,
+                now_mono,
+            )
         if source.strip().lower() == "gps_localisation":
+            if self._gps_runtime_disabled():
+                print(
+                    "[GPS-DBG] PoseEstimatorThread._apply_localisation_fix: "
+                    "GPS fix ignored because no-GPS mode is active",
+                    flush=True,
+                )
+                return False, None
             self._remember_gps_raw_fix(payload)
-            self._apply_startup_gps_calibration_if_pending(payload)
+            self._apply_startup_gps_calibration_if_pending(payload, now_mono)
+            self._remember_start_gps_calibration_fix(payload, meta, now_mono)
+            start_calibrated, start_info = self._try_apply_start_gps_calibration(
+                current_yaw,
+                now_mono,
+            )
+            if start_calibrated:
+                return True, start_info
             payload, meta = self._apply_gps_calibration_offset(payload, meta)
             self._remember_auto_gps_fix(payload, meta, now_mono)
             return self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
+        elif (
+            self._gps_dashboard_calibration_enabled()
+            and self._is_start_calibration_request(payload, meta)
+            and bool(meta.get("manual"))
+        ):
+            return self._begin_start_gps_calibration(
+                payload,
+                meta,
+                current_yaw,
+                now_mono,
+                source=self._localisation_source(
+                    payload,
+                    meta,
+                    "manual_dashboard_start_calibration",
+                ),
+            )
         elif self._should_calibrate_gps_from_dashboard(payload, meta):
             calibrated, calibration_info = self._apply_gps_dashboard_calibration(
                 payload,
@@ -1155,11 +1605,14 @@ class threadPoseEstimator(threadTracking):
         relocalization_mode = "dead_reckoning"
         relocalization_source = "dead_reckoning"
         relocalization_error_m = 0.0
+        start_gps_status = self._start_gps_calibration_recent_status(now)
         auto_gps_status = self._auto_gps_recent_status(now)
         if gps_relocalized and isinstance(gps_match, dict):
             relocalization_mode = str(gps_match.get("mode") or "gps_fix")
             relocalization_source = str(gps_match.get("source") or "gps_localisation")
             relocalization_error_m = float(gps_match.get("error_m") or 0.0)
+        elif start_gps_status is not None:
+            relocalization_mode, relocalization_source, relocalization_error_m = start_gps_status
         elif auto_gps_status is not None:
             relocalization_mode, relocalization_source, relocalization_error_m = auto_gps_status
         elif stopline_relocalized and stopline_match is not None:

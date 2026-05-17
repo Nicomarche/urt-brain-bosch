@@ -63,6 +63,7 @@ from src.utils.sim_start_pose import (
     save_saved_start_pose,
     saved_start_pose_path,
 )
+from src.utils.gps_mode import is_gps_disabled, save_gps_disabled
 
 
 _logger = logging.getLogger(__name__)
@@ -476,6 +477,8 @@ class MapView(QWidget):
         self._map_dir = Path(map_dir) if map_dir else self._guess_map_dir()
         self._saved_start_pose = load_saved_start_pose(map_dir=self._map_dir)
         self._last_pose_snapshot: dict[str, object] | None = None
+        self._gps_disabled = is_gps_disabled()
+        self._no_gps_available = self._gps_disabled
         self._data = MapData(self._map_dir)
 
         self._scene = _MapScene(self._data, self)
@@ -528,9 +531,15 @@ class MapView(QWidget):
             self._calibrate_start_btn = QPushButton("Calibrate start")
             self._calibrate_start_btn.setToolTip(
                 "Stop only: mark the car as physically sitting at the saved "
-                "start pose, recalibrating IMU yaw and GPS if a fix is fresh."
+                "start pose, recalibrating IMU yaw and GPS from five stable fixes."
             )
             self._calibrate_start_btn.clicked.connect(self._calibrate_to_saved_start)
+            self._no_gps_btn = QPushButton("Use no GPS")
+            self._no_gps_btn.setToolTip(
+                "Stop only: use the saved start pose without GPS. GPS fixes stay "
+                "ignored until GPS mode is enabled again."
+            )
+            self._no_gps_btn.clicked.connect(self._on_no_gps_button_clicked)
             self._start_pose_label = QLabel()
             self._start_pose_label.setMinimumWidth(0)
             self._start_pose_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -617,6 +626,7 @@ class MapView(QWidget):
             toolbar.addWidget(self._relocate_btn)
             toolbar.addWidget(self._save_start_btn)
             toolbar.addWidget(self._calibrate_start_btn)
+            toolbar.addWidget(self._no_gps_btn)
             toolbar.addSpacing(10)
             toolbar.addWidget(self._map_edit_btn)
             toolbar.addStretch(1)
@@ -664,6 +674,7 @@ class MapView(QWidget):
         self._mode = ev.MODE_STOP
         self._relocate_mode = False
         self._refresh_manual_pose_controls()
+        self._update_gps_age_label()
         self._fit_view()
 
     # ------------------------------------------------------------------
@@ -1190,6 +1201,8 @@ class MapView(QWidget):
         return None
 
     def _gps_calibration_sample(self) -> dict[str, float] | None:
+        if self._gps_disabled:
+            return None
         payload = self._last_gps_fix_payload
         if not isinstance(payload, dict) or self._last_gps_fix_time <= 0.0:
             return None
@@ -1283,9 +1296,6 @@ class MapView(QWidget):
                 "start_calibration": True,
             },
         }
-        gps_sample = self._gps_calibration_sample()
-        if gps_sample is not None:
-            payload.update(gps_sample)
         if lanelet_text:
             payload["lanelet_id"] = lanelet_text
         return payload
@@ -1367,7 +1377,37 @@ class MapView(QWidget):
         if hasattr(self, "_save_start_btn"):
             self._save_start_btn.setEnabled(can_edit_pose and self._last_pose_snapshot is not None)
         if hasattr(self, "_calibrate_start_btn"):
-            self._calibrate_start_btn.setEnabled(can_edit_pose and isinstance(self._saved_start_pose, dict))
+            self._calibrate_start_btn.setEnabled(
+                can_edit_pose
+                and isinstance(self._saved_start_pose, dict)
+                and not self._gps_disabled
+            )
+        self._refresh_no_gps_button()
+
+    def _refresh_no_gps_button(self) -> None:
+        if self._compact or not hasattr(self, "_no_gps_btn"):
+            return
+        in_stop = self._is_stop_mode()
+        can_use_no_gps_start = in_stop and isinstance(self._saved_start_pose, dict)
+        self._no_gps_btn.setVisible(bool(self._gps_disabled or self._no_gps_available))
+        self._no_gps_btn.setEnabled(in_stop if self._gps_disabled else can_use_no_gps_start)
+        if self._gps_disabled:
+            self._no_gps_btn.setText("Enable GPS")
+            self._no_gps_btn.setToolTip(
+                "GPS mode is disabled. Enable it here; if the GPS thread was not "
+                "started, restart the serial handler before calibrating with GPS."
+            )
+            self._no_gps_btn.setStyleSheet(
+                "QPushButton { background:#554000; color:#ffdf70; "
+                "padding:4px 10px; border-radius:4px; font-weight:600; }"
+            )
+        else:
+            self._no_gps_btn.setText("Use no GPS")
+            self._no_gps_btn.setToolTip(
+                "Stop only: use the saved start pose without GPS. GPS fixes stay "
+                "ignored until GPS mode is enabled again."
+            )
+            self._no_gps_btn.setStyleSheet("")
 
     def _save_current_pose_as_start(self) -> None:
         if not self._is_stop_mode():
@@ -1393,6 +1433,10 @@ class MapView(QWidget):
         if not self._is_stop_mode():
             self._location_label.setText("Start calibration is only available in Stop mode")
             return
+        if self._gps_disabled:
+            self._location_label.setText("GPS is disabled; use no-GPS start or enable GPS first")
+            self._refresh_manual_pose_controls()
+            return
         payload = self._saved_start_localisation_payload()
         if payload is None:
             self._location_label.setText("No saved start pose available")
@@ -1401,32 +1445,152 @@ class MapView(QWidget):
         try:
             x_m = float(payload["world_x"])
             y_m = float(payload["world_y"])
-            yaw_deg = float(payload.get("yaw_deg", self._last_location_yaw_deg))
         except (KeyError, TypeError, ValueError):
             self._location_label.setText("Saved start pose is invalid")
             return
-        lanelet_id = payload.get("lanelet_id")
-        self._remember_pose_snapshot(
-            x_m,
-            y_m,
-            yaw_deg,
-            lanelet_id=str(lanelet_id) if lanelet_id is not None else None,
-        )
-        self._set_cursor_pose(x_m, y_m, yaw_deg)
         self._client.emit_message(ev.CMD_LOCALISATION, payload)
-        gps_raw_x = payload.get("gps_raw_world_x")
-        gps_raw_y = payload.get("gps_raw_world_y")
-        if gps_raw_x is not None and gps_raw_y is not None:
-            self._location_label.setText(
-                f"Start calibrated → ({x_m:.2f}, {y_m:.2f}) m "
-                f"from GPS ({float(gps_raw_x):.2f}, {float(gps_raw_y):.2f})"
-            )
+        self._location_label.setText(
+            f"Start calibration → waiting for 5 GPS samples at "
+            f"({x_m:.2f}, {y_m:.2f}) m"
+        )
+
+    def _on_no_gps_button_clicked(self) -> None:
+        if not self._is_stop_mode():
+            self._location_label.setText("No-GPS start is only available in Stop mode")
             return
-        self._location_label.setText(f"Start calibrated → ({x_m:.2f}, {y_m:.2f}) m")
+        if self._gps_disabled:
+            try:
+                save_gps_disabled(False, source="dashboard_enable_gps")
+            except Exception as exc:
+                _logger.warning("Could not enable GPS mode: %s", exc)
+                self._location_label.setText("Could not enable GPS mode")
+                return
+            self._gps_disabled = False
+            self._no_gps_available = False
+            self._location_label.setText("GPS enabled; restart serial if the GPS thread was stopped")
+            self._refresh_manual_pose_controls()
+            self._update_gps_age_label()
+            return
+
+        payload = self._saved_start_localisation_payload()
+        if payload is None:
+            self._location_label.setText("No saved start pose available")
+            self._refresh_manual_pose_controls()
+            return
+        meta = dict(payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
+        meta.update({
+            "source": "manual_dashboard_no_gps_start",
+            "manual": True,
+            "gps_calibration": False,
+            "start_calibration": True,
+            "no_gps_mode": True,
+            "gps_disabled": True,
+        })
+        payload = dict(payload)
+        payload["meta"] = meta
+        try:
+            save_gps_disabled(True, source="dashboard_no_gps_start")
+        except Exception as exc:
+            _logger.warning("Could not save no-GPS mode: %s", exc)
+            self._location_label.setText("Could not enable no-GPS mode")
+            return
+        self._gps_disabled = True
+        self._no_gps_available = True
+        self._last_gps_fix_time = 0.0
+        self._last_gps_fix_payload = None
+        self._gps_dot.setVisible(False)
+        try:
+            x_m = float(payload["world_x"])
+            y_m = float(payload["world_y"])
+            yaw_deg = float(payload.get("yaw_deg", self._last_location_yaw_deg))
+        except (KeyError, TypeError, ValueError):
+            x_m = y_m = None
+            yaw_deg = self._last_location_yaw_deg
+        else:
+            lanelet_id = payload.get("lanelet_id")
+            self._remember_pose_snapshot(
+                x_m,
+                y_m,
+                yaw_deg,
+                lanelet_id=str(lanelet_id) if lanelet_id is not None else None,
+            )
+            self._set_cursor_pose(x_m, y_m, yaw_deg)
+        self._client.emit_message(ev.CMD_LOCALISATION, payload)
+        if x_m is not None and y_m is not None:
+            self._location_label.setText(
+                f"No-GPS start → ({x_m:.2f}, {y_m:.2f}) m"
+            )
+        else:
+            self._location_label.setText("No-GPS start requested")
+        self._refresh_manual_pose_controls()
+        self._update_gps_age_label()
 
     # ------------------------------------------------------------------
     # Backend → us
     # ------------------------------------------------------------------
+    @staticmethod
+    def _gps_sample_count_from_source(source: str) -> str | None:
+        tail = str(source or "").rsplit(":", 1)[-1]
+        if "/" not in tail:
+            return None
+        left, right = tail.split("/", 1)
+        if left.strip().isdigit() and right.strip().isdigit():
+            return f"{int(left)}/{int(right)}"
+        return None
+
+    def _apply_relocalization_status_label(self, payload: dict, x_m: float, y_m: float) -> None:
+        meta = payload.get("meta")
+        if not isinstance(meta, dict):
+            return
+        mode = str(meta.get("relocalization_mode") or "").strip()
+        if mode == "gps_disabled_start":
+            self._gps_disabled = True
+            self._no_gps_available = True
+            self._refresh_manual_pose_controls()
+            self._location_label.setText(
+                f"No-GPS mode active → start ({x_m:.2f}, {y_m:.2f}) m"
+            )
+            return
+        if not mode.startswith("start_gps_calibration"):
+            return
+        source = str(meta.get("last_relocalization_source") or "").strip()
+        sample_count = self._gps_sample_count_from_source(source)
+        try:
+            error_m = float(meta.get("last_relocalization_error_m", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            error_m = 0.0
+
+        if mode == "start_gps_calibration_pending":
+            suffix = f" {sample_count}" if sample_count is not None else ""
+            self._location_label.setText(f"Start calibration → collecting GPS{suffix}")
+            return
+        if mode == "start_gps_calibration_failed":
+            self._no_gps_available = True
+            self._refresh_manual_pose_controls()
+            if source.startswith("gps_spread_too_large"):
+                self._location_label.setText(
+                    f"Start calibration failed: GPS samples differ too much "
+                    f"({error_m:.2f} m). Use no GPS if the car is at start."
+                )
+            elif source.startswith("not_enough_fresh_gps_samples"):
+                suffix = f" ({sample_count})" if sample_count is not None else ""
+                self._location_label.setText(
+                    f"Start calibration failed: not enough fresh GPS samples{suffix}. "
+                    "Use no GPS if the car is at start."
+                )
+            else:
+                self._location_label.setText(
+                    "Start calibration failed. Use no GPS if the car is at start."
+                )
+            return
+        if mode == "start_gps_calibration":
+            self._no_gps_available = False
+            self._refresh_manual_pose_controls()
+            suffix = f" from {sample_count} GPS samples" if sample_count is not None else ""
+            self._location_label.setText(
+                f"Start calibrated → ({x_m:.2f}, {y_m:.2f}) m{suffix}"
+            )
+
     def _on_location(self, payload) -> None:
         if not isinstance(payload, dict):
             return
@@ -1440,6 +1604,7 @@ class MapView(QWidget):
         self._last_location_yaw_deg = yaw_deg
         self._remember_pose_snapshot(x_m, y_m, yaw_deg)
         self._set_cursor_pose(x_m, y_m, yaw_deg)
+        self._apply_relocalization_status_label(payload, x_m, y_m)
 
     def _on_cars(self, payload) -> None:
         # Refresh the "other cars" layer.
@@ -1555,6 +1720,16 @@ class MapView(QWidget):
         self._refresh_manual_pose_controls()
 
     def _on_gps_fix(self, payload) -> None:
+        try:
+            self._gps_disabled = is_gps_disabled()
+        except Exception:
+            pass
+        if self._gps_disabled:
+            self._last_gps_fix_time = 0.0
+            self._last_gps_fix_payload = None
+            self._gps_dot.setVisible(False)
+            self._update_gps_age_label()
+            return
         if not isinstance(payload, dict):
             print(
                 f"[GPS-DBG] map_view._on_gps_fix: payload not dict "
@@ -1597,6 +1772,10 @@ class MapView(QWidget):
         self._update_gps_age_label()
 
     def _update_gps_age_label(self) -> None:
+        if self._gps_disabled:
+            self._gps_label.setText("GPS: disabled")
+            self._gps_label.setStyleSheet("color:#ffcc00; font-size:10pt; font-weight:600;")
+            return
         if self._last_gps_fix_time <= 0.0:
             self._gps_label.setText("GPS: --")
             self._gps_label.setStyleSheet("color:#666; font-size: 10pt;")

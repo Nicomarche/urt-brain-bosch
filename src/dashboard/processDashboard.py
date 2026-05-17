@@ -868,6 +868,11 @@ class processDashboard(WorkerProcess):
         try:
             gps_payload = self._gps_fix_subscriber.receive()
             if gps_payload is not None:
+                try:
+                    from src.utils.gps_mode import is_gps_disabled
+                    gps_disabled = is_gps_disabled()
+                except Exception:
+                    gps_disabled = False
                 meta_src = (
                     gps_payload.get("meta", {}).get("source")
                     if isinstance(gps_payload, dict)
@@ -882,6 +887,7 @@ class processDashboard(WorkerProcess):
                 if (
                     isinstance(gps_payload, dict)
                     and meta_src == "gps_localisation"
+                    and not gps_disabled
                 ):
                     self.socketio.emit("GpsFix", {"value": gps_payload})
                     print(
@@ -893,7 +899,7 @@ class processDashboard(WorkerProcess):
                 else:
                     print(
                         f"[GPS-DBG] processDashboard.send_continuous_messages: "
-                        f"payload IGNORED (no es gps_localisation)",
+                        f"payload IGNORED (no es gps_localisation or GPS disabled)",
                         flush=True,
                     )
         except Exception as exc:
