@@ -318,9 +318,9 @@ class threadWrite(ThreadWithStop):
         payload["timestamp"] = now
         self.actuatorStatusSender.send(payload)
         print(
-            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mQUEUE\033[0m"
-            f" threadWrite -> ACTUATOR_COMMAND_STATUS queue=General"
-            f" qsize={self._queue_depth('General')}"
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mBUS\033[0m"
+            f" threadWrite -> {ACTUATOR_COMMAND_STATUS.name}"
+            f" qos={ACTUATOR_COMMAND_STATUS.qos_preset}"
             f" payload={self._preview(payload)}"
         )
         self._last_status_snapshot = snapshot
@@ -885,12 +885,6 @@ class threadWrite(ThreadWithStop):
             self.last_error_time = now
             return True
         return False
-
-    def _queue_depth(self, queue_name):
-        try:
-            return self.queuesList[queue_name].qsize()
-        except Exception:
-            return "n/a"
 
     def _preview(self, value, limit=180):
         text = repr(value)
