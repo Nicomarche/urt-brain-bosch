@@ -25,9 +25,10 @@ from typing import Any
 def _repo_root() -> Path:
     """Path to the repository root.
 
-    Assumes this file is at ``<repo>/src/gui/config/settings.py``.
+    Assumes this file is at ``<repo>/src/gui/config/settings.py``. The
+    ``parents`` index counts: [0]=config/, [1]=gui/, [2]=src/, [3]=repo.
     """
-    return Path(__file__).resolve().parents[4]
+    return Path(__file__).resolve().parents[3]
 
 
 REPO_ROOT: Path = _repo_root()

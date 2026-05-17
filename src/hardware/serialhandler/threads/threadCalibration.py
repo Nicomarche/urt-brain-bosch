@@ -35,9 +35,12 @@ class threadCalibration(ThreadWithStop):
         self._cmd_subscriber = messageHandlerSubscriber(
             queuesList, CalibrationMsg, "fifo", subscribe=True
         )
-        # Materialize the socket immediately so the wizard's first command
-        # is not lost to the slow-joiner window.
-        self._cmd_subscriber.subscribe()
+        # Sprint 7: NO materializar el socket en __init__. Si el ZMQ context
+        # se inicializa en este proceso después de abrir el puerto serial,
+        # la RX del CDC ACM en la Jetson se queda en in_waiting=0 indefinido
+        # (bytes_total=0). El socket se crea en el primer thread_work() —
+        # el primer click del wizard puede perderse por slow-joiner y el
+        # operador re-clickea (UX aceptable, la calibración es manual).
 
     def thread_work(self) -> None:
         for _ in range(8):
