@@ -1,16 +1,21 @@
 # main.py
 #
-# Punto de entrada del stack URT Brain. Lanza 4 procesos independientes
-# que se comunican vía cola IPC con prioridades (Critical/Warning/General/
-# Config/Log):
+# Punto de entrada del stack URT Brain. Lanza 4 procesos independientes que
+# se comunican vía bus pub/sub ZeroMQ (``src/core/bus``) — ya no hay colas
+# multiprocessing.Queue ni Pipes:
 #
 #   1. processCamera     — perception + control (cámara, YOLO, lane fitting,
 #                          MOT, EKF7, route, BehaviorPlanner, MotionController,
-#                          dispatcher).
+#                          dispatcher). El frame anotado sale por UDP, todo
+#                          el resto por ZMQ.
 #   2. processSerial     — UART al Nucleo STM32 (lee IMU/encoder, escribe
 #                          motor).
-#   3. processDashboard  — Flask + WebSocket para operación remota.
-#   4. processGateway    — router de mensajes entre los otros 3.
+#   3. processDashboard  — Flask + WebSocket para operación remota (durante
+#                          la transición; Sprint 5 lo borra y el GUI habla
+#                          directo al bus).
+#   4. processBus        — broker XSUB/XPUB de ZeroMQ. Reemplaza al viejo
+#                          processGateway. Corre el ``zmq.proxy`` en hilo C
+#                          (libera el GIL).
 #
 # El flujo de control va:
 #
@@ -99,24 +104,39 @@ if hasattr(psutil.Process(os.getpid()), "cpu_affinity"):
     psutil.Process(os.getpid()).cpu_affinity(available_cores)
 
 sys.path.append(".")
-from multiprocessing import Queue, Event
+from multiprocessing import Event
 from src.utils.bigPrintMessages import BigPrint
-from src.utils.outputWriters import QueueWriter, MultiWriter
 import logging
 import logging.handlers
 
 logging.basicConfig(level=logging.INFO)
 
+# ===================================== BUS ENDPOINTS ====================================
+# Dual-bind the broker on both ipc:// (intra-robot, zero-copy) and
+# tcp://0.0.0.0:5556/5557 so the PyQt GUI on a remote PC can connect to the
+# same bus over LAN. Setting the env vars HERE (before any child spawns)
+# means every process — broker, camera, serial — inherits the same config.
+os.environ.setdefault(
+    "URT_BUS_XSUB_BIND",
+    "ipc:///tmp/urt-bus/xsub.sock,tcp://0.0.0.0:5556",
+)
+os.environ.setdefault(
+    "URT_BUS_XPUB_BIND",
+    "ipc:///tmp/urt-bus/xpub.sock,tcp://0.0.0.0:5557",
+)
+# Local peers (children) keep using ipc:// for low latency.
+os.environ.setdefault("URT_BUS_XSUB_ENDPOINT", "ipc:///tmp/urt-bus/xsub.sock")
+os.environ.setdefault("URT_BUS_XPUB_ENDPOINT", "ipc:///tmp/urt-bus/xpub.sock")
+
 # ===================================== PROCESS IMPORTS ==================================
 
-from src.gateway.processGateway import processGateway
-from src.dashboard.processDashboard import processDashboard
+from src.core.bus.processBus import processBus
 from src.hardware.camera.processCamera import processCamera
 from src.hardware.serialhandler.processSerialHandler import processSerialHandler
 from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
-from src.core.messaging.allMessages import StateChange
+from src.core.bus.topics import STATE_CHANGE
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from config import (
@@ -129,6 +149,9 @@ from config import (
     JETSON_FRAMERATE, JETSON_FLIP_METHOD,
     AUTO_STATE_RUN_IN_SIM,
 )
+# ``STREAM_CAMERA_TO_DASHBOARD`` kept as a config flag so users can disable
+# the video streamer (e.g. headless competition runs). The dashboard process
+# itself was removed; the flag now gates ``UdpVideoStreamerThread``.
 
 # ------ New component imports starts here ------#
 
@@ -172,45 +195,45 @@ def main():
     allProcesses = list()
     allEvents = list()
 
-    queueList = {
-        "Critical": Queue(),
-        "Warning": Queue(),
-        "General": Queue(),
-        "Config": Queue(),
-        "Log": Queue(),
-    }
+    # ``queueList`` is now a thin dict kept for signature compatibility with
+    # process constructors (every WorkerProcess subclass takes it positionally).
+    # The new bus does not consume it — the legacy ``messageHandlerSender`` /
+    # ``messageHandlerSubscriber`` (now thin shims over ZMQ) ignore it. The
+    # only entries that matter are the StateMachine Manager proxies attached
+    # below, which subprocesses use to read shared state without bus latency.
+    queueList: dict = {}
     logger = logging.getLogger()
 
-    original_stdout = sys.stdout
-    original_stderr = sys.stderr
-
-    queue_writer = QueueWriter(queueList["Log"])
-    sys.stdout = MultiWriter(original_stdout, queue_writer)
-    sys.stderr = MultiWriter(original_stderr, queue_writer)
+    # ===================================== INITIALIZE BUS ==================================
+    # The broker must come up BEFORE any other process spawns: ZMQ pub/sub
+    # is a "slow joiner" — messages sent before the subscriber's filter
+    # reaches the broker are silently dropped. Starting the broker first
+    # gives every child process a stable endpoint to connect to.
+    processBusInstance = processBus(queueList, logger)
+    processBusInstance.start()
+    # Tiny pause so the broker's ipc:// sockets are bound before children
+    # try to connect. 200 ms is overkill for ipc:// (typically < 5 ms) but
+    # cheap relative to the rest of startup.
+    time.sleep(0.2)
 
     # ===================================== INITIALIZE ==================================
 
-    stateChangeSubscriber = messageHandlerSubscriber(queueList, StateChange, "lastOnly", True)
+    stateChangeSubscriber = messageHandlerSubscriber(queueList, STATE_CHANGE, "lastOnly", True)
     StateMachine.initialize_shared_state(queueList)
 
     # Exponer los proxies del Manager en queueList para que los subprocesos
-    # (dispatcher, etc.) puedan leer el estado directamente sin depender
-    # del gateway pipe (que puede romperse en spawn mode en macOS).
-    # DictProxy y LockProxy son serializables y se pasan via pickle al
-    # subprocess durante el spawn.
+    # (dispatcher, etc.) puedan leer el estado directamente sin pasar por el
+    # bus. ``DictProxy`` y ``LockProxy`` son serializables y se pasan via
+    # pickle al subprocess durante el spawn.
     queueList["__sm_state__"] = StateMachine._shared_state
     queueList["__sm_lock__"] = StateMachine._process_lock
 
-    # Initializing gateway
-    processGatewayInstance = processGateway(queueList, logger)
-    processGatewayInstance.start()
-
     # ===================================== INITIALIZE PROCESSES ==================================
 
-    # Initializing dashboard
-    dashboard_ready = Event()
-    processDashboardInstance = processDashboard(queueList, logger, dashboard_ready, debugging = False,
-                                                stream_camera=STREAM_CAMERA_TO_DASHBOARD)
+    # processDashboard is gone — the GUI talks directly to the bus over
+    # tcp://...:5556/5557 (commands/telemetry) and over UDP (video). Auth,
+    # heartbeat and the SocketIO bridge no longer have a place in the
+    # control plane.
 
     # Initializing camera
     camera_ready = Event()
@@ -244,14 +267,12 @@ def main():
 
     # Initializing serial connection NUCLEO - > PI
     serial_handler_ready = Event()
-    processSerialHandlerInstance = processSerialHandler(queueList, logger, serial_handler_ready, dashboard_ready, debugging = False)
+    processSerialHandlerInstance = processSerialHandler(
+        queueList, logger, serial_handler_ready, None, debugging=False,
+    )
 
-    # Adding all processes to the list
-    #allProcesses.extend([processCamera, processSemaphore, processTrafficCom, processSerialHandler, processDashboard])
-    #allEvents.extend([camera_ready, semaphore_ready, traffic_com_ready, serial_handler_ready, dashboard_ready])
-
-    allProcesses.extend([processCameraInstance, processSerialHandlerInstance, processDashboardInstance])
-    allEvents.extend([camera_ready, serial_handler_ready, dashboard_ready])
+    allProcesses.extend([processCameraInstance, processSerialHandlerInstance])
+    allEvents.extend([camera_ready, serial_handler_ready])
 
     # ------ New component initialize starts here ------#
 
@@ -308,12 +329,12 @@ def main():
 
         for proc in reversed(allProcesses):
             proc.stop()
-        processGatewayInstance.stop()
+        processBusInstance.stop()
 
         # wait for all processes to finish before exiting
         for proc in reversed(allProcesses):
             shutdown_process(proc)
-        shutdown_process(processGatewayInstance)
+        shutdown_process(processBusInstance)
 
 
 if __name__ == "__main__":

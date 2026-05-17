@@ -24,7 +24,7 @@ sudo npm i -g npm@10.8.2 @angular/cli@20.1.4
 sudo pip3 install -r requirements.txt
 
 # --- Frontend deps/build (legacy Angular UI, opcional) ----------------------
-# La UI principal es ahora PyQt5 (src/dashboard/gui/). Este bloque solo
+# La UI principal es ahora PyQt5 (src/gui/). Este bloque solo
 # instala el Angular legacy si la carpeta sigue presente, para usuarios
 # que aún levantan el dashboard con `services/angular-autostart`.
 if [ -d legacy/dashboard-frontend ]; then

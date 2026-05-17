@@ -4,7 +4,7 @@
 #
 # Pipeline:
 #   detection_buffer (DetectedObject[]) ──► MOTTracker.step ──► tracked_buffer
-#                                                              ──► TrackedObjectsMsg
+#                                                              ──► TRACKED_OBJECTS_MSG
 #
 # El detector (YOLO) escribe en `detection_buffer` cada vez que procesa
 # un frame. Este thread lee el último snapshot, llama `step()`, y
@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING, Any
 
-from src.core.messaging.allMessages import TrackedObjectsMsg
+from src.core.bus.topics import TRACKED_OBJECTS_MSG
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.types.perception import DetectedObject, TrackedObject
 from src.core.types.pose import PoseEstimate
@@ -59,7 +59,7 @@ class threadObjectTracker(ThreadWithStop):
         self.logging = logging
         self.debugging = bool(debugging)
 
-        self._sender = messageHandlerSender(queuesList, TrackedObjectsMsg)
+        self._sender = messageHandlerSender(queuesList, TRACKED_OBJECTS_MSG)
         self._last_processed_seq: int = -1
         self._last_step_t: float | None = None
 
@@ -109,7 +109,7 @@ class threadObjectTracker(ThreadWithStop):
             self._sender.send(_serialize_tracked(tracked_tuple, det_ts))
         except Exception:
             if self.logging is not None:
-                self.logging.exception("failed to publish TrackedObjectsMsg")
+                self.logging.exception("failed to publish TRACKED_OBJECTS_MSG")
 
 
 def _coerce_detection_list(payload: Any) -> list[DetectedObject] | None:
@@ -124,7 +124,7 @@ def _serialize_tracked(
     objects: tuple[TrackedObject, ...],
     timestamp: float,
 ) -> dict[str, Any]:
-    """Serialización mínima para TrackedObjectsMsg (cola IPC)."""
+    """Serialización mínima para TRACKED_OBJECTS_MSG (cola IPC)."""
     return {
         "timestamp": float(timestamp),
         "objects": [

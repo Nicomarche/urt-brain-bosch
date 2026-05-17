@@ -1,10 +1,10 @@
 """
 threadTracking — GPS-free dead-reckoning + waypoint navigation thread.
 
-Runs at ~50 Hz inside processCamera.  Receives CurrentSpeed and ImuData from
+Runs at ~50 Hz inside processCamera.  Receives CURRENT_SPEED and IMU_DATA from
 the serial handler, integrates position with DeadReckoning, follows OSM lanelet
 centerlines, and publishes navigation state via TrackingState (in-process
-shared object) and Location messages to the dashboard.
+shared object) and LOCATION messages to the dashboard.
 
 TrackingState is intentionally NOT a multiprocessing.Value — the tracking
 thread lives inside the same OS process as threadLineFollowing, so a plain
@@ -20,18 +20,7 @@ import time
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
-from src.core.messaging.allMessages import (
-    CurrentSpeed,
-    CurrentSteer,
-    ImuData,
-    Location,
-    NavigationCommand,
-    NavigationStatus,
-    SpeedMotor,
-    SignDetected,
-    StateChange,
-    SteerMotor,
-)
+from src.core.bus.topics import CURRENT_SPEED, CURRENT_STEER, IMU_DATA, LOCATION, NAVIGATION_COMMAND, NAVIGATION_STATUS, SPEED_MOTOR, SIGN_DETECTED, STATE_CHANGE, STEER_MOTOR
 
 from src.localization.dead_reckoning import DeadReckoning
 from src.routing.lanelet.attributes import ATTR_NAMES, ATTR_STOPLINE
@@ -242,7 +231,7 @@ _MAX_INTEGRATION_DT = 0.15
 # How many dense waypoints correspond to the intersection lookahead distance
 _LOOKAHEAD_PTS = max(2, int(_INTERSECTION_LOOKAHEAD / _STEP_M))
 
-# BFMC track physical dimensions in metres (for Location scaling to dashboard)
+# BFMC track physical dimensions in metres (for LOCATION scaling to dashboard)
 _TRACK_W_M = 20.67
 _TRACK_H_M = 13.76
 
@@ -737,35 +726,35 @@ class threadTracking(ThreadWithStop):
 
         # Message subscribers (LastOnly → always use most recent value)
         self._speed_sub = messageHandlerSubscriber(
-            queuesList, CurrentSpeed, "lastOnly", subscribe=True
+            queuesList, CURRENT_SPEED, "lastOnly", subscribe=True
         )
         self._speed_cmd_sub = messageHandlerSubscriber(
-            queuesList, SpeedMotor, "lastOnly", subscribe=True
+            queuesList, SPEED_MOTOR, "lastOnly", subscribe=True
         )
         self._imu_sub = messageHandlerSubscriber(
-            queuesList, ImuData, "lastOnly", subscribe=True
+            queuesList, IMU_DATA, "lastOnly", subscribe=True
         )
         self._steer_feedback_sub = messageHandlerSubscriber(
-            queuesList, CurrentSteer, "lastOnly", subscribe=True
+            queuesList, CURRENT_STEER, "lastOnly", subscribe=True
         )
         self._steer_sub = messageHandlerSubscriber(
-            queuesList, SteerMotor, "lastOnly", subscribe=True
+            queuesList, STEER_MOTOR, "lastOnly", subscribe=True
         )
         self._nav_cmd_sub = messageHandlerSubscriber(
-            queuesList, NavigationCommand, "lastOnly", subscribe=True
+            queuesList, NAVIGATION_COMMAND, "lastOnly", subscribe=True
         )
         self._state_sub = messageHandlerSubscriber(
-            queuesList, StateChange, "lastOnly", subscribe=True
+            queuesList, STATE_CHANGE, "lastOnly", subscribe=True
         )
         self._sign_sub = messageHandlerSubscriber(
-            queuesList, SignDetected, "lastOnly", subscribe=True
+            queuesList, SIGN_DETECTED, "lastOnly", subscribe=True
         )
         self._last_steer_rad = 0.0     # latest steering angle in radians (+ = left)
         self._steer_filtered_rad = 0.0 # lag-filtered steer angle used by DR
         self._yaw_ekf_p = _YAW_EKF_P_INIT  # EKF heading covariance (rad²)
-        # Location sender → dashboard map display
-        self._loc_sender = messageHandlerSender(queuesList, Location)
-        self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
+        # LOCATION sender → dashboard map display
+        self._loc_sender = messageHandlerSender(queuesList, LOCATION)
+        self._nav_status_sender = messageHandlerSender(queuesList, NAVIGATION_STATUS)
 
         # Load the OSM route handler.
         osm_path = _OSM_PATH
@@ -1655,7 +1644,7 @@ class threadTracking(ThreadWithStop):
             except Exception:
                 pass
 
-        # ---- Publish Location to dashboard
+        # ---- Publish LOCATION to dashboard
         # IMPORTANT: the dashboard cursor must follow the fused physical pose of
         # the car, not the map-matched pose snapped to the route centerline.
         # When we publish `matched_x/y/yaw` here, the cursor can appear on the

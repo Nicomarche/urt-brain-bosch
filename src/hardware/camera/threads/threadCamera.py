@@ -37,17 +37,11 @@ try:
 except ImportError:
     PICAMERA2_AVAILABLE = False
 
-from src.core.messaging.allMessages import (
-    mainCamera,
-    Recording,
-    Record,
-    Brightness,
-    Contrast,
-)
+from src.core.bus.topics import MAIN_CAMERA, RECORDING, RECORD, BRIGHTNESS, CONTRAST
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import StateChange
+from src.core.bus.topics import STATE_CHANGE
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.statemachine.systemMode import SystemMode
 
@@ -132,8 +126,8 @@ class threadCamera(ThreadWithStop):
                 self.picamera_hdr_enabled = False
                 print(f"\033[1;97m[ Camera Thread ] :\033[0m \033[1;93mWARNING\033[0m - Failed to initialize Mertens HDR, disabling HDR: {e}")
 
-        self.recordingSender = messageHandlerSender(self.queuesList, Recording)
-        self.mainCameraSender = messageHandlerSender(self.queuesList, mainCamera)
+        self.recordingSender = messageHandlerSender(self.queuesList, RECORDING)
+        self.mainCameraSender = messageHandlerSender(self.queuesList, MAIN_CAMERA)
 
         self.subscribe()
         self._init_camera()
@@ -143,10 +137,10 @@ class threadCamera(ThreadWithStop):
     def subscribe(self):
         """Subscribe function. In this function we make all the required subscribe to process gateway"""
 
-        self.recordSubscriber = messageHandlerSubscriber(self.queuesList, Record, "lastOnly", True)
-        self.brightnessSubscriber = messageHandlerSubscriber(self.queuesList, Brightness, "lastOnly", True)
-        self.contrastSubscriber = messageHandlerSubscriber(self.queuesList, Contrast, "lastOnly", True)
-        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
+        self.recordSubscriber = messageHandlerSubscriber(self.queuesList, RECORD, "lastOnly", True)
+        self.brightnessSubscriber = messageHandlerSubscriber(self.queuesList, BRIGHTNESS, "lastOnly", True)
+        self.contrastSubscriber = messageHandlerSubscriber(self.queuesList, CONTRAST, "lastOnly", True)
+        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, STATE_CHANGE, "lastOnly", True)
 
     def queue_sending(self):
         """Callback function for recording flag."""
@@ -202,7 +196,7 @@ class threadCamera(ThreadWithStop):
             # único de ese canal pasó a ser `threadLocalPerception`, que envía
             # el frame YA ANOTADO (carriles + cajas de señales). Acá nos
             # quedamos sólo con captura → frame_buffer (entrada de inferencia)
-            # y mainCamera (grabación a disco).
+            # y MAIN_CAMERA (grabación a disco).
         except Exception as e:
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
@@ -335,8 +329,8 @@ class threadCamera(ThreadWithStop):
             controls = {
                 "AeEnable": True,
                 "AwbEnable": True,
-                "Brightness": float(self._picamera_brightness),
-                "Contrast": float(self._picamera_contrast),
+                "BRIGHTNESS": float(self._picamera_brightness),
+                "CONTRAST": float(self._picamera_contrast),
             }
             if self._picamera_ev_supported:
                 controls["ExposureValue"] = float(self._ae_current_ev)
@@ -756,7 +750,7 @@ class threadCamera(ThreadWithStop):
     # =============================== CONFIG ==============================================
     def configs(self):
         """Callback function for receiving configs on the pipe.
-        Note: Brightness/Contrast controls currently apply to PiCamera (picamera2 API).
+        Note: BRIGHTNESS/CONTRAST controls currently apply to PiCamera (picamera2 API).
         USB cameras ignore these for now (could be extended with cv2.VideoCapture props).
         """
         if self._blocker.is_set():

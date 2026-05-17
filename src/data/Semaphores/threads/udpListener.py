@@ -27,7 +27,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE
 
 import json
-from src.core.messaging.allMessages import Semaphores
+from src.core.bus.topics import SEMAPHORES
 from twisted.internet import protocol
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -39,7 +39,7 @@ class udpListener(protocol.DatagramProtocol):
     """
 
     def __init__(self, queuesList, logger, debugging):
-        self.semaphoresSender = messageHandlerSender(queuesList, Semaphores)
+        self.semaphoresSender = messageHandlerSender(queuesList, SEMAPHORES)
         self.logger = logger
         self.debugging = debugging
 

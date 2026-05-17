@@ -21,14 +21,14 @@ except ImportError:
     _SCIPY_AVAILABLE = False
 import config as _config
 from src.core.types import VisualControlCandidate, VisualStateSnapshot
-from src.core.messaging.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
+from src.core.bus.topics import SPEED_MOTOR, STEER_MOTOR, STATE_CHANGE, LINE_FOLLOWING_CONFIG, LINE_FOLLOWING_DEBUG, LINE_FOLLOWING_STATUS, IMU_DATA, CURRENT_SPEED, CURRENT_STEER, LOCAL_LANE_PERCEPTION, LOCAL_PERCEPTION_STATUS, ACTUATOR_COMMAND_STATUS, SIGN_DETECTED, LANE_CALIB_MODE
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
 from src.statemachine.systemMode import SystemMode
 from src.hardware.camera.threads.maneuverManager import ManeuverManager
 
-# DECISIÓN: este archivo se reescribe completo en Fase 1 (port Autoware) — se descompone
+# DECISIÓN: este archivo se reescribe completo en Fase 1 (port Autoware — se descompone
 # en src/perception/{camera,lane,signs,stopline}/. Los detectores legacy (LSTR, HybridNets,
 # Supercombo) fueron eliminados (Phase 0 cleanup); este archivo solo opera en modo
 # AI_LOCAL (YOLO TensorRT) hasta que termine de migrar a src/perception/.
@@ -601,7 +601,7 @@ Args:
         # Speed scale for command speed units (controller speed variable) to m/s.
         # Controller speed uses cm/s internally, so 1 cm/s = 0.01 m/s.
         self.stanley_speed_to_mps = 0.01
-        # Nucleo CurrentSpeed is sent in x10 cm/s (same as speed_x10 command feedback):
+        # Nucleo CURRENT_SPEED is sent in x10 cm/s (same as speed_x10 command feedback):
         # 1 unit => 0.1 cm/s => 0.001 m/s.
         self.stanley_measured_speed_to_mps = 0.001
         self.stanley_use_measured_speed = True
@@ -763,7 +763,7 @@ Args:
         self._single_line_heading_ref_right = 0.0
 
         # Sensor feedback state (populated from Nucleo via message queue)
-        self._measured_speed = 0.0       # Last CurrentSpeed from Nucleo (x10 cm/s)
+        self._measured_speed = 0.0       # Last CURRENT_SPEED from Nucleo (x10 cm/s)
         self._last_speed_time = None     # Timestamp of last speed reading
         self._measured_steer = 0.0       # Last steering angle feedback
         self._measured_steer_delta = 0.0 # Previous steer - current steer (deg)
@@ -772,8 +772,8 @@ Args:
         self._last_imu_pitch = 0.0       # Last IMU pitch reading (degrees)
         self._yaw_rate = 0.0             # Computed yaw rate (rad/s)
         self._last_imu_time = None       # Timestamp of last IMU reading
-        self._last_cmd_speed = 0.0       # Last SpeedMotor command from dashboard (raw str→float)
-        self._last_cmd_steer = 0.0       # Last SteerMotor command from dashboard (raw str→float)
+        self._last_cmd_speed = 0.0       # Last SPEED_MOTOR command from dashboard (raw str→float)
+        self._last_cmd_steer = 0.0       # Last STEER_MOTOR command from dashboard (raw str→float)
         self._heading_error = 0.0        # Last computed heading error (rad)
         self._stanley_last_psi_ss = 0.0  # Last steady-state heading bias (rad)
         self._stanley_last_traj_yaw_rate = 0.0  # Last reference yaw rate (rad/s)
@@ -1222,43 +1222,43 @@ Args:
         self.just_seen_two_lines = False
 
         # Message handlers
-        # Phase 6 (post-port Autoware): este thread NO escribe SpeedMotor/SteerMotor.
+        # Phase 6 (post-port Autoware): este thread NO escribe SPEED_MOTOR/STEER_MOTOR.
         # El único writer en runtime de competencia es `motor_command_dispatcher`,
         # alimentado por `MotionController.compute(BehaviorOutput, Pose)`. Si
         # alguna vez aparece la tentación de re-instanciar estos senders acá,
         # se está rompiendo la invariante de "una sola fuente de verdad".
-        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
-        self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
+        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, STATE_CHANGE, "lastOnly", True)
+        self.configSubscriber = messageHandlerSubscriber(self.queuesList, LINE_FOLLOWING_CONFIG, "lastOnly", True)
         if self.local_lane_buffer is None:
             self.localLanePerceptionSubscriber = messageHandlerSubscriber(
-                self.queuesList, LocalLanePerception, "lastOnly", True
+                self.queuesList, LOCAL_LANE_PERCEPTION, "lastOnly", True
             )
         else:
             # Local AI runs in the same processCamera process, so use the shared
             # latest-value buffer and avoid subscribing to the heavy queue payload.
             self.localLanePerceptionSubscriber = None
-        self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
-        self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ActuatorCommandStatus, "lastOnly", True)
+        self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LOCAL_PERCEPTION_STATUS, "lastOnly", True)
+        self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ACTUATOR_COMMAND_STATUS, "lastOnly", True)
         
         # Sensor feedback subscribers (for Stanley controller)
-        self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, ImuData, "lastOnly", True)
-        self.currentSpeedSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
-        self.currentSteerSubscriber = messageHandlerSubscriber(self.queuesList, CurrentSteer, "lastOnly", True)
+        self.imuDataSubscriber = messageHandlerSubscriber(self.queuesList, IMU_DATA, "lastOnly", True)
+        self.currentSpeedSubscriber = messageHandlerSubscriber(self.queuesList, CURRENT_SPEED, "lastOnly", True)
+        self.currentSteerSubscriber = messageHandlerSubscriber(self.queuesList, CURRENT_STEER, "lastOnly", True)
 
         # Dashboard command subscribers — used to capture PC commands in the manual-run log
-        self.speedMotorSubscriber = messageHandlerSubscriber(self.queuesList, SpeedMotor, "lastOnly", True)
-        self.steerMotorSubscriber = messageHandlerSubscriber(self.queuesList, SteerMotor, "lastOnly", True)
+        self.speedMotorSubscriber = messageHandlerSubscriber(self.queuesList, SPEED_MOTOR, "lastOnly", True)
+        self.steerMotorSubscriber = messageHandlerSubscriber(self.queuesList, STEER_MOTOR, "lastOnly", True)
 
         # Parking spot detection subscriber
-        self.signDetectedSubscriber = messageHandlerSubscriber(self.queuesList, SignDetected, "lastOnly", True)
+        self.signDetectedSubscriber = messageHandlerSubscriber(self.queuesList, SIGN_DETECTED, "lastOnly", True)
 
         # Calibration mode subscriber
-        self.laneCalibModeSubscriber = messageHandlerSubscriber(self.queuesList, LaneCalibMode, "lastOnly", True)
+        self.laneCalibModeSubscriber = messageHandlerSubscriber(self.queuesList, LANE_CALIB_MODE, "lastOnly", True)
 
         # Parking state machine variables
         self._parking_state                = ParkingState.IDLE
         self._parking_last_spot_box        = None    # Last known bbox [y1,x1,y2,x2] normalized
-        self._parking_last_spot_distance_cm = None   # Metric distance to spot (from SignDetected)
+        self._parking_last_spot_distance_cm = None   # Metric distance to spot (from SIGN_DETECTED)
         self._parking_spot_miss_frames     = 0       # Consecutive frames without parking detection
         self._parking_phase_start_time     = 0.0     # Timestamp when current phase started
         self._parking_phase_dist_cm        = 0.0     # Odometry-based distance traveled in current phase
@@ -1266,16 +1266,16 @@ Args:
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM  # Computed at spot-lost transition
 
         # Debug stream senders
-        self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
-        self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
-        self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
+        self.debugStreamSender = messageHandlerSender(self.queuesList, LINE_FOLLOWING_DEBUG)
+        self.statusSender = messageHandlerSender(self.queuesList, LINE_FOLLOWING_STATUS)
+        self.stateChangeSender = messageHandlerSender(self.queuesList, STATE_CHANGE)
 
         # Preview backend: the legacy mode opened cv2.imshow windows from
         # this worker (which crashes on macOS forks and is useless on the
         # headless Jetson) or published frames over a ZMQ pub socket so a
         # separate ``view_debug.py`` process could render them.
         #
-        # Now that the unified PyQt5 GUI subscribes to ``LineFollowingDebug``
+        # Now that the unified PyQt5 GUI subscribes to ``LINE_FOLLOWING_DEBUG``
         # over SocketIO and renders the same overlay (see
         # ``debugStreamSender.send(b64_data)`` later in this class), the
         # local windows are redundant. We keep the ZMQ pub as an *opt-in*
@@ -5093,7 +5093,7 @@ Args:
 
         * ZMQ pub (opt-in via URT_PREVIEW_BACKEND=zmq) — for an external
           ``view_debug.py``-style viewer.
-        * The dashboard's ``LineFollowingDebug`` event (handled separately
+        * The dashboard's ``LINE_FOLLOWING_DEBUG`` event (handled separately
           via ``debugStreamSender``) — what the PyQt5 panel consumes.
 
         If neither is configured, the call is a no-op — no X11 window
@@ -9704,7 +9704,7 @@ Much faster and better for curves than blind sliding window."""
     # ------------------------------------------------------------------
 
     def _check_calib_mode(self):
-        """Process incoming LaneCalibMode toggle messages."""
+        """Process incoming LANE_CALIB_MODE toggle messages."""
         msg = self.laneCalibModeSubscriber.receive()
         if msg is None:
             return
@@ -10257,9 +10257,9 @@ Much faster and better for curves than blind sliding window."""
                 # CALIBRATION MODE: manual mode only — run algorithm silently, enforce min speed
                 if self._calib_mode_active:
                     command_source = "calib_mode"
-                    # Phase 6: ya NO mandamos SpeedMotor desde acá. Si el usuario
+                    # Phase 6: ya NO mandamos SPEED_MOTOR desde acá. Si el usuario
                     # quiere mover el auto en calibración debe hacerlo desde el
-                    # dashboard (ese sí entra como mensaje SpeedMotor inbound) o
+                    # dashboard (ese sí entra como mensaje SPEED_MOTOR inbound) o
                     # construir un escenario de calibración en `src/behavior/`.
                     # Lo único que persiste es el log para análisis offline.
                     commanded_speed = self.min_speed
@@ -11772,7 +11772,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
     # ------------------------------------------------------------------
 
     def _poll_sign_detected(self):
-        """Consume SignDetected messages and update parking-spot tracking.
+        """Consume SIGN_DETECTED messages and update parking-spot tracking.
 
         Returns True if a parking detection was received this cycle.
 
@@ -11834,7 +11834,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
     def _parking_advance_distance(self, now):
         """Integrate encoder odometry to get distance traveled in the current phase (cm).
 
-        Uses _measured_speed (Nucleo CurrentSpeed in ×10 cm/s units) converted to
+        Uses _measured_speed (Nucleo CURRENT_SPEED in ×10 cm/s units) converted to
         m/s via stanley_measured_speed_to_mps. If the encoder is not reporting
         (speed == 0), accumulation is skipped and only the timer fallback is used.
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """External viewer for line-following debug previews (opt-in).
 
-The default operator surface is the unified PyQt5 GUI (``src/dashboard/gui``),
+The default operator surface is the unified PyQt5 GUI (``src/gui``),
 which subscribes to ``LineFollowingDebug`` over SocketIO and shows a single
 composite frame per tick. That covers 95% of debugging needs.
 

@@ -109,7 +109,7 @@ The recommended entry point is `run.sh`, which auto-selects mode by platform:
 ./run.sh
 ```
 
-The PyQt5 GUI (`src/dashboard/gui/`) provides:
+The PyQt5 GUI (`src/gui/`) provides:
 
 * Map view with the car's live position, GraphML nodes and active route
 * Map editor (GraphML + SVG + semantics) — single source of truth, JSON-persisted

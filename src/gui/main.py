@@ -1,4 +1,4 @@
-"""GUI entry point — ``python3 -m src.dashboard.gui.main``.
+"""GUI entry point — ``python3 -m src.gui.main``.
 
 Starts a minimal PyQt5 dashboard:
 
@@ -24,7 +24,8 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QApplication
 
 from .client.session import SessionManager
-from .client.socketio_client import SocketIOClient
+from .client.udp_video_client import UdpVideoClient
+from .client.zmq_bus_client import ZmqBusClient
 from .config import persistence, settings
 from .widgets.main_window import show_main_window
 
@@ -121,21 +122,39 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("BFMC Dashboard")
     _install_sigint_handler(app)
 
-    client = SocketIOClient(host=host, port=port)
+    client = ZmqBusClient(host=host, port=port)
     session = SessionManager(
         client,
         password_md5=args.password_md5,
         skip_login=args.no_login,
     )
 
-    window = show_main_window(client, session, skip_login=args.no_login)
+    # UDP video receiver: binds on an ephemeral port, decodes JPEG frames
+    # delivered by ``UdpVideoStreamerThread`` on the robot. Started before
+    # ``show_main_window`` so the CameraView signal is live by the time
+    # the first frame arrives. The actual port we listen on is announced
+    # to the robot via the SocketIO handshake (Sprint 4 will replace this
+    # with a dedicated ZMQ REQ).
+    udp_video = UdpVideoClient(
+        bind_port=settings.DEFAULT_UDP_VIDEO_PORT,
+        robot_host=host,
+    )
+    udp_video.start()
+    logger.info("UDP video listening on port %s", udp_video.bind_port())
+
+    window = show_main_window(
+        client, session, skip_login=args.no_login, video_source=udp_video,
+    )
 
     # Kick the SocketIO connection off after the window is up so the user
     # sees the "Disconnected" indicator transition to "Connected".
     client.start()
 
-    exit_code = app.exec_()
-    client.stop()
+    try:
+        exit_code = app.exec_()
+    finally:
+        udp_video.stop()
+        client.stop()
     return exit_code
 
 

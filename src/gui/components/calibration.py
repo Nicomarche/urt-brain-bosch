@@ -39,13 +39,13 @@ from scipy.interpolate import CubicSpline
 
 from string import Template
 
-from src.core.messaging.allMessages import ControlCalib, CalibPWMData, CalibRunDone
+from src.core.bus.topics import CONTROL_CALIB, CALIB_PWM_DATA, CALIB_RUN_DONE
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.statemachine.stateMachine import StateMachine
 
 
-class Calibration():
+class Calibration:
     def __init__(self, queuesList, socketio, w=20, h=26, eps=0.1, max_angle_tolerance=0.05):
         self.W = w
         self.H = h
@@ -935,10 +935,10 @@ class Calibration():
     
     def _init_subscribers(self):
         """Initialize the subscribers."""
-        self.calibPWMDataSubscriber = messageHandlerSubscriber(self.queuesList, CalibPWMData, "lastOnly", True)
-        self.calibRunDoneSubscriber = messageHandlerSubscriber(self.queuesList, CalibRunDone, "lastOnly", True)
+        self.calibPWMDataSubscriber = messageHandlerSubscriber(self.queuesList, CALIB_PWM_DATA, "lastOnly", True)
+        self.calibRunDoneSubscriber = messageHandlerSubscriber(self.queuesList, CALIB_RUN_DONE, "lastOnly", True)
 
 
     def _init_senders(self):
         """Initialize the senders."""
-        self.controlCalibSender = messageHandlerSender(self.queuesList, ControlCalib)
+        self.controlCalibSender = messageHandlerSender(self.queuesList, CONTROL_CALIB)

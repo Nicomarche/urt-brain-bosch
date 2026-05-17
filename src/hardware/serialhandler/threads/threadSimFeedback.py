@@ -21,7 +21,7 @@ Why this thread exists
 ----------------------
 On the real car, the Nucleo STM32 sends a continuous serial stream with
 encoder speed, steering angle, and BNO055 IMU readings. ``threadRead``
-parses it and publishes ``CurrentSpeed`` / ``CurrentSteer`` / ``ImuData``
+parses it and publishes ``CURRENT_SPEED`` / ``CURRENT_STEER`` / ``IMU_DATA``
 onto the IPC queues that the rest of the brain (relocalization,
 line-following, dashboard…) subscribes to.
 
@@ -56,11 +56,7 @@ import time
 from typing import Optional
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import (
-    CurrentSpeed,
-    CurrentSteer,
-    ImuData,
-)
+from src.core.bus.topics import CURRENT_SPEED, CURRENT_STEER, IMU_DATA
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 
@@ -116,9 +112,9 @@ class threadSimFeedback(ThreadWithStop):
     # ------------------------------------------------------------------
     def _init_senders(self) -> None:
         """Mirror ``threadRead._init_senders`` for the three feedback streams."""
-        self.currentSpeedSender = messageHandlerSender(self.queuesList, CurrentSpeed)
-        self.currentSteerSender = messageHandlerSender(self.queuesList, CurrentSteer)
-        self.imuDataSender = messageHandlerSender(self.queuesList, ImuData)
+        self.currentSpeedSender = messageHandlerSender(self.queuesList, CURRENT_SPEED)
+        self.currentSteerSender = messageHandlerSender(self.queuesList, CURRENT_STEER)
+        self.imuDataSender = messageHandlerSender(self.queuesList, IMU_DATA)
 
     # ------------------------------------------------------------------
     def _ensure_socket(self) -> bool:
@@ -159,11 +155,11 @@ class threadSimFeedback(ThreadWithStop):
         """Translate one ``feedback`` JSON message into IPC sender calls.
 
         Field map (sim_bridge → brain):
-            speed_mmps  → CurrentSpeed   (float, mm/s — divided by 1000 in
+            speed_mmps  → CURRENT_SPEED   (float, mm/s — divided by 1000 in
                                           relocalization._parse_speed_mps)
-            steer_x10   → CurrentSteer   (float, tenths of degree, +=right —
+            steer_x10   → CURRENT_STEER   (float, tenths of degree, +=right —
                                           divided by 10 in _parse_steer_rad)
-            yaw_deg     → ImuData["yaw"] (degrees in brain_map; downstream
+            yaw_deg     → IMU_DATA["yaw"] (degrees in brain_map; downstream
                                           parsing applies config-driven sign)
             roll/pitch/accel{x,y,z}      → forwarded so the dashboard's IMU
                                           panel doesn't show empty fields.

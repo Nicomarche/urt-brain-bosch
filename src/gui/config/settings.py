@@ -25,7 +25,7 @@ from typing import Any
 def _repo_root() -> Path:
     """Path to the repository root.
 
-    Assumes this file is at ``<repo>/src/dashboard/gui/config/settings.py``.
+    Assumes this file is at ``<repo>/src/gui/config/settings.py``.
     """
     return Path(__file__).resolve().parents[4]
 
@@ -119,6 +119,12 @@ def ensure_config_dir() -> None:
 # ----------------------------------------------------------------------
 DEFAULT_HOST: str = os.environ.get("URT_GUI_HOST", "localhost")
 DEFAULT_PORT: int = int(os.environ.get("URT_GUI_PORT", "5005"))
+
+# UDP port the GUI binds for receiving fragmented JPEG video from
+# ``UdpVideoStreamerThread``. 0 = ephemeral (kernel picks). Static ports
+# are convenient on dev boxes where the robot's URT_VIDEO_TARGET_PORT is
+# baked into run.sh.
+DEFAULT_UDP_VIDEO_PORT: int = int(os.environ.get("URT_GUI_UDP_VIDEO_PORT", "0"))
 
 # MD5 hash of the password the GUI will accept. Empty = no password.
 # We honour the env var so you can ship a binary without baking it in.

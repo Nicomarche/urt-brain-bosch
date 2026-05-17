@@ -29,7 +29,7 @@ from src.localization.relocalization_thread import (
     _YAW_EKF_P_INIT,
     threadTracking,
 )
-from src.core.messaging.allMessages import Localisation, OdoReset
+from src.core.bus.topics import LOCALISATION, ODO_RESET
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
@@ -131,17 +131,17 @@ class threadPoseEstimator(threadTracking):
         self._last_camera_lateral_correction_monotonic = 0.0
         self._last_absolute_yaw_fix_monotonic = 0.0
         self._last_absolute_yaw_fix_source = None
-        # Localisation multiplexes dashboard manual fixes and LoCSys GPS fixes.
+        # LOCALISATION multiplexes dashboard manual fixes and LoCSys GPS fixes.
         # Keep FIFO here and drain/prioritize in _receive_localisation_fix_payload();
         # LastOnly can drop a manual relocate if a GPS fix arrives right after it.
         self._localisation_fix_sub = messageHandlerSubscriber(
-            queuesList, Localisation, "fifo", subscribe=True
+            queuesList, LOCALISATION, "fifo", subscribe=True
         )
-        self._odo_reset_sender = messageHandlerSender(queuesList, OdoReset)
+        self._odo_reset_sender = messageHandlerSender(queuesList, ODO_RESET)
         print(
             f"[GPS-DBG] PoseEstimatorThread.__init__: _localisation_fix_sub "
-            f"registered (Owner={Localisation.Owner.value} "
-            f"msgID={Localisation.msgID.value})",
+            f"registered (Owner={LOCALISATION.Owner.value} "
+            f"msgID={LOCALISATION.msgID.value})",
             flush=True,
         )
         self._last_gps_raw_xy: tuple[float, float] | None = None
@@ -314,7 +314,7 @@ class threadPoseEstimator(threadTracking):
             self._odo_reset_sender.send("1")
         except Exception:
             if self.logging is not None:
-                self.logging.exception("failed to send OdoReset on AUTO entry")
+                self.logging.exception("failed to send ODO_RESET on AUTO entry")
         if gps_disabled:
             self._finish_auto_gps_entry(mode="auto_gps_disabled", source="no_gps_mode")
             live_log(
@@ -1046,8 +1046,8 @@ class threadPoseEstimator(threadTracking):
             return
         if MOTOR_OUTPUT != "zmq":
             return
-        from src.core.messaging.allMessages import SimRelocalize
-        messageHandlerSender(self.queuesList, SimRelocalize).send({
+        from src.core.bus.topics import SIM_RELOCALIZE
+        messageHandlerSender(self.queuesList, SIM_RELOCALIZE).send({
             "world_x": float(x_m),
             "world_y": float(y_m),
             "yaw_rad": float(yaw_rad),

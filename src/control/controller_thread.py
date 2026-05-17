@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from src.core.messaging.allMessages import StateChange
+from src.core.bus.topics import STATE_CHANGE
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.behavior import BehaviorOutput
 from src.core.types.pose import PoseEstimate
@@ -67,7 +67,7 @@ class threadMotionController(ThreadWithStop):
         self.logging = logging
         self.debugging = bool(debugging)
         self._state_sub = messageHandlerSubscriber(
-            queuesList, StateChange, "lastOnly", subscribe=True
+            queuesList, STATE_CHANGE, "lastOnly", subscribe=True
         )
         self._current_state = "DEFAULT"
 

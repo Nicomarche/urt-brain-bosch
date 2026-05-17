@@ -34,7 +34,7 @@ from typing import Dict
 from src.statemachine.systemMode import SystemMode
 from src.statemachine.transitionTable import TransitionTable
 from src.core.messaging.messageHandlerSender import messageHandlerSender
-from src.core.messaging.allMessages import StateChange
+from src.core.bus.topics import STATE_CHANGE
 from src.utils.live_log import live_log
 
 class StateMachine:
@@ -119,7 +119,7 @@ class StateMachine:
 
         # only initialize once per instance
         if not getattr(self, '_instance_initialized', False):
-            self.stateChangeSender =  messageHandlerSender(StateMachine._queueList, StateChange)
+            self.stateChangeSender =  messageHandlerSender(StateMachine._queueList, STATE_CHANGE)
             setattr(self, '_instance_initialized', True)
 
     def request_mode(self, action: str) -> bool:
@@ -176,7 +176,7 @@ class StateMachine:
         """Send the starting mode to all listeners using a temporary sender."""
         if cls._queueList is not None and cls._shared_state is not None:
             try:
-                sender = messageHandlerSender(cls._queueList, StateChange)
+                sender = messageHandlerSender(cls._queueList, STATE_CHANGE)
                 sender.send(mode.name)
                 print(f"\033[1;97m[ State Machine ] :\033[0m \033[1;92mINFO\033[0m - Starting in \033[1;94m{mode.name}\033[0m mode")
                 live_log(

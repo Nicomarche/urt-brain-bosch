@@ -1,7 +1,7 @@
 # src/control/motor_command_dispatcher.py
 #
-# `threadMotorCommandDispatcher` — el ÚNICO writer de `SpeedMotor` y
-# `SteerMotor` en el path de competencia. Lee el `motor_command_buffer`
+# `threadMotorCommandDispatcher` — el ÚNICO writer de `SPEED_MOTOR` y
+# `STEER_MOTOR` en el path de competencia. Lee el `motor_command_buffer`
 # producido por el `MotionController`, lo pasa por el `SafetyGate`, y
 # despacha el resultado al firmware Nucleo vía las colas IPC.
 #
@@ -18,7 +18,7 @@
 #
 #   motor_command_buffer ─► dispatcher ─► SafetyGate.evaluate()
 #                                         │
-#                                         ├─ valid+passed → SpeedMotor + SteerMotor
+#                                         ├─ valid+passed → SPEED_MOTOR + STEER_MOTOR
 #                                         └─ stale/invalid → fallback (0, 0)
 #
 # Diseño:
@@ -38,12 +38,7 @@ from __future__ import annotations
 import time
 
 from src.control.safety_gate import SafetyGate
-from src.core.messaging.allMessages import (
-    MotorCommandMsg,
-    SpeedMotor,
-    StateChange,
-    SteerMotor,
-)
+from src.core.bus.topics import MOTOR_COMMAND_MSG, SPEED_MOTOR, STATE_CHANGE, STEER_MOTOR
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.control import MotorCommand
@@ -91,11 +86,11 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self.logging = logging
         self.debugging = bool(debugging)
 
-        self._speedMotorSender = messageHandlerSender(queuesList, SpeedMotor)
-        self._steerMotorSender = messageHandlerSender(queuesList, SteerMotor)
-        self._motorCmdMsgSender = messageHandlerSender(queuesList, MotorCommandMsg)
+        self._speedMotorSender = messageHandlerSender(queuesList, SPEED_MOTOR)
+        self._steerMotorSender = messageHandlerSender(queuesList, STEER_MOTOR)
+        self._motorCmdMsgSender = messageHandlerSender(queuesList, MOTOR_COMMAND_MSG)
         self._stateChangeSubscriber = messageHandlerSubscriber(
-            queuesList, StateChange, "lastOnly", True
+            queuesList, STATE_CHANGE, "lastOnly", True
         )
         # Estado del sistema (controlado por el dashboard). Solo en
         # {AUTO, PARKING} se mandan comandos al motor; en DEFAULT/MANUAL
@@ -113,7 +108,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         # Diagnóstico — última decisión publicada (para el dashboard).
         self._last_dispatched: MotorCommand | None = None
 
-        # Una vez que el IPC entrega su primer StateChange, el Manager proxy
+        # Una vez que el IPC entrega su primer STATE_CHANGE, el Manager proxy
         # no debe volver a pisarlo (el proxy es stale en spawn mode: eventlet
         # en processDashboard rompe la conexión al Manager, por lo que el proxy
         # queda congelado en "STOP" mientras el IPC sí entrega "AUTO").
@@ -221,7 +216,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
             self._motorCmdMsgSender.send(self._serialize(cmd))
         except Exception:
             if self.logging is not None:
-                self.logging.exception("failed to publish MotorCommandMsg")
+                self.logging.exception("failed to publish MOTOR_COMMAND_MSG")
 
         # Si el estado no es operativo, no escribimos. El gate sigue
         # corriendo (logging continúa para diagnóstico).
@@ -276,7 +271,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
     def _send(self, cmd: MotorCommand) -> None:
         """Convierte unidades y publica a las colas Critical."""
         # `MotorCommand` sigue ISO 8855: +deg = ruedas a la izquierda.
-        # El wire legacy `SteerMotor` que consumen Nucleo/sim_bridge usa
+        # El wire legacy `STEER_MOTOR` que consumen Nucleo/sim_bridge usa
         # la convención histórica del proyecto: +deg = ruedas a la derecha.
         # La inversión de signo vive acá para aislar el transporte del MPC.
         steer_value = self._steer_deg_to_wire_x10(cmd.steering_deg)
@@ -356,7 +351,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
 
     # ----------------------------------------------------------------
     def _consume_state_change(self) -> None:
-        # Primario: IPC StateChange — la única fuente confiable para cambios
+        # Primario: IPC STATE_CHANGE — la única fuente confiable para cambios
         # iniciados desde el dashboard. El Manager proxy NO se actualiza en
         # processDashboard porque eventlet rompe la conexión al Manager bajo
         # spawn mode en macOS (el proxy queda congelado en "STOP").
@@ -445,7 +440,7 @@ class threadMotorCommandDispatcher(ThreadWithStop):
     # ----------------------------------------------------------------
     @staticmethod
     def _serialize(cmd: MotorCommand) -> dict:
-        """Serialización mínima para MotorCommandMsg (cola IPC)."""
+        """Serialización mínima para MOTOR_COMMAND_MSG (cola IPC)."""
         return {
             "timestamp": float(cmd.timestamp),
             "steering_deg": float(cmd.steering_deg),

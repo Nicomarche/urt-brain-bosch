@@ -398,7 +398,12 @@ def test_route_target_path_does_not_insert_backward_micro_segment_at_matched_joi
     assert abs(path[1, 2]) < 0.05
 
 
-def test_route_target_path_uses_local_recenter_without_dragging_future_turn_branch() -> None:
+def test_route_target_path_uses_local_recenter_connector_to_route_goal() -> None:
+    # Post-4fcfdd707 el connector en local_recenter_only usa tangente
+    # heading-to-goal y extiende el polyline con el tail completo del route
+    # hasta el goal final del go_to. Antes el path se truncaba cerca del
+    # lanelet actual; ahora se vuela al goal (Y baja de 5.95 a ~4) sin
+    # crear S-curves que el MPC interpretaría como retroceso.
     osm_path = Path(__file__).resolve().parents[2] / "maps" / "sim" / "lanelet2_map.osm"
     router = OsmRouteGraph(str(osm_path), step_m=0.05, start_lanelet_id="9")
     route = router.go_to(
@@ -423,9 +428,8 @@ def test_route_target_path_uses_local_recenter_without_dragging_future_turn_bran
     assert bridge_meta["bridge_mode"] == "connector"
     assert path[0, 0] == pytest.approx(pose[0], abs=1e-6)
     assert path[0, 1] == pytest.approx(pose[1], abs=1e-6)
-    assert path[3, 1] < path[1, 1]
-    assert path[5, 1] < path[3, 1]
-    assert path[-1, 1] > 5.88
+    assert path[1, 0] > path[0, 0]
+    assert path[-1, 1] < 4.5
 
 
 def test_local_recenter_tail_does_not_extend_into_future_curve() -> None:

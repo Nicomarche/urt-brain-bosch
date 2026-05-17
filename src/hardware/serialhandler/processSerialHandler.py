@@ -45,7 +45,7 @@ from src.hardware.serialhandler.threads.threadWrite import threadWrite
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.statemachine.systemMode import SystemMode
-from src.core.messaging.allMessages import StateChange, SerialConnectionState
+from src.core.bus.topics import STATE_CHANGE, SERIAL_CONNECTION_STATE
 
 class processSerialHandler(WorkerProcess):
     """This process handle connection between NUCLEO and Raspberry PI.\n
@@ -108,11 +108,11 @@ class processSerialHandler(WorkerProcess):
         self.historyFile = FileHandler(logFile)
 
     def _init_subscribers(self):
-        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
-        self.serialConnectionStateSubscriber = messageHandlerSubscriber(self.queuesList, SerialConnectionState, "lastOnly", True)
+        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, STATE_CHANGE, "lastOnly", True)
+        self.serialConnectionStateSubscriber = messageHandlerSubscriber(self.queuesList, SERIAL_CONNECTION_STATE, "lastOnly", True)
 
     def _init_senders(self):
-        self.serialConnectedSender = messageHandlerSender(self.queuesList, SerialConnectionState)
+        self.serialConnectedSender = messageHandlerSender(self.queuesList, SERIAL_CONNECTION_STATE)
 
     def _safe_close_serial(self):
         """Safely close the serial connection with proper error handling."""
@@ -358,6 +358,18 @@ class processSerialHandler(WorkerProcess):
         writeTh = threadWrite(self, self.historyFile, self.queuesList, self.logger, self.debugging, self.example)
         self.threads.extend([readTh, writeTh])
 
+        # threadCalibration was previously instantiated inside processDashboard.
+        # It now lives in this process: the calibration FSM commands the motors
+        # via the same bus topics the dispatcher uses, and the wizard's reply
+        # stream goes back over the bus instead of SocketIO.
+        from src.hardware.serialhandler.threads.threadCalibration import threadCalibration
+        from src.hardware.serialhandler.threads.threadModeRouter import threadModeRouter
+        from src.hardware.serialhandler.threads.threadResourceMonitor import threadResourceMonitor
+        calibTh = threadCalibration(self.queuesList, self.logger, self.debugging)
+        modeRouterTh = threadModeRouter(self.queuesList, self.logger, self.debugging)
+        monitorTh = threadResourceMonitor(self.queuesList, self.logger, self.debugging)
+        self.threads.extend([calibTh, modeRouterTh, monitorTh])
+
         if self.motor_output == "zmq":
             simFeedbackTh = threadSimFeedback(self.queuesList, self.logger, self.debugging)
             self.threads.append(simFeedbackTh)
@@ -396,28 +408,6 @@ class processSerialHandler(WorkerProcess):
             )
 
 
-# =================================== EXAMPLE =========================================
-#             ++    THIS WILL RUN ONLY IF YOU RUN THE CODE FROM HERE  ++
-#                  in terminal:    python3 processSerialHandler.py
-
-if __name__ == "__main__":
-    from multiprocessing import Queue, Pipe
-    import logging
-    import time
-
-    allProcesses = list()
-    debugg = False
-    # We have a list of multiprocessing.Queue() which individualy represent a priority for processes.
-    queueList = {
-        "Critical": Queue(),
-        "Warning": Queue(),
-        "General": Queue(),
-        "Config": Queue(),
-    }
-    logger = logging.getLogger()
-    pipeRecv, pipeSend = Pipe(duplex=False)
-    process = processSerialHandler(queueList, logger, debugg, True)
-    process.daemon = True
-    process.start()
-    time.sleep(4)  # modify the value to increase/decrease the time of the example
-    process.stop()
+# Standalone demo removed when the message backend was migrated to ZMQ —
+# it depended on a queue-based gateway that no longer exists. Run
+# ``python3 main.py`` to exercise this process inside the real graph.

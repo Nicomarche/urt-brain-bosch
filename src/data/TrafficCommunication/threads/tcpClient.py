@@ -28,7 +28,7 @@
 
 import json
 from threading import Event
-from src.core.messaging.allMessages import Location
+from src.core.bus.topics import LOCATION
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from twisted.internet import protocol
 
@@ -43,7 +43,7 @@ class tcpClient(protocol.ClientFactory):
         self.locsysFrequency = locsysFrequency
         self.queue = queue
         self.event = Event()
-        self.sendLocation = messageHandlerSender(self.queue, Location)
+        self.sendLocation = messageHandlerSender(self.queue, LOCATION)
 
     def clientConnectionLost(self, connector, reason):
         print(f"\033[1;97m[ Traffic Communication ] :\033[0m \033[1;93mWARNING\033[0m - Connection lost with server \033[94m{self.connectiondata}\033[0m")

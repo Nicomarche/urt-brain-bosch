@@ -1,4 +1,3 @@
-import base64
 import math
 import time
 
@@ -12,17 +11,7 @@ from src.perception.signs.sign_classifier import (
 )
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import (
-    DetectedObjectsMsg,
-    LineFollowingConfig,
-    LineFollowingStatus,
-    LocalLanePerception,
-    LocalPerceptionStatus,
-    serialCamera,
-    SignDetected,
-    SignDetectionStatus,
-    StateChange,
-)
+from src.core.bus.topics import DETECTED_OBJECTS_MSG, LINE_FOLLOWING_CONFIG, LINE_FOLLOWING_STATUS, LOCAL_LANE_PERCEPTION, LOCAL_PERCEPTION_STATUS, SIGN_DETECTED, SIGN_DETECTION_STATUS, STATE_CHANGE
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.perception import DetectedObject
@@ -40,6 +29,7 @@ class threadLocalPerception(ThreadWithStop):
                  lidar_scan_buffer=None,
                  pose_estimate_buffer=None,
                  sign_hints_buffer=None,
+                 overlay_buffer=None,
                  enable_sign_detection=True, enable_actions=False,
                  sign_min_confidence=0.50, sign_min_box_area=0.01,
                  action_cooldown=15.0,
@@ -63,6 +53,11 @@ class threadLocalPerception(ThreadWithStop):
         self.lidar_scan_buffer = lidar_scan_buffer
         self.pose_estimate_buffer = pose_estimate_buffer
         self.sign_hints_buffer = sign_hints_buffer
+        # Shared with ``UdpVideoStreamerThread``: every annotated frame
+        # produced by the inference engine lands here; the streamer reads
+        # the latest at its own pace. ``None`` disables dashboard streaming
+        # at the producer level.
+        self.overlay_buffer = overlay_buffer
 
         self.enable_sign_detection = enable_sign_detection
         self.enable_actions = enable_actions
@@ -81,20 +76,12 @@ class threadLocalPerception(ThreadWithStop):
         self.local_ai_imgsz = int(getattr(config, "LOCAL_AI_IMGSZ", 416))
         self.local_ai_device = str(getattr(config, "LOCAL_AI_DEVICE", "auto"))
 
-        # Dashboard preview: este thread es el ÚNICO productor de `serialCamera`
-        # tras Phase 6. Publica el frame ya anotado (carriles + señales) que el
-        # motor genera en `_draw_debug_views`. `threadCamera` se quedó solo con
-        # captura → frame_buffer → grabación. La flag `stream_to_dashboard`
-        # respeta `URT_STREAM_CAMERA=0` para correr headless en competencia.
-        dashboard_fps = max(0.0, float(getattr(config, "DASHBOARD_CAMERA_FPS", 6.0)))
-        self.stream_to_dashboard = bool(stream_to_dashboard) and dashboard_fps > 0.0
-        self._dashboard_publish_interval = (
-            1.0 / dashboard_fps if dashboard_fps > 0.0 else float("inf")
-        )
-        self._last_dashboard_publish_time = 0.0
-        self._dashboard_jpeg_quality = int(
-            getattr(config, "DASHBOARD_CAMERA_JPEG_QUALITY", 55)
-        )
+        # Dashboard preview: este thread escribe el frame anotado (carriles +
+        # señales) al ``overlay_buffer``. El ``UdpVideoStreamerThread`` lo
+        # lee a su propia tasa y lo envía por UDP. Rate-limit y JPEG quality
+        # ahora viven en el streamer — acá publicamos cada vez que el motor
+        # produce overlay nuevo.
+        self.stream_to_dashboard = bool(stream_to_dashboard) and overlay_buffer is not None
 
         self.last_infer_time = 0.0
         self.last_status_time = 0.0
@@ -109,7 +96,7 @@ class threadLocalPerception(ThreadWithStop):
         self._lf_curve_state_frames = 0
         self._lf_steering_deg = 0.0
         self._current_mode = ""
-        self._px_per_cm = 0.0       # cached from LineFollowingStatus.stanley_px_per_cm
+        self._px_per_cm = 0.0       # cached from LINE_FOLLOWING_STATUS.stanley_px_per_cm
         self._last_frame_shape = None  # (height, width) of last processed frame
 
         # Walk-area pedestrian stop logic
@@ -121,22 +108,21 @@ class threadLocalPerception(ThreadWithStop):
         self._walk_area_last_cleared      = 0.0     # timestamp of last walk_area resume
 
         self.stateChangeSubscriber = messageHandlerSubscriber(
-            self.queuesList, StateChange, "lastOnly", True
+            self.queuesList, STATE_CHANGE, "lastOnly", True
         )
         self.configSubscriber = messageHandlerSubscriber(
-            self.queuesList, LineFollowingConfig, "lastOnly", True
+            self.queuesList, LINE_FOLLOWING_CONFIG, "lastOnly", True
         )
         self.lineFollowingStatusSubscriber = messageHandlerSubscriber(
-            self.queuesList, LineFollowingStatus, "lastOnly", True
+            self.queuesList, LINE_FOLLOWING_STATUS, "lastOnly", True
         )
 
-        self.localLaneSender = messageHandlerSender(self.queuesList, LocalLanePerception)
-        self.localStatusSender = messageHandlerSender(self.queuesList, LocalPerceptionStatus)
-        self.signDetectedSender = messageHandlerSender(self.queuesList, SignDetected)
-        self.signStatusSender = messageHandlerSender(self.queuesList, SignDetectionStatus)
-        self.stateChangeSender = messageHandlerSender(self.queuesList, StateChange)
-        self.serialCameraSender = messageHandlerSender(self.queuesList, serialCamera)
-        self.detectedObjectsSender = messageHandlerSender(self.queuesList, DetectedObjectsMsg)
+        self.localLaneSender = messageHandlerSender(self.queuesList, LOCAL_LANE_PERCEPTION)
+        self.localStatusSender = messageHandlerSender(self.queuesList, LOCAL_PERCEPTION_STATUS)
+        self.signDetectedSender = messageHandlerSender(self.queuesList, SIGN_DETECTED)
+        self.signStatusSender = messageHandlerSender(self.queuesList, SIGN_DETECTION_STATUS)
+        self.stateChangeSender = messageHandlerSender(self.queuesList, STATE_CHANGE)
+        self.detectedObjectsSender = messageHandlerSender(self.queuesList, DETECTED_OBJECTS_MSG)
 
         self.engine = self._build_engine()
         print(
@@ -621,7 +607,7 @@ class threadLocalPerception(ThreadWithStop):
             })
         except Exception:
             if self.logger is not None:
-                self.logger.exception("failed to publish DetectedObjectsMsg")
+                self.logger.exception("failed to publish DETECTED_OBJECTS_MSG")
 
     @staticmethod
     def _is_tracked_object_class(class_name: str) -> bool:
@@ -716,28 +702,19 @@ class threadLocalPerception(ThreadWithStop):
         return frame
 
     def _publish_dashboard_frame(self, result, frame, now):
-        """Publica el frame que ve el `CameraView` del dashboard.
+        """Escribe el frame anotado al ``overlay_buffer``.
 
-        Contrato (single source of truth de Phase 6):
-          - ESTE método es el único productor del canal `serialCamera`.
-            `threadCamera` ya no publica ahí: se quedó sólo con captura
-            (frame_buffer / mainCamera).
-          - Si el motor produjo un overlay (carriles + máscaras + cajas de
-            señales en `result["lane_debug"]["overlay"]`), publicamos eso.
-          - Si no (modelo no cargado, error, primer tick antes de inferir),
-            publicamos el frame raw como fallback — evita pantalla negra.
+        El ``UdpVideoStreamerThread`` (mismo proceso, hilo paralelo) lee de
+        este buffer al ritmo configurado por ``URT_VIDEO_FPS`` y lo envía
+        fragmentado por UDP al GUI. No hay encoding ni rate-limit acá: la
+        inferencia escribe el frame freshest disponible, el streamer decide
+        qué hacer con él (skippea si no cambió, dropea si llega muy rápido).
 
-        Wire format: JPEG → base64-string. Lo decodifica `processDashboard`
-        a bytes y lo emite como `serialCamera_bin` por SocketIO. Mantenemos
-        base64 (en vez de bytes crudos) para no tocar el fast-path existente
-        en `processDashboard.send_continuous_messages`.
-
-        Rate-limit: configurable con `URT_DASHBOARD_CAMERA_FPS` (default 6).
-        La inferencia puede correr bastante más rápido que el preview remoto.
+        ``result["lane_debug"]["overlay"]`` es la imagen BGR con carriles y
+        cajas de señales dibujadas. Si no existe (modelo no listo todavía),
+        se publica el frame raw para evitar pantalla negra en el GUI.
         """
-        if not self.stream_to_dashboard:
-            return
-        if (now - self._last_dashboard_publish_time) < self._dashboard_publish_interval:
+        if not self.stream_to_dashboard or self.overlay_buffer is None:
             return
 
         overlay = None
@@ -746,29 +723,10 @@ class threadLocalPerception(ThreadWithStop):
             if isinstance(lane_debug, dict):
                 overlay = lane_debug.get("overlay")
 
-        # `overlay` puede no existir (modelo no listo) o ser un ndarray vacío.
-        # En ambos casos caemos al frame raw, que ya tenemos a mano del tick
-        # actual de `thread_work`.
         img = overlay if overlay is not None else frame
         if img is None:
             return
-
-        try:
-            ok, encoded = cv2.imencode(
-                ".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, self._dashboard_jpeg_quality]
-            )
-            if not ok:
-                return
-            b64_data = base64.b64encode(encoded).decode("utf-8")
-            self.serialCameraSender.send(b64_data)
-            self._last_dashboard_publish_time = now
-        except Exception as exc:
-            # Nunca dejar que un error de encoding mate el thread: la
-            # inferencia/pub de control debe seguir aunque el preview falle.
-            print(
-                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m"
-                f" - dashboard frame publish failed: {exc}"
-            )
+        self.overlay_buffer.write(img)
 
     def _build_local_lane_payload(self, result, frame_timestamp, frame_sequence):
         result_timestamp = time.time()

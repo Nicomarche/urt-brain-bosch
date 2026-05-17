@@ -43,9 +43,18 @@ class CameraView(QLabel):
     _INDICATOR_Y    = 52     # px from bottom edge to baseline
 
     def __init__(self, client: SocketIOClient, show_fps: bool = True,
-                 parent: Optional[QWidget] = None):
+                 parent: Optional[QWidget] = None,
+                 video_source=None):
+        """
+        Args:
+            client: telemetry/command client (provides ``motor_command_signal``).
+            video_source: anything exposing ``camera_frame_signal``. Defaults
+                to ``client`` for the legacy SocketIO path; pass a
+                :class:`UdpVideoClient` to consume the new UDP stream.
+        """
         super().__init__(parent)
         self._client = client
+        self._video_source = video_source if video_source is not None else client
         self._show_fps = show_fps
         self._last_image: Optional[QImage] = None
         self._frame_times: deque[float] = deque(maxlen=self.FPS_HISTORY)
@@ -61,7 +70,7 @@ class CameraView(QLabel):
         self.setStyleSheet("background-color: #111; color: #888;")
         self.setText(self.PLACEHOLDER_TEXT)
 
-        self._client.camera_frame_signal.connect(self._on_frame)
+        self._video_source.camera_frame_signal.connect(self._on_frame)
         self._client.motor_command_signal.connect(self._on_motor_command)
 
     # ------------------------------------------------------------------

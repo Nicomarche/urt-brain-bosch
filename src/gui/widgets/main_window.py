@@ -279,7 +279,8 @@ class MainWindow(QMainWindow):
 # ----------------------------------------------------------------------
 # Helper used by main.py to bootstrap the whole stack
 # ----------------------------------------------------------------------
-def _build_driving_tab(client: SocketIOClient, window: "MainWindow") -> QWidget:
+def _build_driving_tab(client: SocketIOClient, window: "MainWindow",
+                       video_source=None) -> QWidget:
     """Driving tab = control + test pad arriba, cámara + telemetry abajo.
 
     Layout::
@@ -327,7 +328,7 @@ def _build_driving_tab(client: SocketIOClient, window: "MainWindow") -> QWidget:
     layout.addWidget(ManualTestPad(client))
 
     body = QSplitter(_Qt.Horizontal)
-    body.addWidget(CameraView(client, show_fps=True))
+    body.addWidget(CameraView(client, show_fps=True, video_source=video_source))
     mini_map = MapView(client, compact=True)
     mini_map.setMinimumHeight(240)
     body.addWidget(TelemetryCluster(client, footer_widget=mini_map))
@@ -338,7 +339,8 @@ def _build_driving_tab(client: SocketIOClient, window: "MainWindow") -> QWidget:
     return container
 
 
-def _install_default_panels(window: "MainWindow", client: SocketIOClient) -> None:
+def _install_default_panels(window: "MainWindow", client: SocketIOClient,
+                            video_source=None) -> None:
     """Replace placeholder panels with real implementations as they exist.
 
     Kept here (vs in MainWindow itself) because the MainWindow shouldn't
@@ -359,7 +361,8 @@ def _install_default_panels(window: "MainWindow", client: SocketIOClient) -> Non
     # Telemetry no se registra como tab independiente: el `_build_driving_tab`
     # ya la embebe junto a la cámara para que el operador vea los gauges
     # mientras maneja en manual.
-    window.add_tab("driving", "Driving", _build_driving_tab(client, window))
+    window.add_tab("driving", "Driving",
+                   _build_driving_tab(client, window, video_source=video_source))
     window.add_tab("lidar", "LiDAR", LidarPanel(client))
     window.add_tab("map", "Map", MapView(client))
     window.add_tab("routes", "Routes", RoutesPanel(client))
@@ -370,10 +373,15 @@ def _install_default_panels(window: "MainWindow", client: SocketIOClient) -> Non
 
 
 def show_main_window(client: SocketIOClient, session: SessionManager,
-                     skip_login: bool) -> MainWindow:
-    """Create and show the MainWindow, gating it on login when needed."""
+                     skip_login: bool, video_source=None) -> MainWindow:
+    """Create and show the MainWindow, gating it on login when needed.
+
+    ``video_source`` (if provided) feeds the CameraView with frames over UDP.
+    When None, CameraView falls back to ``client.camera_frame_signal`` (the
+    legacy SocketIO path).
+    """
     window = MainWindow(client, session)
-    _install_default_panels(window, client)
+    _install_default_panels(window, client, video_source=video_source)
 
     if skip_login or not session.has_password:
         # No password configured — kick off the SessionAccess handshake

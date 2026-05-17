@@ -4,12 +4,12 @@ from pathlib import Path
 
 import numpy as np
 
-from src.dashboard.gui.config import settings
-from src.dashboard.gui.widgets._map_path_overlay import (
+from src.gui.config import settings
+from src.gui.widgets._map_path_overlay import (
     extract_control_path_points,
     extract_nav_route_preview_points,
 )
-from src.dashboard.gui.widgets._map_click_routing import resolve_click_destination_lanelet
+from src.gui.widgets._map_click_routing import resolve_click_destination_lanelet
 from src.routing.lanelet.lanelet_map import Lanelet, LaneletMap
 
 

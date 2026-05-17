@@ -56,24 +56,6 @@ class processSemaphores(WorkerProcess):
         self.threads.append(CarsSemTh)
 
 
-# =================================== EXAMPLE =========================================
-
-if __name__ == "__main__":
-    from multiprocessing import Queue
-
-    queueList = {
-        "Critical": Queue(),  # Queue for critical messages
-        "Warning": Queue(),  # Queue for warning messages
-        "General": Queue(),  # Queue for general messages
-        "Config": Queue(),  # Queue for configuration messages
-    }
-
-    allProcesses = list()
-    process = processSemaphores(queueList, logging=None)
-    process.start()
-
-    x = range(6)
-    for n in x:
-        print(queueList["General"].get())  # Print general messages
-
-    process.stop()
+# Standalone demo removed when the message backend was migrated to ZMQ.
+# Use ``python3 main.py`` (after uncommenting the processSemaphores block
+# in main.py) to exercise this module on real hardware.

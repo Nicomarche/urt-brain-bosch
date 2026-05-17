@@ -33,25 +33,7 @@ from datetime import datetime, timedelta
 
 from src.hardware.serialhandler.threads.messageconverter import MessageConverter
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import (
-    ActuatorCommandStatus,
-    Klem,
-    Control,
-    SteerMotor,
-    SpeedMotor,
-    Brake,
-    ToggleBatteryLvl,
-    ToggleHallSpeed,
-    ToggleImuData,
-    ToggleInstant,
-    ToggleResourceMonitor,
-    SerialConnectionState,
-    ControlCalib,
-    IsAlive,
-    RequestSteerLimits,
-    OdoReset,
-    SimRelocalize,
-)
+from src.core.bus.topics import ACTUATOR_COMMAND_STATUS, KLEM, CONTROL, STEER_MOTOR, SPEED_MOTOR, BRAKE, TOGGLE_BATTERY_LVL, TOGGLE_HALL_SPEED, TOGGLE_IMU_DATA, TOGGLE_INSTANT, TOGGLE_RESOURCE_MONITOR, SERIAL_CONNECTION_STATE, CONTROL_CALIB, IS_ALIVE, REQUEST_STEER_LIMITS, ODO_RESET, SIM_RELOCALIZE
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.utils.live_log import live_log
@@ -81,8 +63,8 @@ class threadWrite(ThreadWithStop):
         self.engineEnabled = False
         self.currentKlemMode = 0
         self.messageConverter = MessageConverter()
-        self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
-        self.speedMotorSender = messageHandlerSender(self.queuesList, SpeedMotor)
+        self.steerMotorSender = messageHandlerSender(self.queuesList, STEER_MOTOR)
+        self.speedMotorSender = messageHandlerSender(self.queuesList, SPEED_MOTOR)
         self.configPath = "src/utils/table_state.json"
         self.motionCommandTime = 0
         self.last_speed_cmd = None
@@ -127,25 +109,25 @@ class threadWrite(ThreadWithStop):
 
     def _init_subscribers(self):
         """Subscribe function. In this function we make all the required subscribe to process gateway"""
-        self.klSubscriber = messageHandlerSubscriber(self.queuesList, Klem, "lastOnly", True)
-        self.controlSubscriber = messageHandlerSubscriber(self.queuesList, Control, "lastOnly", True)
-        self.steerMotorSubscriber = messageHandlerSubscriber(self.queuesList, SteerMotor, "lastOnly", True)
-        self.speedMotorSubscriber = messageHandlerSubscriber(self.queuesList, SpeedMotor, "lastOnly", True)
-        self.brakeSubscriber = messageHandlerSubscriber(self.queuesList, Brake, "lastOnly", True)
-        self.instantSubscriber = messageHandlerSubscriber(self.queuesList, ToggleInstant, "lastOnly", True)
-        self.batterySubscriber = messageHandlerSubscriber(self.queuesList, ToggleBatteryLvl, "lastOnly", True)
-        self.resourceMonitorSubscriber = messageHandlerSubscriber(self.queuesList, ToggleResourceMonitor, "lastOnly", True)
-        self.imuSubscriber = messageHandlerSubscriber(self.queuesList, ToggleImuData, "lastOnly", True)
-        self.hallSpeedSubscriber = messageHandlerSubscriber(self.queuesList, ToggleHallSpeed, "lastOnly", True)
-        self.odoResetSubscriber = messageHandlerSubscriber(self.queuesList, OdoReset, "lastOnly", True)
-        self.controlCalibSubscriber = messageHandlerSubscriber(self.queuesList, ControlCalib, "lastOnly", True)
-        self.isAliveSubscriber = messageHandlerSubscriber(self.queuesList, IsAlive, "lastOnly", True)
-        self.requestSteerLimitsSubscriber = messageHandlerSubscriber(self.queuesList, RequestSteerLimits, "lastOnly", True)
-        self.simRelocalizeSubscriber = messageHandlerSubscriber(self.queuesList, SimRelocalize, "lastOnly", True)
+        self.klSubscriber = messageHandlerSubscriber(self.queuesList, KLEM, "lastOnly", True)
+        self.controlSubscriber = messageHandlerSubscriber(self.queuesList, CONTROL, "lastOnly", True)
+        self.steerMotorSubscriber = messageHandlerSubscriber(self.queuesList, STEER_MOTOR, "lastOnly", True)
+        self.speedMotorSubscriber = messageHandlerSubscriber(self.queuesList, SPEED_MOTOR, "lastOnly", True)
+        self.brakeSubscriber = messageHandlerSubscriber(self.queuesList, BRAKE, "lastOnly", True)
+        self.instantSubscriber = messageHandlerSubscriber(self.queuesList, TOGGLE_INSTANT, "lastOnly", True)
+        self.batterySubscriber = messageHandlerSubscriber(self.queuesList, TOGGLE_BATTERY_LVL, "lastOnly", True)
+        self.resourceMonitorSubscriber = messageHandlerSubscriber(self.queuesList, TOGGLE_RESOURCE_MONITOR, "lastOnly", True)
+        self.imuSubscriber = messageHandlerSubscriber(self.queuesList, TOGGLE_IMU_DATA, "lastOnly", True)
+        self.hallSpeedSubscriber = messageHandlerSubscriber(self.queuesList, TOGGLE_HALL_SPEED, "lastOnly", True)
+        self.odoResetSubscriber = messageHandlerSubscriber(self.queuesList, ODO_RESET, "lastOnly", True)
+        self.controlCalibSubscriber = messageHandlerSubscriber(self.queuesList, CONTROL_CALIB, "lastOnly", True)
+        self.isAliveSubscriber = messageHandlerSubscriber(self.queuesList, IS_ALIVE, "lastOnly", True)
+        self.requestSteerLimitsSubscriber = messageHandlerSubscriber(self.queuesList, REQUEST_STEER_LIMITS, "lastOnly", True)
+        self.simRelocalizeSubscriber = messageHandlerSubscriber(self.queuesList, SIM_RELOCALIZE, "lastOnly", True)
         
     def _init_senders(self):
-        self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
-        self.actuatorStatusSender = messageHandlerSender(self.queuesList, ActuatorCommandStatus)
+        self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SERIAL_CONNECTION_STATE)
+        self.actuatorStatusSender = messageHandlerSender(self.queuesList, ACTUATOR_COMMAND_STATUS)
 
     def _init_motor_output(self):
         """Pick motor backend based on config.MOTOR_OUTPUT ('serial' | 'zmq').
@@ -191,7 +173,7 @@ class threadWrite(ThreadWithStop):
         # ── Auto-engage KL en sim ──────────────────────────────────────────
         # En el auto físico, KL es la llave de contacto: KL=0 (off) /
         # KL=15 (electrónica on) / KL=30 (motor encendido). El brain bloquea
-        # SpeedMotor/SteerMotor hasta que el operador la lleva a 30 desde
+        # SPEED_MOTOR/STEER_MOTOR hasta que el operador la lleva a 30 desde
         # el dashboard — es la red de seguridad que evita arranques
         # accidentales con gente cerca del auto.
         #
@@ -337,7 +319,7 @@ class threadWrite(ThreadWithStop):
         self.actuatorStatusSender.send(payload)
         print(
             f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mQUEUE\033[0m"
-            f" threadWrite -> ActuatorCommandStatus queue=General"
+            f" threadWrite -> ACTUATOR_COMMAND_STATUS queue=General"
             f" qsize={self._queue_depth('General')}"
             f" payload={self._preview(payload)}"
         )
@@ -500,11 +482,11 @@ class threadWrite(ThreadWithStop):
             self.send_to_serial(command)
         else:
             toggle_keys = [
-                "ToggleInstant",
-                "ToggleBatteryLvl",
-                "ToggleImuData",
-                "ToggleResourceMonitor",
-                "ToggleHallSpeed",
+                "TOGGLE_INSTANT",
+                "TOGGLE_BATTERY_LVL",
+                "TOGGLE_IMU_DATA",
+                "TOGGLE_RESOURCE_MONITOR",
+                "TOGGLE_HALL_SPEED",
             ]
             for key in toggle_keys:
                 if key not in data:
@@ -561,7 +543,7 @@ class threadWrite(ThreadWithStop):
                 )
                 print(
                     f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
-                    f" - threadWrite received Klem \033[94m{kl_value}\033[0m"
+                    f" - threadWrite received KLEM \033[94m{kl_value}\033[0m"
                 )
                 if self.debugger:
                     self.logger.info(kl_value)
@@ -693,7 +675,7 @@ class threadWrite(ThreadWithStop):
                     # quedó gated (engineEnabled=False, brake activo, etc.).
                     print(
                         f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRECV\033[0m"
-                        f" SpeedMotor={speedRecv!r} cached={self.last_speed_cmd}"
+                        f" SPEED_MOTOR={speedRecv!r} cached={self.last_speed_cmd}"
                     )
 
                 if steerRecv is not None:
@@ -707,7 +689,7 @@ class threadWrite(ThreadWithStop):
                     if self.last_steer_cmd != last_logged:
                         print(
                             f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mRECV\033[0m"
-                            f" SteerMotor={steerRecv!r} cached={self.last_steer_cmd}"
+                            f" STEER_MOTOR={steerRecv!r} cached={self.last_steer_cmd}"
                         )
                         self._last_logged_steer = self.last_steer_cmd
 
@@ -729,7 +711,7 @@ class threadWrite(ThreadWithStop):
                 if speed_or_steer_updated and brakeRecv is None:
                     if self.engineEnabled:
                         # En manual el dashboard manda eventos por eje: ↑/↓
-                        # solo emite SpeedMotor, ←/→ solo emite SteerMotor.
+                        # solo emite SPEED_MOTOR, ←/→ solo emite STEER_MOTOR.
                         # Antes exigíamos que AMBOS estuvieran cacheados para
                         # despachar — eso dejaba "↑ sin tocar steer" sin
                         # comando, así que el auto no arrancaba. Defaulteamos

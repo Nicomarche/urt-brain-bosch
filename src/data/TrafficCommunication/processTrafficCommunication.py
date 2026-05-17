@@ -31,7 +31,6 @@ if __name__ == "__main__":
     sys.path.insert(0, "../../..")
 
 # Import necessary modules
-from multiprocessing import Pipe
 from src.data.TrafficCommunication.useful.sharedMem import sharedMem
 from src.templates.workerprocess import WorkerProcess
 from src.data.TrafficCommunication.threads.threadTrafficCommunication import threadTrafficCommunication
@@ -67,41 +66,6 @@ class processTrafficCommunication(WorkerProcess):
         self.threads.append(TrafficComTh)
 
 
-# =================================== EXAMPLE =========================================
-#             ++    THIS WILL RUN ONLY IF YOU RUN THE CODE FROM HERE  ++
-#                  in terminal:    python3 processTrafficCommunication.py
-
-if __name__ == "__main__":
-    from multiprocessing import Queue
-    import time
-
-    shared_memory = sharedMem()
-    locsysReceivePipe, locsysSendPipe = Pipe(duplex=False)
-    queueList = {
-        "Critical": Queue(),
-        "Warning": Queue(),
-        "General": Queue(),
-        "Config": Queue(),
-    }
-    # filename = "useful/publickey_server.pem"
-    filename = "useful/publickey_server_test.pem"
-    deviceID = 3
-    frequency = 0.4
-    traffic_communication = threadTrafficCommunication(
-        shared_memory, queueList, deviceID, frequency, filename
-    )
-    traffic_communication.start()    
-
-    start_time = time.time()
-    duration = 10  # specify the duration in seconds
-    
-    shared_memory.insert("devicePos", [1.2, 2.3]) # send a position to the server
-    shared_memory.insert("deviceRot", [3.4]) # send a rotation to the server
-    shared_memory.insert("deviceSpeed", [4.5]) # send a speed to the server
-    shared_memory.insert("historyData", [5.6, 6.7, 8]) # send a history data point to the server
-
-    while time.time() - start_time < duration:
-        try:
-            print(queueList["General"].get(timeout=1))
-        except:pass
-    traffic_communication.stop()
+# Standalone demo removed when the message backend was migrated to ZMQ.
+# Use ``python3 main.py`` (after uncommenting the processTrafficCommunication
+# block in main.py) to exercise this module against the BFMC server.

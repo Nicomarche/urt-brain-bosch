@@ -1,6 +1,6 @@
 """Calibration wizard — drive the backend's ``Calibration`` state machine.
 
-The backend at ``src/dashboard/components/calibration.py`` owns the actual
+The backend at ``src/gui/components/calibration.py`` owns the actual
 calibration sequence (steering left → right → backward → test run →
 polynomial fit → save). We just talk to it over SocketIO using the
 existing protocol, exactly like the Angular ``calibration.component`` did:

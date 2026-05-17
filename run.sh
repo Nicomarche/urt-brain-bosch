@@ -3,20 +3,27 @@
 # Launcher for urt-brain-bosch — three modes:
 #
 #   ./run.sh                     Mac dev: backend (sim) + GUI on localhost.
-#   ./run.sh --monitor <IP[:P]>  Mac monitor: only the GUI, pointed at a remote
-#                                car. No backend on this machine.
+#   ./run.sh --monitor <IP>      Mac monitor: only the GUI, pointed at a remote
+#                                car (uses ZMQ tcp://IP:5556/5557). No backend
+#                                on this machine.
 #   ./run.sh                     Jetson: backend only (no GUI), with full
 #                                CUDA / Tegra environment.
 #   ./run.sh --no-gui            Force backend-only (debug).
 #
 # Any extra args after a flag are forwarded to ``main.py`` (or to the GUI in
 # monitor mode), so e.g. ``./run.sh --no-gui --quick`` still works.
+#
+# Transport:
+#   - Bus pub/sub: ZMQ XSUB tcp://*:5556 (GUI→brain commands), XPUB tcp://*:5557
+#     (brain→GUI telemetry). Internal robot processes connect over ipc://.
+#   - Video: UDP unicast from robot to the GUI's bound port. Discovery is done
+#     in-band through the ``VideoSubscribe`` topic — no manual env vars needed.
 # -----------------------------------------------------------------------------
 
 set -e
 # Job control: each ``cmd &`` becomes its own process group leader, so
-# ``kill -- -PGID`` reaps the whole eventlet/multiprocess tree at once
-# instead of orphaning the children.
+# ``kill -- -PGID`` reaps the whole multiprocess tree at once instead of
+# orphaning the children.
 set -m
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -84,9 +91,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Default port if user gave just an IP.
-if [[ "$MODE" == "monitor" && "$MONITOR_TARGET" != *:* ]]; then
-    MONITOR_TARGET="${MONITOR_TARGET}:5005"
+# --monitor IP[:port] semantics: any explicit ``:port`` is ignored — the GUI
+# resolves the bus endpoints from env vars (URT_BUS_GUI_PUB_PORT / SUB_PORT,
+# defaulting to 5556 / 5557). We strip the legacy port to keep --connect clean.
+if [[ "$MODE" == "monitor" && "$MONITOR_TARGET" == *:* ]]; then
+    MONITOR_TARGET="${MONITOR_TARGET%%:*}"
 fi
 
 # ---- Platform-specific environment (before monitor so --monitor uses .venv) -
@@ -161,6 +170,18 @@ else
     export URT_LOCAL_AI_MODEL_PATH="${URT_LOCAL_AI_MODEL_PATH:-models/lane_segmentation/Best_weights_reentrenado_416px.engine}"
 fi
 
+# ---- Bus + UDP video defaults (exported for backend + GUI children) ---------
+# The broker dual-binds on ipc:// (intra-robot, zero-copy) and tcp://0.0.0.0:5556/5557
+# (LAN GUI). main.py exports the same defaults if missing — we set them here so
+# user overrides via env take precedence over both.
+export URT_BUS_IPC_DIR="${URT_BUS_IPC_DIR:-/tmp/urt-bus}"
+mkdir -p "$URT_BUS_IPC_DIR"
+export URT_BUS_GUI_PUB_PORT="${URT_BUS_GUI_PUB_PORT:-5556}"
+export URT_BUS_GUI_SUB_PORT="${URT_BUS_GUI_SUB_PORT:-5557}"
+export URT_VIDEO_FPS="${URT_VIDEO_FPS:-15}"
+export URT_VIDEO_MTU="${URT_VIDEO_MTU:-1400}"
+export URT_VIDEO_JPEG_QUALITY="${URT_VIDEO_JPEG_QUALITY:-70}"
+
 export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"
 if [[ -z "${URT_EXPECTED_MPC_BACKEND:-}" ]]; then
     _URT_FORCE_PP_LC="$(printf '%s' "${URT_FORCE_PURE_PURSUIT:-}" | tr '[:upper:]' '[:lower:]')"
@@ -187,8 +208,8 @@ fi
 
 # ---- Pure GUI mode (remote monitor) -----------------------------------------
 if [[ "$MODE" == "monitor" ]]; then
-    echo "[run.sh] Monitor mode → GUI only, connecting to $MONITOR_TARGET"
-    exec "$PYTHON_BIN" -m src.dashboard.gui.main \
+    echo "[run.sh] Monitor mode → GUI only, connecting to tcp://$MONITOR_TARGET:$URT_BUS_GUI_PUB_PORT/$URT_BUS_GUI_SUB_PORT"
+    exec "$PYTHON_BIN" -m src.gui.main \
         --connect "$MONITOR_TARGET" "${GUI_ARGS[@]}"
 fi
 
@@ -209,7 +230,7 @@ fi
 
 # ---- Mac dev: backend + GUI ------------------------------------------------
 setup_live_log
-echo "[run.sh] Mac dev mode → backend (sim) + GUI on localhost:5005"
+echo "[run.sh] Mac dev mode → backend (sim) + GUI on tcp://localhost:$URT_BUS_GUI_PUB_PORT/$URT_BUS_GUI_SUB_PORT"
 echo "[run.sh] Press Ctrl+C in this terminal to stop both backend and GUI."
 
 "$PYTHON_BIN" main.py "${EXTRA_ARGS[@]}" &
@@ -217,9 +238,9 @@ BACKEND_PID=$!
 
 # Recursive kill: walk the parent → children tree from ``$1`` and send
 # ``$2`` (default TERM) to every PID we find, leaves first. ``main.py``
-# spawns several multiprocessing workers (camera, gateway, line-following…),
-# so a flat ``kill $BACKEND_PID`` leaves them orphaned and the next launch
-# can't bind :5005.
+# spawns several multiprocessing workers (camera, serial, bus broker), so
+# a flat ``kill $BACKEND_PID`` leaves them orphaned and the next launch
+# can't rebind the bus ports.
 kill_tree() {
     local parent=$1 sig=${2:-TERM} child
     if ! kill -0 "$parent" 2>/dev/null; then return; fi
@@ -242,17 +263,22 @@ cleanup() {
             kill -0 "$BACKEND_PID" 2>/dev/null || break
             sleep 0.2
         done
-        # Force-kill anything still alive (eventlet sometimes ignores TERM
-        # when stuck in a C extension call — common with cv2 / numpy).
+        # Force-kill anything still alive (cv2/numpy can ignore TERM
+        # when stuck in a C extension call).
         kill_tree "$BACKEND_PID" KILL
     fi
-    # Best-effort: free :5005 in case a stray child is still holding it.
+    # Best-effort: free the bus ports + ipc sockets in case a stray child
+    # is still holding them.
     local stragglers
-    stragglers=$(lsof -nP -iTCP:5005 -sTCP:LISTEN -t 2>/dev/null || true)
-    if [[ -n "$stragglers" ]]; then
-        echo "[run.sh] Killing :5005 holdouts: $stragglers"
-        kill -KILL $stragglers 2>/dev/null || true
-    fi
+    for port in "$URT_BUS_GUI_PUB_PORT" "$URT_BUS_GUI_SUB_PORT"; do
+        stragglers=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null || true)
+        if [[ -n "$stragglers" ]]; then
+            echo "[run.sh] Killing :$port holdouts: $stragglers"
+            kill -KILL $stragglers 2>/dev/null || true
+        fi
+    done
+    # Clean stale ipc sockets so the next run can bind without EADDRINUSE.
+    rm -f "$URT_BUS_IPC_DIR"/*.sock 2>/dev/null || true
 }
 
 # Trap on every exit reason so cleanup is unavoidable: INT (Ctrl+C),
@@ -260,12 +286,15 @@ cleanup() {
 # normal exit including ``set -e`` failures).
 trap cleanup EXIT INT TERM HUP
 
-# Wait up to 10 seconds for the SocketIO port to come up before launching
-# the GUI — the GUI handles reconnects fine, but starting after the backend
-# is ready avoids a "disconnected" flash on first paint.
-echo "[run.sh] Waiting for backend on :5005…"
+# Wait up to 10 seconds for the bus broker to bind its XSUB port (5556)
+# before launching the GUI. The GUI's ZmqBusClient does its own reconnect
+# but starting after the broker is bound avoids "disconnected" flicker on
+# first paint and avoids the GUI's first publish being dropped to /dev/null
+# (ZMQ silently discards messages sent before the subscriber filter
+# reaches the broker).
+echo "[run.sh] Waiting for bus broker on :$URT_BUS_GUI_PUB_PORT…"
 for _ in $(seq 1 40); do
-    if (exec 3<>/dev/tcp/127.0.0.1/5005) 2>/dev/null; then
+    if (exec 3<>/dev/tcp/127.0.0.1/"$URT_BUS_GUI_PUB_PORT") 2>/dev/null; then
         exec 3>&- 3<&-
         break
     fi
@@ -276,8 +305,8 @@ done
 # Cmd+Q → 0) without tripping ``set -e``. Whatever exit code we get we
 # pass through, *after* the cleanup trap has had a chance to run.
 set +e
-"$PYTHON_BIN" -m src.dashboard.gui.main \
-    --connect "localhost:5005" "${GUI_ARGS[@]}"
+"$PYTHON_BIN" -m src.gui.main \
+    --connect "localhost" "${GUI_ARGS[@]}"
 GUI_RC=$?
 set -e
 exit $GUI_RC

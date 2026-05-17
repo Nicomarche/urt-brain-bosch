@@ -38,7 +38,7 @@ Variante locIDsub:
 2. Enviar {"reqORinfo": "info", "type": "locIDsub", "locID": <ID>, "freq": 0.25}
 3. Recibir {"type": "location", "x": m, "y": m, "z": m}
    Ese stream usa el frame de la pista: (0,0) abajo-izquierda,
-   x+ hacia la derecha, y+ hacia arriba. Antes de emitir Localisation se
+   x+ hacia la derecha, y+ hacia arriba. Antes de emitir LOCALISATION se
    transforma al frame world del Lanelet/OSM.
 
 En simulación (MOTOR_OUTPUT == "zmq"):
@@ -47,7 +47,7 @@ por defecto se conecta directo al LoCSys expuesto por `sim_bridge`
 Gazebo al frame `brain_map`; no se debe usar el `locsys_SIM.py` hardcodeado
 del repositorio Shared como fuente de GPS del simulador.
 
-El fix se emite como mensaje Localisation IPC con world_x/world_y y, si está
+El fix se emite como mensaje LOCALISATION IPC con world_x/world_y y, si está
 disponible, yaw_rad/yaw_deg. Así evitamos el flip de imagen y trabajamos
 directo en el frame del mapa OSM, sin necesitar conocer height_m.
 """
@@ -63,7 +63,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import CurrentSpeed, Localisation, Location
+from src.core.bus.topics import CURRENT_SPEED, LOCALISATION, LOCATION
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
@@ -97,32 +97,7 @@ _TRACKING_META_JSON = ""
 
 try:
     from config import (
-        LOCSYS_PORT        as _LOCSYS_PORT,
-        LOCSYS_HOST_COMP   as _LOCSYS_HOST_COMP,
-        TRAFFIC_COMM_HOST  as _TRAFFIC_COMM_HOST,
-        TRAFFIC_COMM_PORT  as _TRAFFIC_COMM_PORT,
-        TRAFFIC_COMM_AUTODISCOVERY_ENABLED as _TRAFFIC_COMM_AUTODISCOVERY_ENABLED,
-        TRAFFIC_COMM_DISCOVERY_PORT as _TRAFFIC_COMM_DISCOVERY_PORT,
-        TRAFFIC_COMM_DISCOVERY_TIMEOUT_S as _TRAFFIC_COMM_DISCOVERY_TIMEOUT_S,
-        TRAFFIC_COMM_PUBLIC_KEY_PATH as _TRAFFIC_COMM_PUBLIC_KEY_PATH,
-        LOCSYS_DEVICE_ID   as _LOCSYS_DEVICE_ID,
-        SIM_LOCSYS_HOST    as _SIM_LOCSYS_HOST,
-        SIM_LOCSYS_PORT    as _SIM_LOCSYS_PORT,
-        GPS_RECONNECT_S    as _GPS_RECONNECT_S,
-        LOCSYS_USE_TRAFFIC_COMM_SERVER as _LOCSYS_USE_TRAFFIC_COMM_SERVER,
-        LOCSYS_DIRECT_FALLBACK_ENABLED as _LOCSYS_DIRECT_FALLBACK_ENABLED,
-        TRAFFIC_COMM_SEND_EGO_DATA as _TRAFFIC_COMM_SEND_EGO_DATA,
-        TRAFFIC_COMM_SEND_PERIOD_S as _TRAFFIC_COMM_SEND_PERIOD_S,
-        TRAFFIC_COMM_LOCSYS_MODE as _TRAFFIC_COMM_LOCSYS_MODE,
-        TRAFFIC_COMM_LOCSYS_SUB_FREQ as _TRAFFIC_COMM_LOCSYS_SUB_FREQ,
-        TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE as _TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE,
-        TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME as _TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME,
-        TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X,
-        TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y,
-        TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M,
-        TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M,
-        TRACKING_LANELET2_OSM as _TRACKING_LANELET2_OSM,
-        TRACKING_META_JSON as _TRACKING_META_JSON,
+        LOCSYS_PORT as _LOCSYS_PORT, LOCSYS_HOST_COMP as _LOCSYS_HOST_COMP, TRAFFIC_COMM_HOST as _TRAFFIC_COMM_HOST, TRAFFIC_COMM_PORT as _TRAFFIC_COMM_PORT, TRAFFIC_COMM_AUTODISCOVERY_ENABLED as _TRAFFIC_COMM_AUTODISCOVERY_ENABLED, TRAFFIC_COMM_DISCOVERY_PORT as _TRAFFIC_COMM_DISCOVERY_PORT, TRAFFIC_COMM_DISCOVERY_TIMEOUT_S as _TRAFFIC_COMM_DISCOVERY_TIMEOUT_S, TRAFFIC_COMM_PUBLIC_KEY_PATH as _TRAFFIC_COMM_PUBLIC_KEY_PATH, LOCSYS_DEVICE_ID as _LOCSYS_DEVICE_ID, SIM_LOCSYS_HOST as _SIM_LOCSYS_HOST, SIM_LOCSYS_PORT as _SIM_LOCSYS_PORT, GPS_RECONNECT_S as _GPS_RECONNECT_S, LOCSYS_USE_TRAFFIC_COMM_SERVER as _LOCSYS_USE_TRAFFIC_COMM_SERVER, LOCSYS_DIRECT_FALLBACK_ENABLED as _LOCSYS_DIRECT_FALLBACK_ENABLED, TRAFFIC_COMM_SEND_EGO_DATA as _TRAFFIC_COMM_SEND_EGO_DATA, TRAFFIC_COMM_SEND_PERIOD_S as _TRAFFIC_COMM_SEND_PERIOD_S, TRAFFIC_COMM_LOCSYS_MODE as _TRAFFIC_COMM_LOCSYS_MODE, TRAFFIC_COMM_LOCSYS_SUB_FREQ as _TRAFFIC_COMM_LOCSYS_SUB_FREQ, TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE as _TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE, TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME as _TRAFFIC_COMM_LOCSYS_SUB_COORD_FRAME, TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_X, TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y as _TRAFFIC_COMM_LOCSYS_SUB_ORIGIN_WORLD_Y, TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_WIDTH_M, TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M as _TRAFFIC_COMM_LOCSYS_SUB_MAP_HEIGHT_M, TRACKING_LANELET2_OSM as _TRACKING_LANELET2_OSM, TRACKING_META_JSON as _TRACKING_META_JSON,
     )
 except ImportError:
     pass
@@ -382,14 +357,14 @@ class threadLocSys(ThreadWithStop):
         except ImportError:
             self._sim_mode = False
 
-        self.localisationSender = messageHandlerSender(self.queuesList, Localisation)
+        self.localisationSender = messageHandlerSender(self.queuesList, LOCALISATION)
         self._traffic_location_sub = (
-            messageHandlerSubscriber(self.queuesList, Location, "lastOnly", True)
+            messageHandlerSubscriber(self.queuesList, LOCATION, "lastOnly", True)
             if _TRAFFIC_COMM_SEND_EGO_DATA
             else None
         )
         self._traffic_speed_sub = (
-            messageHandlerSubscriber(self.queuesList, CurrentSpeed, "lastOnly", True)
+            messageHandlerSubscriber(self.queuesList, CURRENT_SPEED, "lastOnly", True)
             if _TRAFFIC_COMM_SEND_EGO_DATA
             else None
         )
@@ -943,7 +918,7 @@ class threadLocSys(ThreadWithStop):
     # ------------------------------------------------------------------
 
     def _emit_fix(self, data: dict) -> None:
-        """Envía un Localisation IPC con coordenadas en el frame del OSM."""
+        """Envía un LOCALISATION IPC con coordenadas en el frame del OSM."""
         x = float(data["x"])
         y = float(data["y"])
         payload = {
@@ -993,7 +968,7 @@ class threadLocSys(ThreadWithStop):
                 payload[key] = data[key]
         self.localisationSender.send(payload)
         print(
-            f"[GPS-DBG] _emit_fix: SENT Localisation IPC "
+            f"[GPS-DBG] _emit_fix: SENT LOCALISATION IPC "
             f"world_x={x:.3f} world_y={y:.3f} "
             f"yaw_rad={payload.get('yaw_rad')} yaw_deg={payload.get('yaw_deg')} "
             f"meta.source=gps_localisation",
@@ -1092,7 +1067,7 @@ class threadLocSys(ThreadWithStop):
         return fix
 
     def _locsys_device_fix_from_message(self, data: dict) -> dict | None:
-        """Normalize locsysDevice coordinates before publishing Localisation.
+        """Normalize locsysDevice coordinates before publishing LOCALISATION.
 
         In the simulator the direct LoCSys stream is already in the map/world
         frame. On the real car, the locsysDevice coordinates follow the same

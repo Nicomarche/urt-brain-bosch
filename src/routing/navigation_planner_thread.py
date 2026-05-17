@@ -24,7 +24,7 @@ from src.localization.relocalization_thread import (
 )
 from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import NavigationCommand, NavigationStatus, StateChange
+from src.core.bus.topics import NAVIGATION_COMMAND, NAVIGATION_STATUS, STATE_CHANGE
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 
@@ -146,12 +146,12 @@ class threadNavigationPlanner(ThreadWithStop):
         self.debugging = debugging
         self.visualizer = visualizer
         self._nav_cmd_sub = messageHandlerSubscriber(
-            queuesList, NavigationCommand, "lastOnly", subscribe=True
+            queuesList, NAVIGATION_COMMAND, "lastOnly", subscribe=True
         )
         self._state_sub = messageHandlerSubscriber(
-            queuesList, StateChange, "lastOnly", subscribe=True
+            queuesList, STATE_CHANGE, "lastOnly", subscribe=True
         )
-        self._nav_status_sender = messageHandlerSender(queuesList, NavigationStatus)
+        self._nav_status_sender = messageHandlerSender(queuesList, NAVIGATION_STATUS)
         self._graph = self._load_graph()
         self._path_manager = PathManager(self._graph) if self._graph is not None else None
         self._last_pose = self._resolve_initial_pose()

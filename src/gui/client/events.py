@@ -2,7 +2,7 @@
 
 Single source of truth: every other module imports from here instead of
 sprinkling string literals around. The names mirror the contract exposed by
-``src/dashboard/processDashboard.py`` (which is what the legacy Angular
+``the (now-removed) Flask dashboard`` (which is what the legacy Angular
 dashboard also uses) so changing a name here means changing the matching emit
 in the backend, and vice versa.
 
@@ -22,7 +22,12 @@ CMD_DRIVING_MODE = "DrivingMode"             # "stop" / "manual" / "legacy" / "a
 CMD_SPEED = "SpeedMotor"                     # int -50..+50
 CMD_STEER = "SteerMotor"                     # int (tenths of deg) -600..+600 in sim, ±250 hw
 CMD_BRAKE = "Brake"                          # bool
-CMD_RECORDING = "Recording"                  # bool
+CMD_RECORDING = "Record"                     # bool — matches Record enum
+                                              # in allMessages (command path,
+                                              # Owner=Dashboard, msgID=5).
+                                              # Recording (Owner=threadCamera)
+                                              # is the *state* topic, not the
+                                              # command — that's EVT_RECORDING.
 CMD_CALIBRATION = "Calibration"              # dict (action + payload)
 CMD_NAV_COMMAND = "NavigationCommand"        # {"x": float, "y": float} or {"mode": "clear"}
 CMD_LOCALISATION = "Localisation"            # {"world_x": float, "world_y": float}

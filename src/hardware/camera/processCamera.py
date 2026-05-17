@@ -40,7 +40,7 @@ from src.core.messaging.buffers import LatestFrameBuffer, LatestValueBuffer
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
-from src.core.messaging.allMessages import StateChange
+from src.core.bus.topics import STATE_CHANGE
 
 
 class processCamera(WorkerProcess):
@@ -92,7 +92,7 @@ class processCamera(WorkerProcess):
         self.sign_action_cooldown = sign_action_cooldown
         self.frame_buffer = LatestFrameBuffer()
         self.local_lane_buffer = LatestValueBuffer()
-        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
+        self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, STATE_CHANGE, "lastOnly", True)
 
         super(processCamera, self).__init__(self.queuesList, ready_event)
 
@@ -210,10 +210,14 @@ class processCamera(WorkerProcess):
         self.threads.append(lidarTh)
 
         # Local AI perception (TensorRT engine) now runs inside the camera process.
-        # Phase 6: este thread es el ÚNICO productor de `serialCamera` —
-        # publica el frame ya anotado (carriles + cajas de señales) al
-        # dashboard. `stream_to_dashboard` permite apagarlo en modo
-        # headless (config.STREAM_CAMERA_TO_DASHBOARD=False).
+        # El frame anotado se escribe a ``overlay_buffer`` (intra-proceso, sin
+        # encoding ni queue). El ``UdpVideoStreamerThread`` lo consume y lo
+        # manda fragmentado por UDP al GUI — replaza el viejo path
+        # serialCamera (JPEG → base64 → multiprocessing.Queue → SocketIO).
+        from src.hardware.camera.threads.threadVideoStreamer import UdpVideoStreamerThread
+
+        overlay_buffer = LatestFrameBuffer()
+
         localPerceptionTh = threadLocalPerception(
             self.queuesList, self.logging, self.debugging,
             frame_buffer=self.frame_buffer,
@@ -222,6 +226,7 @@ class processCamera(WorkerProcess):
             lidar_scan_buffer=lidar_scan_buffer,
             pose_estimate_buffer=pose_estimate_buffer,
             sign_hints_buffer=sign_hints_buffer,
+            overlay_buffer=overlay_buffer,
             enable_sign_detection=self.enable_sign_detection,
             enable_actions=self.sign_detection_actions,
             sign_min_confidence=self.sign_min_confidence,
@@ -230,6 +235,10 @@ class processCamera(WorkerProcess):
             stream_to_dashboard=self.stream_to_dashboard,
         )
         self.threads.append(localPerceptionTh)
+
+        videoStreamerTh = UdpVideoStreamerThread(frame_buffer=overlay_buffer)
+        self.threads.append(videoStreamerTh)
+        self._video_streamer = videoStreamerTh  # exposed for handshake REP wiring (Sprint 4)
 
         # Phase 4–6: buffers del path de control nuevo.
         # `behavior_output_buffer` lo escribe `threadBehaviorPlanner` (single
@@ -470,50 +479,7 @@ class processCamera(WorkerProcess):
         self.threads.append(dispatcherTh)
 
 
-# =================================== EXAMPLE =========================================
-#             ++    THIS WILL RUN ONLY IF YOU RUN THE CODE FROM HERE  ++
-#                  in terminal:    python3 processCamera.py
-if __name__ == "__main__":
-    from multiprocessing import Queue, Event
-    import time
-    import logging
-    import cv2
-    import base64
-    import numpy as np
-
-    allProcesses = list()
-
-    debugg = True
-
-    queueList = {
-        "Critical": Queue(),
-        "Warning": Queue(),
-        "General": Queue(),
-        "Config": Queue(),
-    }
-
-    logger = logging.getLogger()
-
-    process = processCamera(queueList, logger, debugg)
-
-    process.daemon = True
-    process.start()
-
-    time.sleep(4)
-    if debugg:
-        logger.warning("getting")
-    img = {"msgValue": 1}
-    while not isinstance(img["msgValue"], str):
-        img = queueList["General"].get()
-    
-    msg_value = img["msgValue"]
-    if isinstance(msg_value, str):
-        image_data = base64.b64decode(msg_value)
-    else:
-        raise ValueError("Expected string for base64 decoding")
-    img = np.frombuffer(image_data, dtype=np.uint8)
-    image = cv2.imdecode(img, cv2.IMREAD_COLOR)
-    if debugg:
-        logger.warning("got")
-    cv2.imwrite("test.jpg", image)
-    process.stop()
+# Standalone demo removed when the message backend was migrated to ZMQ —
+# the old queue-based capture loop no longer reflects the production data
+# path (frames go via UDP, not the bus). Run ``python3 main.py`` to
+# exercise this process inside the real graph.

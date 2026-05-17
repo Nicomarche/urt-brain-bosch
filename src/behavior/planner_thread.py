@@ -14,7 +14,7 @@
 #   3. Llama `BehaviorPlanner.plan(ctx) -> BehaviorOutput`.
 #   4. Escribe el `BehaviorOutput` en el buffer de salida (consumido por
 #      el MotionController, Phase 6).
-#   5. Publica un snapshot serializable al dashboard vía `BehaviorOutputMsg`.
+#   5. Publica un snapshot serializable al dashboard vía `BEHAVIOR_OUTPUT_MSG`.
 #
 # Diseño:
 #   - El thread es DELGADO: cero lógica de decisión. Sólo pega buffers→
@@ -38,7 +38,7 @@ from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 
 from src.behavior.context import PlanningContext
-from src.core.messaging.allMessages import BehaviorOutputMsg, BehaviorPlannerStatus, StateChange
+from src.core.bus.topics import BEHAVIOR_OUTPUT_MSG, BEHAVIOR_PLANNER_STATUS, STATE_CHANGE
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.behavior import BehaviorOutput, ScenarioName
@@ -47,8 +47,7 @@ from src.core.types.perception import LaneObservation, StoplineObservation, Trac
 from src.core.types.pose import PoseEstimate
 from src.core.types.routing import RouteContext
 from src.routing.lanelet.runtime_loader import (
-    lanelet_map_covers_ids,
-    load_tracking_lanelet_map,
+    lanelet_map_covers_ids, load_tracking_lanelet_map,
 )
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
@@ -130,15 +129,15 @@ class threadBehaviorPlanner(ThreadWithStop):
 
         # Senders al dashboard. Mantenemos dos canales: el plan completo
         # (target_path + speed_profile) y un status corto para gauges.
-        self._output_sender = messageHandlerSender(queuesList, BehaviorOutputMsg)
-        self._status_sender = messageHandlerSender(queuesList, BehaviorPlannerStatus)
+        self._output_sender = messageHandlerSender(queuesList, BEHAVIOR_OUTPUT_MSG)
+        self._status_sender = messageHandlerSender(queuesList, BEHAVIOR_PLANNER_STATUS)
 
-        # Modo del sistema vía IPC StateChange — mismo mecanismo que el
+        # Modo del sistema vía IPC STATE_CHANGE — mismo mecanismo que el
         # dispatcher. El Manager proxy (__sm_state__) no lo actualiza el
         # dashboard subprocess (eventlet rompe el proxy bajo spawn), así que
         # el pipe IPC es la única fuente confiable para todos los writers.
         self._stateChangeSubscriber = messageHandlerSubscriber(
-            queuesList, StateChange, "lastOnly", True
+            queuesList, STATE_CHANGE, "lastOnly", True
         )
         self._current_mode: str = "STOP"
 
@@ -232,7 +231,7 @@ class threadBehaviorPlanner(ThreadWithStop):
         """Un tick: leer inputs → planear → publicar."""
         tick_start = time.monotonic()
 
-        # Actualizar modo desde IPC StateChange (mismo override que el dispatcher).
+        # Actualizar modo desde IPC STATE_CHANGE (mismo override que el dispatcher).
         try:
             msg = self._stateChangeSubscriber.receive()
             if msg is not None:
@@ -547,7 +546,7 @@ class threadBehaviorPlanner(ThreadWithStop):
         except Exception:
             # IPC no debe romper el ciclo del planner — logueamos y seguimos.
             if self.logging is not None:
-                self.logging.exception("failed to publish BehaviorOutputMsg")
+                self.logging.exception("failed to publish BEHAVIOR_OUTPUT_MSG")
 
     def _publish_status(self, plan: BehaviorOutput) -> None:
         """Status para gauges del dashboard (2 Hz)."""
@@ -562,7 +561,7 @@ class threadBehaviorPlanner(ThreadWithStop):
             self._status_sender.send(payload)
         except Exception:
             if self.logging is not None:
-                self.logging.exception("failed to publish BehaviorPlannerStatus")
+                self.logging.exception("failed to publish BEHAVIOR_PLANNER_STATUS")
 
     def _publish_empty(self, *, reason: str) -> None:
         """Cuando faltan inputs: publicar plan vacío con stop_required."""

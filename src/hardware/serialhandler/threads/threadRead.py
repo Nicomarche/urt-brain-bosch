@@ -34,23 +34,7 @@ import serial
 from datetime import datetime, timedelta
 
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.messaging.allMessages import (
-    BatteryLvl,
-    ImuData,
-    ImuAck,
-    InstantConsumption,
-    EnableButton,
-    ResourceMonitor,
-    CurrentSpeed,
-    CurrentSteer,
-    CurrentDistance,
-    ShutDownSignal,
-    SerialConnectionState,
-    CalibPWMData,
-    CalibRunDone,
-    SteeringLimits,
-    AliveSignal
-)
+from src.core.bus.topics import BATTERY_LVL, IMU_DATA, IMU_ACK, INSTANT_CONSUMPTION, ENABLE_BUTTON, RESOURCE_MONITOR, CURRENT_SPEED, CURRENT_STEER, CURRENT_DISTANCE, SHUT_DOWN_SIGNAL, SERIAL_CONNECTION_STATE, CALIB_PWM_DATA, CALIB_RUN_DONE, STEERING_LIMITS, ALIVE_SIGNAL
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 
 
@@ -97,21 +81,21 @@ class threadRead(ThreadWithStop):
         self.queue_sending()
 
     def _init_senders(self):
-        self.enableButtonSender = messageHandlerSender(self.queuesList, EnableButton)
-        self.batteryLvlSender = messageHandlerSender(self.queuesList, BatteryLvl)
-        self.instantConsumptionSender = messageHandlerSender(self.queuesList, InstantConsumption)
-        self.imuDataSender = messageHandlerSender(self.queuesList, ImuData)
-        self.imuAckSender = messageHandlerSender(self.queuesList, ImuAck)
-        self.resourceMonitorSender = messageHandlerSender(self.queuesList, ResourceMonitor)
-        self.currentSpeedSender = messageHandlerSender(self.queuesList, CurrentSpeed)
-        self.currentSteerSender = messageHandlerSender(self.queuesList, CurrentSteer)
-        self.currentDistanceSender = messageHandlerSender(self.queuesList, CurrentDistance)
-        self.warningSender = messageHandlerSender(self.queuesList, ShutDownSignal)
-        self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SerialConnectionState)
-        self.calibPWMDataSender = messageHandlerSender(self.queuesList, CalibPWMData)
-        self.calibRunDoneSender = messageHandlerSender(self.queuesList, CalibRunDone)
-        self.steeringLimitsSender = messageHandlerSender(self.queuesList, SteeringLimits)
-        self.aliveSignalSender = messageHandlerSender(self.queuesList, AliveSignal)
+        self.enableButtonSender = messageHandlerSender(self.queuesList, ENABLE_BUTTON)
+        self.batteryLvlSender = messageHandlerSender(self.queuesList, BATTERY_LVL)
+        self.instantConsumptionSender = messageHandlerSender(self.queuesList, INSTANT_CONSUMPTION)
+        self.imuDataSender = messageHandlerSender(self.queuesList, IMU_DATA)
+        self.imuAckSender = messageHandlerSender(self.queuesList, IMU_ACK)
+        self.resourceMonitorSender = messageHandlerSender(self.queuesList, RESOURCE_MONITOR)
+        self.currentSpeedSender = messageHandlerSender(self.queuesList, CURRENT_SPEED)
+        self.currentSteerSender = messageHandlerSender(self.queuesList, CURRENT_STEER)
+        self.currentDistanceSender = messageHandlerSender(self.queuesList, CURRENT_DISTANCE)
+        self.warningSender = messageHandlerSender(self.queuesList, SHUT_DOWN_SIGNAL)
+        self.serialConnectionStateSender = messageHandlerSender(self.queuesList, SERIAL_CONNECTION_STATE)
+        self.calibPWMDataSender = messageHandlerSender(self.queuesList, CALIB_PWM_DATA)
+        self.calibRunDoneSender = messageHandlerSender(self.queuesList, CALIB_RUN_DONE)
+        self.steeringLimitsSender = messageHandlerSender(self.queuesList, STEERING_LIMITS)
+        self.aliveSignalSender = messageHandlerSender(self.queuesList, ALIVE_SIGNAL)
 
     # ====================================== RUN ==========================================
     def thread_work(self):
@@ -165,7 +149,7 @@ class threadRead(ThreadWithStop):
     # ==================================== SENDING =======================================
     def queue_sending(self):
         """Callback function for enable button flag."""
-        self._send_and_log(EnableButton, self.enableButtonSender, True, "heartbeat", "queue_sending")
+        self._send_and_log(ENABLE_BUTTON, self.enableButtonSender, True, "heartbeat", "queue_sending")
         threading.Timer(1, self.queue_sending).start()
 
     def send_queue(self, buff):
@@ -206,21 +190,21 @@ class threadRead(ThreadWithStop):
                     "accely": fields[4],
                     "accelz": fields[5],
                 }
-                self._send_and_log(ImuData, self.imuDataSender, str(data), action, buff)
+                self._send_and_log(IMU_DATA, self.imuDataSender, str(data), action, buff)
             elif fields:
-                self._send_and_log(ImuAck, self.imuAckSender, fields[0], action, buff)
+                self._send_and_log(IMU_ACK, self.imuAckSender, fields[0], action, buff)
             else:
                 self._log_ignored_frame(buff, "imu payload is empty", warning=True)
 
         elif action == "brake":
-            self._send_and_log(CurrentSpeed, self.currentSpeedSender, 0.0, action, buff)
-            self._send_and_log(CurrentSteer, self.currentSteerSender, 0.0, action, buff)
+            self._send_and_log(CURRENT_SPEED, self.currentSpeedSender, 0.0, action, buff)
+            self._send_and_log(CURRENT_STEER, self.currentSteerSender, 0.0, action, buff)
 
         elif action == "speed":
             speed = self._first_payload_field(value)
             if self.is_float(speed):
                 speed_value = float(speed)
-                self._send_and_log(CurrentSpeed, self.currentSpeedSender, speed_value, action, buff)
+                self._send_and_log(CURRENT_SPEED, self.currentSpeedSender, speed_value, action, buff)
                 self._log_feedback_value("speed", speed_value)
             else:
                 self._log_ignored_frame(buff, f"speed is not numeric: {speed!r}", warning=True)
@@ -229,7 +213,7 @@ class threadRead(ThreadWithStop):
             steer = self._first_payload_field(value)
             if self.is_float(steer):
                 steer_value = float(steer)
-                self._send_and_log(CurrentSteer, self.currentSteerSender, steer_value, action, buff)
+                self._send_and_log(CURRENT_STEER, self.currentSteerSender, steer_value, action, buff)
                 self._log_feedback_value("steer", steer_value)
             else:
                 self._log_ignored_frame(buff, f"steer is not numeric: {steer!r}", warning=True)
@@ -239,7 +223,7 @@ class threadRead(ThreadWithStop):
             if self.is_float(distance):
                 distance_mm = int(float(distance))
                 self._send_and_log(
-                    CurrentDistance,
+                    CURRENT_DISTANCE,
                     self.currentDistanceSender,
                     distance_mm,
                     action,
@@ -262,10 +246,10 @@ class threadRead(ThreadWithStop):
             steerPWM = fields[1]
 
             if speedPWM == "0" and steerPWM == "0":
-                self._send_and_log(CalibRunDone, self.calibRunDoneSender, True, action, buff)
+                self._send_and_log(CALIB_RUN_DONE, self.calibRunDoneSender, True, action, buff)
             else:
                 self._send_and_log(
-                    CalibPWMData,
+                    CALIB_PWM_DATA,
                     self.calibPWMDataSender,
                     {"speedPWM": speedPWM, "steerPWM": steerPWM},
                     action,
@@ -276,7 +260,7 @@ class threadRead(ThreadWithStop):
             self._log_ack(action, value, buff)
 
         elif action == "alive":
-            self._send_and_log(AliveSignal, self.aliveSignalSender, True, action, buff)
+            self._send_and_log(ALIVE_SIGNAL, self.aliveSignalSender, True, action, buff)
 
         elif action == "steerLimits":
             fields = self._payload_fields(value)
@@ -286,7 +270,7 @@ class threadRead(ThreadWithStop):
             lowerLimit = fields[0]
             upperLimit = fields[1]
             self._send_and_log(
-                SteeringLimits,
+                STEERING_LIMITS,
                 self.steeringLimitsSender,
                 {"lowerLimit": lowerLimit, "upperLimit": upperLimit},
                 action,
@@ -297,7 +281,7 @@ class threadRead(ThreadWithStop):
             current = self._first_payload_field(value)
             if self.check_valid_value(action, current):
                 self._send_and_log(
-                    InstantConsumption,
+                    INSTANT_CONSUMPTION,
                     self.instantConsumptionSender,
                     float(current),
                     action,
@@ -309,14 +293,14 @@ class threadRead(ThreadWithStop):
             if self.check_valid_value(action, voltage):
                 percentage = (int(float(voltage)) - 7000) / 14
                 percentage = max(0, min(100, round(percentage)))
-                self._send_and_log(BatteryLvl, self.batteryLvlSender, percentage, action, buff)
+                self._send_and_log(BATTERY_LVL, self.batteryLvlSender, percentage, action, buff)
 
         elif action == "resourceMonitor":
             if self.check_valid_value(action, value):
                 data = re.match(self.resourceMonitorPattern, value)
                 if data:
                     message = {"heap": data.group(1), "stack": data.group(2)}
-                    self._send_and_log(ResourceMonitor, self.resourceMonitorSender, message, action, buff)
+                    self._send_and_log(RESOURCE_MONITOR, self.resourceMonitorSender, message, action, buff)
                 else:
                     self._log_ignored_frame(buff, "resourceMonitor regex did not match", warning=True)
 
@@ -325,7 +309,7 @@ class threadRead(ThreadWithStop):
             if data:
                 warning_value = f"{data.group(1)}:{data.group(2)}:{data.group(3)}"
                 print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;93mWARNING\033[0m - Shutdown in \033[94m{data.group(1)}h {data.group(2)}m {data.group(3)}s\033[0m")
-                self._send_and_log(ShutDownSignal, self.warningSender, warning_value, action, buff)
+                self._send_and_log(SHUT_DOWN_SIGNAL, self.warningSender, warning_value, action, buff)
             else:
                 self._log_ignored_frame(buff, "warning regex did not match", warning=True)
 

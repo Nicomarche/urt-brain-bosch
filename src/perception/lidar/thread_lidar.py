@@ -7,17 +7,12 @@ from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 import config
-from src.core.messaging.allMessages import LidarScanMsg, LidarStatusMsg
+from src.core.bus.topics import LIDAR_SCAN_MSG, LIDAR_STATUS_MSG
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.types.lidar import LidarHealth, LidarObstacle, LidarPoint, LidarScan
 from src.core.types.pose import PoseEstimate
 from src.perception.lidar.processing import (
-    RollingLidarBuffer,
-    cluster_obstacles,
-    raw_points_to_body_points,
-    scan_from_points,
-    signed_angle_rad,
-    transform_obstacles_to_world,
+    RollingLidarBuffer, cluster_obstacles, raw_points_to_body_points, scan_from_points, signed_angle_rad, transform_obstacles_to_world,
 )
 from src.perception.lidar.reader import LidarPortNotConfigured, LidarReader
 from src.templates.threadwithstop import ThreadWithStop
@@ -50,8 +45,8 @@ class threadLidar(ThreadWithStop):
         self._pose_buf = pose_estimate_buffer
         self._enabled = bool(getattr(config, "LIDAR_ENABLED", True))
         self._backend = str(getattr(config, "LIDAR_BACKEND", "zmq")).lower()
-        self._scan_sender = messageHandlerSender(queuesList, LidarScanMsg)
-        self._status_sender = messageHandlerSender(queuesList, LidarStatusMsg)
+        self._scan_sender = messageHandlerSender(queuesList, LIDAR_SCAN_MSG)
+        self._status_sender = messageHandlerSender(queuesList, LIDAR_STATUS_MSG)
         self._rolling = RollingLidarBuffer(
             ttl_s=float(getattr(config, "LIDAR_ROLLING_TTL_S", 0.5))
         )
@@ -196,7 +191,7 @@ class threadLidar(ThreadWithStop):
             self._scan_sender.send(_serialize_scan(scan, obstacles))
         except Exception:
             if self.logging is not None:
-                self.logging.exception("failed to publish LidarScanMsg")
+                self.logging.exception("failed to publish LIDAR_SCAN_MSG")
         self._publish_status("ok", "scan fresh", scan=scan, obstacles=obstacles)
 
         live_log(
