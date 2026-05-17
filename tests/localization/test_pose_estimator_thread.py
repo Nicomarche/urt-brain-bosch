@@ -418,6 +418,10 @@ def test_apply_localisation_fix_manual_pose_teleports_sim(monkeypatch) -> None:
     estimator._last_absolute_yaw_fix_source = None
     estimator._last_yaw_rad = 0.0
     estimator._yaw_ekf_p = 0.0
+    estimator._last_raw_imu = None
+    estimator._last_imu_t = None
+    estimator._pending_yaw_offset_target_rad = None
+    estimator._yaw_offset_calibrated = False
     estimator.tracking_state = SimpleNamespace(
         set_lane_measurement_state=lambda *_args, **_kwargs: None
     )
@@ -490,6 +494,7 @@ def test_manual_dashboard_relocates_even_without_recent_gps(monkeypatch) -> None
         (2.5, -1.25, math.radians(45.0)),
         abs=1e-9,
     )
+    assert estimator._pending_yaw_offset_target_rad == pytest.approx(math.radians(45.0))
 
 
 def test_manual_dashboard_calibrates_gps_when_recent_fix_exists(monkeypatch) -> None:
@@ -543,6 +548,44 @@ def test_manual_dashboard_calibrates_gps_when_recent_fix_exists(monkeypatch) -> 
         (2.5, -1.25, math.radians(45.0)),
         abs=1e-9,
     )
+
+
+def test_initial_world_pose_uses_saved_start_for_real_and_sim(monkeypatch) -> None:
+    saved_pose = (4.0, -2.0, math.radians(30.0))
+    default_pose = (0.0, 0.0, 0.0)
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._graph = SimpleNamespace(get_start_pose=lambda: default_pose)
+
+    monkeypatch.setattr(
+        "src.localization.pose_estimator_thread.resolve_saved_start_pose",
+        lambda graph, default=None: saved_pose,
+    )
+
+    assert estimator._resolve_initial_world_pose() == saved_pose
+
+
+def test_startup_gps_calibration_anchors_first_fix_to_start(monkeypatch) -> None:
+    import config as cfg
+
+    monkeypatch.setattr(cfg, "MOTOR_OUTPUT", "serial", raising=False)
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._startup_world_pose = (5.0, 7.5, math.radians(90.0))
+    estimator._startup_gps_calibration_pending = True
+    estimator._gps_calibration_offset_xy = None
+    estimator._last_raw_imu = None
+    estimator._last_imu_t = None
+    estimator._pending_yaw_offset_target_rad = None
+    estimator._yaw_offset_calibrated = False
+
+    calibrated = estimator._apply_startup_gps_calibration_if_pending(
+        {"world_x": 4.5, "world_y": 8.0, "meta": {"source": "gps_localisation"}}
+    )
+
+    assert calibrated is True
+    assert estimator._startup_gps_calibration_pending is False
+    assert estimator._gps_calibration_offset_xy == pytest.approx((0.5, -0.5))
+    assert estimator._pending_yaw_offset_target_rad == pytest.approx(math.radians(90.0))
 
 
 def test_receive_localisation_fix_prefers_manual_over_newer_gps() -> None:

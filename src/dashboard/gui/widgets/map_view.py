@@ -522,9 +522,15 @@ class MapView(QWidget):
             self._save_start_btn = QPushButton("Save start")
             self._save_start_btn.setToolTip(
                 "Stop only: save the current car pose into "
-                "config/sim_start_pose.json so the next sim run starts there."
+                "config/sim_start_pose.json so startup calibration uses it."
             )
             self._save_start_btn.clicked.connect(self._save_current_pose_as_start)
+            self._calibrate_start_btn = QPushButton("Calibrate start")
+            self._calibrate_start_btn.setToolTip(
+                "Stop only: mark the car as physically sitting at the saved "
+                "start pose, recalibrating IMU yaw and GPS if a fix is fresh."
+            )
+            self._calibrate_start_btn.clicked.connect(self._calibrate_to_saved_start)
             self._start_pose_label = QLabel()
             self._start_pose_label.setMinimumWidth(0)
             self._start_pose_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
@@ -610,6 +616,7 @@ class MapView(QWidget):
             toolbar.addWidget(clear_route_btn)
             toolbar.addWidget(self._relocate_btn)
             toolbar.addWidget(self._save_start_btn)
+            toolbar.addWidget(self._calibrate_start_btn)
             toolbar.addSpacing(10)
             toolbar.addWidget(self._map_edit_btn)
             toolbar.addStretch(1)
@@ -1238,6 +1245,51 @@ class MapView(QWidget):
             payload["lanelet_id"] = str(lanelet_id)
         return payload
 
+    def _saved_start_localisation_payload(self) -> dict[str, object] | None:
+        pose = self._saved_start_pose
+        if not isinstance(pose, dict):
+            return None
+        try:
+            x_m = float(pose["world_x"])
+            y_m = float(pose["world_y"])
+            yaw_deg = float(
+                pose.get("yaw_deg")
+                if pose.get("yaw_deg") is not None
+                else math.degrees(float(pose["yaw_rad"]))
+                if pose.get("yaw_rad") is not None
+                else self._last_location_yaw_deg
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+        lanelet_id = pose.get("lanelet_id")
+        lanelet_text = str(lanelet_id).strip() if lanelet_id is not None else ""
+        if not lanelet_text:
+            lanelet_text = self._resolve_lanelet_id_for_pose(x_m, y_m, yaw_deg=yaw_deg) or ""
+
+        payload: dict[str, object] = {
+            "world_x": round(float(x_m), 6),
+            "world_y": round(float(y_m), 6),
+            "posA": round(float(x_m), 6),
+            "posB": round(float(y_m), 6),
+            "rotA": 0.0,
+            "rotB": 0.0,
+            "yaw_deg": round(float(yaw_deg), 3),
+            "timestamp": _time.time(),
+            "meta": {
+                "source": "manual_dashboard_start_calibration",
+                "manual": True,
+                "gps_calibration": True,
+                "start_calibration": True,
+            },
+        }
+        gps_sample = self._gps_calibration_sample()
+        if gps_sample is not None:
+            payload.update(gps_sample)
+        if lanelet_text:
+            payload["lanelet_id"] = lanelet_text
+        return payload
+
     def _saved_start_pose_payload(self) -> dict[str, object] | None:
         if not isinstance(self._last_pose_snapshot, dict):
             return None
@@ -1293,13 +1345,13 @@ class MapView(QWidget):
                 self._start_pose_label.setText(f"Start: ({x_m:.2f}, {y_m:.2f})")
                 self._start_pose_label.setStyleSheet("color:#8fd19e; font-size: 10pt;")
                 self._start_pose_label.setToolTip(
-                    f"Saved sim start pose for this map.\nYaw: {yaw_deg:.1f}°\n{config_hint}"
+                    f"Saved start pose for this map.\nYaw: {yaw_deg:.1f}°\n{config_hint}"
                 )
                 return
         self._start_pose_label.setText("Start: default")
         self._start_pose_label.setStyleSheet("color:#666; font-size: 10pt;")
         self._start_pose_label.setToolTip(
-            f"No saved sim start pose for this map.\n{config_hint}"
+            f"No saved start pose for this map.\n{config_hint}"
         )
 
     def _refresh_manual_pose_controls(self) -> None:
@@ -1314,6 +1366,8 @@ class MapView(QWidget):
         self._relocate_btn.setEnabled(can_edit_pose)
         if hasattr(self, "_save_start_btn"):
             self._save_start_btn.setEnabled(can_edit_pose and self._last_pose_snapshot is not None)
+        if hasattr(self, "_calibrate_start_btn"):
+            self._calibrate_start_btn.setEnabled(can_edit_pose and isinstance(self._saved_start_pose, dict))
 
     def _save_current_pose_as_start(self) -> None:
         if not self._is_stop_mode():
@@ -1334,6 +1388,41 @@ class MapView(QWidget):
         self._location_label.setText(
             f"Start saved → ({float(payload['world_x']):.2f}, {float(payload['world_y']):.2f}) m"
         )
+
+    def _calibrate_to_saved_start(self) -> None:
+        if not self._is_stop_mode():
+            self._location_label.setText("Start calibration is only available in Stop mode")
+            return
+        payload = self._saved_start_localisation_payload()
+        if payload is None:
+            self._location_label.setText("No saved start pose available")
+            self._refresh_manual_pose_controls()
+            return
+        try:
+            x_m = float(payload["world_x"])
+            y_m = float(payload["world_y"])
+            yaw_deg = float(payload.get("yaw_deg", self._last_location_yaw_deg))
+        except (KeyError, TypeError, ValueError):
+            self._location_label.setText("Saved start pose is invalid")
+            return
+        lanelet_id = payload.get("lanelet_id")
+        self._remember_pose_snapshot(
+            x_m,
+            y_m,
+            yaw_deg,
+            lanelet_id=str(lanelet_id) if lanelet_id is not None else None,
+        )
+        self._set_cursor_pose(x_m, y_m, yaw_deg)
+        self._client.emit_message(ev.CMD_LOCALISATION, payload)
+        gps_raw_x = payload.get("gps_raw_world_x")
+        gps_raw_y = payload.get("gps_raw_world_y")
+        if gps_raw_x is not None and gps_raw_y is not None:
+            self._location_label.setText(
+                f"Start calibrated → ({x_m:.2f}, {y_m:.2f}) m "
+                f"from GPS ({float(gps_raw_x):.2f}, {float(gps_raw_y):.2f})"
+            )
+            return
+        self._location_label.setText(f"Start calibrated → ({x_m:.2f}, {y_m:.2f}) m")
 
     # ------------------------------------------------------------------
     # Backend → us

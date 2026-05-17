@@ -141,6 +141,7 @@ class threadPoseEstimator(threadTracking):
         self._last_gps_raw_xy: tuple[float, float] | None = None
         self._last_gps_raw_monotonic = 0.0
         self._gps_calibration_offset_xy: tuple[float, float] | None = None
+        self._startup_gps_calibration_pending = False
         self._gps_fix_history = deque(maxlen=max(10, _AUTO_GPS_SAMPLE_COUNT * 3))
         self._auto_gps_pending = False
         self._auto_gps_started_monotonic = 0.0
@@ -151,16 +152,12 @@ class threadPoseEstimator(threadTracking):
         self._auto_gps_last_mode_monotonic = 0.0
         self._pending_yaw_offset_target_rad: float | None = None
         self._startup_world_pose = self._resolve_initial_world_pose()
+        self._startup_gps_calibration_pending = (
+            self._startup_world_pose is not None
+            and self._gps_dashboard_calibration_enabled()
+        )
         self._apply_start_pose_override()
         self._send_sim_relocalize()
-
-    @staticmethod
-    def _sim_start_pose_enabled() -> bool:
-        try:
-            from config import MOTOR_OUTPUT
-        except ImportError:
-            return False
-        return MOTOR_OUTPUT == "zmq"
 
     @staticmethod
     def _gps_dashboard_calibration_enabled() -> bool:
@@ -576,12 +573,38 @@ class threadPoseEstimator(threadTracking):
         adjusted_payload["meta"] = adjusted_meta
         return adjusted_payload, adjusted_meta
 
+    def _apply_startup_gps_calibration_if_pending(self, payload: dict) -> bool:
+        if not bool(getattr(self, "_startup_gps_calibration_pending", False)):
+            return False
+        if not self._gps_dashboard_calibration_enabled():
+            self._startup_gps_calibration_pending = False
+            return False
+        pose = getattr(self, "_startup_world_pose", None)
+        if pose is None:
+            self._startup_gps_calibration_pending = False
+            return False
+        raw_xy = self._payload_xy(payload)
+        if raw_xy is None:
+            return False
+        target_x, target_y, target_yaw = pose
+        raw_x, raw_y = raw_xy
+        offset_x = float(target_x) - float(raw_x)
+        offset_y = float(target_y) - float(raw_y)
+        self._gps_calibration_offset_xy = (offset_x, offset_y)
+        self._startup_gps_calibration_pending = False
+        self._calibrate_imu_yaw_offset_to(float(target_yaw))
+        print(
+            "\033[1;97m[ PoseEstimator ] :\033[0m \033[1;92mINFO\033[0m"
+            f" - Startup GPS calibrated to saved start: raw ({float(raw_x):.3f}, {float(raw_y):.3f}) -> "
+            f"start ({float(target_x):.3f}, {float(target_y):.3f}); "
+            f"offset=({offset_x:.3f}, {offset_y:.3f})"
+        )
+        return True
+
     def _resolve_initial_world_pose(self) -> tuple[float, float, float] | None:
         if self._graph is None:
             return None
         default_pose = self._graph.get_start_pose()
-        if not self._sim_start_pose_enabled():
-            return default_pose
         return resolve_saved_start_pose(self._graph, default=default_pose)
 
     def _apply_start_pose_override(self) -> None:
@@ -875,6 +898,7 @@ class threadPoseEstimator(threadTracking):
         source = self._localisation_source(payload, meta, default_source)
         if source.strip().lower() == "gps_localisation":
             self._remember_gps_raw_fix(payload)
+            self._apply_startup_gps_calibration_if_pending(payload)
             payload, meta = self._apply_gps_calibration_offset(payload, meta)
             self._remember_auto_gps_fix(payload, meta, now_mono)
             return self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
@@ -911,6 +935,8 @@ class threadPoseEstimator(threadTracking):
         self._dr.reset(float(x), float(y), float(yaw))
         self._last_yaw_rad = float(yaw)
         self._yaw_ekf_p = _YAW_EKF_P_INIT
+        if bool(meta.get("manual")):
+            self._calibrate_imu_yaw_offset_to(float(yaw))
         if payload.get("yaw_rad") is not None or payload.get("yaw_deg") is not None:
             self._last_absolute_yaw_fix_monotonic = time.monotonic()
             self._last_absolute_yaw_fix_source = str(meta.get("source") or payload.get("source") or "gps_localisation")

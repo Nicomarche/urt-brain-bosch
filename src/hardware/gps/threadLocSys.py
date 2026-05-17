@@ -134,6 +134,7 @@ _JSON_DECODER = json.JSONDecoder()
 _AUTO_HOST_TOKENS = {"", "auto", "autodiscover", "autodiscovery", "discover"}
 _WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 _TRACK_WORLD_BOUNDS_CACHE: dict[str, float] | None = None
+_TRACK_WORLD_Y_AXIS_INVERTED_CACHE: bool | None = None
 
 
 class _TrafficRequestNotRecognised(RuntimeError):
@@ -268,6 +269,31 @@ def _tracking_world_bounds() -> dict[str, float] | None:
         return None
     _TRACK_WORLD_BOUNDS_CACHE = dict(bounds)
     return dict(bounds)
+
+
+def _tracking_world_y_axis_inverted() -> bool:
+    """Whether the Lanelet/OSM world Y grows upward on the rendered track."""
+    global _TRACK_WORLD_Y_AXIS_INVERTED_CACHE
+    if _TRACK_WORLD_Y_AXIS_INVERTED_CACHE is not None:
+        return bool(_TRACK_WORLD_Y_AXIS_INVERTED_CACHE)
+    if not _TRACKING_META_JSON:
+        _TRACK_WORLD_Y_AXIS_INVERTED_CACHE = True
+        return True
+    meta_path = _repo_path(str(_TRACKING_META_JSON))
+    if not meta_path.exists():
+        _TRACK_WORLD_Y_AXIS_INVERTED_CACHE = True
+        return True
+    try:
+        with meta_path.open("r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        _TRACK_WORLD_Y_AXIS_INVERTED_CACHE = True
+        return True
+    if not isinstance(meta, dict):
+        _TRACK_WORLD_Y_AXIS_INVERTED_CACHE = True
+        return True
+    _TRACK_WORLD_Y_AXIS_INVERTED_CACHE = bool(meta.get("y_axis_inverted", True))
+    return bool(_TRACK_WORLD_Y_AXIS_INVERTED_CACHE)
 
 
 def _traffic_public_key_candidates() -> list[Path]:
@@ -663,8 +689,9 @@ class threadLocSys(ThreadWithStop):
         """Convert locIDsub coordinates into the Lanelet/OSM world frame.
 
         The BFMC TrafficCommunicationServer reports its `location` stream in a
-        track image frame: (0, 0) at the lower-left corner, +x to the right and
-        +y upward. The rest of the brain consumes Lanelet/OSM world coordinates.
+        track frame: (0, 0) at the lower-left corner, +x to the right and +y
+        upward. The rest of the brain consumes Lanelet/OSM world coordinates,
+        whose Y direction depends on the active track metadata.
         """
         coord_scale = float(_TRAFFIC_COMM_LOCSYS_SUB_COORD_SCALE)
         raw_x_m = float(x) * coord_scale
@@ -685,6 +712,7 @@ class threadLocSys(ThreadWithStop):
                 "world_bounds_y_min": None,
                 "world_bounds_y_max": None,
                 "frame_in_bounds": True,
+                "world_y_axis_inverted": True,
             }
 
         bounds = _tracking_world_bounds() or {}
@@ -735,8 +763,17 @@ class threadLocSys(ThreadWithStop):
                 f"coord frame {frame!r}; using track_bottom_left semantics",
                 flush=True,
             )
+        world_y_axis_inverted = _tracking_world_y_axis_inverted()
         world_x = float(x_min) + raw_x_m * frame_scale_x
-        world_y = float(y_min) + raw_y_m * frame_scale_y
+        if world_y_axis_inverted:
+            world_y = float(y_min) + raw_y_m * frame_scale_y
+        else:
+            y_max = (
+                float(bounds["y_max"])
+                if "y_max" in bounds
+                else float(y_min) + float(map_height_m or raw_y_m)
+            )
+            world_y = y_max - raw_y_m * frame_scale_y
         in_bounds = True
         if map_width_m is not None and map_width_m > 1e-9:
             in_bounds = in_bounds and (-0.05 <= raw_x_m <= float(map_width_m) + 0.05)
@@ -764,6 +801,7 @@ class threadLocSys(ThreadWithStop):
             "world_bounds_y_min": float(bounds["y_min"]) if "y_min" in bounds else None,
             "world_bounds_y_max": float(bounds["y_max"]) if "y_max" in bounds else None,
             "frame_in_bounds": bool(in_bounds),
+            "world_y_axis_inverted": bool(world_y_axis_inverted),
         }
 
     def _world_xy_to_traffic_subscription_frame(self, x: float, y: float) -> tuple[float, float]:
@@ -779,7 +817,14 @@ class threadLocSys(ThreadWithStop):
         origin_x = float(transform_meta["origin_world_x"])
         origin_y = float(transform_meta["origin_world_y"])
         traffic_x = (float(x) - origin_x) / frame_scale_x / coord_scale
-        traffic_y = (float(y) - origin_y) / frame_scale_y / coord_scale
+        if bool(transform_meta.get("world_y_axis_inverted", True)):
+            traffic_y = (float(y) - origin_y) / frame_scale_y / coord_scale
+        else:
+            y_max = transform_meta.get("world_bounds_y_max")
+            if y_max is None:
+                frame_height_m = float(transform_meta.get("frame_height_m") or 0.0)
+                y_max = origin_y + frame_height_m * frame_scale_y
+            traffic_y = (float(y_max) - float(y)) / frame_scale_y / coord_scale
         return traffic_x, traffic_y
 
     def _receive_traffic_inputs(self) -> None:
@@ -942,6 +987,7 @@ class threadLocSys(ThreadWithStop):
             "gps_world_bounds_y_min",
             "gps_world_bounds_y_max",
             "gps_frame_in_bounds",
+            "gps_world_y_axis_inverted",
         ):
             if key in data:
                 payload[key] = data[key]
@@ -1015,6 +1061,7 @@ class threadLocSys(ThreadWithStop):
             "gps_world_bounds_y_min": transform_meta["world_bounds_y_min"],
             "gps_world_bounds_y_max": transform_meta["world_bounds_y_max"],
             "gps_frame_in_bounds": transform_meta["frame_in_bounds"],
+            "gps_world_y_axis_inverted": transform_meta["world_y_axis_inverted"],
         }
         z = self._as_float(data.get("z"))
         if z is not None:
@@ -1029,10 +1076,92 @@ class threadLocSys(ThreadWithStop):
             f"{float(transform_meta['frame_scale_y']):.6f}) "
             f"frame_size=({float(transform_meta['frame_width_m'] or 0.0):.3f},"
             f"{float(transform_meta['frame_height_m'] or 0.0):.3f}) "
+            f"world_y_axis_inverted={bool(transform_meta['world_y_axis_inverted'])} "
             f"in_bounds={bool(transform_meta['frame_in_bounds'])} "
             f"world x={fix['x']:.6f} y={fix['y']:.6f}",
             flush=True,
         )
+
+        yaw_rad = self._as_float(data.get("yaw_rad"))
+        if yaw_rad is not None:
+            fix["yaw_rad"] = yaw_rad
+        else:
+            yaw_deg = self._as_float(data.get("yaw_deg", data.get("yaw")))
+            if yaw_deg is not None:
+                fix["yaw_deg"] = yaw_deg
+        return fix
+
+    def _locsys_device_fix_from_message(self, data: dict) -> dict | None:
+        """Normalize locsysDevice coordinates before publishing Localisation.
+
+        In the simulator the direct LoCSys stream is already in the map/world
+        frame. On the real car, the locsysDevice coordinates follow the same
+        track-bottom-left convention as locIDsub: (0, 0) bottom-left, x+ right,
+        y+ up.
+        """
+        if not isinstance(data, dict):
+            return None
+        candidates = (
+            ("x", "y"),
+            ("posA", "posB"),
+            ("value1", "value2"),
+            ("world_x", "world_y"),
+        )
+        x = y = None
+        keys = ("", "")
+        for x_key, y_key in candidates:
+            x = self._as_float(data.get(x_key))
+            y = self._as_float(data.get(y_key))
+            if x is not None and y is not None:
+                keys = (x_key, y_key)
+                break
+        if x is None or y is None:
+            return None
+
+        if bool(getattr(self, "_sim_mode", False)) or keys == ("world_x", "world_y"):
+            fix: dict[str, object] = {
+                "x": float(x),
+                "y": float(y),
+                "gps_coord_frame": "world",
+                "gps_coord_scale": 1.0,
+                "gps_frame_scale_x": 1.0,
+                "gps_frame_scale_y": 1.0,
+                "gps_origin_world_x": 0.0,
+                "gps_origin_world_y": 0.0,
+                "gps_frame_width_m": None,
+                "gps_frame_height_m": None,
+                "gps_world_bounds_x_min": None,
+                "gps_world_bounds_x_max": None,
+                "gps_world_bounds_y_min": None,
+                "gps_world_bounds_y_max": None,
+                "gps_frame_in_bounds": True,
+                "gps_world_y_axis_inverted": True,
+            }
+        else:
+            world_x, world_y, transform_meta = self._traffic_subscription_xy_to_world(x, y)
+            fix = {
+                "x": world_x,
+                "y": world_y,
+                "gps_raw_traffic_x": x,
+                "gps_raw_traffic_y": y,
+                "gps_coord_frame": transform_meta["coord_frame"],
+                "gps_coord_scale": transform_meta["coord_scale"],
+                "gps_frame_scale_x": transform_meta["frame_scale_x"],
+                "gps_frame_scale_y": transform_meta["frame_scale_y"],
+                "gps_origin_world_x": transform_meta["origin_world_x"],
+                "gps_origin_world_y": transform_meta["origin_world_y"],
+                "gps_frame_width_m": transform_meta["frame_width_m"],
+                "gps_frame_height_m": transform_meta["frame_height_m"],
+                "gps_world_bounds_x_min": transform_meta["world_bounds_x_min"],
+                "gps_world_bounds_x_max": transform_meta["world_bounds_x_max"],
+                "gps_world_bounds_y_min": transform_meta["world_bounds_y_min"],
+                "gps_world_bounds_y_max": transform_meta["world_bounds_y_max"],
+                "gps_frame_in_bounds": transform_meta["frame_in_bounds"],
+                "gps_world_y_axis_inverted": transform_meta["world_y_axis_inverted"],
+            }
+            z = self._as_float(data.get("z"))
+            if z is not None:
+                fix["gps_raw_traffic_z"] = z
 
         yaw_rad = self._as_float(data.get("yaw_rad"))
         if yaw_rad is not None:
@@ -1265,7 +1394,14 @@ class threadLocSys(ThreadWithStop):
                     objects, buffer = _extract_json_objects(buffer)
                     for data in objects:
                         try:
-                            self._emit_fix(data)
+                            fix = self._locsys_device_fix_from_message(data)
+                            if fix is not None:
+                                self._emit_fix(fix)
+                            else:
+                                print(
+                                    f"[GPS-DBG] thread_work: non-location msg ignored: {data!r}",
+                                    flush=True,
+                                )
                         except (KeyError, ValueError, TypeError) as exc:
                             print(
                                 f"[GPS-DBG] thread_work: parse/_emit_fix error "
