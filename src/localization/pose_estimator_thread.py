@@ -15,25 +15,17 @@ from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_GAIN,
     _CAMERA_LATERAL_CORRECTION_MAX_M,
     _CAMERA_LATERAL_CORRECTION_STEP_MAX_M,
-    _IMU_STEER_INHIBIT_DEG,
     _IMU_YAW_SIGN,
     _MAX_INTEGRATION_DT,
-    _MAX_PHYSICAL_YAW_RATE_RADS,
     _SEMANTIC_RELOCALIZATION_COOLDOWN_S,
     _SEMANTIC_RELOCALIZATION_DISTANCE_TOLERANCE_M,
     _SEMANTIC_RELOCALIZATION_MAX_DISTANCE_M,
     _SEMANTIC_RELOCALIZATION_MAX_MAP_ERROR_M,
-    _STEER_GAIN_DR,
-    _STEER_LAG_ALPHA,
     _VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS,
     _VISUAL_STOPLINE_EVENT_MAX_AGE_S,
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M,
     _VISUAL_STOPLINE_RELOCALIZATION_COOLDOWN_S,
-    _WHEELBASE_M,
     _YAW_EKF_P_INIT,
-    _YAW_EKF_Q,
-    _YAW_EKF_R_STRAIGHT,
-    _YAW_EKF_R_STEER_K,
     threadTracking,
 )
 from src.core.messaging.allMessages import Localisation, OdoReset
@@ -981,12 +973,14 @@ class threadPoseEstimator(threadTracking):
         self._resolve_speed_mps(now)
         self._last_steer_rad = self._resolve_steer_rad(now)
 
+        yaw_start_rad = float(self._last_yaw_rad)
+        yaw_end_rad = yaw_start_rad
+
         imu_raw = self._imu_sub.receive()
         if imu_raw is not None:
             try:
                 imu_dict = ast.literal_eval(str(imu_raw))
                 self._last_raw_imu = imu_dict
-                prev_imu_t = self._last_imu_t
                 self._last_imu_t = now
                 yaw_deg = float(imu_dict.get("yaw", math.degrees(self._last_yaw_rad)))
                 yaw_raw_rad = _IMU_YAW_SIGN * math.radians(yaw_deg)
@@ -999,25 +993,7 @@ class threadPoseEstimator(threadTracking):
                     self._yaw_offset = target_yaw - yaw_raw_rad
                     self._yaw_offset_calibrated = True
                     self._pending_yaw_offset_target_rad = None
-                elif not self._has_fresh_absolute_yaw_fix(now):
-                    # EKF correction: fuse IMU absolute heading with kinematic prediction.
-                    # R scales with steer²: large steer → servo EMI biases magnetometer
-                    # → kinematic model trusted more. Smooth transition, no hard cutoff.
-                    yaw_imu = yaw_raw_rad + self._yaw_offset
-                    dt_imu = (now - prev_imu_t) if prev_imu_t is not None else 0.05
-                    innov = yaw_imu - self._last_yaw_rad
-                    while innov > math.pi:
-                        innov -= 2.0 * math.pi
-                    while innov < -math.pi:
-                        innov += 2.0 * math.pi
-                    # Rate-limit innovation to reject servo-EMI step spikes
-                    max_innov = _MAX_PHYSICAL_YAW_RATE_RADS * max(dt_imu, 0.02)
-                    innov = max(-max_innov, min(max_innov, innov))
-                    # Kalman gain: R grows with steer² → IMU less reliable when turning
-                    R_imu = _YAW_EKF_R_STRAIGHT + _YAW_EKF_R_STEER_K * (self._steer_filtered_rad ** 2)
-                    K = self._yaw_ekf_p / (self._yaw_ekf_p + R_imu)
-                    self._last_yaw_rad += K * innov
-                    self._yaw_ekf_p = (1.0 - K) * self._yaw_ekf_p
+                yaw_end_rad = yaw_raw_rad + self._yaw_offset
                 self._imu_received = True
             except Exception:
                 pass
@@ -1025,24 +1001,15 @@ class threadPoseEstimator(threadTracking):
         if self._dr is None:
             return
 
-        eff_steer_raw = self._last_steer_rad * _STEER_GAIN_DR
-        self._steer_filtered_rad = (
-            self._steer_filtered_rad
-            + _STEER_LAG_ALPHA * (eff_steer_raw - self._steer_filtered_rad)
-        )
-        eff_steer_rad = self._steer_filtered_rad
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(
+        self._dr.update_from_yaw(
             self._last_speed,
-            self._last_yaw_rad,
+            yaw_start_rad,
+            yaw_end_rad,
             dr_dt,
-            steer_rad=eff_steer_rad,
-            wheelbase_m=_WHEELBASE_M,
         )
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
-        # EKF process noise: covariance grows over time as kinematic drift accumulates
-        self._yaw_ekf_p = min(self._yaw_ekf_p + _YAW_EKF_Q * dr_dt, 1.0)
         raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
 
         route_context, _, _ = self.route_context_buffer.read_latest(with_metadata=True)

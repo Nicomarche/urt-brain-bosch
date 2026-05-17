@@ -97,6 +97,21 @@ class TrackingRelocalizationTests(unittest.TestCase):
         self.assertLess(y, 0.0)
         self.assertLess(yaw, 0.0)
 
+    def test_dead_reckoning_measured_right_yaw_increases_osm_yaw(self):
+        dr = DeadReckoning(0.0, 0.0, 0.0)
+
+        dr.update_from_yaw(
+            speed_mps=0.20,
+            yaw_start_rad=0.0,
+            yaw_end_rad=math.radians(12.0),
+            dt=0.10,
+        )
+
+        x, y, yaw = dr.get_state()
+        self.assertGreater(x, 0.0)
+        self.assertGreater(y, 0.0)
+        self.assertGreater(yaw, 0.0)
+
     def _make_lane_reloc_tracker(self, dr_y=0.10, speed=0.20):
         tracker = threadTracking.__new__(threadTracking)
         tracker._dr = _FakeDR(x=0.0, y=dr_y, yaw=0.0)

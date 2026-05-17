@@ -407,18 +407,17 @@ TRACKING_STEER_SIGN_DR = 1.0
 
 # Signo del yaw IMU antes de sumarlo al offset de calibración.
 #
-#   Real hardware (BNO055): el firmware Nucleo envía yaw CCW-positivo
-#   (convención right-hand rule), así que un giro a la derecha produce
-#   yaw_deg < 0 → necesitamos _IMU_YAW_SIGN = -1 para que yaw_raw_rad
-#   sea positivo (= crece hacia el sur en el frame OSM, que es el +π/2 de la
-#   trayectoria CW-desde-el-este que usa el dead reckoning).
+#   Real hardware observado: un giro a la derecha debe hacer crecer yaw en el
+#   frame OSM/dashboard. Mantenemos +1.0 como default para que el yaw IMU no
+#   quede espejado; si una IMU/firmware concreto publica el signo opuesto, este
+#   valor sigue siendo el override de compatibilidad.
 #
 #   Sim (sim_bridge feedback_yaw_sign=1.0): el simulador integra
 #   ω = +v·tan(δ)/WB, por lo que un giro a la derecha hace crecer
 #   yaw_deg → la negación del hardware daría el signo incorrecto.
 #   Con _IMU_YAW_SIGN = +1 la señal del sim coincide con la convención
 #   del dead reckoning sin invertir.
-TRACKING_IMU_YAW_SIGN = 1.0 if _SIM_MODE else -1.0
+TRACKING_IMU_YAW_SIGN = 1.0
 
 # DEPRECATED: el yaw de sim ya llega en `brain_map` desde `sim_bridge`, así que
 # no hace falta una corrección extra en el brain. Se conserva en config sólo

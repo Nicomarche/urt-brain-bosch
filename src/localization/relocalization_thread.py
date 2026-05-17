@@ -72,10 +72,9 @@ try:
     # `_STEER_SIGN_DR` queda como override de compatibilidad ADEMÁS de esa
     # inversión fija; en la configuración normal debe quedarse en +1.0.
     _STEER_SIGN_DR     = float(getattr(cfg, "TRACKING_STEER_SIGN_DR", 1.0) or 1.0)
-    # Sign applied to raw IMU yaw before EKF fusion.
-    # +1.0 for sim (sim_bridge right-turn → yaw increases, matches the OSM tangent convention).
-    # -1.0 for real hardware (BNO055 CCW-positive = right-turn → yaw decreases).
-    _IMU_YAW_SIGN      = float(getattr(cfg, "TRACKING_IMU_YAW_SIGN", -1.0) or -1.0)
+    # Sign applied to raw IMU yaw before yaw fusion. Default +1.0 matches the
+    # observed OSM/dashboard convention: right turn -> yaw increases.
+    _IMU_YAW_SIGN      = float(getattr(cfg, "TRACKING_IMU_YAW_SIGN", 1.0) or 1.0)
     # True when running against sim_bridge (MOTOR_OUTPUT="zmq").
     _IS_SIM            = getattr(cfg, "MOTOR_OUTPUT", "") == "zmq"
     # First-order lag filter on the steer angle fed to dead reckoning.
@@ -180,7 +179,7 @@ except Exception:
     _WHEELBASE_M       = 0.260
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
-    _IMU_YAW_SIGN      = -1.0   # fallback: real hardware (CCW-positive IMU)
+    _IMU_YAW_SIGN      = 1.0
     _IS_SIM            = False
     _STEER_LAG_ALPHA   = 1.0
     _YAW_EKF_Q          = 1e-4
@@ -1729,7 +1728,8 @@ class threadTracking(ThreadWithStop):
             imu_ok = "✓" if self._imu_received else "✗NO_IMU"
             if imu:
                 imu_yaw_raw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
-                imu_yaw_corrected = imu_yaw_raw + math.degrees(self._yaw_offset)
+                imu_yaw_signed = _IMU_YAW_SIGN * imu_yaw_raw
+                imu_yaw_corrected = imu_yaw_signed + math.degrees(self._yaw_offset)
                 pitch = imu.get("pitch", "?")
                 roll  = imu.get("roll",  "?")
                 cal_str = (
@@ -1737,7 +1737,8 @@ class threadTracking(ThreadWithStop):
                     if self._yaw_offset_calibrated else "uncal"
                 )
                 imu_str = (
-                    f"imu{imu_ok} raw={imu_yaw_raw:.1f}° corr={imu_yaw_corrected:.1f}° "
+                    f"imu{imu_ok} raw={imu_yaw_raw:.1f}° signed={imu_yaw_signed:.1f}° "
+                    f"corr={imu_yaw_corrected:.1f}° "
                     f"({cal_str}) pitch={pitch} roll={roll} (age={imu_age})"
                     f" steer={math.degrees(self._last_steer_rad):.1f}°"
                 )

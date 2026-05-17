@@ -11,6 +11,7 @@ import pytest
 from src.core.types.perception import LaneObservation
 from src.core.types.pose import Pose2D
 from src.core.types.routing import RouteContext
+from src.localization.dead_reckoning import DeadReckoning
 from src.localization.pose_estimator_thread import threadPoseEstimator
 
 
@@ -30,6 +31,17 @@ class _FakeDR:
 
     def correct_yaw(self, yaw_correction_rad: float) -> None:
         self.yaw += float(yaw_correction_rad)
+
+    def update_from_yaw(
+        self,
+        speed_mps: float,
+        yaw_start_rad: float,
+        yaw_end_rad: float,
+        dt: float,
+    ) -> None:
+        self.x += float(speed_mps) * float(dt) * math.cos(float(yaw_end_rad))
+        self.y += float(speed_mps) * float(dt) * math.sin(float(yaw_end_rad))
+        self.yaw = float(yaw_end_rad)
 
     def get_state(self) -> tuple[float, float, float]:
         return self.x, self.y, self.yaw
@@ -63,6 +75,30 @@ class _FakeLaneletMap:
         return self.lanelet if lanelet_id == "lane-a" else None
 
 
+class _CaptureBuffer:
+    def __init__(self, value=None) -> None:
+        self.value = value
+        self.writes = []
+
+    def read_latest(self, *, with_metadata: bool = False):
+        if with_metadata:
+            return self.value, None, None
+        return self.value
+
+    def write(self, value, timestamp=None) -> None:
+        self.writes.append((value, timestamp))
+
+
+class _OneShotSub:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def receive(self):
+        value = self.value
+        self.value = None
+        return value
+
+
 def _make_route_context() -> RouteContext:
     return RouteContext(
         route_active=True,
@@ -80,6 +116,59 @@ def _make_estimator(*, speed_mps: float = 0.20, dr_y: float = 0.05) -> threadPos
     estimator._last_yaw_rad = 0.0
     estimator.tracking_state = SimpleNamespace(last_yaw_correction_deg=0.0)
     return estimator
+
+
+def test_thread_work_uses_imu_yaw_instead_of_steering_for_pose() -> None:
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._dr = DeadReckoning(0.0, 0.0, 0.0)
+    estimator._last_t = time.monotonic() - 0.10
+    estimator._last_speed = 0.20
+    estimator._last_speed_t = None
+    estimator._last_speed_source = "encoder"
+    estimator._last_cmd_speed_t = None
+    estimator._last_steer_rad = 0.0
+    estimator._last_yaw_rad = 0.0
+    estimator._start_yaw_rad = 0.0
+    estimator._yaw_offset = 0.0
+    estimator._yaw_offset_calibrated = True
+    estimator._pending_yaw_offset_target_rad = None
+    estimator._yaw_ekf_p = 0.0
+    estimator._imu_received = False
+    estimator._last_raw_imu = None
+    estimator._last_imu_t = time.monotonic() - 0.10
+    estimator._last_absolute_yaw_fix_monotonic = 0.0
+    estimator._last_absolute_yaw_fix_source = None
+
+    estimator._consume_state_change = lambda: None
+    estimator._resolve_speed_mps = lambda _now: estimator._last_speed
+    estimator._resolve_steer_rad = lambda _now: math.radians(25.0)
+    estimator._imu_sub = _OneShotSub(str({"yaw": 10.0, "roll": 0.0, "pitch": 0.0}))
+    estimator.route_context_buffer = _CaptureBuffer(None)
+    estimator.lane_observation_buffer = _CaptureBuffer(None)
+    estimator.stopline_observation_buffer = _CaptureBuffer(None)
+    estimator.pose_estimate_buffer = _CaptureBuffer(None)
+    estimator._apply_localisation_fix = lambda _current_yaw, _now: (False, None)
+    estimator._consume_sign_observation = lambda _now: None
+    estimator._auto_gps_recent_status = lambda _now: None
+    estimator._publish_location_from_pose_estimate = lambda _pose, _route: None
+    estimator.tracking_state = SimpleNamespace(
+        update_from_pose_estimate=lambda _pose: None,
+        last_yaw_correction_deg=0.0,
+    )
+    estimator._debug_log_enabled = False
+    estimator._debug_log_path = None
+    estimator._frame_idx = 0
+    estimator._log_every = 1
+
+    estimator.thread_work()
+
+    x, y, yaw = estimator._dr.get_state()
+    assert x > 0.0
+    assert y > 0.0
+    assert yaw == pytest.approx(math.radians(10.0), abs=1e-9)
+    pose_estimate, _ = estimator.pose_estimate_buffer.writes[-1]
+    assert pose_estimate.fused_pose.yaw == pytest.approx(math.radians(10.0), abs=1e-9)
+    assert pose_estimate.steer_rad == pytest.approx(math.radians(25.0), abs=1e-9)
 
 
 def test_apply_lane_observation_skips_invalid_single_line_measurement() -> None:

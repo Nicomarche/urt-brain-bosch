@@ -1,5 +1,5 @@
 """
-Dead reckoning position estimator using a kinematic bicycle model.
+Dead reckoning position estimator.
 
 Position is integrated using Runge-Kutta 4th order (RK4), which accounts for
 the heading change *within* each timestep.  This is critical at high speed or
@@ -7,7 +7,12 @@ with large dt (frame drops): Euler integration uses only the start-of-step
 heading, accumulating O(dt²) position error per step, while RK4 reduces that
 to O(dt⁴).
 
-The ODE is integrated directly in the active OSM/map frame:
+The ODE is integrated directly in the active OSM/map frame.  The active
+localization path supplies measured yaw from IMU:
+    dx/dt   = v * cos(yaw_measured)
+    dy/dt   = v * sin(yaw_measured)
+
+The legacy bicycle-model API is still available for older callers:
     dx/dt   = v * cos(yaw)
     dy/dt   = v * sin(yaw)
     dyaw/dt = -(v / L) * tan(steer)
@@ -25,10 +30,10 @@ Project control / Nucleo feedback uses the opposite raw wire steering
 convention (`steer > 0` means right turn), so threadTracking converts it
 before calling this module.
 
-yaw is corrected to IMU absolute heading whenever a fresh IMU sample arrives
-(handled in threadTracking), so heading never accumulates drift.  Only
-position drifts over time — corrected by re-anchoring to a known node whenever
-the car passes close to a stop-line node.
+In the active pose estimator, yaw is provided by IMU absolute heading whenever
+a fresh IMU sample arrives, so steering does not decide the estimated heading.
+Only position drifts over time — corrected by re-anchoring to known map or
+visual references.
 """
 
 import math
@@ -54,7 +59,7 @@ class DeadReckoning:
     # ------------------------------------------------------------------
     def update(self, speed_mps: float, yaw_rad: float, dt: float,
                steer_rad: float = 0.0, wheelbase_m: float = _WHEELBASE_M) -> None:
-        """Integrate one time step using RK4.
+        """Legacy bicycle-model integration using RK4.
 
         RK4 evaluates the heading at the start, midpoint, and end of the step
         so position is accurate even when the car is turning at high speed or
@@ -81,15 +86,63 @@ class DeadReckoning:
         yaw_mid = yaw_rad + (dt * 0.5) * yaw_rate   # heading at t + dt/2
         yaw_end = yaw_rad + dt * yaw_rate             # heading at t + dt
 
+        self._apply_rk4_yaw_trajectory(
+            float(speed_mps),
+            float(yaw_rad),
+            yaw_mid,
+            yaw_end,
+            float(dt),
+        )
+
+    def update_from_yaw(
+        self,
+        speed_mps: float,
+        yaw_start_rad: float,
+        yaw_end_rad: float,
+        dt: float,
+    ) -> None:
+        """Integrate one time step using measured yaw at the start and end.
+
+        This is the active pose-estimator path: position follows the IMU yaw
+        trajectory, not commanded or measured steering angle.
+        """
+        if dt <= 0.0 or dt > 1.0:
+            return
+
+        yaw_start = float(yaw_start_rad)
+        yaw_delta = float(yaw_end_rad) - yaw_start
+        while yaw_delta > math.pi:
+            yaw_delta -= 2.0 * math.pi
+        while yaw_delta < -math.pi:
+            yaw_delta += 2.0 * math.pi
+
+        yaw_mid = yaw_start + 0.5 * yaw_delta
+        yaw_end = yaw_start + yaw_delta
+        self._apply_rk4_yaw_trajectory(
+            float(speed_mps),
+            yaw_start,
+            yaw_mid,
+            yaw_end,
+            float(dt),
+        )
+
+    def _apply_rk4_yaw_trajectory(
+        self,
+        speed_mps: float,
+        yaw_start_rad: float,
+        yaw_mid_rad: float,
+        yaw_end_rad: float,
+        dt: float,
+    ) -> None:
         # k2 == k3 because yaw_rate is constant (straight-line yaw trajectory)
-        k1_x = speed_mps * math.cos(yaw_rad)
-        k1_y = speed_mps * math.sin(yaw_rad)
+        k1_x = speed_mps * math.cos(yaw_start_rad)
+        k1_y = speed_mps * math.sin(yaw_start_rad)
 
-        k24_x = speed_mps * math.cos(yaw_mid)   # k2 and k3 are identical
-        k24_y = speed_mps * math.sin(yaw_mid)
+        k24_x = speed_mps * math.cos(yaw_mid_rad)   # k2 and k3 are identical
+        k24_y = speed_mps * math.sin(yaw_mid_rad)
 
-        k4_x = speed_mps * math.cos(yaw_end)
-        k4_y = speed_mps * math.sin(yaw_end)
+        k4_x = speed_mps * math.cos(yaw_end_rad)
+        k4_y = speed_mps * math.sin(yaw_end_rad)
 
         dx = (dt / 6.0) * (k1_x + 4.0 * k24_x + k4_x)
         dy = (dt / 6.0) * (k1_y + 4.0 * k24_y + k4_y)
@@ -97,7 +150,7 @@ class DeadReckoning:
         with self._lock:
             self._x += dx
             self._y += dy
-            self._yaw = yaw_end
+            self._yaw = yaw_end_rad
 
     def reset(self, x: float, y: float, yaw: float) -> None:
         """Re-anchor position to a known ground truth (e.g. a stop-line node)."""
