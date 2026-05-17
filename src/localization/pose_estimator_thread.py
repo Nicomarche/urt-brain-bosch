@@ -125,8 +125,11 @@ class threadPoseEstimator(threadTracking):
         self._last_camera_lateral_correction_monotonic = 0.0
         self._last_absolute_yaw_fix_monotonic = 0.0
         self._last_absolute_yaw_fix_source = None
+        # Localisation multiplexes dashboard manual fixes and LoCSys GPS fixes.
+        # Keep FIFO here and drain/prioritize in _receive_localisation_fix_payload();
+        # LastOnly can drop a manual relocate if a GPS fix arrives right after it.
         self._localisation_fix_sub = messageHandlerSubscriber(
-            queuesList, Localisation, "lastOnly", subscribe=True
+            queuesList, Localisation, "fifo", subscribe=True
         )
         self._odo_reset_sender = messageHandlerSender(queuesList, OdoReset)
         print(
@@ -196,6 +199,52 @@ class threadPoseEstimator(threadTracking):
     @staticmethod
     def _localisation_source(payload: dict, meta: dict, default_source: str) -> str:
         return str(meta.get("source") or payload.get("source") or default_source)
+
+    @staticmethod
+    def _is_manual_localisation_payload(payload: dict) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        meta = payload.get("meta")
+        if isinstance(meta, dict):
+            if bool(meta.get("manual")):
+                return True
+            source = str(meta.get("source") or "").strip().lower()
+            if source.startswith("manual"):
+                return True
+        source = str(payload.get("source") or "").strip().lower()
+        return source.startswith("manual")
+
+    def _receive_localisation_fix_payload(self):
+        subscriber = getattr(self, "_localisation_fix_sub", None)
+        if subscriber is None:
+            return None
+        payload = subscriber.receive()
+        if payload is None:
+            return None
+
+        latest_payload = payload
+        latest_manual_payload = (
+            payload if self._is_manual_localisation_payload(payload) else None
+        )
+
+        has_more = getattr(subscriber, "is_data_in_pipe", None)
+        if not callable(has_more):
+            return latest_manual_payload or latest_payload
+
+        for _ in range(50):
+            try:
+                if not bool(has_more()):
+                    break
+            except Exception:
+                break
+            next_payload = subscriber.receive()
+            if next_payload is None:
+                break
+            latest_payload = next_payload
+            if self._is_manual_localisation_payload(next_payload):
+                latest_manual_payload = next_payload
+
+        return latest_manual_payload or latest_payload
 
     def _remember_gps_raw_fix(self, payload: dict) -> None:
         xy = self._payload_xy(payload)
@@ -806,7 +855,7 @@ class threadPoseEstimator(threadTracking):
         if self._dr is None or self._graph is None:
             return False, None
         now_mono = time.monotonic() if now is None else float(now)
-        payload = self._localisation_fix_sub.receive()
+        payload = self._receive_localisation_fix_payload()
         if not isinstance(payload, dict):
             self._try_apply_auto_gps_relocalization(current_yaw, now_mono)
             return False, None

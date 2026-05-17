@@ -442,6 +442,74 @@ def test_apply_localisation_fix_manual_pose_teleports_sim(monkeypatch) -> None:
     ]
 
 
+def test_receive_localisation_fix_prefers_manual_over_newer_gps() -> None:
+    class _FakeSubscriber:
+        def __init__(self) -> None:
+            self.payloads = [
+                {
+                    "world_x": 1.0,
+                    "world_y": 2.0,
+                    "meta": {"manual": True, "source": "manual_dashboard"},
+                },
+                {
+                    "world_x": 9.0,
+                    "world_y": 9.0,
+                    "meta": {"source": "gps_localisation"},
+                },
+            ]
+
+        def receive(self):
+            if not self.payloads:
+                return None
+            return self.payloads.pop(0)
+
+        def is_data_in_pipe(self) -> bool:
+            return bool(self.payloads)
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._localisation_fix_sub = _FakeSubscriber()
+
+    payload = estimator._receive_localisation_fix_payload()
+
+    assert payload["world_x"] == pytest.approx(1.0)
+    assert payload["world_y"] == pytest.approx(2.0)
+    assert payload["meta"]["source"] == "manual_dashboard"
+
+
+def test_receive_localisation_fix_uses_latest_gps_when_no_manual() -> None:
+    class _FakeSubscriber:
+        def __init__(self) -> None:
+            self.payloads = [
+                {
+                    "world_x": 1.0,
+                    "world_y": 2.0,
+                    "meta": {"source": "gps_localisation"},
+                },
+                {
+                    "world_x": 3.0,
+                    "world_y": 4.0,
+                    "meta": {"source": "gps_localisation"},
+                },
+            ]
+
+        def receive(self):
+            if not self.payloads:
+                return None
+            return self.payloads.pop(0)
+
+        def is_data_in_pipe(self) -> bool:
+            return bool(self.payloads)
+
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._localisation_fix_sub = _FakeSubscriber()
+
+    payload = estimator._receive_localisation_fix_payload()
+
+    assert payload["world_x"] == pytest.approx(3.0)
+    assert payload["world_y"] == pytest.approx(4.0)
+    assert payload["meta"]["source"] == "gps_localisation"
+
+
 def test_auto_entry_starts_gps_window_and_sends_odometer_reset() -> None:
     sent: list[str] = []
     emptied = {"value": False}
