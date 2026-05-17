@@ -2947,51 +2947,56 @@ def _project_point_to_corridor(
     if axis.shape[0] < 2 or left.shape != axis.shape or right.shape != axis.shape:
         return None
 
-    best: _CorridorProjection | None = None
-    best_dist = math.inf
-    cumulative_arc_m = 0.0
-    px = float(point_xy[0])
-    py = float(point_xy[1])
-    for idx in range(axis.shape[0] - 1):
-        a = axis[idx]
-        b = axis[idx + 1]
-        seg = b - a
-        seg_len_sq = float(np.dot(seg, seg))
-        if seg_len_sq <= 1e-12:
-            continue
-        seg_len = math.sqrt(seg_len_sq)
-        t = ((px - float(a[0])) * float(seg[0]) + (py - float(a[1])) * float(seg[1])) / seg_len_sq
-        t = max(0.0, min(1.0, float(t)))
-        center = a + t * seg
-        dist = float(np.linalg.norm(np.array([px, py], dtype=float) - center))
-        if dist >= best_dist:
-            cumulative_arc_m += seg_len
-            continue
-        left_point = left[idx] + t * (left[idx + 1] - left[idx])
-        right_point = right[idx] + t * (right[idx + 1] - right[idx])
-        span = left_point - right_point
-        width_m = float(np.linalg.norm(span))
-        if width_m > 1e-9:
-            lateral_dir = span / width_m
-            center_point = (left_point + right_point) * 0.5
-        else:
-            nx = -float(seg[1]) / seg_len
-            ny = float(seg[0]) / seg_len
-            lateral_dir = np.array([nx, ny], dtype=float)
-            center_point = np.array(center, copy=True, dtype=float)
-        offset_m = float(np.dot(np.array([px, py], dtype=float) - center_point, lateral_dir))
-        best_dist = dist
-        best = _CorridorProjection(
-            center_point=np.asarray(center_point, dtype=float),
-            left_point=np.asarray(left_point, dtype=float),
-            right_point=np.asarray(right_point, dtype=float),
-            lateral_dir=np.asarray(lateral_dir, dtype=float),
-            center_offset_m=offset_m,
-            width_m=width_m,
-            arc_m=float(cumulative_arc_m + t * seg_len),
-        )
-        cumulative_arc_m += seg_len
-    return best
+    starts = axis[:-1]
+    segs = axis[1:] - starts
+    seg_len_sq = np.einsum("ij,ij->i", segs, segs)
+    valid = seg_len_sq > 1e-12
+    if not bool(np.any(valid)):
+        return None
+
+    point = np.asarray(point_xy, dtype=float)
+    rel = point - starts
+    safe_len_sq = np.where(valid, seg_len_sq, 1.0)
+    t_values = np.einsum("ij,ij->i", rel, segs) / safe_len_sq
+    t_values = np.clip(t_values, 0.0, 1.0)
+
+    centers = starts + (t_values[:, None] * segs)
+    deltas = centers - point
+    dist_sq = np.einsum("ij,ij->i", deltas, deltas)
+    dist_sq = np.where(valid, dist_sq, math.inf)
+    best_idx = int(np.argmin(dist_sq))
+    if not math.isfinite(float(dist_sq[best_idx])):
+        return None
+
+    t = float(t_values[best_idx])
+    seg = segs[best_idx]
+    seg_len = float(math.sqrt(float(seg_len_sq[best_idx])))
+    left_point = left[best_idx] + t * (left[best_idx + 1] - left[best_idx])
+    right_point = right[best_idx] + t * (right[best_idx + 1] - right[best_idx])
+    span = left_point - right_point
+    width_m = float(np.linalg.norm(span))
+    center = centers[best_idx]
+    if width_m > 1e-9:
+        lateral_dir = span / width_m
+        center_point = (left_point + right_point) * 0.5
+    else:
+        nx = -float(seg[1]) / seg_len
+        ny = float(seg[0]) / seg_len
+        lateral_dir = np.array([nx, ny], dtype=float)
+        center_point = np.array(center, copy=True, dtype=float)
+
+    offset_m = float(np.dot(point - center_point, lateral_dir))
+    seg_lens = np.sqrt(np.where(valid, seg_len_sq, 0.0))
+    cumulative = np.concatenate([[0.0], np.cumsum(seg_lens)])
+    return _CorridorProjection(
+        center_point=np.asarray(center_point, dtype=float),
+        left_point=np.asarray(left_point, dtype=float),
+        right_point=np.asarray(right_point, dtype=float),
+        lateral_dir=np.asarray(lateral_dir, dtype=float),
+        center_offset_m=offset_m,
+        width_m=width_m,
+        arc_m=float(cumulative[best_idx] + t * seg_len),
+    )
 
 
 def _safe_half_width_from_span(span_m: float) -> float:
