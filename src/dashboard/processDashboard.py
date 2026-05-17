@@ -83,7 +83,11 @@ class processDashboard(WorkerProcess):
         IpManager.replace_ip_in_file()
 
         self.stateChangeSender = messageHandlerSender(queueList, StateChange)
-        self._current_mode = SystemMode.DEFAULT
+        # StateMachine.initialize_shared_state() starts the brain in STOP, and
+        # the GUI also defaults its mode controls to Stop. Keeping the dashboard
+        # gate in DEFAULT here made first-click manual relocalization look like
+        # it worked in the GUI while Flask rejected it as "not STOP".
+        self._current_mode = self._initial_mode()
 
         self.messages = {}
         self.sendMessages = {}
@@ -151,6 +155,7 @@ class processDashboard(WorkerProcess):
         IpManager.replace_ip_in_file()
         try:
             self.stateMachine = StateMachine.get_instance()
+            self._sync_current_mode_from_state_machine()
         except RuntimeError:
             # Spawn mode: StateMachine class state is not inherited by the child.
             # handle_driving_mode() already handles self.stateMachine being None.
@@ -193,6 +198,26 @@ class processDashboard(WorkerProcess):
         self.socketio.on_event('message', self.handle_message)
         self.socketio.on_event('save', self.handle_save_table_state)
         self.socketio.on_event('load', self.handle_load_table_state)
+
+    @staticmethod
+    def _initial_mode():
+        """Return the mode used before the first StateChange reaches Flask."""
+        return SystemMode.STOP
+
+    def _sync_current_mode_from_state_machine(self):
+        shared_state = getattr(self.stateMachine, "_shared_state", None)
+        if shared_state is None:
+            return
+        try:
+            shared_mode = shared_state.get("mode")
+        except Exception:
+            return
+        if isinstance(shared_mode, SystemMode):
+            self._current_mode = shared_mode
+
+    @staticmethod
+    def _mode_allows_manual_localisation(mode):
+        return mode == SystemMode.STOP
 
     @staticmethod
     def _is_ego_location_payload(payload):
@@ -472,7 +497,7 @@ class processDashboard(WorkerProcess):
                 if (
                     dataName == "Localisation"
                     and self._is_manual_dashboard_localisation(dataDict.get("Value"))
-                    and self._current_mode != SystemMode.STOP
+                    and not self._mode_allows_manual_localisation(self._current_mode)
                 ):
                     print(
                         f"\033[1;97m[ Dashboard ] :\033[0m \033[1;93mWARNING\033[0m"
