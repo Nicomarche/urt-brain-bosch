@@ -140,8 +140,7 @@ class threadPoseEstimator(threadTracking):
         self._odo_reset_sender = messageHandlerSender(queuesList, ODO_RESET)
         print(
             f"[GPS-DBG] PoseEstimatorThread.__init__: _localisation_fix_sub "
-            f"registered (Owner={LOCALISATION.Owner.value} "
-            f"msgID={LOCALISATION.msgID.value})",
+            f"registered (topic={LOCALISATION.name})",
             flush=True,
         )
         self._last_gps_raw_xy: tuple[float, float] | None = None

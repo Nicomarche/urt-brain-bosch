@@ -400,12 +400,6 @@ class threadRead(ThreadWithStop):
             return text[:limit] + "..."
         return text
 
-    def _queue_depth(self, queue_name):
-        try:
-            return self.queuesList[queue_name].qsize()
-        except Exception:
-            return "n/a"
-
     def _log_serial_read(self, data, waiting, before_len, after_len):
         if not self._serial_debug_enabled:
             return
@@ -476,17 +470,14 @@ class threadRead(ThreadWithStop):
             f" action={action!r} value={self._preview(value)} raw={self._preview(raw)}"
         )
 
-    def _send_and_log(self, enum_cls, sender, value, action, raw):
+    def _send_and_log(self, topic, sender, value, action, raw):
         sender.send(value)
         if not self._serial_debug_enabled:
             return
-        queue_name = enum_cls.Queue.value
         print(
-            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mQUEUE\033[0m"
-            f" threadRead -> {enum_cls.__name__}"
-            f" queue={queue_name} owner={enum_cls.Owner.value}"
-            f" msgID={enum_cls.msgID.value} type={enum_cls.msgType.value}"
-            f" qsize={self._queue_depth(queue_name)}"
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mBUS\033[0m"
+            f" threadRead -> {topic.name}"
+            f" qos={topic.qos_preset} type={topic.payload_type.__name__}"
             f" value={self._preview(value)}"
             f" from_action={action!r} raw={self._preview(raw)}"
         )
