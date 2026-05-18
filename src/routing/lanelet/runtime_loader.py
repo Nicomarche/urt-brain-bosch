@@ -7,10 +7,10 @@ from src.routing.lanelet.lanelet_map import LaneletMap
 
 _CACHE_LOCK = threading.Lock()
 _CACHED_LANELET_MAP: LaneletMap | None = None
-_CACHED_KEY: tuple[str, float] | None = None
+_CACHED_KEY: tuple | None = None
 
 
-def _resolve_tracking_lanelet_config() -> tuple[str, float] | None:
+def _resolve_tracking_lanelet_config() -> tuple[str, float, str | None, float] | None:
     try:
         import config as _cfg
     except Exception:
@@ -28,7 +28,17 @@ def _resolve_tracking_lanelet_config() -> tuple[str, float] | None:
         return None
 
     step_m = float(getattr(_cfg, "TRACKING_WAYPOINT_STEP_M", 0.05) or 0.05)
-    return osm_path, step_m
+
+    topology_path = os.path.join(os.path.dirname(osm_path), "topology.json")
+    if os.path.exists(topology_path):
+        try:
+            topology_mtime = float(os.path.getmtime(topology_path))
+        except OSError:
+            topology_mtime = 0.0
+    else:
+        topology_path = None
+        topology_mtime = 0.0
+    return osm_path, step_m, topology_path, topology_mtime
 
 
 def load_tracking_lanelet_map(*, force_reload: bool = False) -> LaneletMap | None:
@@ -37,8 +47,8 @@ def load_tracking_lanelet_map(*, force_reload: bool = False) -> LaneletMap | Non
     resolved = _resolve_tracking_lanelet_config()
     if resolved is None:
         return None
-    osm_path, step_m = resolved
-    cache_key = (str(osm_path), float(step_m))
+    osm_path, step_m, topology_path, topology_mtime = resolved
+    cache_key = (str(osm_path), float(step_m), str(topology_path or ""), float(topology_mtime))
 
     with _CACHE_LOCK:
         if not force_reload and _CACHED_LANELET_MAP is not None and _CACHED_KEY == cache_key:
@@ -47,7 +57,11 @@ def load_tracking_lanelet_map(*, force_reload: bool = False) -> LaneletMap | Non
     try:
         from src.routing.lanelet.from_osm import load_lanelet2_osm
 
-        lanelet_map = load_lanelet2_osm(osm_path, step_m=step_m)
+        lanelet_map = load_lanelet2_osm(
+            osm_path,
+            step_m=step_m,
+            topology_ground_truth_path=topology_path,
+        )
     except Exception:
         return None
 

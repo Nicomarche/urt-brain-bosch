@@ -55,6 +55,7 @@ from ._map_path_overlay import (
 )
 from ._map_click_routing import resolve_click_destination_lanelet
 from ._pannable_view import PannableZoomableView
+from ._bfmc_plan_loader import load_and_emit_bfmc_plan
 from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
     ATTR_INTERSECTION,
@@ -567,6 +568,13 @@ class MapView(QWidget):
             clear_route_btn = QPushButton("Clear route")
             clear_route_btn.clicked.connect(self._clear_route)
             self._clear_route_btn = clear_route_btn
+            self._load_bfmc_plan_btn = QPushButton("Load BFMC plan")
+            self._load_bfmc_plan_btn.setToolTip(
+                "Load a precomputed plan.json from the BFMC waypoint planner "
+                "(default folder: urt-brain-bosch/plans/) and follow its "
+                "lanelet_sequence."
+            )
+            self._load_bfmc_plan_btn.clicked.connect(self._load_bfmc_plan)
             self._map_edit_btn = QToolButton()
             self._map_edit_btn.setText("Edit map")
             self._map_edit_btn.setCheckable(True)
@@ -637,6 +645,7 @@ class MapView(QWidget):
             toolbar.addWidget(load_btn)
             toolbar.addWidget(fit_btn)
             toolbar.addWidget(clear_route_btn)
+            toolbar.addWidget(self._load_bfmc_plan_btn)
             toolbar.addWidget(self._relocate_btn)
             toolbar.addWidget(self._measure_btn)
             toolbar.addWidget(self._save_start_btn)
@@ -2060,6 +2069,9 @@ class MapView(QWidget):
             self._location_label.setText(
                 f"Route armed → ({x_m:.2f}, {y_m:.2f}) m{lanelet_text} · switch to Auto to execute"
             )
+
+    def _load_bfmc_plan(self) -> None:
+        load_and_emit_bfmc_plan(self, self._client)
 
     def _clear_route(self) -> None:
         self._client.emit_message(ev.CMD_NAV_COMMAND, {"mode": "clear"})

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import dataclasses
+import json
+import logging
 import math
+import os
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
@@ -8,6 +12,8 @@ import numpy as np
 from pyproj import CRS, Transformer
 
 from src.core.types.routing import RegulatoryElement
+
+log = logging.getLogger(__name__)
 from src.routing.lanelet.attributes import (
     ATTR_CROSSWALK,
     ATTR_INTERSECTION,
@@ -57,7 +63,12 @@ class ParsedOsmMap:
     relations: dict[str, OsmRelation]
 
 
-def load_lanelet2_osm(path: str, *, step_m: float = 0.50) -> LaneletMap:
+def load_lanelet2_osm(
+    path: str,
+    *,
+    step_m: float = 0.50,
+    topology_ground_truth_path: str | None = None,
+) -> LaneletMap:
     """Carga un mapa Lanelet2 OSM y lo convierte al `LaneletMap` del planner.
 
     Soporta el subconjunto que necesitamos para el behavior planner:
@@ -85,6 +96,8 @@ def load_lanelet2_osm(path: str, *, step_m: float = 0.50) -> LaneletMap:
         regulators=regulators,
         step_m=step_m,
     )
+    if topology_ground_truth_path:
+        lanelets = _apply_topology_ground_truth(lanelets, topology_ground_truth_path)
 
     from src.routing.lanelet.queries import LaneletKDTreeIndex
 
@@ -95,6 +108,80 @@ def load_lanelet2_osm(path: str, *, step_m: float = 0.50) -> LaneletMap:
         kdtree_index=kdtree,
         map_metadata=_build_map_metadata(parsed=parsed),
     )
+
+
+def _apply_topology_ground_truth(
+    lanelets: dict[str, "Lanelet"], path: str
+) -> dict[str, "Lanelet"]:
+    """REEMPLAZO TOTAL: los `successor_ids` de cada lanelet pasan a ser
+    exactamente los del JSON. Lanelets sin entrada en el JSON quedan sin
+    sucesores. Los `predecessor_ids` se derivan desde los sucesores ya
+    reemplazados. Si el path no existe, devuelve la entrada sin cambios.
+    """
+    if not path or not os.path.exists(path):
+        return lanelets
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            gt = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("topology override: could not parse %s: %s", path, exc)
+        return lanelets
+    if not isinstance(gt, dict):
+        log.warning("topology override: %s is not a JSON object", path)
+        return lanelets
+
+    gt_norm: dict[str, list[str]] = {}
+    for key, value in gt.items():
+        if not isinstance(value, (list, tuple)):
+            continue
+        gt_norm[str(key)] = [str(item) for item in value]
+
+    missing_from_json = [lid for lid in lanelets if lid not in gt_norm]
+    unknown_in_json = [k for k in gt_norm if k not in lanelets]
+    if missing_from_json:
+        log.warning(
+            "topology override: %d lanelets sin entrada en JSON "
+            "(quedaran sin sucesores). Ejemplos: %s",
+            len(missing_from_json),
+            missing_from_json[:5],
+        )
+    if unknown_in_json:
+        log.warning(
+            "topology override: %d IDs del JSON no existen en el OSM. "
+            "Ejemplos: %s",
+            len(unknown_in_json),
+            unknown_in_json[:5],
+        )
+
+    new_succ: dict[str, tuple[str, ...]] = {}
+    for lid in lanelets:
+        succs = [s for s in gt_norm.get(lid, []) if s in lanelets and s != lid]
+        new_succ[lid] = tuple(succs)
+    new_pred: dict[str, list[str]] = {lid: [] for lid in lanelets}
+    for lid, succs in new_succ.items():
+        for s in succs:
+            if lid not in new_pred[s]:
+                new_pred[s].append(lid)
+
+    out: dict[str, "Lanelet"] = {}
+    edge_count = 0
+    affected = 0
+    for lid, lanelet in lanelets.items():
+        if tuple(lanelet.successor_ids) != new_succ[lid]:
+            affected += 1
+        edge_count += len(new_succ[lid])
+        out[lid] = dataclasses.replace(
+            lanelet,
+            successor_ids=new_succ[lid],
+            predecessor_ids=tuple(new_pred[lid]),
+        )
+    log.info(
+        "topology override applied from %s: %d edges, %d lanelets affected",
+        path,
+        edge_count,
+        affected,
+    )
+    return out
 
 
 def parse_lanelet2_osm(path: str) -> ParsedOsmMap:

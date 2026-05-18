@@ -47,10 +47,24 @@ class OsmRouteGraph:
         *,
         step_m: float = 0.05,
         start_lanelet_id: str | None = None,
+        topology_ground_truth_path: str | None = None,
     ) -> None:
         self.step_m = float(step_m)
         self._osm_path = os.path.abspath(osm_path)
-        self.lanelet_map = load_lanelet2_osm(self._osm_path, step_m=self.step_m)
+        if topology_ground_truth_path is None:
+            default_topology = os.path.join(
+                os.path.dirname(self._osm_path), "topology.json"
+            )
+            if os.path.exists(default_topology):
+                topology_ground_truth_path = default_topology
+        elif topology_ground_truth_path and not os.path.exists(topology_ground_truth_path):
+            topology_ground_truth_path = None
+        self._topology_ground_truth_path = topology_ground_truth_path
+        self.lanelet_map = load_lanelet2_osm(
+            self._osm_path,
+            step_m=self.step_m,
+            topology_ground_truth_path=topology_ground_truth_path,
+        )
         self._blocked_lanelet_ids: set[str] = set()
         self.map_metadata = self._load_effective_map_metadata(self.lanelet_map.get_map_metadata())
         try:

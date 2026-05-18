@@ -26,5 +26,19 @@ __pycache__
 src/dashboard/frontend/.angular/
 src/dashboard/frontend/dist/
 **/venv/
+.venv/
+**/.venv/
 aiserver/models/supercombo.onnx
 src/dashboard/frontend/.angular/cache/18.2.21/dashboard/.tsbuildinfo
+
+# GUI layout (user-specific)
+config/gui_layout.json
+
+# Acados generated code (built locally)
+src/control/c_generated_code/
+
+# BFMC plans (operator drops planner outputs here; not source of truth)
+plans/*.json
+
+# Legacy lanelet2 OSM (kept as backup after switching to the unified planner OSM)
+maps/*/lanelet2_map.legacy.osm

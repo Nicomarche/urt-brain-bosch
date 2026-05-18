@@ -307,6 +307,72 @@ class PathManager:
         route_id = self._next_route_id("route")
         return self._activate_route(route, [self._normalize_destination_spec(destination)], route_id)
 
+    def set_route_from_lanelet_sequence(
+        self,
+        lanelet_ids,
+        current_pose: dict | None = None,
+        *,
+        route_id_hint: str | None = None,
+    ) -> bool:
+        """Activa una ruta siguiendo una secuencia ordenada de lanelets.
+
+        - Valida que TODOS los lanelets existan en el mapa.
+        - Valida conectividad par-a-par usando `successor_ids`.
+        - No re-resuelve Dijkstra: densifica directamente con `build_dense_path`.
+        Devuelve False si algo no cierra (sin intentar reparar).
+        """
+        clean_ids = [str(item) for item in (lanelet_ids or []) if str(item)]
+        if not clean_ids:
+            live_log(
+                "route_planner", event="lanelet_sequence_empty",
+                route_id_hint=route_id_hint,
+            )
+            return False
+        lmap = self.graph.lanelet_map
+        missing = [lid for lid in clean_ids if lmap.get_lanelet(lid) is None]
+        if missing:
+            live_log(
+                "route_planner", event="lanelet_sequence_invalid",
+                reason="unknown_lanelets",
+                missing=missing[:10],
+                missing_count=len(missing),
+            )
+            return False
+        broken: list[tuple[str, str]] = []
+        for i in range(len(clean_ids) - 1):
+            a, b = clean_ids[i], clean_ids[i + 1]
+            if a == b:
+                continue
+            succs = lmap.get_lanelet(a).successor_ids
+            if b not in succs:
+                broken.append((a, b))
+        if broken:
+            live_log(
+                "route_planner", event="lanelet_sequence_invalid",
+                reason="broken_successor_links",
+                broken_count=len(broken),
+                broken_preview=[f"{a}->{b}" for a, b in broken[:10]],
+            )
+            return False
+        start_pose_xy = None
+        if isinstance(current_pose, dict):
+            try:
+                start_pose_xy = (
+                    float(current_pose["x"]),
+                    float(current_pose["y"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                start_pose_xy = None
+        route_id = route_id_hint or self._next_route_id("seq")
+        route = self.graph.build_dense_path(
+            clean_ids,
+            closed_loop=False,
+            route_id=route_id,
+            source="lanelet_sequence",
+            start_pose_xy=start_pose_xy,
+        )
+        return self._activate_route(route, [], route_id)
+
     def set_route_queue(self, destinations, current_pose: dict | None = None) -> bool:
         start_spec = self._pose_to_start_spec(current_pose)
         dest_specs = []
@@ -367,6 +433,17 @@ class PathManager:
             elif mode == "go_to_multiple":
                 self.replans += 1
                 handled = self.set_route_queue(destinations, current_pose=current_pose)
+            elif mode == "lanelet_sequence":
+                lanelet_ids = [str(x) for x in (command.get("lanelet_ids") or [])]
+                if not lanelet_ids:
+                    handled = False
+                else:
+                    self.replans += 1
+                    handled = self.set_route_from_lanelet_sequence(
+                        lanelet_ids,
+                        current_pose=current_pose,
+                        route_id_hint=command.get("plan_name") or command.get("route_id"),
+                    )
             else:
                 handled = False
         live_log(
