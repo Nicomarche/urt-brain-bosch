@@ -777,6 +777,10 @@ Args:
         self._follow_right_gain = 1.0           # P gain on normalized error → ±max_steering
         self._follow_right_miss_frames = 0
         self._follow_right_last_right_x = None
+
+        # Throttled motor-command log (1 Hz) so we can verify the bus end-to-end
+        # without flooding the console even when show_debug is off.
+        self._last_motor_tx_log = 0.0
         
         # Frame noise rejection filter (handles reflections/glare)
         self.use_noise_filter = True         # Enable noise rejection
@@ -9272,9 +9276,10 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             # Normal operation — send both steer and speed
             self.steerMotorSender.send(str(steer_value))
             self.speedMotorSender.send(str(speed_value))
-            
-            # Log motor commands only in debug mode to avoid I/O overhead on RPi
-            if self.show_debug:
+
+            now_log = time.monotonic()
+            if self.show_debug or (now_log - self._last_motor_tx_log) >= 1.0:
+                self._last_motor_tx_log = now_log
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mMOTOR\033[0m - Steer: {steer_value} Speed: {speed_value}")
             
         except Exception as e:

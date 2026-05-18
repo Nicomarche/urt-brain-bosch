@@ -94,6 +94,8 @@ class threadWrite(ThreadWithStop):
         self._last_status_snapshot = None
         self._last_status_send_time = 0.0
         self._last_forced_feedback_enable = 0.0
+        self._last_tx_log_per_action: dict = {}
+        self._tx_log_period_s = 1.0
 
         # error rate limiting
         self.last_error_time = None
@@ -145,6 +147,15 @@ class threadWrite(ThreadWithStop):
                                 f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m"
                                 f" - Sent KL command \033[94m{command_msg.strip()}\033[0m"
                             )
+                        else:
+                            now_log = time.monotonic()
+                            last_log = self._last_tx_log_per_action.get(action, 0.0)
+                            if now_log - last_log >= self._tx_log_period_s:
+                                self._last_tx_log_per_action[action] = now_log
+                                print(
+                                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mTX\033[0m"
+                                    f" {command_msg.strip()}"
+                                )
                         return True, command_msg
 
                 if action == "kl" or self._should_send_error():

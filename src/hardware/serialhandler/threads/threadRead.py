@@ -85,6 +85,11 @@ class threadRead(ThreadWithStop):
         self.last_error_time = None
         self.error_cooldown = timedelta(seconds=3)
 
+        # RX log throttling (1 print per action per second so we can see the
+        # Nucleo is talking back without flooding the console).
+        self._last_rx_log_per_action: dict = {}
+        self._rx_log_period_s = 1.0
+
         self.queue_sending()
 
     def _init_senders(self):
@@ -150,6 +155,16 @@ class threadRead(ThreadWithStop):
             action = re.sub(r'[^a-zA-Z0-9]', '', action)
             if self.debugger:
                 self.logger.info(buff)
+
+            now_log = time.monotonic()
+            last_log = self._last_rx_log_per_action.get(action, 0.0)
+            if now_log - last_log >= self._rx_log_period_s:
+                self._last_rx_log_per_action[action] = now_log
+                preview = (value[:40] + "…") if len(value) > 40 else value
+                print(
+                    f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;95mRX\033[0m"
+                    f" @{action}:{preview}"
+                )
 
             if action == "imu":
                 splittedValue = value.split(";")
