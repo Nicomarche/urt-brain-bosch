@@ -281,7 +281,7 @@ STREAM_CAMERA_TO_DASHBOARD = False
 # Ventanas de OpenCV para debug visual (requieren monitor/display conectado).
 # SHOW_CAMERA_PREVIEW actua como master switch: si es False, ninguna ventana se abre.
 # Si es True, puedes elegir cuales abrir individualmente con DEBUG_WINDOWS.
-SHOW_CAMERA_PREVIEW = True
+SHOW_CAMERA_PREVIEW = False
 
 # Ventanas individuales de debug (solo aplican si SHOW_CAMERA_PREVIEW = True)
 DEBUG_WINDOWS = {

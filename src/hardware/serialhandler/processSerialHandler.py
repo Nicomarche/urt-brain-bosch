@@ -31,6 +31,7 @@ if __name__ == "__main__":
     sys.path.insert(0, "../../..")
 
 import re
+import time
 import serial
 import serial.tools.list_ports
 import threading
@@ -119,8 +120,11 @@ class processSerialHandler(WorkerProcess):
                     return
 
                 self.serialCon = serial.Serial(self.serialDevice, 115200, timeout=0.1)
+                # Drain initial USB-serial garbage (FTDI/CH340 emit noise during DTR/RTS settle).
                 self.serialCon.reset_input_buffer()
                 self.serialCon.reset_output_buffer()
+                time.sleep(0.25)
+                self.serialCon.reset_input_buffer()
                 self.serialConnected = True
                 print(f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;92mINFO\033[0m - Connected to \033[94m{self.serialDevice}\033[0m")
 
