@@ -331,7 +331,7 @@ def test_constant_speed_plan_keeps_map_primary_near_intersection_semantic() -> N
         route=replace(
             base_ctx.route,
             next_semantic_type="intersection",
-            next_semantic_distance_m=0.65,
+            next_semantic_distance_m=0.20,
         ),
         lane_observation=LaneObservation(
             detected_sides=("left", "right"),
@@ -352,7 +352,7 @@ def test_constant_speed_plan_keeps_map_primary_near_intersection_semantic() -> N
     assert plan.notes["mpc_weight_profile"] == "map_turn_authority"
     assert plan.notes["steer_rate_limit_deg_s"] == pytest.approx(160.0)
     assert plan.notes["visual_path_primary_rejected_reason"].startswith("map_authority:")
-    assert "@0.65m" in plan.notes["visual_path_primary_rejected_reason"]
+    assert "@0.20m" in plan.notes["visual_path_primary_rejected_reason"]
 
 
 def test_constant_speed_plan_uses_visual_recovery_when_map_match_is_bad_near_intersection() -> None:

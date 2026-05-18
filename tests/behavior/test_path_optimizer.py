@@ -240,6 +240,67 @@ def test_path_optimizer_clamps_route_back_inside_lanelet_corridor() -> None:
     assert np.all(out.target_path[1:, 1] >= out.drivable_right_bound[1:, 1] - 1e-6)
 
 
+def test_path_optimizer_preserves_two_line_visual_recovery_outside_stale_corridor() -> None:
+    lanelet_map = from_track_graph(
+        _build_track_graph(
+            [("n1", 0.0, 0.0, 0), ("n2", 1.0, 0.0, 0), ("n3", 2.0, 0.0, 0)]
+        ),
+        step_m=0.10,
+    )
+    base_ctx = _with_route_signature(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            horizon_n=12,
+            dt=0.1,
+            lanelet_map=lanelet_map,
+            nominal_speed_mps=0.10,
+            map_match_error_m=0.22,
+        ),
+        route_id="route-visual-recovery",
+        current_lanelet_id="n1->n2",
+        next_lanelet_ids=("n2->n3",),
+    )
+    ctx = replace(
+        base_ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            measurement_mode="two_line",
+            quality=1.0,
+            direct_error_valid=True,
+            direct_error_m=0.08,
+            planner_priority_active=True,
+            center_waypoints_body=tuple((0.05 * i, -0.12, 0.0) for i in range(20)),
+            lane_width_m=0.35,
+        ),
+    )
+    raw_path = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.15, 0.12, 0.0],
+            [0.40, 0.12, 0.0],
+            [0.80, 0.12, 0.0],
+        ],
+        dtype=float,
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=raw_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.10, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "visual_lane_waypoints", "path_authority": "visual_recovery"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["containment_mode"] == "visual_primary_synthetic_bounds"
+    assert out.notes["visual_primary_corridor_bypass_active"] is True
+    assert out.notes["visual_primary_corridor_bypass_reason"] == "visual_recovery"
+    assert np.max(out.target_path[2:8, 1]) > 0.09
+
+
 def test_path_optimizer_projects_visual_reentry_inside_lanelet_corridor() -> None:
     lanelet_map = from_track_graph(
         _build_track_graph(

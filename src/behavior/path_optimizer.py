@@ -2662,6 +2662,72 @@ def _contain_path_within_corridor(
         else 0.0
     )
     route_map_match_error_m = abs(float(getattr(getattr(ctx, "route", None), "map_match_error_m", 0.0) or 0.0))
+    lane_observation = getattr(ctx, "lane_observation", None)
+    lane_measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
+    try:
+        lane_quality = float(getattr(lane_observation, "quality", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        lane_quality = 0.0
+    path_authority = str(_path_note_str(path_plan, "path_authority") or "")
+    visual_path_owns_corridor = (
+        bool(path_source_visual)
+        and str(path_plan.scenario_name) == "lane_keep"
+        and (
+            (
+                path_authority == "visual"
+                and lane_measurement_mode in {"two_line", "single_line"}
+                and lane_quality >= 0.75
+            )
+            or (
+                path_authority == "visual_recovery"
+                and lane_measurement_mode == "two_line"
+                and lane_quality >= 0.75
+            )
+        )
+    )
+    if visual_path_owns_corridor:
+        left_bound, right_bound = _synthetic_bounds_from_xy(
+            sampled_xy,
+            half_width_m=_DRIVABLE_HALF_WIDTH_M,
+        )
+        return _ContainmentResult(
+            target_xy=np.array(sampled_xy, copy=True),
+            left_bound=left_bound,
+            right_bound=right_bound,
+            corridor_available=True,
+            infeasible=False,
+            used_prev_safe_path=False,
+            first_infeasible_index=None,
+            max_violation_m=0.0,
+            max_abs_offset_m=float(corridor_reference_error_m),
+            ego_corridor_error_m=float(corridor_reference_error_m),
+            touches_bound=False,
+            mode="visual_primary_synthetic_bounds",
+            notes={
+                "corridor_source": "visual_primary_synthetic_bounds",
+                "reference_corridor_source": corridor.source,
+                "corridor_lanelet_ids": list(corridor.lanelet_ids),
+                "corridor_required": bool(_requires_real_corridor(ctx)),
+                "corridor_required_missing": False,
+                "corridor_visual_lane_guidance_active": bool(corridor_visual_lane_guidance_active),
+                "corridor_visual_lane_guidance_reason": str(visual_lane_state.reason),
+                "corridor_visual_lane_guidance_mode": str(visual_lane_state.measurement_mode),
+                "corridor_visual_lane_guidance_profile": str(visual_lane_state.profile_name),
+                "corridor_visual_lane_guidance_shift_m": float(visual_lane_base_shift_m),
+                "corridor_visual_lane_guidance_prefix_samples": 0,
+                "corridor_visual_lane_guidance_max_shift_m": 0.0,
+                "corridor_visual_lane_guidance_max_limit_m": 0.0,
+                "corridor_visual_lane_entry_ramp_active": False,
+                "corridor_visual_lane_entry_ramp_distance_m": float(_VISUAL_LANE_REENTRY_RAMP_DISTANCE_M),
+                "corridor_visual_path_priority_active": True,
+                "visual_primary_corridor_bypass_active": True,
+                "visual_primary_corridor_bypass_reason": str(path_authority),
+                "visual_primary_corridor_bypass_measurement_mode": str(lane_measurement_mode),
+                "visual_primary_corridor_bypass_quality": float(lane_quality),
+                "visual_primary_corridor_bypass_map_match_error_m": float(route_map_match_error_m),
+                "visual_primary_corridor_bypass_ego_corridor_error_m": float(corridor_reference_error_m),
+            },
+        )
     single_line_visual_override_reason = "route_map_match"
     if corridor_reference_error_m >= route_map_match_error_m:
         single_line_visual_override_reason = "corridor_pose_mismatch"
@@ -2673,8 +2739,8 @@ def _contain_path_within_corridor(
     )
     single_line_visual_override_active = (
         bool(path_source_visual)
-        and str(getattr(ctx.lane_observation, "measurement_mode", "none") or "none") == "single_line"
-        and bool(getattr(ctx.lane_observation, "planner_priority_active", False))
+        and lane_measurement_mode == "single_line"
+        and bool(getattr(lane_observation, "planner_priority_active", False))
         and (
             single_line_route_override_map_match_trigger
             or single_line_route_override_corridor_trigger
