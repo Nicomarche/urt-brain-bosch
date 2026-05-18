@@ -82,8 +82,8 @@ OBJ+= $(OCP_OBJ)
 EXTERNAL_DIR=
 EXTERNAL_LIB=
 
-INCLUDE_PATH = /Users/luciogarcia/acados_install/include
-LIB_PATH = /Users/luciogarcia/acados_install/lib
+INCLUDE_PATH = /Users/joaquinmarcoff/acados_install/include
+LIB_PATH = /Users/joaquinmarcoff/acados_install/lib
 
 # preprocessor flags for make's implicit rules
 CPPFLAGS+= -I$(INCLUDE_PATH)
@@ -143,7 +143,7 @@ ocp_cython_c: ocp_shared_lib
 	-o acados_ocp_solver_pyx.c \
 	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
 	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_ocp_solver_pyx.pyx \
-	-I /Users/luciogarcia/urt-brain-bosch/src/control/c_generated_code \
+	-I /Users/joaquinmarcoff/Desktop/Projects/BFMC/urt-brain-bosch/src/control/c_generated_code \
 
 ocp_cython_o: ocp_cython_c
 	$(CC) $(ACADOS_FLAGS) -c -O2 \
@@ -153,8 +153,8 @@ ocp_cython_o: ocp_cython_c
 	-I $(INCLUDE_PATH)/blasfeo/include/ \
 	-I $(INCLUDE_PATH)/hpipm/include/ \
 	-I $(INCLUDE_PATH) \
-	-I /opt/homebrew/lib/python3.14/site-packages/numpy/_core/include \
-	-I /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14 \
+	-I /Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/numpy/_core/include \
+	-I /Library/Frameworks/Python.framework/Versions/3.12/include/python3.12 \
 	acados_ocp_solver_pyx.c \
 
 ocp_cython: ocp_cython_o
@@ -172,7 +172,7 @@ sim_cython_c: sim_shared_lib
 	-o acados_sim_solver_pyx.c \
 	-I $(INCLUDE_PATH)/../interfaces/acados_template/acados_template \
 	$(INCLUDE_PATH)/../interfaces/acados_template/acados_template/acados_sim_solver_pyx.pyx \
-	-I /Users/luciogarcia/urt-brain-bosch/src/control/c_generated_code \
+	-I /Users/joaquinmarcoff/Desktop/Projects/BFMC/urt-brain-bosch/src/control/c_generated_code \
 
 sim_cython_o: sim_cython_c
 	$(CC) $(ACADOS_FLAGS) -c -O2 \
@@ -182,8 +182,8 @@ sim_cython_o: sim_cython_c
 	-I $(INCLUDE_PATH)/blasfeo/include/ \
 	-I $(INCLUDE_PATH)/hpipm/include/ \
 	-I $(INCLUDE_PATH) \
-	-I /opt/homebrew/lib/python3.14/site-packages/numpy/_core/include \
-	-I /opt/homebrew/opt/python@3.14/Frameworks/Python.framework/Versions/3.14/include/python3.14 \
+	-I /Library/Frameworks/Python.framework/Versions/3.12/lib/python3.12/site-packages/numpy/_core/include \
+	-I /Library/Frameworks/Python.framework/Versions/3.12/include/python3.12 \
 	acados_sim_solver_pyx.c \
 
 sim_cython: sim_cython_o
