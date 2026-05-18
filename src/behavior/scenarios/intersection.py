@@ -33,7 +33,14 @@ from src.routing.lanelet.attributes import (
 )
 
 
-_INTERSECTION_SPEED_MPS = 0.40
+try:
+    from config import (
+        BEHAVIOR_INTERSECTION_MIN_SPEED_MPS as _INTERSECTION_MIN_SPEED_MPS,
+        BEHAVIOR_INTERSECTION_SPEED_MPS as _INTERSECTION_SPEED_MPS,
+    )
+except Exception:
+    _INTERSECTION_SPEED_MPS = 0.18
+    _INTERSECTION_MIN_SPEED_MPS = 0.12
 _INTERSECTION_LOOKAHEAD_M = 3.0
 _TTC_HORIZON_S = 2.5
 _INTERSECTION_STOPLINE_ARM_M = 0.40  # plan TANDA 1.1: arm visual stopline
@@ -150,7 +157,10 @@ class Intersection(BaseScenario):
     def plan(self, ctx: PlanningContext) -> BehaviorOutput:
         from dataclasses import replace
 
-        notes: dict = {"reason": "intersection_active"}
+        notes: dict = {
+            "reason": "intersection_active",
+            "min_moving_speed_mps": float(_INTERSECTION_MIN_SPEED_MPS),
+        }
         motion_state = self._classify_motion_state()
 
         # Cross-traffic: si algún tracked_object cruza nuestra

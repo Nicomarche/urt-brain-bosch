@@ -1362,6 +1362,8 @@ class threadTracking(ThreadWithStop):
         #   3) El comando del MPC indica movimiento real (≥ umbral).
         _CMD_FALLBACK_AUTO_MIN_MPS = 0.05
         if (
+            _COMMAND_SPEED_FALLBACK_ENABLED
+            and
             current_state_message != "MANUAL"
             and self._last_speed_source == "encoder_zero"
             and _cmd_fresh
