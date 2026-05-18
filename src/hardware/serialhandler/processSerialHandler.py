@@ -105,15 +105,25 @@ class processSerialHandler(WorkerProcess):
                 # clean up existing connection safely
                 self._safe_close_serial()
 
-                # Match /dev/ttyACM* (Nucleo via USB) or /dev/ttyUSB* (USB-serial adapter)
-                self.serialDevice = next(
-                    (
-                        port.device
-                        for port in serial.tools.list_ports.comports()
-                        if re.match(r"/dev/tty(ACM|USB)\d+", port.device)
-                    ),
-                    None,
+                # Match /dev/ttyACM* (Nucleo native USB / ST-Link) preferred,
+                # /dev/ttyUSB* (external USB-serial adapter) as fallback.
+                # The firmware (Embedded_Platform/main.cpp:40) talks over USBTX/USBRX
+                # → ST-Link → /dev/ttyACM0. ttyUSB0 is usually an FTDI/CH340 on
+                # different MCU pins where no firmware UART is wired.
+                available_ports = list(serial.tools.list_ports.comports())
+                acm_ports = sorted(
+                    p.device for p in available_ports if re.match(r"/dev/ttyACM\d+", p.device)
                 )
+                usb_ports = sorted(
+                    p.device for p in available_ports if re.match(r"/dev/ttyUSB\d+", p.device)
+                )
+                prioritized = acm_ports + usb_ports
+                self.serialDevice = prioritized[0] if prioritized else None
+                if prioritized:
+                    print(
+                        f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mPORTS\033[0m"
+                        f" available={prioritized} selected=\033[94m{self.serialDevice}\033[0m"
+                    )
 
                 if self.serialDevice is None:
                     self.serialConnected = False
