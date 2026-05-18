@@ -380,6 +380,126 @@ def test_constant_speed_plan_rejects_transverse_visual_path() -> None:
     assert plan.notes["visual_path_primary_rejected_reason"] == "visual_path_insufficient_forward_span"
 
 
+def test_blend_enabled_produces_blended_path_for_single_line(monkeypatch) -> None:
+    monkeypatch.setattr("config.LANE_BLEND_ENABLED", True)
+    monkeypatch.setattr("config.LANE_BLEND_ALPHA_SINGLE_LINE", 0.3)
+    monkeypatch.setattr("config.LANE_BLEND_QUALITY_MIN", 0.5)
+    monkeypatch.setattr("config.LANE_BLEND_TAU_DECAY_S", 0.02)
+    monkeypatch.setattr("config.LANE_BLEND_TAU_RECOVERY_S", 0.02)
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.35,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.9,
+            measurement_mode="single_line",
+            direct_error_valid=True,
+            direct_error_m=0.05,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    # Avanzamos varios ticks para pasar la hysteresis del gate underlying y
+    # dejar que el filtro temporal del blender se asiente.
+    plan = None
+    for _ in range(20):
+        plan = scenario.plan(ctx)
+    assert plan is not None
+    assert plan.valid is True
+    # Con single_line el blender se asienta cerca de α=0.3 ⇒ DR dominante.
+    assert plan.notes["path_source"] == "blended_visual_dr"
+    assert plan.notes["path_authority"] == "blended_route"
+    assert plan.notes["mpc_weight_profile"] in {"map_turn_authority", "lane_keep_visual", "lane_keep"}
+    # El α reportado debe estar entre 0.1 y 0.5 (asentado en 0.3 con tolerancia).
+    alpha = float(plan.notes["lane_blend_alpha"])
+    assert 0.1 <= alpha <= 0.5
+
+
+def test_blend_enabled_uses_visual_branch_for_two_lines(monkeypatch) -> None:
+    monkeypatch.setattr("config.LANE_BLEND_ENABLED", True)
+    monkeypatch.setattr("config.LANE_BLEND_TAU_DECAY_S", 0.02)
+    monkeypatch.setattr("config.LANE_BLEND_TAU_RECOVERY_S", 0.02)
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.20,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.10,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_straight_visual_waypoints(),
+            lane_width_m=0.35,
+        ),
+    )
+    plan = None
+    for _ in range(20):
+        plan = scenario.plan(ctx)
+    assert plan is not None
+    assert plan.notes["path_source"] == "visual_lane_waypoints"
+    assert plan.notes["path_authority"] == "visual"
+
+
+def test_blend_enabled_falls_back_to_route_when_no_lines(monkeypatch) -> None:
+    monkeypatch.setattr("config.LANE_BLEND_ENABLED", True)
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=(),
+            quality=0.0,
+            measurement_mode="none",
+        ),
+    )
+    plan = scenario.plan(ctx)
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["path_authority"] == "route"
+    assert plan.notes["lane_blend_alpha"] == 0.0
+
+
 def test_constant_speed_plan_uses_hysteresis_for_soft_visual_rejections() -> None:
     scenario = _ConstantSpeedScenario()
     good_ctx = replace(

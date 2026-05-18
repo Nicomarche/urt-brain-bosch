@@ -20,12 +20,27 @@ import numpy as np
 
 from src.behavior.context import PlanningContext
 from src.behavior.trajectory_builder import (
+    blend_target_paths,
     build_target_path,
     build_target_path_from_route,
     build_target_path_from_visual,
 )
+from src.behavior.visual_dr_blender import VisualDrBlender
 from src.behavior.visual_primary_gate import VisualPrimaryGate
 from src.core.types.behavior import BehaviorOutput, ScenarioName
+
+
+def _load_lane_blend_dominant_threshold() -> float:
+    """Umbral α para elegir el perfil de pesos MPC en blend (visual vs route)."""
+    try:
+        import config as _cfg
+
+        return float(getattr(_cfg, "LANE_BLEND_DOMINANT_THRESHOLD", 0.5))
+    except Exception:
+        return 0.5
+
+
+_LANE_BLEND_DOMINANT_THRESHOLD = _load_lane_blend_dominant_threshold()
 
 
 @dataclass
@@ -106,41 +121,171 @@ class BaseScenario(ABC):
         lane_obs = getattr(ctx, "lane_observation", None)
         route_corridor_available = bool(ctx.route.route_active) and bool(route_waypoints)
         lanelet_corridor_available = bool(ctx.lanelet_map is not None and ctx.route.current_lanelet_id)
-        visual_decision = self._visual_primary_gate().decide(
+        # Decisor de blend: cuando `LANE_BLEND_ENABLED=False` emite α∈{0,1}
+        # idéntico al `VisualPrimaryGate` clásico, preservando comportamiento.
+        blend_decision = self._visual_dr_blender().decide(
             ctx=ctx,
             lane_observation=lane_obs,
             scenario_name=scenario_name,
             route_corridor_available=route_corridor_available,
             lanelet_corridor_available=lanelet_corridor_available,
+            now_s=float(getattr(ctx, "now_s", 0.0) or 0.0),
         )
-        notes.update(visual_decision.notes)
-        visual_path_reason = str(visual_decision.reason)
-        map_authority_active = bool(visual_decision.map_authority_active)
-        use_visual_path = bool(visual_decision.use_visual_path)
+        notes.update(blend_decision.notes)
+        alpha = float(blend_decision.alpha)
+        visual_path_reason = str(blend_decision.gate_decision.reason)
+        map_authority_active = bool(blend_decision.map_authority_active)
+        use_visual_path = alpha >= 1.0 - 1e-6
+        use_dr_path = alpha <= 1e-6
         if use_visual_path:
-            visual_measurement_mode = str(getattr(lane_obs, "measurement_mode", "none") or "none")
-            connect_visual_path_from_ego = visual_measurement_mode != "single_line"
-            target_path = build_target_path_from_visual(
-                center_waypoints_body=lane_obs.center_waypoints_body,
-                ego_pose=ctx.pose.fused_pose,
+            target_path = self._build_visual_target_path(
+                ctx=ctx,
+                lane_obs=lane_obs,
                 target_speed_mps=target_speed_mps,
-                horizon_n=ctx.horizon_n,
-                dt=ctx.dt,
-                connect_from_ego_pose=connect_visual_path_from_ego,
+                notes=notes,
+                visual_path_reason=visual_path_reason,
             )
-            notes.setdefault("path_source", "visual_lane_waypoints")
-            notes.setdefault("recovery_source", "visual_lane_waypoints")
-            notes["path_authority"] = "visual"
-            notes["mpc_weight_profile"] = "lane_keep_visual"
-            notes["steer_rate_limit_deg_s"] = 180.0
-            notes["visual_lane_waypoint_count"] = int(len(lane_obs.center_waypoints_body or ()))
-            notes["visual_path_connected_from_ego_pose"] = bool(connect_visual_path_from_ego)
-            if lane_obs.extrapolated_side:
-                notes["visual_lane_extrapolated_side"] = str(lane_obs.extrapolated_side)
-            if lane_obs.lane_width_m is not None:
-                notes["visual_lane_width_m"] = float(lane_obs.lane_width_m)
-            notes["visual_path_primary_reason"] = str(visual_path_reason)
-        elif route_corridor_available:
+        elif use_dr_path:
+            dr_result = self._build_dr_target_path(
+                ctx=ctx,
+                target_speed_mps=target_speed_mps,
+                route_waypoints=route_waypoints,
+                route_corridor_available=route_corridor_available,
+                lanelet_corridor_available=lanelet_corridor_available,
+                map_authority_active=map_authority_active,
+                notes=notes,
+                visual_path_reason=visual_path_reason,
+            )
+            if dr_result is None:
+                return self._fallback_plan(ctx, reason="no_lanelet_map_or_id")
+            target_path = dr_result
+        else:
+            # ── Blend convexo visual ↔ DR ─────────────────────────────────
+            # Construimos ambos paths en el mismo frame y los mezclamos punto
+            # a punto con `alpha` como peso del visual. Esto da una
+            # transición SUAVE en single_line (típicamente α≈0.3): el path
+            # sigue mayormente el corredor DR pero se desvía hacia la
+            # tangente visual, que mantiene la curvatura del polinomio
+            # incluso con una sola línea (la otra se sintetiza con LANE_WIDTH).
+            visual_notes: dict = {}
+            visual_path = self._build_visual_target_path(
+                ctx=ctx,
+                lane_obs=lane_obs,
+                target_speed_mps=target_speed_mps,
+                notes=visual_notes,
+                visual_path_reason=visual_path_reason,
+            )
+            dr_notes: dict = {}
+            dr_path = self._build_dr_target_path(
+                ctx=ctx,
+                target_speed_mps=target_speed_mps,
+                route_waypoints=route_waypoints,
+                route_corridor_available=route_corridor_available,
+                lanelet_corridor_available=lanelet_corridor_available,
+                map_authority_active=map_authority_active,
+                notes=dr_notes,
+                visual_path_reason=visual_path_reason,
+            )
+            if dr_path is None:
+                # Sin DR no hay con qué mezclar — degradar a visual puro y
+                # mergear los notes del visual.
+                target_path = visual_path
+                notes.update(visual_notes)
+            else:
+                target_path = blend_target_paths(visual_path, dr_path, alpha)
+                # Mergear notes de ambas ramas con el de mayor peso ganando
+                # los keys conflictivos (perfil de pesos / steer rate limit).
+                dominant_visual = alpha >= _LANE_BLEND_DOMINANT_THRESHOLD
+                # Empezamos por el lado menos dominante para que el dominante
+                # sobreescriba sus keys.
+                if dominant_visual:
+                    notes.update(dr_notes)
+                    notes.update(visual_notes)
+                    notes["path_authority"] = "blended_visual"
+                    notes["mpc_weight_profile"] = "lane_keep_visual"
+                    notes["steer_rate_limit_deg_s"] = 180.0
+                else:
+                    notes.update(visual_notes)
+                    notes.update(dr_notes)
+                    notes["path_authority"] = "blended_route"
+                    # Si DR estaba bajo autoridad de mapa, mantenemos sus límites
+                    # (no queremos relajar steer rate cerca de una intersección).
+                    if map_authority_active:
+                        notes["mpc_weight_profile"] = "map_turn_authority"
+                        notes["steer_rate_limit_deg_s"] = 160.0
+                notes["path_source"] = "blended_visual_dr"
+                notes["recovery_source"] = "blended_visual_dr"
+                notes["visual_path_primary_reason"] = str(visual_path_reason)
+        if lane_obs is not None and _supports_visual_lane_reentry_bias(lane_obs):
+            notes["visual_lane_error_m"] = float(lane_obs.direct_error_m or 0.0)
+            notes["visual_lane_quality"] = float(lane_obs.quality or 0.0)
+        speed_profile = np.full(ctx.horizon_n, float(target_speed_mps), dtype=float)
+        stop_required = False
+
+        return BehaviorOutput(
+            timestamp=ctx.now_s,
+            dt=ctx.dt,
+            target_path=target_path,
+            speed_profile=speed_profile,
+            scenario_name=scenario_name,
+            valid=True,
+            stop_required=stop_required,
+            notes=notes,
+        )
+
+    def _build_visual_target_path(
+        self,
+        *,
+        ctx: PlanningContext,
+        lane_obs,
+        target_speed_mps: float,
+        notes: dict,
+        visual_path_reason: str,
+    ) -> np.ndarray:
+        """Arma el target_path desde los waypoints visuales y publica los notes
+        canónicos de la rama visual. Mutates `notes` in place.
+        """
+        visual_measurement_mode = str(getattr(lane_obs, "measurement_mode", "none") or "none")
+        connect_visual_path_from_ego = visual_measurement_mode != "single_line"
+        target_path = build_target_path_from_visual(
+            center_waypoints_body=lane_obs.center_waypoints_body,
+            ego_pose=ctx.pose.fused_pose,
+            target_speed_mps=target_speed_mps,
+            horizon_n=ctx.horizon_n,
+            dt=ctx.dt,
+            connect_from_ego_pose=connect_visual_path_from_ego,
+        )
+        notes.setdefault("path_source", "visual_lane_waypoints")
+        notes.setdefault("recovery_source", "visual_lane_waypoints")
+        notes["path_authority"] = "visual"
+        notes["mpc_weight_profile"] = "lane_keep_visual"
+        notes["steer_rate_limit_deg_s"] = 180.0
+        notes["visual_lane_waypoint_count"] = int(len(lane_obs.center_waypoints_body or ()))
+        notes["visual_path_connected_from_ego_pose"] = bool(connect_visual_path_from_ego)
+        if lane_obs.extrapolated_side:
+            notes["visual_lane_extrapolated_side"] = str(lane_obs.extrapolated_side)
+        if lane_obs.lane_width_m is not None:
+            notes["visual_lane_width_m"] = float(lane_obs.lane_width_m)
+        notes["visual_path_primary_reason"] = str(visual_path_reason)
+        return target_path
+
+    def _build_dr_target_path(
+        self,
+        *,
+        ctx: PlanningContext,
+        target_speed_mps: float,
+        route_waypoints: list,
+        route_corridor_available: bool,
+        lanelet_corridor_available: bool,
+        map_authority_active: bool,
+        notes: dict,
+        visual_path_reason: str,
+    ) -> np.ndarray | None:
+        """Arma el target_path desde la ruta densa o, en su defecto, la lanelet
+        centerline. Devuelve `None` si no hay ninguna referencia DR (caller
+        decide cómo recuperar — típicamente `_fallback_plan`).
+        """
+        if route_corridor_available:
             target_path, route_bridge_meta = build_target_path_from_route(
                 route_waypoints=route_waypoints,
                 matched_idx=int(ctx.route.matched_idx or 0),
@@ -168,7 +313,8 @@ class BaseScenario(ABC):
             for key in ("bridge_mode", "protected_prefix_m", "merge_start_idx", "merge_end_idx"):
                 if route_bridge_meta.get(key) is not None:
                     notes[key] = route_bridge_meta[key]
-        elif lanelet_corridor_available:
+            return target_path
+        if lanelet_corridor_available:
             target_path = build_target_path(
                 lanelet_map=ctx.lanelet_map,
                 start_lanelet_id=ctx.route.current_lanelet_id,
@@ -188,24 +334,8 @@ class BaseScenario(ABC):
                 notes.setdefault("path_authority", "lanelet")
             if visual_path_reason:
                 notes["visual_path_primary_rejected_reason"] = str(visual_path_reason)
-        else:
-            return self._fallback_plan(ctx, reason="no_lanelet_map_or_id")
-        if lane_obs is not None and _supports_visual_lane_reentry_bias(lane_obs):
-            notes["visual_lane_error_m"] = float(lane_obs.direct_error_m or 0.0)
-            notes["visual_lane_quality"] = float(lane_obs.quality or 0.0)
-        speed_profile = np.full(ctx.horizon_n, float(target_speed_mps), dtype=float)
-        stop_required = False
-
-        return BehaviorOutput(
-            timestamp=ctx.now_s,
-            dt=ctx.dt,
-            target_path=target_path,
-            speed_profile=speed_profile,
-            scenario_name=scenario_name,
-            valid=True,
-            stop_required=stop_required,
-            notes=notes,
-        )
+            return target_path
+        return None
 
     def _visual_primary_gate(self) -> VisualPrimaryGate:
         gate = getattr(self, "_lane_visual_primary_gate", None)
@@ -213,6 +343,20 @@ class BaseScenario(ABC):
             gate = VisualPrimaryGate()
             setattr(self, "_lane_visual_primary_gate", gate)
         return gate
+
+    def _visual_dr_blender(self) -> VisualDrBlender:
+        blender = getattr(self, "_lane_visual_dr_blender", None)
+        if blender is None:
+            blender = VisualDrBlender()
+            setattr(self, "_lane_visual_dr_blender", blender)
+        # El blender reusa internamente un VisualPrimaryGate. Para que el comportamiento
+        # con `LANE_BLEND_ENABLED=False` sea bit-for-bit idéntico al pre-blender,
+        # exponemos el gate del blender como el gate "clásico" del scenario. Así la
+        # histeresis (enter/exit ticks) se mantiene en un solo lugar y los tests
+        # legacy que prueban hysteresis siguen pasando.
+        if getattr(self, "_lane_visual_primary_gate", None) is not blender.gate:
+            self._lane_visual_primary_gate = blender.gate
+        return blender
 
     def _fallback_plan(self, ctx: PlanningContext, reason: str) -> BehaviorOutput:
         """BehaviorOutput inválido — el `safety_gate` toma control.

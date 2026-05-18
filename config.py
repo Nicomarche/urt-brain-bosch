@@ -40,6 +40,28 @@ LANE_VISUAL_PRIMARY_MAX_HEADING_ERROR_DEG = 35.0
 LANE_VISUAL_PRIMARY_ENTER_TICKS = 3
 LANE_VISUAL_PRIMARY_EXIT_TICKS = 2
 
+# ── Visual ↔ Dead-Reckoning blend (Camino B) ───────────────────────────────
+# Cuando se ven las dos líneas el path proviene 100% de los waypoints visuales;
+# cuando se ve una sola línea, mezclamos visual (que ya sintetiza la línea
+# ausente desplazando LANE_WIDTH_M) con el corredor de ruta/DR; cuando no se
+# ve ninguna, el path es 100% DR (route/lanelet). El peso α se suaviza con
+# constantes de tiempo distintas según se gane o se pierda visión, para que
+# perder una línea no haga saltar el control y recuperar una línea no
+# reactive visual instantáneamente con un solo frame ruidoso.
+#
+# El blender RESPETA todos los hard-blocks del VisualPrimaryGate
+# (intersection / map authority / scenario != lane_keep / geometría inválida):
+# en esos casos α=0 (DR puro). Con LANE_BLEND_ENABLED=False el blender se
+# cortocircuita y delega al gate clásico binario (rollback bit-for-bit).
+LANE_BLEND_ENABLED = False                     # feature flag (off por default)
+LANE_BLEND_ALPHA_TWO_LINE = 1.0                # α* cuando se ven 2 líneas estables
+LANE_BLEND_ALPHA_SINGLE_LINE = 0.3             # α* con 1 línea (mayormente DR, corregido por visual)
+LANE_BLEND_ALPHA_NO_LINE = 0.0                 # α* con 0 líneas (DR puro)
+LANE_BLEND_QUALITY_MIN = 0.5                   # quality bajo el cual α* se atenúa a 0
+LANE_BLEND_TAU_DECAY_S = 0.3                   # τ al perder visión (bajar α rápido hacia DR)
+LANE_BLEND_TAU_RECOVERY_S = 0.5                # τ al recuperar visión (subir α despacio hacia visual)
+LANE_BLEND_DOMINANT_THRESHOLD = 0.5            # umbral α para elegir perfil de pesos MPC (visual vs route)
+
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
 PARKING_SPOT_WIDTH_CM  = 35.0  # ancho del espacio de estacionamiento

@@ -535,6 +535,66 @@ def build_target_path_from_visual(
     return target_path
 
 
+def blend_target_paths(
+    path_visual: np.ndarray,
+    path_route: np.ndarray,
+    alpha: float,
+) -> np.ndarray:
+    """Mezcla convexamente dos `target_path` (N+1, 3) en el mismo frame.
+
+    Args:
+      path_visual: path armado desde los waypoints visuales
+        (`build_target_path_from_visual`). Shape (M, 3) con `(x, y, psi)`
+        en frame OSM/mapa.
+      path_route: path armado desde la ruta densa/centerline
+        (`build_target_path_from_route` / `build_target_path`). Mismo
+        shape y frame que `path_visual`.
+      alpha: peso del visual ∈ [0, 1]. 1 = visual puro, 0 = route puro.
+        Valores intermedios producen blend convexo punto a punto.
+
+    Convención de blend:
+      - Posición (x, y): blend convexo lineal.
+      - Heading (ψ): blend angle-aware con `atan2(α·sinψv+(1−α)·sinψr,
+        α·cosψv+(1−α)·cosψr)` para evitar discontinuidades en ±π.
+
+    Si los shapes difieren se truncan al mínimo común (típicamente coinciden
+    porque ambos paths se arman con el mismo `horizon_n`). Si uno está vacío
+    o degenerado, se devuelve el otro.
+    """
+    if path_visual is None and path_route is None:
+        return np.zeros((1, 3), dtype=float)
+    if path_visual is None or path_visual.size == 0:
+        return np.asarray(path_route, dtype=float)
+    if path_route is None or path_route.size == 0:
+        return np.asarray(path_visual, dtype=float)
+
+    a = float(max(0.0, min(1.0, alpha)))
+    if a >= 1.0 - 1e-6:
+        return np.asarray(path_visual, dtype=float)
+    if a <= 1e-6:
+        return np.asarray(path_route, dtype=float)
+
+    pv = np.asarray(path_visual, dtype=float)
+    pr = np.asarray(path_route, dtype=float)
+    if pv.ndim != 2 or pv.shape[1] < 3 or pr.ndim != 2 or pr.shape[1] < 3:
+        # Shape inesperado — preferimos el visual si parece sano, sino route.
+        return pv if pv.ndim == 2 and pv.shape[1] >= 3 else pr
+
+    n = int(min(pv.shape[0], pr.shape[0]))
+    pv = pv[:n]
+    pr = pr[:n]
+
+    xy = a * pv[:, :2] + (1.0 - a) * pr[:, :2]
+
+    psi_v = pv[:, 2]
+    psi_r = pr[:, 2]
+    sin_part = a * np.sin(psi_v) + (1.0 - a) * np.sin(psi_r)
+    cos_part = a * np.cos(psi_v) + (1.0 - a) * np.cos(psi_r)
+    psi = np.arctan2(sin_part, cos_part)
+
+    return np.column_stack([xy, psi])
+
+
 def _trim_nonforward_visual_prefix(
     waypoints: list[tuple[float, float, float]],
 ) -> tuple[list[tuple[float, float, float]], int]:
