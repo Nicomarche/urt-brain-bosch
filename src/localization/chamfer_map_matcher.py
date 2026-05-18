@@ -208,6 +208,8 @@ class ChamferMapMatcher:
             valid_fraction=float(best_fraction),
             best_offset_px=(int(best_dx), int(best_dy)),
         )
+        if abs(int(best_dx)) >= int(radius_px_x) or abs(int(best_dy)) >= int(radius_px_y):
+            return ChamferMatchResult(applied=False, reason="edge_match", **common)
         if best_cost > float(max_cost_px):
             return ChamferMatchResult(applied=False, reason="cost_too_high", **common)
         if improvement < float(min_improvement_px):

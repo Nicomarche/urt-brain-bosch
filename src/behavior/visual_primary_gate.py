@@ -59,6 +59,7 @@ class _GateConfig:
     enabled: bool
     allowed_scenarios: frozenset[str]
     two_line_min_quality: float
+    single_line_enabled: bool
     single_line_min_quality: float
     min_points: int
     map_authority_distance_m: float
@@ -299,6 +300,7 @@ def _load_config() -> _GateConfig:
         enabled=bool(_get("LANE_VISUAL_PRIMARY_ENABLED", True)),
         allowed_scenarios=frozenset(str(item) for item in (allowed or ())),
         two_line_min_quality=float(_get("LANE_VISUAL_PRIMARY_TWO_LINE_MIN_QUALITY", 0.75)),
+        single_line_enabled=bool(_get("LANE_VISUAL_PRIMARY_SINGLE_LINE_ENABLED", False)),
         single_line_min_quality=float(_get("LANE_VISUAL_PRIMARY_SINGLE_LINE_MIN_QUALITY", 0.85)),
         min_points=int(_get("LANE_VISUAL_MIN_POLY_POINTS", 8)),
         map_authority_distance_m=float(_get("LANE_VISUAL_PRIMARY_MAP_AUTHORITY_DISTANCE_M", 0.90)),
@@ -381,6 +383,9 @@ def _visual_candidate_is_usable(
     if mode == "two_line":
         min_quality = cfg.two_line_min_quality
     elif mode == "single_line":
+        notes["visual_primary_single_line_enabled"] = bool(cfg.single_line_enabled)
+        if not cfg.single_line_enabled:
+            return False, "single_line_primary_disabled", notes
         min_quality = cfg.single_line_min_quality
     else:
         return False, f"unsupported_measurement_mode:{mode}", notes

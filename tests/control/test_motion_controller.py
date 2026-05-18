@@ -347,6 +347,42 @@ def test_negative_solver_speed_gets_forward_recovery_on_route_path() -> None:
     assert cmd.speed_mps == pytest.approx(0.20)
 
 
+def test_negative_solver_speed_forward_recovery_tolerates_large_path_heading() -> None:
+    """La recuperación no debe quedarse parada si el punto espacial sí está adelante."""
+    pose = _pose()
+    x_fwd_m = 0.08
+    y_left_m = 0.02
+    c = math.cos(pose.fused_pose.yaw)
+    s = math.sin(pose.fused_pose.yaw)
+    dx = (c * x_fwd_m) + (s * y_left_m)
+    dy = (s * x_fwd_m) - (c * y_left_m)
+    path_yaw = pose.fused_pose.yaw + math.radians(75.0)
+    target_path = np.array(
+        [
+            [pose.fused_pose.x, pose.fused_pose.y, pose.fused_pose.yaw],
+            [pose.fused_pose.x + dx, pose.fused_pose.y + dy, path_yaw],
+            [pose.fused_pose.x + (2.0 * dx), pose.fused_pose.y + (2.0 * dy), path_yaw],
+            [pose.fused_pose.x + (3.0 * dx), pose.fused_pose.y + (3.0 * dy), path_yaw],
+            [pose.fused_pose.x + (4.0 * dx), pose.fused_pose.y + (4.0 * dy), path_yaw],
+            [pose.fused_pose.x + (5.0 * dx), pose.fused_pose.y + (5.0 * dy), path_yaw],
+        ],
+        dtype=float,
+    )
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(-0.05, 1.0))))
+
+    cmd = mc.compute(
+        _bo(
+            speed_mps=0.20,
+            target_path=target_path,
+            notes={"path_source": "route_waypoints"},
+        ),
+        pose,
+    )
+
+    assert cmd.valid is True
+    assert cmd.speed_mps == pytest.approx(0.20)
+
+
 def test_steering_clamped_to_max() -> None:
     """Si el solver entrega 40°, se reclampa a +25 (max_steering_deg)."""
     mc = _disable_rate_limits(MotionController(

@@ -65,7 +65,8 @@ except Exception:
     _FORWARD_RECOVERY_MIN_SPEED_MPS = 0.20
 _FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M = 0.02
 _FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M = 0.18
-_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG = 45.0
+_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG = 90.0
+_FORWARD_RECOVERY_PATH_SOURCES = frozenset({"route_waypoints", "visual_lane_waypoints"})
 
 
 def _solver_lib_path() -> str:
@@ -1178,7 +1179,7 @@ class MotionController(IMotionController):
             and float(v_opt) < 0.0
             and requested_speed_mps > 1e-6
             and requested_speed_mps >= float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
-            and path_source == "route_waypoints"
+            and path_source in _FORWARD_RECOVERY_PATH_SOURCES
         ):
             forward_recovery_hint = _first_forward_reference_hint(
                 state_refs,
@@ -1201,7 +1202,7 @@ class MotionController(IMotionController):
                 )
                 if speed_mps < float(_FORWARD_RECOVERY_MIN_SPEED_MPS):
                     speed_mps = float(_FORWARD_RECOVERY_MIN_SPEED_MPS)
-                forward_recovery_reason = "negative_solver_forward_route_recovery"
+                forward_recovery_reason = "negative_solver_forward_reference_recovery"
             else:
                 forward_recovery_reason = "negative_solver_no_forward_hint"
 

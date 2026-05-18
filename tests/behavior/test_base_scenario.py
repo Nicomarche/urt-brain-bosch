@@ -131,7 +131,50 @@ def test_constant_speed_plan_does_not_cap_or_stop_for_visual_lane_drift_inputs()
     assert plan.speed_profile[0] == pytest.approx(0.4, abs=1e-6)
 
 
-def test_constant_speed_plan_uses_single_line_visual_primary_on_normal_route() -> None:
+def test_constant_speed_plan_keeps_route_primary_for_single_line_by_default() -> None:
+    scenario = _ConstantSpeedScenario()
+    ctx = replace(
+        make_context(
+            pose_x=0.02,
+            pose_y=0.05,
+            pose_yaw=0.0,
+            current_lanelet_id="n1->n2",
+            route_waypoints=[
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            matched_pose=(0.0, 0.0, 0.0),
+            map_match_error_m=0.35,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=True,
+            direct_error_m=0.05,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=_lookahead_visual_waypoints(),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+
+    plan = _plan_after_visual_hysteresis(scenario, ctx)
+
+    assert plan.valid is True
+    assert plan.notes["path_source"] == "route_waypoints"
+    assert plan.notes["path_authority"] == "route"
+    assert plan.notes["visual_path_primary_rejected_reason"] == "single_line_primary_disabled"
+    assert plan.notes["visual_primary_single_line_enabled"] is False
+
+
+def test_constant_speed_plan_can_enable_single_line_visual_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("config.LANE_VISUAL_PRIMARY_SINGLE_LINE_ENABLED", True)
     scenario = _ConstantSpeedScenario()
     ctx = replace(
         make_context(
@@ -349,15 +392,14 @@ def test_constant_speed_plan_keeps_visual_primary_path_without_route_corridor() 
             map_match_error_m=0.35,
         ),
         lane_observation=LaneObservation(
-            detected_sides=("left",),
-            quality=0.85,
-            measurement_mode="single_line",
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
             direct_error_valid=True,
             direct_error_m=0.05,
             control_policy_mode="ROUTE_TRACKING",
             planner_priority_active=True,
-            center_waypoints_body=_lookahead_visual_waypoints(),
-            extrapolated_side="right",
+            center_waypoints_body=_straight_visual_waypoints(),
             lane_width_m=0.35,
         ),
     )
@@ -366,8 +408,8 @@ def test_constant_speed_plan_keeps_visual_primary_path_without_route_corridor() 
 
     assert plan.valid is True
     assert plan.notes["path_source"] == "visual_lane_waypoints"
-    assert plan.notes["visual_path_primary_reason"] == "single_line_primary"
-    assert plan.notes["visual_path_connected_from_ego_pose"] is False
+    assert plan.notes["visual_path_primary_reason"] == "two_line_primary"
+    assert plan.notes["visual_path_connected_from_ego_pose"] is True
 
 
 def test_constant_speed_plan_keeps_route_primary_when_visual_quality_is_low() -> None:
