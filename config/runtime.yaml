@@ -1,0 +1,124 @@
+# runtime.yaml — Parámetros mutables en caliente del brain.
+#
+# Plan E1: este archivo contiene SÓLO valores que el operador quiere poder
+# ajustar entre runs (o en runs activos) sin reiniciar el robot. Las
+# constantes físicas (lane width, focal length, wheelbase) y los endpoints
+# ZMQ siguen en config.py — sólo lo que se "tunea en campo" vive acá.
+#
+# Hot-reload:
+#   * El watcher (RuntimeParams) revisa este archivo cada ~2 s.
+#   * Cuando el mtime cambia, releé y propaga via `RUNTIME_PARAMS_RELOADED`.
+#   * Aplicación EN BOUNDARY de scenario — el BehaviorPlanner detecta el
+#     cambio al entrar/salir de un escenario para evitar saltos midstride
+#     que rompan al MPC compilado.
+#
+# Cómo agregar un nuevo parámetro:
+#   1. Agregar la clave + valor por defecto acá.
+#   2. Consumir con `RuntimeParams.get("nombre.completo.dotted", default)`.
+#   3. Documentar la unidad y el rango razonable en este YAML.
+
+# ─── Parking ────────────────────────────────────────────────────────────
+parking:
+  search_speed_mps: 0.10    # velocidad buscando el spot
+  forward_speed_mps: 0.06   # avance fino durante la maniobra
+  reverse_speed_mps: -0.08  # retroceso fino durante la maniobra
+  trigger_distance_m: 1.00  # gating: distancia visual al SPOT visual
+
+# ─── Tracking de objetos / signos ───────────────────────────────────────
+signs:
+  min_confidence: 0.55                # global fallback si no hay override por clase
+  action_cooldown_s: 1.0              # ventana de supresión de re-emit
+  stop_command_distance_m: 0.40       # distancia de freno reactivo al stop sign
+  stop_hold_s: 3.0                    # tiempo de hold en señal de stop
+  stop_retrigger_suppress_s: 5.0      # supresión post-stop antes de re-armar
+
+# ─── Traffic Light (plan C1.3) ──────────────────────────────────────────
+traffic_light:
+  enabled: true
+  react_range_m: 4.0          # distancia mínima a la luz para reaccionar
+  red_speed_mps: 0.0          # 0 = freno absoluto
+  yellow_speed_mps: 0.05      # crawl ante luz amarilla
+  max_wait_s: 15.0            # timeout antifail-safe si la luz no cambia
+  lidar_match_required: false # YOLO es suficiente bajo iluminación variable
+
+# ─── Pedestrian Yield (plan C1.4) ───────────────────────────────────────
+pedestrian:
+  yield_distance_m: 2.5       # proyección al path ego < esto → yield
+  yield_half_fov_deg: 45.0    # cono de visibilidad
+  yield_min_confidence: 0.50
+  yield_min_age_frames: 2
+
+# ─── Lane geometry validation (plan TANDA 0.1) ──────────────────────────
+# Rechaza percepción visual del carril cuando el detector confunde la
+# línea opuesta como borde propio. Patrón espejo del check del REF
+# (LaneDetector.hpp: |L-R| ≈ LANE_WIDTH_PIXEL ±25%).
+lane:
+  width_consistency_tolerance: 0.25      # |L+R - lane_width| / lane_width < esto
+  min_quality_for_visual_correction: 0.3 # debajo de esto, LaneKeep cae a route_tracking
+
+# ─── Crosswalk ──────────────────────────────────────────────────────────
+crosswalk:
+  speed_mps: 0.10
+  pedestrian_block_distance_m: 2.5
+
+# ─── Overtake ───────────────────────────────────────────────────────────
+overtake:
+  enabled: true
+  min_dist_to_car_m: 0.8
+  max_car_dist_m: 1.8
+  overtake_dist_m: 2.0
+  lane_offset_m: 0.31
+
+# ─── Visual lateral correction profile ──────────────────────────────────
+# Plan B2: gain dependiente de scenario. El BehaviorPlanner setea el perfil
+# activo en TrackingState al entrar al scenario.
+visual_correction_profiles:
+  default:
+    gain: 0.18
+    max_m: 0.02
+    step_max_m: 0.015
+  lane_keep:
+    gain: 0.22
+    max_m: 0.025
+    step_max_m: 0.018
+  intersection:
+    gain: 0.05
+    max_m: 0.01
+    step_max_m: 0.005
+  roundabout:
+    gain: 0.05
+    max_m: 0.01
+    step_max_m: 0.005
+  parking:
+    gain: 0.00
+    max_m: 0.00
+    step_max_m: 0.000
+
+# ─── Acados MPC weight profiles (plan B1.2) ─────────────────────────────
+# El BehaviorPlanner invoca MotionController.set_weight_profile() al entrar
+# al scenario. Para parking adoptamos los valores validados del repo REF.
+acados_mpc_profiles:
+  default:
+    x: 2.0
+    y: 2.0
+    yaw: 0.5
+    v: 1.0
+    steer: 0.0
+    dv: 1.5
+    dsteer: 0.75
+  parking:
+    x: 1.0
+    y: 7.0
+    yaw: 1.0
+    v: 0.5
+    steer: 0.0
+    dv: 0.0
+    dsteer: 0.0
+  highway:
+    x: 2.0
+    y: 1.5
+    yaw: 0.3
+    v: 1.5
+    steer: 0.0
+    dv: 2.0
+    dsteer: 1.0
