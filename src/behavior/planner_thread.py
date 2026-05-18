@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.behavior.context import PlanningContext
 from src.core.bus.topics import BEHAVIOR_OUTPUT_MSG, BEHAVIOR_PLANNER_STATUS, STATE_CHANGE
+from src.core.messaging.header import SeqCounter, stamp as _stamp_header
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.behavior import BehaviorOutput, ScenarioName
@@ -85,6 +86,7 @@ class threadBehaviorPlanner(ThreadWithStop):
         lidar_scan_buffer: "LatestValueBuffer | None" = None,
         lidar_obstacles_buffer: "LatestValueBuffer | None" = None,
         sign_hints_buffer: "LatestValueBuffer | None" = None,
+        tracking_state=None,
         *,
         dt_s: float,
         horizon_n: int,
@@ -98,6 +100,10 @@ class threadBehaviorPlanner(ThreadWithStop):
         self.queuesList = queuesList
         self._planner = planner
         self._lanelet_map = lanelet_map
+        # Shared state with pose_estimator — used to publish the active
+        # scenario name each tick so the visual-correction profile can be
+        # resolved at correction time. Optional: tests pass None.
+        self._tracking_state = tracking_state
         self._lanelet_map_last_recovery_attempt_mono = 0.0
         self._lanelet_map_recovery_retry_s = 1.0
         self._pose_buf = pose_estimate_buffer
@@ -131,15 +137,26 @@ class threadBehaviorPlanner(ThreadWithStop):
         # (target_path + speed_profile) y un status corto para gauges.
         self._output_sender = messageHandlerSender(queuesList, BEHAVIOR_OUTPUT_MSG)
         self._status_sender = messageHandlerSender(queuesList, BEHAVIOR_PLANNER_STATUS)
+        # Plan TANDA 2.2 / C5.1: snapshot agregado de percepción.
+        from src.core.bus.topics import PERCEPTION_DEBUG  # local import: avoid circ
+        self._perception_debug_sender = messageHandlerSender(queuesList, PERCEPTION_DEBUG)
 
-        # Modo del sistema vía IPC STATE_CHANGE — mismo mecanismo que el
-        # dispatcher. El Manager proxy (__sm_state__) no lo actualiza el
-        # dashboard subprocess (eventlet rompe el proxy bajo spawn), así que
-        # el pipe IPC es la única fuente confiable para todos los writers.
+        # Contadores monotónicos por topic — habilitan detección de gaps
+        # vía analyze_run.py --check-seq-gaps.
+        self._seq_output = SeqCounter()
+        self._seq_status = SeqCounter()
+        self._seq_perception_debug = SeqCounter()
+
+        # Modo del sistema vía IPC STATE_CHANGE.  Espejo del patrón del
+        # dispatcher: IPC es primario; Manager proxy (__sm_state__) es fallback
+        # hasta que llega el primer mensaje IPC (cubre la carrera spawn-mode en
+        # macOS donde el mensaje ZMQ puede llegar tarde por slow-joiner).
         self._stateChangeSubscriber = messageHandlerSubscriber(
             queuesList, STATE_CHANGE, "lastOnly", True
         )
         self._current_mode: str = "STOP"
+        self._ipc_mode_received: bool = False
+        self._sm_state = queuesList.get("__sm_state__") if queuesList else None
 
         # Métricas para el status — no afectan a la lógica de decisión.
         self._frame_idx = 0
@@ -231,13 +248,25 @@ class threadBehaviorPlanner(ThreadWithStop):
         """Un tick: leer inputs → planear → publicar."""
         tick_start = time.monotonic()
 
-        # Actualizar modo desde IPC STATE_CHANGE (mismo override que el dispatcher).
+        # Primario: IPC STATE_CHANGE.
         try:
             msg = self._stateChangeSubscriber.receive()
             if msg is not None:
                 self._current_mode = str(msg).upper()
+                self._ipc_mode_received = True
         except Exception:
             pass
+
+        # Fallback: Manager proxy, solo hasta que llega el primer IPC.
+        # Cubre el slow-joiner de ZMQ spawn-mode en macOS donde el mensaje
+        # puede no haber llegado aún aunque el StateMachine ya cambió.
+        if not self._ipc_mode_received and self._sm_state is not None:
+            try:
+                mode = self._sm_state.get("mode", None)
+                if mode is not None:
+                    self._current_mode = mode.name.upper()
+            except Exception:
+                pass
 
         # Fuera de AUTO/PARKING no planear ni correr el MPC.
         if self._current_mode not in {"AUTO", "PARKING"}:
@@ -417,6 +446,11 @@ class threadBehaviorPlanner(ThreadWithStop):
         # Publicar snapshot serializable al dashboard. Hacemos esta
         # serialización fuera del lock del buffer para minimizar contención.
         self._publish_output(plan)
+        # Plan TANDA 2.2 / C5.1: snapshot agregado de percepción + scenario
+        # activo en un único topic. Permite al GUI mostrar chips por
+        # TrackedObject sin parsear N topics, y a perception_replay
+        # reconstruir el frame offline.
+        self._publish_perception_debug(plan, ctx)
 
         # Métricas.
         self._last_plan_dt_ms = (time.monotonic() - tick_start) * 1000.0
@@ -525,11 +559,23 @@ class threadBehaviorPlanner(ThreadWithStop):
     # Publicación al dashboard
     # ----------------------------------------------------------------
     def _publish_output(self, plan: BehaviorOutput) -> None:
-        """Serializa BehaviorOutput a dict para el canal IPC."""
+        """Serializa BehaviorOutput a dict para el canal IPC.
+
+        Incluye un MessageHeader (D2) con timestamp + seq + source para
+        trazabilidad cross-thread. Mantenemos ``timestamp`` toplevel
+        legacy para no romper consumidores que aún no leen ``header``.
+        """
+        header = _stamp_header(
+            "behavior_planner",
+            self._seq_output,
+            timestamp=float(plan.timestamp) if plan.timestamp else None,
+        )
         payload: dict[str, Any] = {
+            "header": header.to_dict(),
             "timestamp": float(plan.timestamp),
             "dt": float(plan.dt),
             "scenario_name": str(plan.scenario_name),
+            "motion_state": str(getattr(plan, "motion_state", "moving")),
             "valid": bool(plan.valid),
             "stop_required": bool(plan.stop_required),
             "min_moving_speed_mps": (
@@ -541,6 +587,15 @@ class threadBehaviorPlanner(ThreadWithStop):
             "speed_profile": plan.speed_profile.tolist(),
             "notes": _serialize_notes(plan.notes),
         }
+        # Propagar el scenario activo a TrackingState para que pose_estimator
+        # resuelva el perfil de corrección visual correspondiente. Solo set,
+        # sin lectura — el lock dentro del setter es granular y barato.
+        if self._tracking_state is not None:
+            try:
+                self._tracking_state.set_current_scenario(str(plan.scenario_name))
+            except Exception:
+                if self.logging is not None:
+                    self.logging.exception("failed to set tracking_state.current_scenario")
         try:
             self._output_sender.send(payload)
         except Exception:
@@ -548,11 +603,61 @@ class threadBehaviorPlanner(ThreadWithStop):
             if self.logging is not None:
                 self.logging.exception("failed to publish BEHAVIOR_OUTPUT_MSG")
 
+    def _publish_perception_debug(self, plan: BehaviorOutput, ctx) -> None:
+        """Plan TANDA 2.2 — snapshot agregado de percepción + scenario.
+
+        Un único topic con TODO lo que el sistema "vio" + decidió en este
+        tick: tracked objects (con clase, distancia, confianza, age),
+        sign hints, scenario activo y motion_state. Diseñado para:
+
+          * GUI: widget telemetría dibuja chips por TrackedObject sin
+            parsear N topics distintos.
+          * Replay: ``tools/perception_replay.py`` reconstruye qué vio el
+            auto sin re-correr el detector YOLO.
+
+        Tasa: 1× por tick del planner (~20 Hz). El payload es chico
+        (lista de tracked objects + scenario + sign_hints).
+        """
+        header = _stamp_header("behavior_planner", self._seq_perception_debug)
+        tracked_payload: list[dict[str, Any]] = []
+        for obj in tuple(getattr(ctx, "tracked_objects", ()) or ()):
+            try:
+                xy = obj.position_world_xy
+                world_xy = [float(xy[0]), float(xy[1])] if xy is not None else None
+            except (TypeError, IndexError):
+                world_xy = None
+            tracked_payload.append({
+                "track_id": int(getattr(obj, "track_id", -1) or -1),
+                "class_id": int(getattr(obj, "class_id", -1) or -1),
+                "class_name": str(getattr(obj, "class_name", "") or ""),
+                "confidence": float(getattr(obj, "confidence", 0.0) or 0.0),
+                "age_frames": int(getattr(obj, "age_frames", 0) or 0),
+                "world_xy": world_xy,
+            })
+        sign_hints_payload = _slim_sign_hints(getattr(ctx, "sign_hints", ()) or ())
+        payload = {
+            "header": header.to_dict(),
+            "timestamp": float(plan.timestamp),
+            "active_scenario": str(plan.scenario_name),
+            "motion_state": str(getattr(plan, "motion_state", "moving")),
+            "stop_required": bool(plan.stop_required),
+            "tracked_objects": tracked_payload,
+            "sign_hints": sign_hints_payload,
+        }
+        try:
+            self._perception_debug_sender.send(payload)
+        except Exception:
+            if self.logging is not None:
+                self.logging.exception("failed to publish PERCEPTION_DEBUG")
+
     def _publish_status(self, plan: BehaviorOutput) -> None:
         """Status para gauges del dashboard (2 Hz)."""
         fps = 1.0 / self._last_plan_dt_ms * 1000.0 if self._last_plan_dt_ms > 0 else 0.0
+        header = _stamp_header("behavior_planner", self._seq_status)
         payload = {
+            "header": header.to_dict(),
             "active_scenario": str(plan.scenario_name),
+            "motion_state": str(getattr(plan, "motion_state", "moving")),
             "horizon_n": int(plan.horizon_n),
             "fps": float(fps),
             "last_plan_dt_ms": float(self._last_plan_dt_ms),

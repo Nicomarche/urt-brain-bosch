@@ -71,12 +71,17 @@ _has_solver() {
         local lib_path="$PROJECT_ROOT/src/control/c_generated_code/libacados_ocp_solver_bfmc_bicycle.so"
     fi
     [[ -f "$lib_path" ]] || return 1
+    # If the solver spec was regenerated after the native library, the binary
+    # belongs to an older OCP and must be rebuilt for this platform.
+    [[ "$SOLVER_JSON" -nt "$lib_path" ]] && return 1
 
     local expected_solver_dir="$PROJECT_ROOT/src/control/c_generated_code"
     local expected_lib_path="$ACADOS_INSTALL_DIR/lib"
     local expected_shared_ext=".$LIB_EXT"
+    PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
     "$PYTHON_BIN" - "$SOLVER_JSON" "$expected_solver_dir" "$expected_lib_path" "$expected_shared_ext" <<'PY'
 import json
+import math
 import os
 import sys
 
@@ -84,20 +89,55 @@ json_file, expected_solver_dir, expected_lib_path, expected_shared_ext = sys.arg
 
 try:
     with open(json_file, "r", encoding="utf-8") as fh:
-        code_gen_opts = json.load(fh).get("code_gen_opts", {})
+        data = json.load(fh)
+        code_gen_opts = data.get("code_gen_opts", {})
 except Exception:
     sys.exit(1)
+
+try:
+    import config as cfg
+    expected_N = int(getattr(cfg, "ACADOS_MPC_N", 40))
+    expected_T = float(getattr(cfg, "ACADOS_MPC_T", 0.10))
+    expected_tf = expected_N * expected_T
+    expected_v_min = float(getattr(cfg, "ACADOS_MPC_V_MIN", -0.50))
+    expected_v_max = float(getattr(cfg, "ACADOS_MPC_V_MAX", 0.40))
+    expected_delta_min = math.radians(float(getattr(cfg, "ACADOS_MPC_DELTA_MIN_DEG", -21.5)))
+    expected_delta_max = math.radians(float(getattr(cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+except Exception:
+    expected_N = 40
+    expected_T = 0.10
+    expected_tf = 4.0
+    expected_v_min = -0.50
+    expected_v_max = 0.40
+    expected_delta_min = math.radians(-21.5)
+    expected_delta_max = math.radians(25.0)
 
 
 def real(path: object) -> str:
     return os.path.realpath(os.path.expanduser(str(path or "")))
 
+def close(a: object, b: float, tol: float = 1e-6) -> bool:
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except Exception:
+        return False
+
+solver_options = data.get("solver_options", {})
+constraints = data.get("constraints", {})
+time_steps = solver_options.get("time_steps", [])
+lbu = constraints.get("lbu", [])
+ubu = constraints.get("ubu", [])
 
 checks = [
     real(code_gen_opts.get("code_export_directory")) == real(expected_solver_dir),
     real(code_gen_opts.get("json_file")) == real(json_file),
     real(code_gen_opts.get("acados_lib_path")) == real(expected_lib_path),
     str(code_gen_opts.get("shared_lib_ext") or "") == expected_shared_ext,
+    int(solver_options.get("N_horizon", -1)) == expected_N,
+    close(solver_options.get("tf"), expected_tf),
+    len(time_steps) == expected_N and all(close(step, expected_T) for step in time_steps),
+    len(lbu) >= 2 and close(lbu[0], expected_v_min) and close(lbu[1], expected_delta_min),
+    len(ubu) >= 2 and close(ubu[0], expected_v_max) and close(ubu[1], expected_delta_max),
 ]
 
 sys.exit(0 if all(checks) else 1)
@@ -201,12 +241,12 @@ if ! _has_template; then
 
     # Dependencias previas
     if [[ "$PLATFORM" == "Darwin" ]]; then
-        "$PYTHON_BIN" -m pip install vcs-versioning casadi --break-system-packages -q
+        "$PYTHON_BIN" -m pip install vcs-versioning casadi cython deprecated --break-system-packages -q
         "$PYTHON_BIN" -m pip install \
             "$ACADOS_SRC_DIR/interfaces/acados_template" \
             --no-deps --break-system-packages -q
     else
-        "$PYTHON_BIN" -m pip install vcs-versioning casadi -q
+        "$PYTHON_BIN" -m pip install vcs-versioning casadi cython deprecated -q
         "$PYTHON_BIN" -m pip install \
             "$ACADOS_SRC_DIR/interfaces/acados_template" \
             --no-deps -q
@@ -224,6 +264,7 @@ if ! _has_solver; then
     DYLD_LIBRARY_PATH="$ACADOS_INSTALL_DIR/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
     LD_LIBRARY_PATH="$ACADOS_INSTALL_DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     KMP_DUPLICATE_LIB_OK=TRUE \
+    PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
         "$PYTHON_BIN" -m src.control._acados_solver_gen
     log "  solver generado"
 else

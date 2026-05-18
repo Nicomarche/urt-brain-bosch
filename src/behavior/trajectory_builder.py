@@ -1179,15 +1179,10 @@ def _world_to_local(delta_xy: np.ndarray, *, yaw_rad: float) -> np.ndarray:
 
 
 def _local_to_world(local_xy: np.ndarray, *, origin_xy: np.ndarray, yaw_rad: float) -> np.ndarray:
-    cos_y = math.cos(float(yaw_rad))
-    sin_y = math.sin(float(yaw_rad))
-    return np.array(
-        [
-            float(origin_xy[0]) + cos_y * float(local_xy[0]) - sin_y * float(local_xy[1]),
-            float(origin_xy[1]) + sin_y * float(local_xy[0]) + cos_y * float(local_xy[1]),
-        ],
-        dtype=float,
-    )
+    # Wrapper sobre src.core.frames.body_to_world (single source of truth).
+    # Mantenemos el nombre legacy para no romper imports internos del módulo.
+    from src.core.frames import body_to_world as _bw
+    return _bw(local_xy, origin_xy=origin_xy, yaw_rad=yaw_rad)
 
 
 def _smoothstep(alpha: float) -> float:

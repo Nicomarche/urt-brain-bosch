@@ -29,6 +29,8 @@ from typing import Any
 
 import numpy as np
 
+from src.core.messaging.header import MessageHeader
+
 
 class ScenarioName(str, Enum):
     """Nombres canónicos de escenarios — string-enum para serialización fácil.
@@ -47,10 +49,60 @@ class ScenarioName(str, Enum):
     ROUNDABOUT = "roundabout"
     STOP = "stop"
     OVERTAKE = "overtake"
+    TRAFFIC_LIGHT = "traffic_light"
+    PEDESTRIAN_YIELD = "pedestrian_yield"
     # FALLBACK no es un scenario propiamente dicho — lo usa el planner
     # cuando ningún scenario está activo, para emitir un BehaviorOutput
     # con stop_required=True. Mantener acá evita strings mágicos.
     FALLBACK = "fallback"
+
+
+class MotionState(str, Enum):
+    """Sub-estado granular de marcha del auto, ortogonal al ``ScenarioName``.
+
+    Plan B3: mientras ``scenario_name`` indica QUÉ escenario está activo,
+    ``motion_state`` describe la FASE dentro de ese scenario o el modo de
+    marcha general. Tomamos los nombres canónicos del repo de referencia
+    (REF) más los que ya implícitamente teníamos (curva, rotonda).
+
+    El dashboard usa este campo para un chip visual estable; el dispatcher
+    lo lee para modular tolerancias del safety gate; los scenarios lo
+    reportan en cada plan para que el operador tenga visibilidad fina.
+    """
+
+    # ── De marcha general ───────────────────────────────────────────
+    MOVING = "moving"
+    CRUISING = "cruising"            # marcha recta confiable (lane_keep en autopista corta)
+    DONE = "done"
+    # ── De curva detectada (path-curvature based) ───────────────────
+    IN_CURVE_LEFT = "in_curve_left"
+    IN_CURVE_RIGHT = "in_curve_right"
+    # ── De intersección ─────────────────────────────────────────────
+    APPROACHING_INTERSECTION = "approaching_intersection"
+    IN_INTERSECTION = "in_intersection"
+    EXITING_INTERSECTION = "exiting_intersection"
+    # ── De stop / luces ─────────────────────────────────────────────
+    APPROACHING_STOP = "approaching_stop"
+    WAITING_FOR_STOP_SIGN = "waiting_for_stop_sign"
+    WAITING_FOR_TRAFFIC_LIGHT = "waiting_for_traffic_light"
+    # ── De parking ──────────────────────────────────────────────────
+    APPROACHING_PARKING = "approaching_parking"
+    PARKING = "parking"
+    PARKED = "parked"
+    EXITING_PARKING = "exiting_parking"
+    # ── De rotonda ──────────────────────────────────────────────────
+    ENTERING_ROUNDABOUT = "entering_roundabout"
+    IN_ROUNDABOUT = "in_roundabout"
+    EXITING_ROUNDABOUT = "exiting_roundabout"
+    # ── De adelantamiento ───────────────────────────────────────────
+    OVERTAKE_ACTIVE = "overtake_active"
+    # ── De crosswalk / peatón ───────────────────────────────────────
+    APPROACHING_CROSSWALK = "approaching_crosswalk"
+    CROSSWALK_YIELDING = "crosswalk_yielding"
+    IN_CROSSWALK_CROSSING = "in_crosswalk_crossing"
+    PEDESTRIAN_YIELDING = "pedestrian_yielding"
+    # ── De autopista ────────────────────────────────────────────────
+    HIGHWAY_CRUISE = "highway_cruise"
 
 
 class TurnSignalCommand(str, Enum):
@@ -128,10 +180,15 @@ class BehaviorOutput:
     target_path: np.ndarray = field(default_factory=lambda: np.zeros((1, 3)))
     speed_profile: np.ndarray = field(default_factory=lambda: np.zeros(0))
     scenario_name: str = ScenarioName.FALLBACK.value
+    motion_state: str = MotionState.MOVING.value  # plan B3: sub-estado granular
     valid: bool = False
     stop_required: bool = False
     min_moving_speed_mps: float | None = None
     notes: dict[str, Any] = field(default_factory=dict)
+    # Plan TANDA 2.1: Header opcional. Default ``None`` mantiene retro-compat —
+    # consumidores deben leer ``header.timestamp`` con fallback al ``timestamp``
+    # toplevel hasta que toda la cadena migre.
+    header: MessageHeader | None = None
 
     @property
     def horizon_n(self) -> int:

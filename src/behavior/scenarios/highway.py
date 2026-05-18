@@ -11,10 +11,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.behavior.sign_utils import nearest_sign_hint
-from src.core.types.behavior import BehaviorOutput, ScenarioName
+from src.core.types.behavior import BehaviorOutput, MotionState, ScenarioName
 from src.routing.lanelet.attributes import (
     ATTR_HIGHWAY_LEFT,
     ATTR_HIGHWAY_RIGHT,
@@ -55,7 +57,7 @@ class Highway(BaseScenario):
         # La velocidad highway puede ser mayor que la nominal pero
         # nunca más alta que max_speed_mps (el velocity_overlay capea).
         target = min(max(_HIGHWAY_SPEED_MPS, float(_HIGHWAY_MIN_SPEED_MPS)), ctx.max_speed_mps)
-        return self._build_constant_speed_plan(
+        plan = self._build_constant_speed_plan(
             ctx=ctx,
             target_speed_mps=target,
             scenario_name=self.name,
@@ -65,3 +67,4 @@ class Highway(BaseScenario):
                 "min_moving_speed_mps": float(_HIGHWAY_MIN_SPEED_MPS),
             },
         )
+        return replace(plan, motion_state=MotionState.HIGHWAY_CRUISE.value)

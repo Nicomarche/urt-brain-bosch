@@ -27,6 +27,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.core.messaging.header import MessageHeader
+
 
 @dataclass(frozen=True)
 class MotorCommand:
@@ -57,6 +59,8 @@ class MotorCommand:
     source: str = "none"
     reason: str = ""
     debug: dict[str, Any] = field(default_factory=dict)
+    # Plan TANDA 2.1: Header opcional (default None mantiene retro-compat).
+    header: MessageHeader | None = None
 
 
 @dataclass(frozen=True)

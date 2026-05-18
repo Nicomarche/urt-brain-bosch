@@ -254,6 +254,22 @@ class ZmqBusClient(QObject):
         return f"tcp://{self._host}:{self._sub_port}"
 
     # ─── Outgoing ─────────────────────────────────────────────────────
+    def emit_calibration(self, payload: dict) -> str:
+        """Emite un command de calibración con ``correlation_id`` auto-generado.
+
+        Devuelve el ``correlation_id`` (uuid4 hex) para que el caller pueda
+        matchear contra la respuesta del thread. Esto convierte CALIBRATION
+        (pub/sub mismo topic para request y reply) en un par request↔reply
+        sin race condition entre requests concurrentes.
+        """
+        import uuid
+        correlation_id = uuid.uuid4().hex
+        full_payload = dict(payload)
+        full_payload["correlation_id"] = correlation_id
+        # Reusa la lógica de emit_message para todos los gates y locks.
+        self.emit_message("Calibration", full_payload)
+        return correlation_id
+
     def emit_message(self, name: str, value: Any = None) -> None:
         """Publish ``value`` on the bus topic associated with ``name``.
 

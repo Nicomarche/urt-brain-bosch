@@ -136,7 +136,7 @@ from src.hardware.serialhandler.processSerialHandler import processSerialHandler
 from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
-from src.core.bus.topics import STATE_CHANGE
+from src.core.bus.topics import STATE_CHANGE, WARNING_SIGNAL
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from config import (
@@ -219,7 +219,31 @@ def main():
     # ===================================== INITIALIZE ==================================
 
     stateChangeSubscriber = messageHandlerSubscriber(queueList, STATE_CHANGE, "lastOnly", True)
+    # Plan G3: shutdown coordinado por WARNING_SIGNAL severity=crit/dead.
+    # Si un thread crítico (planner, MPC, dispatcher, pose_estimator) emite
+    # WARNING crit, iniciamos shutdown ordenado: klem off → BehaviorOutput
+    # valid=False → stop all processes → exit.
+    warningSignalSubscriber = messageHandlerSubscriber(
+        queueList, WARNING_SIGNAL, "fifo", True
+    )
+    _CRITICAL_THREADS = {
+        "threadBehaviorPlanner",
+        "threadPoseEstimator",
+        "MotorCommandDispatcher",
+        "threadWrite",
+    }
     StateMachine.initialize_shared_state(queueList)
+
+    # Plan E2: inicializar data/calibration.db con el schema canónico antes
+    # de que cualquier thread haga lecturas. La API es lazy y CREATE TABLE
+    # IF NOT EXISTS, así que no rompe runs sucesivos. Cierra inmediatamente
+    # — los consumidores abren su propia conexión cuando la necesiten.
+    try:
+        from src.core.persistence.calibration_db import CalibrationDB
+        with CalibrationDB():
+            pass
+    except Exception:
+        logger.exception("failed to bootstrap calibration.db")
 
     # Exponer los proxies del Manager en queueList para que los subprocesos
     # (dispatcher, etc.) puedan leer el estado directamente sin pasar por el
@@ -321,6 +345,21 @@ def main():
                 #processSemaphore = manage_process_life(processSemaphores, processSemaphore, [queueList, logging, semaphore_ready, False], modeDictSemaphore["enabled"], allProcesses)
                 # processTrafficCom = manage_process_life(processTrafficCommunication, processTrafficCom, [queueList, logging, 3, traffic_com_ready, False], modeDictTrafficCom["enabled"], allProcesses)
                 pass
+
+            # Plan G3: si un thread crítico emite WARNING crit/dead, gatillar
+            # shutdown ordenado igual que Ctrl+C.
+            warning = warningSignalSubscriber.receive()
+            if warning is not None:
+                # WARNING_SIGNAL llega como string (str(payload_dict)) — parsear best-effort.
+                w_str = str(warning)
+                if ("severity=crit" in w_str or "severity=dead" in w_str or
+                        "severity':'crit" in w_str or "severity':'dead" in w_str):
+                    is_critical = any(name in w_str for name in _CRITICAL_THREADS)
+                    if is_critical:
+                        print(
+                            f"\033[1;91m[ main ] Critical thread WARNING: {w_str} — shutting down\033[0m"
+                        )
+                        raise KeyboardInterrupt
 
             blocker.wait(0.1)
 

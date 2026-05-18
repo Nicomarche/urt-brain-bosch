@@ -440,53 +440,53 @@ void bfmc_bicycle_acados_setup_nlp_in(bfmc_bicycle_solver_capsule* capsule, cons
     {
         // set time_steps
     
-        double time_step = 0.05;
+        double time_step = 0.1;
         for (int i = 0; i < N; i++)
         {
             ocp_nlp_in_set(nlp_config, nlp_dims, nlp_in, i, "Ts", &time_step);
         }
         // set cost scaling
         double* cost_scaling = malloc((N+1)*sizeof(double));
-        cost_scaling[0] = 0.05;
-        cost_scaling[1] = 0.05;
-        cost_scaling[2] = 0.05;
-        cost_scaling[3] = 0.05;
-        cost_scaling[4] = 0.05;
-        cost_scaling[5] = 0.05;
-        cost_scaling[6] = 0.05;
-        cost_scaling[7] = 0.05;
-        cost_scaling[8] = 0.05;
-        cost_scaling[9] = 0.05;
-        cost_scaling[10] = 0.05;
-        cost_scaling[11] = 0.05;
-        cost_scaling[12] = 0.05;
-        cost_scaling[13] = 0.05;
-        cost_scaling[14] = 0.05;
-        cost_scaling[15] = 0.05;
-        cost_scaling[16] = 0.05;
-        cost_scaling[17] = 0.05;
-        cost_scaling[18] = 0.05;
-        cost_scaling[19] = 0.05;
-        cost_scaling[20] = 0.05;
-        cost_scaling[21] = 0.05;
-        cost_scaling[22] = 0.05;
-        cost_scaling[23] = 0.05;
-        cost_scaling[24] = 0.05;
-        cost_scaling[25] = 0.05;
-        cost_scaling[26] = 0.05;
-        cost_scaling[27] = 0.05;
-        cost_scaling[28] = 0.05;
-        cost_scaling[29] = 0.05;
-        cost_scaling[30] = 0.05;
-        cost_scaling[31] = 0.05;
-        cost_scaling[32] = 0.05;
-        cost_scaling[33] = 0.05;
-        cost_scaling[34] = 0.05;
-        cost_scaling[35] = 0.05;
-        cost_scaling[36] = 0.05;
-        cost_scaling[37] = 0.05;
-        cost_scaling[38] = 0.05;
-        cost_scaling[39] = 0.05;
+        cost_scaling[0] = 0.1;
+        cost_scaling[1] = 0.1;
+        cost_scaling[2] = 0.1;
+        cost_scaling[3] = 0.1;
+        cost_scaling[4] = 0.1;
+        cost_scaling[5] = 0.1;
+        cost_scaling[6] = 0.1;
+        cost_scaling[7] = 0.1;
+        cost_scaling[8] = 0.1;
+        cost_scaling[9] = 0.1;
+        cost_scaling[10] = 0.1;
+        cost_scaling[11] = 0.1;
+        cost_scaling[12] = 0.1;
+        cost_scaling[13] = 0.1;
+        cost_scaling[14] = 0.1;
+        cost_scaling[15] = 0.1;
+        cost_scaling[16] = 0.1;
+        cost_scaling[17] = 0.1;
+        cost_scaling[18] = 0.1;
+        cost_scaling[19] = 0.1;
+        cost_scaling[20] = 0.1;
+        cost_scaling[21] = 0.1;
+        cost_scaling[22] = 0.1;
+        cost_scaling[23] = 0.1;
+        cost_scaling[24] = 0.1;
+        cost_scaling[25] = 0.1;
+        cost_scaling[26] = 0.1;
+        cost_scaling[27] = 0.1;
+        cost_scaling[28] = 0.1;
+        cost_scaling[29] = 0.1;
+        cost_scaling[30] = 0.1;
+        cost_scaling[31] = 0.1;
+        cost_scaling[32] = 0.1;
+        cost_scaling[33] = 0.1;
+        cost_scaling[34] = 0.1;
+        cost_scaling[35] = 0.1;
+        cost_scaling[36] = 0.1;
+        cost_scaling[37] = 0.1;
+        cost_scaling[38] = 0.1;
+        cost_scaling[39] = 0.1;
         cost_scaling[40] = 1;
         for (int i = 0; i <= N; i++)
         {
@@ -618,9 +618,9 @@ void bfmc_bicycle_acados_setup_nlp_in(bfmc_bicycle_solver_capsule* capsule, cons
     double* lubu = calloc(2*NBU, sizeof(double));
     double* lbu = lubu;
     double* ubu = lubu + NBU;
-    lbu[0] = -0.1;
-    ubu[0] = 0.1;
-    lbu[1] = -0.4363323129985824;
+    lbu[0] = -0.5;
+    ubu[0] = 0.4;
+    lbu[1] = -0.3752457891787809;
     ubu[1] = 0.4363323129985824;
 
     for (int i = 0; i < N; i++)

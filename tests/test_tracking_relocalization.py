@@ -2,6 +2,7 @@ import math
 import time
 import types
 import unittest
+from collections import deque
 
 from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
 from src.localization.dead_reckoning import DeadReckoning
@@ -55,6 +56,42 @@ class TrackingRelocalizationTests(unittest.TestCase):
 
         self.assertAlmostEqual(speed_mps, 0.108, places=4)
         self.assertEqual(tracker._last_speed_source, "command")
+
+    def test_encoder_outlier_is_replaced_by_recent_command(self):
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub(["500"])  # 0.50 m/s encoder spike
+        tracker._speed_cmd_sub = _FakeSub(["200"])  # 0.20 m/s command
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 200.0
+        tracker._last_cmd_speed_t = 9.95
+        tracker._cmd_speed_history = deque([0.20] * 5, maxlen=5)
+        tracker._current_state_message = "AUTO"
+
+        speed_mps = tracker._resolve_speed_mps(now=10.0)
+
+        self.assertAlmostEqual(speed_mps, 0.20, places=4)
+        self.assertEqual(tracker._last_speed_source, "encoder_filtered_command")
+
+    def test_encoder_near_zero_is_clamped_to_zero(self):
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub(["10"])  # 0.01 m/s noise
+        tracker._speed_cmd_sub = _FakeSub([None])
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 0.0
+        tracker._last_cmd_speed_t = None
+        tracker._cmd_speed_history = deque([0.0] * 5, maxlen=5)
+        tracker._current_state_message = "AUTO"
+
+        speed_mps = tracker._resolve_speed_mps(now=10.0)
+
+        self.assertAlmostEqual(speed_mps, 0.0, places=4)
+        self.assertEqual(tracker._last_speed_source, "encoder_zero")
 
     def test_current_steer_feedback_is_preferred_over_command(self):
         tracker = threadTracking.__new__(threadTracking)
@@ -111,6 +148,24 @@ class TrackingRelocalizationTests(unittest.TestCase):
         self.assertGreater(x, 0.0)
         self.assertGreater(y, 0.0)
         self.assertGreater(yaw, 0.0)
+
+    def test_dead_reckoning_beta_moves_cg_before_body_yaw_changes(self):
+        dr = DeadReckoning(0.0, 0.0, 0.0)
+
+        dr.update_from_yaw(
+            speed_mps=0.20,
+            yaw_start_rad=0.0,
+            yaw_end_rad=0.0,
+            dt=0.10,
+            steer_rad=math.radians(25.0),
+            wheelbase_m=0.258,
+            rear_axle_to_cg_m=0.103,
+        )
+
+        x, y, yaw = dr.get_state()
+        self.assertGreater(x, 0.0)
+        self.assertLess(y, 0.0)
+        self.assertAlmostEqual(yaw, 0.0, places=9)
 
     def _make_lane_reloc_tracker(self, dr_y=0.10, speed=0.20):
         tracker = threadTracking.__new__(threadTracking)

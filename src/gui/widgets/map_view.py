@@ -21,7 +21,7 @@ from typing import Optional
 import time as _time
 
 from PyQt5.QtCore import QPointF, QRectF, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PyQt5.QtGui import QBrush, QColor, QFont, QImage, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QDoubleSpinBox,
@@ -32,7 +32,9 @@ from PyQt5.QtWidgets import (
     QGraphicsPathItem,
     QGraphicsPixmapItem,
     QGraphicsPolygonItem,
+    QGraphicsRectItem,
     QGraphicsScene,
+    QGraphicsSimpleTextItem,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -43,10 +45,12 @@ from PyQt5.QtWidgets import (
 )
 
 from ..client import events as ev
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 from ..config import persistence, settings
 from ._map_path_overlay import (
     extract_control_path_points,
+    extract_control_path_points_with_speed,
+    speed_to_color_hsl,
     extract_nav_route_preview_points,
 )
 from ._map_click_routing import resolve_click_destination_lanelet
@@ -492,6 +496,8 @@ class MapView(QWidget):
         self._has_centered_on_ego = False
         self._pending_initial_fit = True
         self._syncing_map_calibration_controls = False
+        self._measure_mode = False
+        self._measure_point_a: tuple[float, float] | None = None
 
         self._build_scene()
 
@@ -522,6 +528,14 @@ class MapView(QWidget):
             )
             self._relocate_btn.setCheckable(True)
             self._relocate_btn.toggled.connect(self._on_relocate_toggled)
+            self._measure_btn = QToolButton()
+            self._measure_btn.setText("Measure")
+            self._measure_btn.setToolTip(
+                "Click two points on the map to measure the distance in centimetres. "
+                "Click a third time to start a new measurement."
+            )
+            self._measure_btn.setCheckable(True)
+            self._measure_btn.toggled.connect(self._on_measure_toggled)
             self._save_start_btn = QPushButton("Save start")
             self._save_start_btn.setToolTip(
                 "Stop only: save the current car pose into "
@@ -624,6 +638,7 @@ class MapView(QWidget):
             toolbar.addWidget(fit_btn)
             toolbar.addWidget(clear_route_btn)
             toolbar.addWidget(self._relocate_btn)
+            toolbar.addWidget(self._measure_btn)
             toolbar.addWidget(self._save_start_btn)
             toolbar.addWidget(self._calibrate_start_btn)
             toolbar.addWidget(self._no_gps_btn)
@@ -741,6 +756,54 @@ class MapView(QWidget):
         self._control_path.setPen(QPen(QColor("#2ed47a"), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         self._control_path.setZValue(51)
         self._scene.addItem(self._control_path)
+        # Plan F1: segmentos coloreados por velocidad (uno por punto).
+        # El _control_path queda como fallback "verde plano" si el payload
+        # no trae speed_profile; cuando trae, ocultamos _control_path y
+        # dibujamos N _speed_segments en su lugar.
+        self._speed_segments: list[QGraphicsItem] = []
+
+        # Measure overlay — two yellow dots, a dashed line, and a distance label.
+        _mr = 6
+        self._measure_dot_a = QGraphicsEllipseItem(-_mr, -_mr, 2 * _mr, 2 * _mr)
+        self._measure_dot_a.setPen(QPen(QColor("#ffffff"), 1.5))
+        self._measure_dot_a.setBrush(QBrush(QColor(255, 220, 0, 220)))
+        self._measure_dot_a.setZValue(200)
+        self._measure_dot_a.setVisible(False)
+        self._scene.addItem(self._measure_dot_a)
+
+        self._measure_dot_b = QGraphicsEllipseItem(-_mr, -_mr, 2 * _mr, 2 * _mr)
+        self._measure_dot_b.setPen(QPen(QColor("#ffffff"), 1.5))
+        self._measure_dot_b.setBrush(QBrush(QColor(255, 220, 0, 220)))
+        self._measure_dot_b.setZValue(200)
+        self._measure_dot_b.setVisible(False)
+        self._scene.addItem(self._measure_dot_b)
+
+        self._measure_line_item = QGraphicsLineItem()
+        self._measure_line_item.setPen(QPen(QColor(255, 220, 0, 200), 1.5, Qt.DashLine))
+        self._measure_line_item.setZValue(199)
+        self._measure_line_item.setVisible(False)
+        self._scene.addItem(self._measure_line_item)
+
+        _measure_font = QFont()
+        _measure_font.setPointSize(10)
+        _measure_font.setBold(True)
+        self._measure_label_bg = QGraphicsRectItem()
+        self._measure_label_bg.setPen(QPen(Qt.NoPen))
+        self._measure_label_bg.setBrush(QBrush(QColor(0, 0, 0, 180)))
+        self._measure_label_bg.setZValue(201)
+        self._measure_label_bg.setVisible(False)
+        self._scene.addItem(self._measure_label_bg)
+
+        self._measure_label = QGraphicsSimpleTextItem()
+        self._measure_label.setBrush(QBrush(QColor(255, 220, 0)))
+        self._measure_label.setFont(_measure_font)
+        self._measure_label.setZValue(202)
+        self._measure_label.setVisible(False)
+        self._scene.addItem(self._measure_label)
+
+        # Reset active measurement state on every scene rebuild.
+        self._measure_point_a = None
+
         self._apply_lanelet_highlights(
             current_lanelet_id=self._active_current_lanelet_id,
             next_lanelet_ids=self._active_next_lanelet_ids,
@@ -1699,13 +1762,43 @@ class MapView(QWidget):
         )
 
     def _on_behavior_output(self, payload) -> None:
-        control_path_points = extract_control_path_points(payload)
-        if len(control_path_points) < 2:
+        # Plan F1: si el payload trae speed_profile, dibujar segmentos
+        # coloreados (rojo→verde). Si no, fallback al path verde plano.
+        speed_points = extract_control_path_points_with_speed(payload)
+        # Clear previous segments
+        for item in self._speed_segments:
+            self._scene.removeItem(item)
+        self._speed_segments.clear()
+
+        if len(speed_points) >= 2:
+            # ocultar el path plano si vamos a dibujar segmentos coloreados
             self._control_path.setPath(QPainterPath())
-            return
-        self._control_path.setPath(
-            _build_world_path(control_path_points, world_to_pixel=self._data.world_to_pixel)
-        )
+            # Resolver max speed para normalizar el color
+            try:
+                max_speed = max(0.001, max(s for _, _, s in speed_points))
+            except ValueError:
+                max_speed = 0.5
+            for i in range(len(speed_points) - 1):
+                x0, y0, s0 = speed_points[i]
+                x1, y1, _ = speed_points[i + 1]
+                px0 = self._data.world_to_pixel(x0, y0)
+                px1 = self._data.world_to_pixel(x1, y1)
+                from PyQt5.QtWidgets import QGraphicsLineItem
+                seg = QGraphicsLineItem(px0[0], px0[1], px1[0], px1[1])
+                color_hex = speed_to_color_hsl(s0, max_speed_mps=max_speed)
+                pen = QPen(QColor(color_hex), 4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+                seg.setPen(pen)
+                seg.setZValue(51)
+                self._scene.addItem(seg)
+                self._speed_segments.append(seg)
+        else:
+            control_path_points = extract_control_path_points(payload)
+            if len(control_path_points) < 2:
+                self._control_path.setPath(QPainterPath())
+                return
+            self._control_path.setPath(
+                _build_world_path(control_path_points, world_to_pixel=self._data.world_to_pixel)
+            )
 
     def _on_state_change(self, mode: str) -> None:
         if mode:
@@ -1809,6 +1902,13 @@ class MapView(QWidget):
             checked = False
         self._relocate_mode = checked
         if checked:
+            if hasattr(self, "_measure_btn") and self._measure_btn.isChecked():
+                self._measure_btn.blockSignals(True)
+                self._measure_btn.setChecked(False)
+                self._measure_btn.blockSignals(False)
+                self._measure_mode = False
+                self._clear_measure_overlay()
+                self._measure_btn.setStyleSheet("")
             if hasattr(self, "_relocate_btn"):
                 self._relocate_btn.setStyleSheet(
                     "QToolButton { background:#cc3232; color:white; "
@@ -1818,17 +1918,99 @@ class MapView(QWidget):
         else:
             if hasattr(self, "_relocate_btn"):
                 self._relocate_btn.setStyleSheet("")
+            if not self._measure_mode:
+                self._view.viewport().unsetCursor()
+
+    def _on_measure_toggled(self, checked: bool) -> None:
+        self._measure_mode = checked
+        if checked:
+            if hasattr(self, "_relocate_btn") and self._relocate_btn.isChecked():
+                self._relocate_btn.blockSignals(True)
+                self._relocate_btn.setChecked(False)
+                self._relocate_btn.blockSignals(False)
+                self._relocate_mode = False
+            self._measure_btn.setStyleSheet(
+                "QToolButton { background:#1a5c8a; color:white; "
+                "padding:4px 10px; border-radius:4px; font-weight:600; }"
+            )
+            self._view.viewport().setCursor(Qt.CrossCursor)
+            self._location_label.setText("Measure: click point A on the map")
+        else:
+            self._measure_btn.setStyleSheet("")
             self._view.viewport().unsetCursor()
+            self._clear_measure_overlay()
+
+    def _clear_measure_overlay(self) -> None:
+        self._measure_point_a = None
+        for item in (
+            getattr(self, "_measure_dot_a", None),
+            getattr(self, "_measure_dot_b", None),
+            getattr(self, "_measure_line_item", None),
+            getattr(self, "_measure_label_bg", None),
+            getattr(self, "_measure_label", None),
+        ):
+            if item is not None:
+                item.setVisible(False)
+
+    def _update_measure_overlay(
+        self,
+        point_a: tuple[float, float],
+        point_b: tuple[float, float] | None,
+    ) -> None:
+        ax, ay = self._data.world_to_pixel(*point_a)
+        self._measure_dot_a.setPos(ax, ay)
+        self._measure_dot_a.setVisible(True)
+
+        if point_b is None:
+            self._measure_dot_b.setVisible(False)
+            self._measure_line_item.setVisible(False)
+            self._measure_label_bg.setVisible(False)
+            self._measure_label.setVisible(False)
+            return
+
+        bx, by = self._data.world_to_pixel(*point_b)
+        self._measure_dot_b.setPos(bx, by)
+        self._measure_dot_b.setVisible(True)
+
+        self._measure_line_item.setLine(ax, ay, bx, by)
+        self._measure_line_item.setVisible(True)
+
+        dist_cm = math.hypot(point_b[0] - point_a[0], point_b[1] - point_a[1]) * 100.0
+        self._measure_label.setText(f"{dist_cm:.1f} cm")
+
+        br = self._measure_label.boundingRect()
+        mid_x = (ax + bx) / 2.0
+        mid_y = (ay + by) / 2.0
+        lx = mid_x - br.width() / 2.0
+        ly = mid_y - br.height() - 6.0
+        self._measure_label.setPos(lx, ly)
+        self._measure_label_bg.setRect(lx - 3.0, ly - 2.0, br.width() + 6.0, br.height() + 4.0)
+        self._measure_label_bg.setVisible(True)
+        self._measure_label.setVisible(True)
 
     def _on_map_click(self, x_m: float, y_m: float) -> None:
-        # Two behaviours:
+        # Three behaviours:
         #
-        # 1. Relocate mode: any click → ``Localisation``. In sim this drops the
-        #    car there; on the real car it calibrates the latest GPS fix to the
-        #    clicked map point.
-        # 2. Normal click → ``NavigationCommand`` (plan a route to this point).
-        #    This includes AUTO mode + known node — the user wants navigation,
-        #    not a teleport.
+        # 0. Measure mode: first click sets point A, second shows A→B distance.
+        # 1. Relocate mode: any click → ``Localisation``.
+        # 2. Normal click → ``NavigationCommand``.
+        if self._measure_mode:
+            if self._measure_point_a is None:
+                self._measure_point_a = (x_m, y_m)
+                self._update_measure_overlay((x_m, y_m), None)
+                self._location_label.setText(
+                    f"Measure A: ({x_m:.2f}, {y_m:.2f}) m  ·  click point B"
+                )
+            else:
+                point_a = self._measure_point_a
+                dist_cm = math.hypot(x_m - point_a[0], y_m - point_a[1]) * 100.0
+                self._update_measure_overlay(point_a, (x_m, y_m))
+                self._location_label.setText(
+                    f"Distance: {dist_cm:.1f} cm  "
+                    f"({point_a[0]:.2f}, {point_a[1]:.2f}) → ({x_m:.2f}, {y_m:.2f}) m  ·  click to remeasure"
+                )
+                self._measure_point_a = None
+            return
         if self._relocate_mode:
             if not self._is_stop_mode():
                 self._location_label.setText("Relocate is only available in Stop mode")

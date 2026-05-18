@@ -287,6 +287,37 @@ def test_velocity_planner_caps_speed_on_curvature() -> None:
     assert any(note.get("kind") == "curvature_constraint" for note in out.notes.get("velocity_modules", []))
 
 
+def test_velocity_planner_slows_nominal_bfmc_speed_on_tight_curve() -> None:
+    theta = np.linspace(0.0, np.pi / 2.0, 21)
+    radius = 0.30
+    target_path = np.column_stack(
+        [
+            radius * np.cos(theta),
+            radius * np.sin(theta),
+            theta + np.pi / 2.0,
+        ]
+    )
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.25, max_speed_mps=0.40)
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.25, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((21, 2), dtype=float),
+        drivable_right_bound=np.zeros((21, 2), dtype=float),
+        ctx=ctx,
+    )
+
+    assert np.min(out.speed_profile) == pytest.approx(0.20, abs=1e-6)
+    assert any(note.get("kind") == "curvature_constraint" for note in out.notes.get("velocity_modules", []))
+
+
 def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
     ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.25, max_speed_mps=0.40)
     ctx = replace(

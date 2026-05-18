@@ -41,6 +41,11 @@ mkdir -p "$BRAIN_RUN_DIR" "$SIM_RUN_DIR"
 : > "$BRAIN_JSONL"
 : > "$SIM_JSONL"
 
+# E5: exportar URT_LOG_RUN_DIR para que los productores legacy
+# (serial_history.log, lane_calib_log.txt, tracking_debug.txt) escriban
+# dentro del run_<ts> en vez de contaminar temp/ toplevel.
+export URT_LOG_RUN_DIR="$BRAIN_RUN_DIR"
+
 # Resolución de pythons:
 #   BRAIN_PY  = venv del brain (tiene socketio+requests para el headless_controller)
 #   GZ_PY     = python con gz bindings (Homebrew python3.13 con gz)

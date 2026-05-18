@@ -7,7 +7,7 @@ from dataclasses import replace
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.behavior.sign_utils import normalize_sign_kind, sign_hints_for
-from src.core.types.behavior import BehaviorOutput, ScenarioName
+from src.core.types.behavior import BehaviorOutput, MotionState, ScenarioName
 
 try:
     import config as _cfg
@@ -124,7 +124,11 @@ class StopSign(BaseScenario):
                 scenario_name=self.name,
                 notes=notes,
             )
-            return replace(plan, stop_required=True)
+            return replace(
+                plan,
+                stop_required=True,
+                motion_state=MotionState.WAITING_FOR_STOP_SIGN.value,
+            )
 
         plan = self._build_constant_speed_plan(
             ctx=ctx,
@@ -139,7 +143,12 @@ class StopSign(BaseScenario):
             dt=float(ctx.dt),
             distance_to_stop_m=float(distance_m),
         )
-        return replace(plan, speed_profile=speed, stop_required=False)
+        return replace(
+            plan,
+            speed_profile=speed,
+            stop_required=False,
+            motion_state=MotionState.APPROACHING_STOP.value,
+        )
 
     def _candidate(self, ctx: PlanningContext) -> dict | None:
         sign = _nearest_lidar_stop_sign(ctx)

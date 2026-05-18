@@ -59,7 +59,8 @@ class processSerialHandler(WorkerProcess):
     # ===================================== INIT =========================================
     def __init__(self, queueList, logging, ready_event=None, dashboard_ready=None, debugging=False, example=False):
         # devFile = "/dev/ttyACM0"
-        logFile = "temp/serial_history.log"
+        from src.core.log_paths import resolve_log_path
+        logFile = resolve_log_path("serial_history.log")
 
         self.logger = logging
         self.queuesList = queueList
@@ -103,7 +104,8 @@ class processSerialHandler(WorkerProcess):
         from threading import Lock
         self.serialLock = Lock()
         self.serialCon = None
-        logFile = "temp/serial_history.log"
+        from src.core.log_paths import resolve_log_path
+        logFile = resolve_log_path("serial_history.log")
         from src.hardware.serialhandler.threads.filehandler import FileHandler
         self.historyFile = FileHandler(logFile)
 

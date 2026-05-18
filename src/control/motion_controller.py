@@ -37,7 +37,7 @@
 #   - Pre `compute()`: `behavior_output.target_path.shape == (N+1, 3)` y
 #     `speed_profile.shape == (N,)` con `N` igual al horizonte del solver
 #     ya generado. Si no calzan, devuelve MotorCommand inválido (no crash).
-#   - Post: `MotorCommand.steering_deg ∈ [-25, +25]` y `speed_mps >= 0`
+#   - Post: `MotorCommand.steering_deg ∈ [delta_min, delta_max]` y `speed_mps >= 0`
 #     cuando `valid=True`. El `safety_gate` aguas abajo no necesita
 #     re-clampar.
 
@@ -86,6 +86,19 @@ def _wrap_angle(a: float) -> float:
     while a < -math.pi:
         a += 2.0 * math.pi
     return a
+
+
+def _default_steering_bounds_deg(default_max_deg: float = 25.0) -> tuple[float, float]:
+    try:
+        import config as _cfg
+        max_deg = float(getattr(_cfg, "ACADOS_MPC_DELTA_MAX_DEG", default_max_deg))
+        min_deg = float(getattr(_cfg, "ACADOS_MPC_DELTA_MIN_DEG", -max_deg))
+    except Exception:
+        max_deg = float(default_max_deg)
+        min_deg = -max_deg
+    if min_deg > max_deg:
+        min_deg, max_deg = max_deg, min_deg
+    return float(min_deg), float(max_deg)
 
 
 def _osm_pose_to_controller_frame(x: float, y: float, yaw: float) -> np.ndarray:
@@ -243,7 +256,7 @@ class AcadosMPC:
     Parameters
     ----------
     max_steering_deg : float
-        Cota absoluta de steering en grados.
+        Cota superior de steering en grados.
     output_deadband_deg : float
         Si |δ| < deadband ⇒ se redondea a 0 (evita jitter del actuador).
     """
@@ -251,9 +264,12 @@ class AcadosMPC:
     def __init__(
         self,
         max_steering_deg: float = 25.0,
+        min_steering_deg: float | None = None,
         output_deadband_deg: float = 0.5,
     ) -> None:
-        self.max_steering_deg = float(max_steering_deg)
+        default_min_deg, default_max_deg = _default_steering_bounds_deg(max_steering_deg)
+        self.max_steering_deg = float(default_max_deg if max_steering_deg == 25.0 else max_steering_deg)
+        self.min_steering_deg = float(default_min_deg if min_steering_deg is None else min_steering_deg)
         self.output_deadband_deg = float(output_deadband_deg)
         self._solver: AcadosOcpSolver | None = None
         self._N: int = 0
@@ -350,7 +366,7 @@ class AcadosMPC:
 
         # Convertir a grados, clampar y aplicar deadband
         delta_deg = math.degrees(delta_rad)
-        delta_deg = max(-self.max_steering_deg, min(self.max_steering_deg, delta_deg))
+        delta_deg = max(self.min_steering_deg, min(self.max_steering_deg, delta_deg))
         if abs(delta_deg) < self.output_deadband_deg:
             delta_deg = 0.0
 
@@ -393,6 +409,51 @@ class AcadosMPC:
         for j in range(self._N):
             self._solver.cost_set(j, "W", W)
         self._solver.cost_set(self._N, "W", W_e)
+        self._active_profile_name = "custom"
+
+    def set_weight_profile(self, profile_name: str) -> bool:
+        """Plan B1: aplica un perfil de pesos pre-definido por nombre.
+
+        Lee de ``config.ACADOS_MPC_PROFILES`` (constantes Python) primero,
+        y como fallback de ``runtime.yaml`` vía ``RuntimeParams`` para que
+        el operador pueda tunear en campo.
+
+        Returns:
+            True si el perfil se aplicó; False si no se encontró.
+        """
+        from src.core.runtime_params import params as _rt_params
+        profile = None
+        # 1) intenta config.ACADOS_MPC_PROFILES
+        try:
+            import config as _cfg_mod
+            profiles_dict = getattr(_cfg_mod, "ACADOS_MPC_PROFILES", None)
+            if isinstance(profiles_dict, dict):
+                profile = profiles_dict.get(str(profile_name))
+        except Exception:
+            pass
+        # 2) fallback a runtime.yaml acados_mpc_profiles.<name>
+        if profile is None:
+            from_yaml = _rt_params.get(f"acados_mpc_profiles.{profile_name}", None)
+            if isinstance(from_yaml, dict):
+                profile = from_yaml
+        if not isinstance(profile, dict):
+            return False
+        self.update_weights(
+            x_cost=float(profile.get("x", 2.0)),
+            y_cost=float(profile.get("y", 2.0)),
+            yaw_cost=float(profile.get("yaw", 0.5)),
+            v_cost=float(profile.get("v", 1.0)),
+            steer_cost=float(profile.get("steer", 0.0)),
+            delta_v_cost=float(profile.get("dv", 1.5)),
+            delta_steer_cost=float(profile.get("dsteer", 0.75)),
+        )
+        self._active_profile_name = str(profile_name)
+        return True
+
+    @property
+    def active_profile_name(self) -> str:
+        """Nombre del perfil de pesos activo (para telemetría)."""
+        return getattr(self, "_active_profile_name", "default")
 
     def update_bounds(
         self,
@@ -482,7 +543,7 @@ class PurePursuitSolver:
         Factor de tiempo: `L_d = max(min_lookahead_m, gain * v)`. Más alto
         = trayectoria más suave, peor tracking en curvas cerradas.
     max_steering_deg : float
-        Cota mecánica del actuador.
+        Cota superior del actuador.
     output_deadband_deg : float
         Si `|δ| < deadband` ⇒ se devuelve 0 (evita jitter del actuador).
     """
@@ -495,13 +556,16 @@ class PurePursuitSolver:
         min_lookahead_m: float = 0.30,
         lookahead_gain_s: float = 0.6,
         max_steering_deg: float = 25.0,
+        min_steering_deg: float | None = None,
         output_deadband_deg: float = 0.5,
     ) -> None:
         self._N = int(horizon_n)
         self._L_wb = float(wheelbase_m)
         self._min_lookahead = float(min_lookahead_m)
         self._lookahead_gain = float(lookahead_gain_s)
-        self.max_steering_deg = float(max_steering_deg)
+        default_min_deg, default_max_deg = _default_steering_bounds_deg(max_steering_deg)
+        self.max_steering_deg = float(default_max_deg if max_steering_deg == 25.0 else max_steering_deg)
+        self.min_steering_deg = float(default_min_deg if min_steering_deg is None else min_steering_deg)
         self.output_deadband_deg = float(output_deadband_deg)
         self.ready = True
         self._last_debug: dict = {}
@@ -573,7 +637,7 @@ class PurePursuitSolver:
         delta_deg = math.degrees(delta_rad)
 
         # 6. Clamp + deadband — mismas reglas que AcadosMPC.
-        delta_deg = max(-self.max_steering_deg, min(self.max_steering_deg, delta_deg))
+        delta_deg = max(self.min_steering_deg, min(self.max_steering_deg, delta_deg))
         if abs(delta_deg) < self.output_deadband_deg:
             delta_deg = 0.0
 
@@ -678,7 +742,7 @@ class MotionController(IMotionController):
     solver : AcadosMPC | None
         Si None, se construye uno por defecto. Inyectable para tests.
     max_steering_deg : float
-        Cota absoluta de steering. Pasada a AcadosMPC y verificada acá.
+        Cota superior de steering. Pasada a AcadosMPC y verificada acá.
     output_deadband_deg : float
         Steering < deadband ⇒ 0. Útil para no exigir al actuador a
         baja amplitud.
@@ -689,11 +753,19 @@ class MotionController(IMotionController):
         solver: "AcadosMPC | PurePursuitSolver | None" = None,
         *,
         max_steering_deg: float = 25.0,
+        min_steering_deg: float | None = None,
         output_deadband_deg: float = 0.5,
         fallback_horizon_n: int = 20,
     ) -> None:
         self._backend_name = "unknown"
         self._backend_context: dict[str, object] = {}
+        default_min_deg, default_max_deg = _default_steering_bounds_deg(max_steering_deg)
+        resolved_max_steering_deg = (
+            default_max_deg if max_steering_deg == 25.0 else float(max_steering_deg)
+        )
+        resolved_min_steering_deg = (
+            default_min_deg if min_steering_deg is None else float(min_steering_deg)
+        )
         if solver is not None:
             # Solver inyectado — el caller sabe lo que hace (tests).
             self._solver = solver
@@ -725,26 +797,32 @@ class MotionController(IMotionController):
             # abortamos el arranque. Queremos que usar un backend distinto
             # de Acados sea una decisión consciente, no un fallback silencioso.
             acados = None if _force_pp else AcadosMPC(
-                max_steering_deg=max_steering_deg,
+                max_steering_deg=resolved_max_steering_deg,
+                min_steering_deg=resolved_min_steering_deg,
                 output_deadband_deg=_acados_output_deadband_deg,
             )
             if acados is not None and acados.ready:
                 self._solver = acados
                 self._backend_name = "acados"
-                # Aplica pesos desde config en runtime — el .so compilado tiene
-                # los defaults de generate_solver() horneados (e.g. steer_cost=0).
-                # Mismo patrón que threadLineFollowing usa para el path legacy.
+                # Plan B1.2: aplica perfil activo desde config en lugar de
+                # leer las constantes sueltas. Si MPC_WEIGHT_PROFILE no está
+                # definido, fallback al "default" (que iguala las constantes
+                # legacy). Si set_weight_profile falla (config sin profiles),
+                # fallback al patrón legacy de constantes sueltas.
                 try:
                     import config as _cfg
-                    acados.update_weights(
-                        x_cost=float(getattr(_cfg, "ACADOS_MPC_X_COST", 2.0)),
-                        y_cost=float(getattr(_cfg, "ACADOS_MPC_Y_COST", 2.0)),
-                        yaw_cost=float(getattr(_cfg, "ACADOS_MPC_YAW_COST", 0.5)),
-                        v_cost=float(getattr(_cfg, "ACADOS_MPC_V_COST", 1.0)),
-                        steer_cost=float(getattr(_cfg, "ACADOS_MPC_STEER_COST", 0.0)),
-                        delta_v_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_V_COST", 1.5)),
-                        delta_steer_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_STEER_COST", 0.75)),
-                    )
+                    profile_name = str(getattr(_cfg, "MPC_WEIGHT_PROFILE", "default"))
+                    applied = acados.set_weight_profile(profile_name)
+                    if not applied:
+                        acados.update_weights(
+                            x_cost=float(getattr(_cfg, "ACADOS_MPC_X_COST", 2.0)),
+                            y_cost=float(getattr(_cfg, "ACADOS_MPC_Y_COST", 2.0)),
+                            yaw_cost=float(getattr(_cfg, "ACADOS_MPC_YAW_COST", 0.5)),
+                            v_cost=float(getattr(_cfg, "ACADOS_MPC_V_COST", 1.0)),
+                            steer_cost=float(getattr(_cfg, "ACADOS_MPC_STEER_COST", 0.0)),
+                            delta_v_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_V_COST", 1.5)),
+                            delta_steer_cost=float(getattr(_cfg, "ACADOS_MPC_DELTA_STEER_COST", 0.75)),
+                        )
                 except Exception:
                     pass  # sin config (tests unitarios) — pesos del solver compilado
                 # Limitar v_min en runtime: el .so compilado permite v=-0.5
@@ -762,12 +840,13 @@ class MotionController(IMotionController):
                     import math as _math
                     import config as _cfg
                     delta_max = _math.radians(float(getattr(_cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+                    delta_min = _math.radians(float(getattr(_cfg, "ACADOS_MPC_DELTA_MIN_DEG", -_math.degrees(delta_max))))
                     v_max = float(getattr(_cfg, "ACADOS_MPC_V_MAX", 0.10))
                     v_min_runtime = float(getattr(_cfg, "ACADOS_MPC_V_MIN_RUNTIME", -0.05))
                     acados.update_bounds(
                         v_min=v_min_runtime,
                         v_max=v_max,
-                        delta_min_rad=-delta_max,
+                        delta_min_rad=delta_min,
                         delta_max_rad=delta_max,
                     )
                 except Exception:
@@ -799,7 +878,8 @@ class MotionController(IMotionController):
                         horizon_n=fallback_horizon_n,
                         min_lookahead_m=_min_lookahead,
                         lookahead_gain_s=_lookahead_gain,
-                        max_steering_deg=max_steering_deg,
+                        max_steering_deg=resolved_max_steering_deg,
+                        min_steering_deg=resolved_min_steering_deg,
                         output_deadband_deg=output_deadband_deg,
                     )
                     self._backend_name = "pure_pursuit"
@@ -826,7 +906,8 @@ class MotionController(IMotionController):
                         _format_acados_required_error(acados if acados is not None else AcadosMPC())
                     )
         live_log("mpc", event="backend_selected", **self._backend_context)
-        self.max_steering_deg = float(max_steering_deg)
+        self.max_steering_deg = float(resolved_max_steering_deg)
+        self.min_steering_deg = float(resolved_min_steering_deg)
 
         # Rate limiters de steering y velocidad — independientes del solver.
         # Garantizan transiciones graduales aunque el solver entregue saltos.
@@ -1126,7 +1207,7 @@ class MotionController(IMotionController):
 
         # Reclamp por seguridad — si el solver entrega algo > max_steering.
         steering_deg = max(
-            -self.max_steering_deg,
+            self.min_steering_deg,
             min(self.max_steering_deg, float(delta_deg)),
         )
 
@@ -1178,6 +1259,25 @@ class MotionController(IMotionController):
         self._solver.reset()
         self._reset_command_memory()
 
+    def set_weight_profile(self, profile_name: str) -> bool:
+        """Plan B1.2: delega al solver el cambio de perfil de pesos.
+
+        El BehaviorPlanner llama a este método cuando entra a un nuevo
+        scenario (ej. ``"parking"``) para que el MPC re-pondere las
+        prioridades del costo. Si el solver no es AcadosMPC (ej.
+        pure-pursuit), retorna False silenciosamente.
+        """
+        if hasattr(self._solver, "set_weight_profile"):
+            try:
+                return bool(self._solver.set_weight_profile(profile_name))
+            except Exception:
+                return False
+        return False
+
+    def active_weight_profile(self) -> str:
+        """Nombre del perfil de pesos activo, para telemetría."""
+        return str(getattr(self._solver, "active_profile_name", "default"))
+
     def _reset_command_memory(self) -> None:
         self._prev_steer_deg = 0.0
         self._prev_speed_mps = 0.0
@@ -1205,7 +1305,7 @@ class MotionController(IMotionController):
             speed_mps = max(0.0, speed_mps)
 
         steering_deg = max(
-            -self.max_steering_deg,
+            self.min_steering_deg,
             min(self.max_steering_deg, steering_deg),
         )
         return MotorCommand(

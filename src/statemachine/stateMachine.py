@@ -108,6 +108,33 @@ class StateMachine:
         cls._send_starting_mode(cls._shared_state['mode'])
 
     @classmethod
+    def attach(cls, queueList):
+        """Re-attach a child process to an already-initialised shared state.
+
+        On macOS ``spawn`` mode, class variables reset to their defaults in
+        every child process.  The Manager proxies (DictProxy / LockProxy)
+        created by ``initialize_shared_state()`` survive pickle/spawn, so we
+        can reconnect without spinning up a second Manager.
+
+        Safe to call multiple times (no-op after the first successful call).
+        Raises RuntimeError if the proxy keys are missing — callers should
+        treat that as "not yet available" and retry later.
+        """
+        if cls._initialized:
+            return
+        sm_state = queueList.get("__sm_state__") if queueList else None
+        sm_lock = queueList.get("__sm_lock__") if queueList else None
+        if sm_state is None or sm_lock is None:
+            raise RuntimeError(
+                "StateMachine.attach(): '__sm_state__' / '__sm_lock__' missing "
+                "from queueList. Call initialize_shared_state() in main.py first."
+            )
+        cls._shared_state = sm_state
+        cls._process_lock = sm_lock
+        cls._queueList = queueList
+        cls._initialized = True
+
+    @classmethod
     def get_instance(cls):
         """Get the singleton instance for this process."""
         return cls()

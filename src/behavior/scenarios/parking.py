@@ -17,11 +17,12 @@
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.behavior.sign_utils import nearest_sign_hint
-from src.core.types.behavior import BehaviorOutput, ScenarioName
+from src.core.types.behavior import BehaviorOutput, MotionState, ScenarioName
 
 
 try:
@@ -99,12 +100,26 @@ class Parking(BaseScenario):
                 notes["direct_motor_command"] = direct
                 notes["parking_state"] = self._state
 
-        return self._build_constant_speed_plan(
+        plan = self._build_constant_speed_plan(
             ctx=ctx,
             target_speed_mps=_PARKING_APPROACH_SPEED_MPS,
             scenario_name=self.name,
             notes=notes,
         )
+        return replace(plan, motion_state=self._classify_motion_state())
+
+    def _classify_motion_state(self) -> str:
+        """Colapsa las 10 fases internas en 3 motion_states externos.
+
+        Pre-maniobra (search / spot_tracked) → APPROACHING_PARKING.
+        Durante maniobra (forward_past_spot ... forward_correction) → PARKING.
+        Final (parked) → PARKED.
+        """
+        if self._state in {"search", "spot_tracked"}:
+            return MotionState.APPROACHING_PARKING.value
+        if self._state == "parked":
+            return MotionState.PARKED.value
+        return MotionState.PARKING.value
 
     def _update_search_state(
         self,

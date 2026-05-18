@@ -12,6 +12,7 @@ from src.routing.lanelet.attributes import ATTR_HIGHWAY_LEFT, ATTR_HIGHWAY_RIGHT
 from src.core.types.behavior import (
     BehaviorOutput,
     BehaviorPathPlan,
+    MotionState,
     ScenarioName,
     TurnSignalCommand,
 )
@@ -83,6 +84,7 @@ class Overtake(BaseScenario):
             plan,
             target_path=target_path,
             scenario_name=self.name,
+            motion_state=MotionState.OVERTAKE_ACTIVE.value,
             notes={**plan.notes, "turn_signal": TurnSignalCommand.LEFT.value},
         )
 

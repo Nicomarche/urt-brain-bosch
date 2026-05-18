@@ -39,6 +39,7 @@ import time
 
 from src.control.safety_gate import SafetyGate
 from src.core.bus.topics import MOTOR_COMMAND_MSG, SPEED_MOTOR, STATE_CHANGE, STEER_MOTOR
+from src.core.messaging.header import SeqCounter, stamp as _stamp_header
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.control import MotorCommand
@@ -89,6 +90,8 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._speedMotorSender = messageHandlerSender(queuesList, SPEED_MOTOR)
         self._steerMotorSender = messageHandlerSender(queuesList, STEER_MOTOR)
         self._motorCmdMsgSender = messageHandlerSender(queuesList, MOTOR_COMMAND_MSG)
+        # Seq monotónico para detección de gaps en telemetría MOTOR_COMMAND (D2).
+        self._seq_motor_cmd = SeqCounter()
         self._stateChangeSubscriber = messageHandlerSubscriber(
             queuesList, STATE_CHANGE, "lastOnly", True
         )
@@ -212,8 +215,16 @@ class threadMotorCommandDispatcher(ThreadWithStop):
         self._maybe_log_stats()
 
         # Snapshot al dashboard (telemetría — no path crítico).
+        # D2: Header con seq monotónico permite a analyze_run.py detectar
+        # gaps si el dispatcher pierde un tick.
         try:
-            self._motorCmdMsgSender.send(self._serialize(cmd))
+            payload = self._serialize(cmd)
+            payload["header"] = _stamp_header(
+                "motor_command_dispatcher",
+                self._seq_motor_cmd,
+                timestamp=float(cmd.timestamp) if cmd.timestamp else None,
+            ).to_dict()
+            self._motorCmdMsgSender.send(payload)
         except Exception:
             if self.logging is not None:
                 self.logging.exception("failed to publish MOTOR_COMMAND_MSG")

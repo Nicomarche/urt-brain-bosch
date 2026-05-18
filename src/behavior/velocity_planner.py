@@ -13,7 +13,10 @@ from src.utils.live_log import live_log
 _CROSSWALK_SLOWDOWN_RANGE_M = 4.0
 _INTERSECTION_SPEED_MPS = 0.40
 _INTERSECTION_RANGE_M = 6.0
-_CURVATURE_A_LAT_MAX_MPS2 = 0.45
+try:
+    from config import BEHAVIOR_CURVE_A_LAT_MAX_MPS2 as _CURVATURE_A_LAT_MAX_MPS2
+except Exception:
+    _CURVATURE_A_LAT_MAX_MPS2 = 0.08
 
 try:
     from config import TRAFFIC_SIGN_LOW_SPEED_MPS as _TRAFFIC_SIGN_LOW_SPEED_MPS
@@ -66,7 +69,11 @@ try:
 except Exception:
     _BEHAVIOR_HIGHWAY_MIN_SPEED_MPS = 0.40
 
-_CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
+try:
+    from config import BEHAVIOR_CURVE_SPEED_FLOOR_MPS as _CURVATURE_SPEED_FLOOR_MPS
+except Exception:
+    _CURVATURE_SPEED_FLOOR_MPS = float(_BEHAVIOR_MIN_SPEED_MPS)
+_CURVATURE_SPEED_FLOOR_MPS = float(_CURVATURE_SPEED_FLOOR_MPS)
 # REGRESSION GUARD:
 # Acados re-temporiza la referencia del MPC usando el speed_profile final
 # (ver MotionController._retime_state_refs_by_speed). Si lane containment

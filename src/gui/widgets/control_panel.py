@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 from .keyboard_handler import KeyboardHandler
 from .kl_switch import KlSwitch
 from .record_button import RecordButton

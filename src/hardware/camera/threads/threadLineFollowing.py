@@ -710,10 +710,11 @@ Args:
                     )
                     # Apply config control bounds at runtime
                     _delta_max_rad = math.radians(float(getattr(_config, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+                    _delta_min_rad = math.radians(float(getattr(_config, "ACADOS_MPC_DELTA_MIN_DEG", -25.0)))
                     self.acados_mpc.update_bounds(
                         v_min=float(getattr(_config, "ACADOS_MPC_V_MIN", -0.5)),
                         v_max=float(getattr(_config, "ACADOS_MPC_V_MAX", 0.5)),
-                        delta_min_rad=-_delta_max_rad,
+                        delta_min_rad=_delta_min_rad,
                         delta_max_rad=_delta_max_rad,
                     )
                 else:
@@ -1029,15 +1030,12 @@ Args:
         self._manual_run_log_frame_idx = 0
 
         # Lane mask classification debug log (always-on, controlled by config)
+        # Plan TANDA 2.3: honrar URT_LOG_RUN_DIR para no contaminar temp/
+        # toplevel. ``resolve_log_path`` cae a temp/<file> si el env var no
+        # está seteado (compat con invocaciones legacy de main.py).
         self._mask_debug_log_enabled = bool(getattr(_config, 'LANE_MASK_DEBUG_LOG', False))
-        self._mask_debug_log_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "..", "..",
-                "temp",
-                "lane_mask_debug.log",
-            )
-        )
+        from src.core.log_paths import resolve_log_path as _resolve_log_path
+        self._mask_debug_log_path = _resolve_log_path("lane_mask_debug.log")
         self._mask_debug_frame_idx = 0
         self._last_bev_reclassify_debug = {}   # filled by _reclassify_masks_via_bev
         self._last_yolo_raw_debug = {}          # filled by _detect_with_local_ai
@@ -1067,14 +1065,10 @@ Args:
         # Calibration mode state
         self._calib_mode_active = False
         self._calib_log_frame_idx = 0
-        self._calib_log_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "..", "..",
-                "temp",
-                "lane_calib_log.txt",
-            )
-        )
+        # E5: usar URT_LOG_RUN_DIR si está seteado, fallback a temp/ toplevel
+        # para preservar comportamiento legacy cuando se corre main.py directo.
+        from src.core.log_paths import resolve_log_path
+        self._calib_log_path = resolve_log_path("lane_calib_log.txt")
         self._last_requested_motor_command = None
         self._last_sl_shadow_debug = None  # populated each two-line frame for calib diagnostics
         self._last_state_change_message = None

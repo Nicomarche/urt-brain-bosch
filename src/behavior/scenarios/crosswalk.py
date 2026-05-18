@@ -18,7 +18,7 @@ from dataclasses import replace
 from src.behavior.context import PlanningContext
 from src.behavior.scenarios.base import BaseScenario
 from src.behavior.sign_utils import nearest_sign_hint
-from src.core.types.behavior import BehaviorOutput, ScenarioName
+from src.core.types.behavior import BehaviorOutput, MotionState, ScenarioName
 from src.routing.lanelet.attributes import ATTR_CROSSWALK
 
 
@@ -39,6 +39,10 @@ class Crosswalk(BaseScenario):
 
     def __init__(self) -> None:
         self._active = False
+        # Cache de is_active() para clasificar motion_state en plan():
+        # IN_CROSSWALK_CROSSING (lanelet attribute) vs APPROACHING_CROSSWALK
+        # (regulatory ahead o sign hint sin estar todavía adentro).
+        self._last_in_crosswalk_lanelet: bool = False
 
     def is_active(self, ctx: PlanningContext) -> bool:
         sign_hint = nearest_sign_hint(ctx, {"crosswalk"}, max_distance_m=_CROSSWALK_ENTER_RANGE_M)
@@ -53,6 +57,7 @@ class Crosswalk(BaseScenario):
 
         current = ctx.lanelet_map.get_lanelet(ctx.route.current_lanelet_id)
         in_crosswalk_lanelet = current is not None and int(current.attribute) == ATTR_CROSSWALK
+        self._last_in_crosswalk_lanelet = bool(in_crosswalk_lanelet)
 
         # Buscamos crosswalk en regulatory_ahead.
         nearest_crosswalk_dist = math.inf
@@ -85,14 +90,26 @@ class Crosswalk(BaseScenario):
                 scenario_name=self.name,
                 notes=notes,
             )
-            return replace(plan, stop_required=True)
+            return replace(
+                plan,
+                stop_required=True,
+                motion_state=MotionState.CROSSWALK_YIELDING.value,
+            )
 
-        return self._build_constant_speed_plan(
+        plan = self._build_constant_speed_plan(
             ctx=ctx,
             target_speed_mps=_CROSSWALK_SPEED_MPS,
             scenario_name=self.name,
             notes={**notes, "min_moving_speed_mps": float(_CROSSWALK_SPEED_MPS)},
         )
+        # IN_CROSSWALK_CROSSING si ya cruzamos sobre el atributo del lanelet;
+        # APPROACHING_CROSSWALK si todavía no llegamos.
+        motion_state = (
+            MotionState.IN_CROSSWALK_CROSSING.value
+            if self._last_in_crosswalk_lanelet
+            else MotionState.APPROACHING_CROSSWALK.value
+        )
+        return replace(plan, motion_state=motion_state)
 
     def _pedestrian_blocking(self, ctx: PlanningContext) -> bool:
         """¿Algún tracked_object con class_name == 'pedestrian' está

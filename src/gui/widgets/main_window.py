@@ -46,7 +46,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..client.session import SessionManager
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 from ..config import persistence, settings
 
 

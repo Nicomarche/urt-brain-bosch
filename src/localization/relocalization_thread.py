@@ -16,13 +16,14 @@ import math
 import os
 import threading
 import time
+from collections import deque
 
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.bus.topics import CURRENT_SPEED, CURRENT_STEER, IMU_DATA, LOCATION, NAVIGATION_COMMAND, NAVIGATION_STATUS, SPEED_MOTOR, SIGN_DETECTED, STATE_CHANGE, STEER_MOTOR
 
-from src.localization.dead_reckoning import DeadReckoning
+from src.localization.dead_reckoning import DeadReckoning, curve_speed_compensated
 from src.routing.lanelet.attributes import ATTR_NAMES, ATTR_STOPLINE
 from src.routing.lanelet.osm_router import OsmRouteGraph
 from src.routing.route_planner import PathManager
@@ -49,6 +50,12 @@ try:
     _MAX_LOOKAHEAD_M   = getattr(cfg, "TRACKING_MAX_LOOKAHEAD_M",  0.80)
     # Bicycle model dead-reckoning between IMU updates
     _WHEELBASE_M       = getattr(cfg, "TRACKING_WHEELBASE_M", 0.260)
+    _REAR_AXLE_TO_CG_M = float(
+        getattr(cfg, "TRACKING_REAR_AXLE_TO_CG_M", getattr(cfg, "ACADOS_MPC_L_R", 0.103))
+    )
+    _ENCODER_CURVE_SPEED_COMPENSATION = bool(
+        getattr(cfg, "TRACKING_ENCODER_CURVE_SPEED_COMPENSATION", True)
+    )
     # Steering gain for dead reckoning: physical_wheel_angle / commanded_angle.
     # Gain > 1.0 amplifies the measured steering angle seen by the DR model.
     # Keep the default at 1.0 so the measured steering is trusted directly.
@@ -147,6 +154,21 @@ try:
     _COMMAND_SPEED_FALLBACK_ENABLED = bool(
         getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", True)
     )
+    _ENCODER_FILTER_ENABLED = bool(
+        getattr(cfg, "TRACKING_ENCODER_FILTER_ENABLED", True)
+    )
+    _ENCODER_FILTER_WINDOW = max(1, int(
+        getattr(cfg, "TRACKING_ENCODER_FILTER_WINDOW", 5) or 5
+    ))
+    _ENCODER_FILTER_OUTLIER_DIFF_MPS = float(
+        getattr(cfg, "TRACKING_ENCODER_FILTER_OUTLIER_DIFF_MPS", 0.15) or 0.15
+    )
+    _ENCODER_FILTER_ZERO_EPS_MPS = float(
+        getattr(cfg, "TRACKING_ENCODER_FILTER_ZERO_EPS_MPS", 0.03) or 0.03
+    )
+    _ENCODER_FILTER_STOP_CMD_DIFF_MPS = float(
+        getattr(cfg, "TRACKING_ENCODER_FILTER_STOP_CMD_DIFF_MPS", 0.07) or 0.07
+    )
     _STEER_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
     )
@@ -166,6 +188,8 @@ except Exception:
     _LOOKAHEAD_TIME_S  = 0.6
     _MAX_LOOKAHEAD_M   = 0.80
     _WHEELBASE_M       = 0.260
+    _REAR_AXLE_TO_CG_M = 0.103
+    _ENCODER_CURVE_SPEED_COMPENSATION = True
     _STEER_GAIN_DR     = 1.0
     _STEER_SIGN_DR     = 1.0
     _IMU_YAW_SIGN      = 1.0
@@ -200,6 +224,11 @@ except Exception:
     _SPEED_FEEDBACK_TIMEOUT_S = 0.35
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
     _COMMAND_SPEED_FALLBACK_ENABLED = True
+    _ENCODER_FILTER_ENABLED = True
+    _ENCODER_FILTER_WINDOW = 5
+    _ENCODER_FILTER_OUTLIER_DIFF_MPS = 0.15
+    _ENCODER_FILTER_ZERO_EPS_MPS = 0.03
+    _ENCODER_FILTER_STOP_CMD_DIFF_MPS = 0.07
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
@@ -311,6 +340,9 @@ class TrackingState:
         self.localization_confidence = 0.0
         self.initialized = False
         self.imu_received = False   # True once a real IMU message has been parsed
+        # Scenario name set by BehaviorPlanner each tick — pose_estimator reads
+        # it to resolve the active VISUAL_CORRECTION_PROFILES entry (gain/max/step).
+        self._current_scenario: str | None = None
         # Reference to the dead reckoning instance — set by threadTracking so
         # threadLineFollowing can push lane-based lateral corrections.
         self._dr = None
@@ -581,6 +613,23 @@ class TrackingState:
             if not reliable:
                 self.raw_lateral_error_m = 0.0
 
+    def set_current_scenario(self, scenario_name: str | None) -> None:
+        """Set the active behavior scenario for visual-correction profile lookup.
+
+        Called by BehaviorPlanner each tick. pose_estimator reads
+        ``current_scenario`` to choose which entry of
+        ``VISUAL_CORRECTION_PROFILES`` (gain/max/step) to apply.
+        """
+        with self._lock:
+            self._current_scenario = (
+                str(scenario_name).strip().lower() if scenario_name else None
+            )
+
+    @property
+    def current_scenario(self) -> str | None:
+        with self._lock:
+            return self._current_scenario
+
     def set_stopline_visual_state(
         self,
         visible: bool,
@@ -795,6 +844,9 @@ class threadTracking(ThreadWithStop):
         self._last_speed_source = "none"
         self._last_cmd_speed_raw = 0.0
         self._last_cmd_speed_t = None
+        self._cmd_speed_history = deque(maxlen=int(_ENCODER_FILTER_WINDOW))
+        self._last_encoder_filter_reason = "uninitialized"
+        self._last_encoder_raw_mps = 0.0
         self._current_state_message = "DEFAULT"
         # Seed yaw from track start pose so heading error is ~0 before IMU arrives.
         # Without this, yaw=0° vs path_psi≈91° gives a -91° error → MPC saturates.
@@ -826,11 +878,11 @@ class threadTracking(ThreadWithStop):
         self._debug_log_enabled = _DEBUG_LOG
         self._debug_log_path = None
         if _DEBUG_LOG:
-            _here = os.path.dirname(os.path.abspath(__file__))
-            _root = os.path.normpath(os.path.join(_here, "..", ".."))
-            _log_dir = os.path.join(_root, "temp")
-            os.makedirs(_log_dir, exist_ok=True)
-            self._debug_log_path = os.path.join(_log_dir, "tracking_debug.txt")
+            # E5: si URT_LOG_RUN_DIR está seteado por run_test.sh, el log
+            # va al directorio del run actual (temp/logs/run_<ts>/); si
+            # no, fallback a temp/ toplevel para invocaciones legacy.
+            from src.core.log_paths import resolve_log_path
+            self._debug_log_path = resolve_log_path("tracking_debug.txt")
             try:
                 with open(self._debug_log_path, "w") as _f:
                     _f.write(
@@ -1184,19 +1236,70 @@ class threadTracking(ThreadWithStop):
             feedback_fresh=bool(feedback_fresh),
         )
 
+    def _speed_command_history(self):
+        history = getattr(self, "_cmd_speed_history", None)
+        if history is None:
+            history = deque(maxlen=int(_ENCODER_FILTER_WINDOW))
+            self._cmd_speed_history = history
+        return history
+
+    def _remember_speed_command_for_encoder_filter(self, cmd_speed_mps: float | None) -> None:
+        if cmd_speed_mps is None:
+            return
+        try:
+            self._speed_command_history().append(float(cmd_speed_mps))
+        except (TypeError, ValueError):
+            return
+
+    def _current_command_speed_mps_for_encoder_filter(self, now: float) -> float | None:
+        last_cmd_t = getattr(self, "_last_cmd_speed_t", None)
+        if last_cmd_t is None:
+            return None
+        if (float(now) - float(last_cmd_t)) > float(_COMMAND_SPEED_FALLBACK_TIMEOUT_S):
+            return None
+        return self._parse_speed_mps(getattr(self, "_last_cmd_speed_raw", 0.0))
+
+    def _filter_encoder_speed_mps(
+        self,
+        encoder_speed_mps: float,
+        command_speed_mps: float | None,
+    ) -> tuple[float, str]:
+        if not bool(_ENCODER_FILTER_ENABLED):
+            return float(encoder_speed_mps), "encoder"
+
+        encoder_speed = float(encoder_speed_mps)
+        command_speed = None if command_speed_mps is None else float(command_speed_mps)
+        filtered_speed = encoder_speed
+        reason = "encoder"
+        min_diff = 0.0
+        history = list(self._speed_command_history())
+
+        if len(history) >= int(_ENCODER_FILTER_WINDOW):
+            min_diff = min(abs(encoder_speed - float(cmd)) for cmd in history)
+            if command_speed is not None and min_diff > float(_ENCODER_FILTER_OUTLIER_DIFF_MPS):
+                filtered_speed = command_speed
+                reason = "encoder_filtered_command"
+
+        if abs(encoder_speed) < float(_ENCODER_FILTER_ZERO_EPS_MPS):
+            filtered_speed = 0.0
+            reason = "encoder_zero"
+        elif (
+            command_speed is not None
+            and abs(command_speed) < 0.01
+            and min_diff > float(_ENCODER_FILTER_STOP_CMD_DIFF_MPS)
+        ):
+            filtered_speed = command_speed
+            reason = "encoder_filtered_stop_command"
+
+        self._last_encoder_filter_reason = reason
+        self._last_encoder_raw_mps = encoder_speed
+        return float(filtered_speed), str(reason)
+
     def _resolve_speed_mps(self, now: float) -> float:
         current_state_message = str(
             getattr(self, "_current_state_message", "DEFAULT") or "DEFAULT"
         ).upper()
         speed_raw = self._speed_sub.receive()
-        if speed_raw is not None:
-            self._last_raw_speed = speed_raw
-            self._last_speed_t = now
-            parsed_speed = self._parse_speed_mps(speed_raw)
-            if parsed_speed is not None:
-                self._last_speed = float(parsed_speed)
-                self._last_speed_source = "encoder"
-
         speed_cmd_raw = self._speed_cmd_sub.receive()
         if speed_cmd_raw is not None:
             try:
@@ -1204,6 +1307,21 @@ class threadTracking(ThreadWithStop):
                 self._last_cmd_speed_t = now
             except (TypeError, ValueError):
                 pass
+
+        cmd_speed_for_filter = self._current_command_speed_mps_for_encoder_filter(now)
+        self._remember_speed_command_for_encoder_filter(cmd_speed_for_filter)
+
+        if speed_raw is not None:
+            self._last_raw_speed = speed_raw
+            self._last_speed_t = now
+            parsed_speed = self._parse_speed_mps(speed_raw)
+            if parsed_speed is not None:
+                filtered_speed, source = self._filter_encoder_speed_mps(
+                    float(parsed_speed),
+                    cmd_speed_for_filter,
+                )
+                self._last_speed = float(filtered_speed)
+                self._last_speed_source = str(source)
 
         # In MANUAL mode the Nucleo feedback may stay at 0 (no odometry), so DR
         # would never advance. Only use the commanded speed when encoder
@@ -1260,6 +1378,10 @@ class threadTracking(ThreadWithStop):
         self._last_speed_source = "none"
         self._last_cmd_speed_raw = 0.0
         self._last_cmd_speed_t = None
+        try:
+            self._speed_command_history().clear()
+        except Exception:
+            pass
         return previous_state, state_name
 
     def _resolve_steer_rad(self, now: float) -> float:
@@ -1397,8 +1519,21 @@ class threadTracking(ThreadWithStop):
         # Passing a yaw that was already advanced by another integration step was
         # exaggerating both curvature and displacement in the preview.
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
-        self._dr.update(self._last_speed * _DR_SPEED_SCALE, self._last_yaw_rad, dr_dt,
-                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M)
+        _dr_speed = float(self._last_speed) * float(_DR_SPEED_SCALE)
+        if (
+            bool(_ENCODER_CURVE_SPEED_COMPENSATION)
+            and str(getattr(self, "_last_speed_source", "none") or "none").startswith("encoder")
+        ):
+            _dr_speed = curve_speed_compensated(
+                _dr_speed,
+                _eff_steer_rad,
+                wheelbase_m=float(_WHEELBASE_M),
+                rear_axle_to_cg_m=float(_REAR_AXLE_TO_CG_M),
+            )
+        self._last_dr_speed_integrated_mps = float(_dr_speed)
+        self._dr.update(_dr_speed, self._last_yaw_rad, dr_dt,
+                        steer_rad=_eff_steer_rad, wheelbase_m=_WHEELBASE_M,
+                        rear_axle_to_cg_m=_REAR_AXLE_TO_CG_M)
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
         # EKF process noise: covariance grows over time as kinematic drift accumulates
@@ -1610,8 +1745,8 @@ class threadTracking(ThreadWithStop):
 
         # ---- Acados full-MPC reference trajectory ----
         try:
-            _mpc_N = int(getattr(cfg, "ACADOS_MPC_N", 30))
-            _mpc_T = float(getattr(cfg, "ACADOS_MPC_T", 0.05))
+            _mpc_N = int(getattr(cfg, "ACADOS_MPC_N", 40))
+            _mpc_T = float(getattr(cfg, "ACADOS_MPC_T", 0.10))
             _mpc_v = float(getattr(cfg, "ACADOS_MPC_V_REF", 0.35))
             _sr, _ir = self._path_manager.get_mpc_references(
                 matched_idx, _mpc_N, _mpc_T, _mpc_v,
@@ -1715,6 +1850,10 @@ class threadTracking(ThreadWithStop):
             imu_age = f"{now - self._last_imu_t:.1f}s" if self._last_imu_t else "never"
             imu = self._last_raw_imu
             imu_ok = "✓" if self._imu_received else "✗NO_IMU"
+            yaw_used_deg = math.degrees(float(getattr(self, "_last_yaw_used_rad", self._last_yaw_rad)))
+            yaw_kin_deg = math.degrees(float(getattr(self, "_last_yaw_kinematic_rad", self._last_yaw_rad)))
+            imu_gain = float(getattr(self, "_last_imu_yaw_gain", 0.0) or 0.0)
+            yaw_rejected = int(bool(getattr(self, "_last_yaw_rejected", False)))
             if imu:
                 imu_yaw_raw = float(imu.get("yaw", math.degrees(self._last_yaw_rad)))
                 imu_yaw_signed = _IMU_YAW_SIGN * imu_yaw_raw
@@ -1730,12 +1869,16 @@ class threadTracking(ThreadWithStop):
                     f"corr={imu_yaw_corrected:.1f}° "
                     f"({cal_str}) pitch={pitch} roll={roll} (age={imu_age})"
                     f" steer={math.degrees(self._last_steer_rad):.1f}°"
+                    f" yaw_used={yaw_used_deg:.1f}° yaw_kin={yaw_kin_deg:.1f}°"
+                    f" imu_gain={imu_gain:.2f} yaw_rej={yaw_rejected}"
                 )
             else:
                 imu_str = (
                     f"imu{imu_ok} yaw={math.degrees(self._last_yaw_rad):.1f}°"
                     f" (seeded_from_track, age={imu_age})"
                     f" steer={math.degrees(self._last_steer_rad):.1f}°"
+                    f" yaw_used={yaw_used_deg:.1f}° yaw_kin={yaw_kin_deg:.1f}°"
+                    f" imu_gain={imu_gain:.2f} yaw_rej={yaw_rejected}"
                 )
 
             zone_str = _ATTR_NAMES.get(node_attr, str(node_attr))

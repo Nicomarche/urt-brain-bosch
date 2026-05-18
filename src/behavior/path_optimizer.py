@@ -2177,11 +2177,17 @@ def _body_to_world_xy(
     pose_y: float,
     pose_yaw: float,
 ) -> np.ndarray:
-    cos_y = math.cos(float(pose_yaw))
-    sin_y = math.sin(float(pose_yaw))
-    world_x = float(pose_x) + (cos_y * float(x_fwd_m)) + (sin_y * float(y_left_m))
-    world_y = float(pose_y) + (sin_y * float(x_fwd_m)) - (cos_y * float(y_left_m))
-    return np.array([world_x, world_y], dtype=float)
+    # Wrapper sobre src.core.frames.body_to_world_yflip — convención y-down
+    # heredada del path_optimizer original. Para no romper signos, llamamos
+    # a la variante específica (NO la matemática).
+    from src.core.frames import body_to_world_yflip as _bwf
+    return _bwf(
+        x_fwd_m=x_fwd_m,
+        y_left_m=y_left_m,
+        pose_x=pose_x,
+        pose_y=pose_y,
+        pose_yaw=pose_yaw,
+    )
 
 
 def _maybe_override_single_line_visual_corridor_flip(

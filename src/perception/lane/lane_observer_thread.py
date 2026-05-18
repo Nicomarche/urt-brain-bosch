@@ -4,6 +4,7 @@ import math
 import time
 
 import config as _config
+from src.core.runtime_params import params as _runtime_params
 from src.core.types import LaneObservation, StoplineObservation, VisualStateSnapshot
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.live_log import live_log
@@ -12,6 +13,7 @@ _VISUAL_PATH_QUALITY_BUMP = 0.85
 _VISUAL_PATH_MIN_POINTS = max(2, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8)))
 _LANE_WIDTH_M = max(0.01, float(getattr(_config, "LANE_WIDTH_CM", 35.0) or 35.0) / 100.0)
 _LINE_DISTANCE_MARGIN_M = max(0.04, _LANE_WIDTH_M * 0.18)
+_DEFAULT_WIDTH_CONSISTENCY_TOLERANCE = 0.25  # plan TANDA 0.1: |L+R - W|/W < esto
 
 
 class threadLaneObserver(ThreadWithStop):
@@ -153,14 +155,50 @@ class threadLaneObserver(ThreadWithStop):
         left_m: float | None,
         right_m: float | None,
         lane_width_m: float | None = None,
-    ) -> bool:
+    ) -> tuple[bool, str | None]:
+        """Validar geometría de líneas detectadas. Retorna (valid, reason_if_invalid).
+
+        Tres chequeos en cascada:
+          1. Rango individual: cada distancia debe estar dentro del carril
+             (con margen). Si una línea aparece a 70 cm cuando el carril
+             mide 35 cm, descartar.
+          2. Consistencia de ancho (plan TANDA 0.1): la suma ``L+R`` debe
+             matchear el ancho físico del carril (``_LANE_WIDTH_M``). Si la
+             diferencia relativa supera ``width_consistency_tolerance`` el
+             detector seguramente mezcló dos líneas de carriles distintos
+             — rechazar y caer a route_tracking. Espejo del check del REF
+             en LaneDetector.hpp:603-610.
+
+        Devolvemos un motivo legible cuando rechazamos para que el log de
+        perception_debug muestre POR QUÉ se descartó la observación.
+        """
         if left_m is None or right_m is None:
-            return True
+            return True, None
         width = lane_width_m if lane_width_m is not None and lane_width_m > 0.0 else _LANE_WIDTH_M
         margin = max(_LINE_DISTANCE_MARGIN_M, width * 0.18)
         lower = -margin
         upper = width + margin
-        return lower <= left_m <= upper and lower <= right_m <= upper
+        if not (lower <= left_m <= upper and lower <= right_m <= upper):
+            return False, "line_distance_out_of_lane_bounds"
+
+        # Consistencia de ancho: NUNCA confiamos en `lane_width_m` (medido,
+        # puede estar contaminado); siempre comparamos contra el ancho
+        # físico del carril (`_LANE_WIDTH_M`) traído de config.
+        expected_width = _LANE_WIDTH_M
+        try:
+            tolerance = float(
+                _runtime_params.get(
+                    "lane.width_consistency_tolerance",
+                    _DEFAULT_WIDTH_CONSISTENCY_TOLERANCE,
+                )
+            )
+        except (TypeError, ValueError):
+            tolerance = _DEFAULT_WIDTH_CONSISTENCY_TOLERANCE
+        tolerance = max(0.05, min(0.6, tolerance))
+        measured_sum = float(left_m) + float(right_m)
+        if abs(measured_sum - expected_width) > tolerance * expected_width:
+            return False, "lane_width_mismatch"
+        return True, None
 
     @staticmethod
     def _direct_error_m(snapshot: VisualStateSnapshot) -> float | None:
@@ -337,7 +375,7 @@ class threadLaneObserver(ThreadWithStop):
         raw_left_line_distance_m = left_line_distance_m
         raw_right_line_distance_m = right_line_distance_m
         raw_line_center_offset_m = line_center_offset_m
-        line_geometry_valid = self._line_geometry_valid(
+        line_geometry_valid, line_geometry_reject_reason = self._line_geometry_valid(
             left_line_distance_m,
             right_line_distance_m,
             lane_width_m,
@@ -368,7 +406,9 @@ class threadLaneObserver(ThreadWithStop):
         observation_debug["raw_direct_error_m"] = raw_direct_error_m
         observation_debug["line_geometry_valid"] = bool(line_geometry_valid)
         if not line_geometry_valid:
-            observation_debug["line_geometry_reject_reason"] = "line_distance_out_of_lane_bounds"
+            observation_debug["line_geometry_reject_reason"] = (
+                line_geometry_reject_reason or "unknown"
+            )
             observation_debug["raw_left_line_distance_m"] = raw_left_line_distance_m
             observation_debug["raw_right_line_distance_m"] = raw_right_line_distance_m
             observation_debug["raw_line_center_offset_m"] = raw_line_center_offset_m

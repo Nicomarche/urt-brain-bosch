@@ -189,11 +189,19 @@ STATE_CHANGE: Topic[str] = Topic("/auto/statemachine/statechange", str, "LATCHED
 
 # ─── From threadTracking ────────────────────────────────────────────────────
 TRACKING_DEBUG: Topic[dict] = Topic("/auto/threadtracking/trackingdebug", dict, "EVENT")
-NAVIGATION_STATUS: Topic[dict] = Topic("/auto/threadtracking/navigationstatus", dict, "EVENT")
+# LATCHED (D5): late-joiners del GUI (que arrancan 2-3s después del brain)
+# deben ver el último estado de navegación sin esperar al próximo tick.
+NAVIGATION_STATUS: Topic[dict] = Topic(
+    "/auto/threadtracking/navigationstatus", dict, "LATCHED"
+)
 
 # ─── From Behavior Planner ──────────────────────────────────────────────────
+# LATCHED (D5): mismo motivo. Late-joiners del map_view dibujan target_path
+# inmediatamente al abrirse el GUI. Riesgo: si el planner muere, el valor
+# queda obsoleto — mitigado por G3 que emite BehaviorOutput valid=False al
+# shutdown.
 BEHAVIOR_OUTPUT_MSG: Topic[dict] = Topic(
-    "/auto/threadbehaviorplanner/behavioroutputmsg", dict, "EVENT"
+    "/auto/threadbehaviorplanner/behavioroutputmsg", dict, "LATCHED"
 )
 BEHAVIOR_PLANNER_STATUS: Topic[dict] = Topic(
     "/auto/threadbehaviorplanner/behaviorplannerstatus", dict, "EVENT"
@@ -215,11 +223,40 @@ MOTOR_COMMAND_MSG: Topic[dict] = Topic(
     "/auto/threadmotorcommanddispatcher/motorcommandmsg", dict, "EVENT"
 )
 
+# ─── Plan F3: vectorial overlays separados del JPEG raw ─────────────────────
+# Cada publicación lleva una capa (lane / signs / lidar_obstacles / detected_objects).
+# El GUI dibuja sobre el QPixmap raw con toggleo por capa.
+OVERLAY_LAYER_MSG: Topic[dict] = Topic(
+    "/auto/overlay/layermsg", dict, "STREAM"
+)
+
+# ─── Plan F4: heartbeat unificado de threads ────────────────────────────────
+# Cada thread publica {thread_name, last_loop_ts, latency_ms, loop_count, ok}.
+# El widget health_panel lo consume y dibuja un dot rojo si >3s sin update.
+THREAD_HEARTBEAT_MSG: Topic[dict] = Topic(
+    "/auto/threads/heartbeat", dict, "STREAM"
+)
+
+# ─── Plan TANDA 2.2 / C5.1: agregado de percepción para dashboard + replay ──
+# Snapshot por tick con TODO lo que el sistema "vio" en ese frame:
+#   tracked_objects (con class_id, confidence, world_xy, age_frames),
+#   sign_hints, scenario activo y motion_state vigentes. Permite al GUI
+#   telemetría mostrar chips sin parsear múltiples topics y a
+#   ``tools/perception_replay.py`` reconstruir frames offline.
+PERCEPTION_DEBUG: Topic[dict] = Topic(
+    "/auto/perception/debug", dict, "STREAM"
+)
+
 
 # Topics whose last value the broker must replay to late subscribers (ROS:
 # "transient_local"). Derived from the LATCHED constants above so we don't
 # duplicate the membership list.
-LATCHED_TOPIC_NAMES: frozenset[str] = frozenset({KLEM.name, STATE_CHANGE.name})
+LATCHED_TOPIC_NAMES: frozenset[str] = frozenset({
+    KLEM.name,
+    STATE_CHANGE.name,
+    BEHAVIOR_OUTPUT_MSG.name,
+    NAVIGATION_STATUS.name,
+})
 
 
 # Back-compat lookup: legacy ``allMessages`` enum class names (PascalCase /

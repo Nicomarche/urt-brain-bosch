@@ -166,7 +166,7 @@ def test_direct_parking_command_allows_reverse() -> None:
     )
     assert cmd.valid is True
     assert cmd.speed_mps == pytest.approx(-0.10)
-    assert cmd.steering_deg == pytest.approx(-25.0)
+    assert cmd.steering_deg == pytest.approx(motion_controller_mod._default_steering_bounds_deg()[0])
     assert cmd.reason == "parking_reversing_entry"
 
 
@@ -302,6 +302,14 @@ def test_steering_clamped_to_max() -> None:
     ))
     cmd = mc.compute(_bo(), _pose())
     assert cmd.steering_deg == pytest.approx(25.0)
+
+
+def test_steering_clamped_to_asymmetric_min() -> None:
+    """El límite negativo sigue la asimetría mecánica del ref."""
+    min_deg, _ = motion_controller_mod._default_steering_bounds_deg()
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.30, -40.0))))
+    cmd = mc.compute(_bo(), _pose())
+    assert cmd.steering_deg == pytest.approx(min_deg)
 
 
 def test_solver_speed_is_capped_to_current_planner_request() -> None:
@@ -537,24 +545,25 @@ def test_acados_straight_lateral_offset_does_not_bang_bang() -> None:
 
     solver.update_weights(
         x_cost=float(getattr(cfg, "ACADOS_MPC_X_COST", 2.0)),
-        y_cost=float(getattr(cfg, "ACADOS_MPC_Y_COST", 5.0)),
-        yaw_cost=float(getattr(cfg, "ACADOS_MPC_YAW_COST", 1.0)),
+        y_cost=float(getattr(cfg, "ACADOS_MPC_Y_COST", 2.0)),
+        yaw_cost=float(getattr(cfg, "ACADOS_MPC_YAW_COST", 0.5)),
         v_cost=float(getattr(cfg, "ACADOS_MPC_V_COST", 1.0)),
-        steer_cost=float(getattr(cfg, "ACADOS_MPC_STEER_COST", 2.0)),
-        delta_v_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_V_COST", 4.0)),
-        delta_steer_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_STEER_COST", 5.0)),
+        steer_cost=float(getattr(cfg, "ACADOS_MPC_STEER_COST", 0.0)),
+        delta_v_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_V_COST", 1.5)),
+        delta_steer_cost=float(getattr(cfg, "ACADOS_MPC_DELTA_STEER_COST", 0.75)),
     )
     delta_max_rad = math.radians(float(getattr(cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0)))
+    delta_min_rad = math.radians(float(getattr(cfg, "ACADOS_MPC_DELTA_MIN_DEG", -25.0)))
     solver.update_bounds(
         v_min=-0.05,
         v_max=float(getattr(cfg, "ACADOS_MPC_V_MAX", 0.40)),
-        delta_min_rad=-delta_max_rad,
+        delta_min_rad=delta_min_rad,
         delta_max_rad=delta_max_rad,
     )
 
     state = np.array([0.0, -0.05, 0.0], dtype=np.float64)
     dt_s = 0.05
-    wheelbase_m = 0.258
+    wheelbase_m = 0.260
     deltas: list[float] = []
     for _ in range(40):
         state_refs = np.column_stack(

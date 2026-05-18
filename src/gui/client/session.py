@@ -27,7 +27,7 @@ from typing import Optional
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal
 
 from . import events as ev
-from .socketio_client import SocketIOClient
+from .zmq_bus_client import ZmqBusClient as SocketIOClient
 
 
 _logger = logging.getLogger(__name__)

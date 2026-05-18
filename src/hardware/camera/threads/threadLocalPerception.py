@@ -9,6 +9,7 @@ from src.perception.signs.sign_classifier import (
     is_actionable_sign,
     normalize_sign_name,
 )
+from src.perception.object_classes import confidence_threshold_for, needs_lidar_confirmation
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.bus.topics import DETECTED_OBJECTS_MSG, LINE_FOLLOWING_CONFIG, LINE_FOLLOWING_STATUS, LOCAL_LANE_PERCEPTION, LOCAL_PERCEPTION_STATUS, SIGN_DETECTED, SIGN_DETECTION_STATUS, STATE_CHANGE
@@ -326,11 +327,23 @@ class threadLocalPerception(ThreadWithStop):
             return None
         return round(float(dist_m) * 100.0, 1)
 
-    def _project_lidar_detection_to_world(
+    def _project_detection_to_world(
         self,
         box,
         distance_cm: float | None,
     ) -> tuple[float, float] | None:
+        """Proyecta una detección (bbox + distancia) al frame mundo.
+
+        Plan TANDA 0.2: la proyección no depende intrínsecamente de LiDAR.
+        Sólo necesita ``distance_cm`` válida y la pose ego. Cuando LiDAR
+        está ausente, ``_estimate_sign_distance_cm`` (pinhole de cámara)
+        provee una estimación razonable para objetos a nivel del piso
+        (peatones, autos, signs). Antes este método se llamaba
+        ``_project_lidar_detection_to_world`` y se invocaba sólo si la
+        fuente de distancia era LiDAR — el efecto secundario era que
+        peatones detectados sin LiDAR llegaban al PedestrianYield con
+        ``position_world_xy=None`` y eran ignorados silenciosamente.
+        """
         if distance_cm is None:
             return None
         pose = self.pose_estimate_buffer.read_latest() if self.pose_estimate_buffer is not None else None
@@ -449,11 +462,20 @@ class threadLocalPerception(ThreadWithStop):
 
         best = detections[0]
         confidence = float(best.get("confidence", 0.0))
+        # Filtro inicial barato — descarta detecciones bien por debajo
+        # del threshold global (sign_min_confidence típicamente 0.50).
         if confidence < self.sign_min_confidence:
             return
 
         raw_sign_name = str(best.get("class", ""))
         sign_name = normalize_sign_name(raw_sign_name) or raw_sign_name
+
+        # Plan C1.1: threshold por clase. STOP y RED_LIGHT requieren más
+        # certeza (0.65–0.70); peatón usa 0.65 también para compensar la
+        # ausencia de confirmación LiDAR obligatoria (plan TANDA 0.2).
+        per_class_threshold = confidence_threshold_for(sign_name)
+        if confidence < per_class_threshold:
+            return
         box = best.get("box", [0, 0, 0, 0])
         if len(box) != 4:
             box = [0, 0, 0, 0]
@@ -472,6 +494,14 @@ class threadLocalPerception(ThreadWithStop):
             distance_cm = None
             distance_source = "none"
 
+        # Plan C4: para clases que exigen confirmación LiDAR (STOP, CAR,
+        # BLOCK), descartamos el hint si no hubo match LiDAR. El dashboard
+        # sigue viendo la detección via SIGN_DETECTED para diagnóstico —
+        # solo no llega al sign_hints_buffer que consume el BehaviorPlanner.
+        lidar_required = bool(needs_lidar_confirmation(sign_name))
+        lidar_confirmed = distance_source == "lidar"
+        actionable_for_planner = (not lidar_required) or lidar_confirmed
+
         self.detection_count += 1
         self.last_sign_name = sign_name
         self.signDetectedSender.send({
@@ -481,9 +511,11 @@ class threadLocalPerception(ThreadWithStop):
             "box_area": round(box_area, 5),
             "distance_cm": distance_cm,
             "distance_source": distance_source,
+            "lidar_required": lidar_required,
+            "actionable": actionable_for_planner,
             "timestamp": now,
         })
-        if self.sign_hints_buffer is not None:
+        if self.sign_hints_buffer is not None and actionable_for_planner:
             hint = {
                 "kind": sign_name,
                 "raw_class": raw_sign_name,
@@ -571,9 +603,14 @@ class threadLocalPerception(ThreadWithStop):
                 distance_cm = None
                 distance_source = "none"
             angle = self._bbox_center_angle_rad(box)
+            # Plan TANDA 0.2: proyectar al mundo siempre que tengamos
+            # distancia confiable, sea LiDAR o cámara pinhole. El
+            # PedestrianYield necesita `position_world_xy` para evaluar el
+            # cono; sin esto, el peatón se ignora silenciosamente cuando
+            # el LiDAR no llega o no cubre el sector.
             world_xy = (
-                self._project_lidar_detection_to_world(box, distance_cm)
-                if distance_source == "lidar"
+                self._project_detection_to_world(box, distance_cm)
+                if distance_cm is not None
                 else None
             )
             bbox_xyxy = _box_yxyx_to_xyxy(box)

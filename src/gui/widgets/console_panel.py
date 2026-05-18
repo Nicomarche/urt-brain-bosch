@@ -32,7 +32,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 
 
 class ConsolePanel(QWidget):

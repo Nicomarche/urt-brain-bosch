@@ -4,8 +4,8 @@
 Run once (on any machine with acados + casadi installed) to produce C code:
 
     cd /path/to/urt-brain-bosch
-    python -m src.control._acados_solver_gen          # defaults: N=40, T=0.05
-    python -m src.control._acados_solver_gen --N 40 --T 0.04   # custom
+    python -m src.control._acados_solver_gen          # defaults: config.py values
+    python -m src.control._acados_solver_gen --N 40 --T 0.10   # urt-ref beta horizon
 
 The solver C code is written to  src/control/c_generated_code/
 and compiled into a shared library on first import by AcadosOcpSolver.
@@ -28,8 +28,8 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", ".."))
 # ---------------------------------------------------------------------------
 
 def create_bicycle_model(
-    wheelbase: float = 0.258,
-    l_r: float = 0.103,
+    wheelbase: float = 0.260,
+    l_r: float = 0.105,
 ) -> "AcadosModel":
     """Kinematic bicycle model with slip-angle (beta variant).
 
@@ -99,12 +99,12 @@ def create_bicycle_model(
 
 def generate_solver(
     N: int = 40,
-    T: float = 0.05,
-    wheelbase: float = 0.258,
-    l_r: float = 0.103,
+    T: float = 0.10,
+    wheelbase: float = 0.260,
+    l_r: float = 0.105,
     v_min: float = -0.5,
-    v_max: float = 0.10,
-    delta_min: float = -0.436,
+    v_max: float = 0.40,
+    delta_min: float = -0.37524579,
     delta_max: float = 0.436,
     x_cost: float = 2.0,
     y_cost: float = 2.0,
@@ -198,15 +198,37 @@ def generate_solver(
 # ---------------------------------------------------------------------------
 
 def main():
+    try:
+        import config as cfg
+        default_N = int(getattr(cfg, "ACADOS_MPC_N", 40))
+        default_T = float(getattr(cfg, "ACADOS_MPC_T", 0.10))
+        default_wheelbase = float(getattr(cfg, "ACADOS_MPC_WHEELBASE", 0.260))
+        default_l_r = float(getattr(cfg, "ACADOS_MPC_L_R", 0.105))
+        default_v_max = float(getattr(cfg, "ACADOS_MPC_V_MAX", 0.40))
+        default_v_min = float(getattr(cfg, "ACADOS_MPC_V_MIN", -default_v_max))
+        default_delta_min_deg = float(getattr(cfg, "ACADOS_MPC_DELTA_MIN_DEG", -21.5))
+        default_delta_max_deg = float(getattr(cfg, "ACADOS_MPC_DELTA_MAX_DEG", 25.0))
+    except Exception:
+        default_N = 40
+        default_T = 0.10
+        default_wheelbase = 0.260
+        default_l_r = 0.105
+        default_v_max = 0.40
+        default_v_min = -0.50
+        default_delta_min_deg = -21.5
+        default_delta_max_deg = 25.0
+
     parser = argparse.ArgumentParser(
         description="Generate Acados MPC solver for BFMC bicycle model.",
     )
-    parser.add_argument("--N", type=int, default=40, help="Prediction horizon steps (default 40)")
-    parser.add_argument("--T", type=float, default=0.05, help="Time step in seconds (default 0.05)")
-    parser.add_argument("--wheelbase", type=float, default=0.258, help="Wheelbase in metres (default 0.258)")
-    parser.add_argument("--l_r", type=float, default=0.103, help="Rear axle to CG in metres (default 0.103)")
-    parser.add_argument("--v_max", type=float, default=0.10, help="Max velocity m/s (default 0.10)")
-    parser.add_argument("--delta_max_deg", type=float, default=25.0, help="Max steering degrees (default 25)")
+    parser.add_argument("--N", type=int, default=default_N, help=f"Prediction horizon steps (default {default_N})")
+    parser.add_argument("--T", type=float, default=default_T, help=f"Time step in seconds (default {default_T})")
+    parser.add_argument("--wheelbase", type=float, default=default_wheelbase, help=f"Wheelbase in metres (default {default_wheelbase})")
+    parser.add_argument("--l_r", type=float, default=default_l_r, help=f"Rear axle to CG in metres (default {default_l_r})")
+    parser.add_argument("--v_min", type=float, default=default_v_min, help=f"Min velocity m/s (default {default_v_min})")
+    parser.add_argument("--v_max", type=float, default=default_v_max, help=f"Max velocity m/s (default {default_v_max})")
+    parser.add_argument("--delta_min_deg", type=float, default=default_delta_min_deg, help=f"Min steering degrees (default {default_delta_min_deg})")
+    parser.add_argument("--delta_max_deg", type=float, default=default_delta_max_deg, help=f"Max steering degrees (default {default_delta_max_deg})")
     parser.add_argument("--output_dir", type=str, default=None, help="Output directory for C code")
     args = parser.parse_args()
 
@@ -215,9 +237,9 @@ def main():
         T=args.T,
         wheelbase=args.wheelbase,
         l_r=args.l_r,
-        v_min=-args.v_max,
+        v_min=args.v_min,
         v_max=args.v_max,
-        delta_min=-np.radians(args.delta_max_deg),
+        delta_min=np.radians(args.delta_min_deg),
         delta_max=np.radians(args.delta_max_deg),
         output_dir=args.output_dir,
     )

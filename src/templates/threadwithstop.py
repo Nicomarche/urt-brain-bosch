@@ -29,6 +29,13 @@
 from threading import Thread, Event
 from functools import partial
 
+# Plan G1: supervisor opcional (cargado lazy para evitar ciclos de import).
+try:
+    from src.templates.supervisor import ThreadSupervisor, SupervisorConfig
+except Exception:  # pragma: no cover - fallback si supervisor.py no existe
+    ThreadSupervisor = None  # type: ignore[assignment]
+    SupervisorConfig = None  # type: ignore[assignment]
+
 
 class ThreadWithStop(Thread):
     def __init__(self, pause=0.001, *args, **kwargs):
@@ -84,23 +91,77 @@ class ThreadWithStop(Thread):
         self._blocker = Event()
         self._pause_event = Event()
         self._pause_event.set()  # start in running state
-        self._pause = pause 
+        self._pause = pause
+        # Plan G1+G2+F4: supervisor lazy-init en run() la primera vez,
+        # cuando la subclase ya está completamente construida y podemos
+        # leer self.queuesList si existe.
+        self._supervisor = None
+
+    def _ensure_supervisor(self):
+        """Lazy init del supervisor — sólo si supervisor.py existe."""
+        if self._supervisor is not None:
+            return self._supervisor
+        if ThreadSupervisor is None:
+            return None
+        heartbeat_pub = None
+        warning_pub = None
+        # Intentar conectar publishers al bus, sin acoplar duro.
+        try:
+            from src.core.bus.topics import (
+                THREAD_HEARTBEAT_MSG as _HB,
+                WARNING_SIGNAL as _WS,
+            )
+            from src.core.messaging.messageHandlerSender import (
+                messageHandlerSender as _Sender,
+            )
+            queuesList = getattr(self, "queuesList", None) or getattr(self, "queueList", None)
+            if queuesList is not None:
+                hb_sender = _Sender(queuesList, _HB)
+                ws_sender = _Sender(queuesList, _WS)
+                heartbeat_pub = lambda payload, _s=hb_sender: _s.send(payload)
+                warning_pub = lambda payload, _s=ws_sender: _s.send(str(payload))
+        except Exception:
+            pass
+        # max_iter_s per-subclass override
+        max_iter_s = float(getattr(self, "_supervisor_max_iter_s", 5.0))
+        self._supervisor = ThreadSupervisor(
+            thread_name=self.__class__.__name__,
+            config=SupervisorConfig(max_iter_s=max_iter_s),
+            heartbeat_publisher=heartbeat_pub,
+            warning_publisher=warning_pub,
+        )
+        return self._supervisor
 
     def run(self):
+        supervisor = self._ensure_supervisor()
         while not self._blocker.is_set():
             # wait for pause event
             self._pause_event.wait()
-            
+
             # check again if we should stop
             if self._blocker.is_set():
                 break
-                
+
             # handle the state change
             self.state_change_handler()
-            
+
+            # If supervisor marked us dead, stop reintentando (sigue alive
+            # para que el join() funcione, pero salta thread_work).
+            if supervisor is not None and supervisor.is_dead:
+                self._blocker.wait(1.0)
+                continue
+            # If en backoff, esperar antes de la próxima iteración.
+            if supervisor is not None and supervisor.should_skip_iter():
+                self._blocker.wait(0.5)
+                continue
+
             # do the actual work
+            if supervisor is not None:
+                supervisor.begin_iter()
             try:
                 self.thread_work()
+                if supervisor is not None:
+                    supervisor.end_iter_ok()
             except Exception as _exc:
                 import traceback as _tb
                 print(
@@ -108,6 +169,8 @@ class ThreadWithStop(Thread):
                     f"{_exc}"
                 )
                 _tb.print_exc()
+                if supervisor is not None:
+                    supervisor.end_iter_failed(_exc)
 
             # respect the pause duration if not paused
             if self._pause_event.is_set():

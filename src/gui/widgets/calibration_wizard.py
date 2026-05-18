@@ -63,7 +63,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ..client import events as ev
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 from ..config import persistence, settings
 
 
@@ -215,11 +215,14 @@ class _RunDirectionStep(QWidget):
         # Ask the backend what the upcoming desired angle/speed is, then
         # dispatch the run. The backend echoes the value back via
         # `current_angle` / `current_speed`.
-        self._client.emit_message(ev.CMD_CALIBRATION, {
+        # Plan TANDA 1.3: emit_calibration() auto-genera correlation_id que
+        # el thread serial echeará en la respuesta. Esto convierte CALIBRATION
+        # (mismo topic para request y reply) en un par matchable.
+        self._client.emit_calibration({
             "Action": "current_angle",
             "Direction": self._direction,
         })
-        self._client.emit_message(ev.CMD_CALIBRATION, {
+        self._client.emit_calibration({
             "Action": "run",
             "Direction": self._direction,
         })
@@ -228,7 +231,7 @@ class _RunDirectionStep(QWidget):
         self._submit_btn.setEnabled(False)
 
     def _rerun_last_step(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "re-run"})
+        self._client.emit_calibration({"Action": "re-run"})
         if self._step > 0:
             self._step -= 1
             self._progress.setValue(self._step)
@@ -243,7 +246,7 @@ class _RunDirectionStep(QWidget):
                 "d2": self._d2.value(),
                 "d3": self._d3.value(),
             }
-        self._client.emit_message(ev.CMD_CALIBRATION, {
+        self._client.emit_calibration({
             "Action": "submit_measurements",
             "Direction": self._direction,
             "Distances": distances,
@@ -323,12 +326,12 @@ class _TestRunStep(QWidget):
         client.calibration_signal.connect(self._on_calibration)
 
     def _run_test(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "test_run"})
+        self._client.emit_calibration({"Action": "test_run"})
         self._status.setText("Test run dispatched — watch the car.")
         self._run_btn.setEnabled(False)
 
     def _mark_done(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "test_run_done"})
+        self._client.emit_calibration({"Action": "test_run_done"})
         self._status.setText("Test run accepted.")
         self._done_btn.setEnabled(False)
 
@@ -399,8 +402,8 @@ class _PolynomialStep(QWidget):
         client.calibration_signal.connect(self._on_calibration)
 
     def _request_data(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "get_polynomial_data"})
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "get_zero_offset_spline_data"})
+        self._client.emit_calibration({"Action": "get_polynomial_data"})
+        self._client.emit_calibration({"Action": "get_zero_offset_spline_data"})
 
     def _on_calibration(self, payload) -> None:
         if not isinstance(payload, dict):
@@ -524,7 +527,7 @@ class _SaveStep(QWidget):
         client.calibration_signal.connect(self._on_calibration)
 
     def _save(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "save_calibration"})
+        self._client.emit_calibration({"Action": "save_calibration"})
         self._status.setText("Requested — waiting for backend zip…")
         self._save_btn.setEnabled(False)
 
@@ -601,7 +604,7 @@ class CalibrationWizard(QWidget):
         self._wire_signals()
         # Ask for current backend status the moment the wizard appears,
         # so the operator knows what's already done.
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "get_status"})
+        self._client.emit_calibration({"Action": "get_status"})
 
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
@@ -670,7 +673,7 @@ class CalibrationWizard(QWidget):
         if isinstance(widget, _RunDirectionStep):
             # Tell the backend to reset its `current_step` between
             # directions (the backend uses `done`/`continue` for that).
-            self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "done"})
+            self._client.emit_calibration({"Action": "done"})
             widget.reset()
 
     def _go_prev(self) -> None:
@@ -687,7 +690,7 @@ class CalibrationWizard(QWidget):
                 self._poly._request_data()
 
     def _start(self) -> None:
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "start"})
+        self._client.emit_calibration({"Action": "start"})
         self._go_next()
 
     def _cancel(self) -> None:
@@ -697,7 +700,7 @@ class CalibrationWizard(QWidget):
             "will be reset."
         ) != QMessageBox.Yes:
             return
-        self._client.emit_message(ev.CMD_CALIBRATION, {"Action": "exit"})
+        self._client.emit_calibration({"Action": "exit"})
         self._current = 0
         self._refresh_step_label()
 

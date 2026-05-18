@@ -38,6 +38,7 @@ class _FakeDR:
         yaw_start_rad: float,
         yaw_end_rad: float,
         dt: float,
+        **_,
     ) -> None:
         self.x += float(speed_mps) * float(dt) * math.cos(float(yaw_end_rad))
         self.y += float(speed_mps) * float(dt) * math.sin(float(yaw_end_rad))
@@ -118,21 +119,24 @@ def _make_estimator(*, speed_mps: float = 0.20, dr_y: float = 0.05) -> threadPos
     return estimator
 
 
-def test_thread_work_uses_imu_yaw_instead_of_steering_for_pose() -> None:
+def _make_thread_work_estimator(*, speed_mps: float, steer_deg: float, imu_yaw_deg: float) -> threadPoseEstimator:
     estimator = threadPoseEstimator.__new__(threadPoseEstimator)
     estimator._dr = DeadReckoning(0.0, 0.0, 0.0)
     estimator._last_t = time.monotonic() - 0.10
-    estimator._last_speed = 0.20
+    estimator._last_speed = float(speed_mps)
     estimator._last_speed_t = None
     estimator._last_speed_source = "encoder"
     estimator._last_cmd_speed_t = None
     estimator._last_steer_rad = 0.0
+    estimator._steer_filtered_rad = 0.0
+    estimator._last_yaw_fusion_steer_rad = 0.0
+    estimator._imu_yaw_inhibit_until = 0.0
     estimator._last_yaw_rad = 0.0
     estimator._start_yaw_rad = 0.0
     estimator._yaw_offset = 0.0
     estimator._yaw_offset_calibrated = True
     estimator._pending_yaw_offset_target_rad = None
-    estimator._yaw_ekf_p = 0.0
+    estimator._yaw_ekf_p = 0.5
     estimator._imu_received = False
     estimator._last_raw_imu = None
     estimator._last_imu_t = time.monotonic() - 0.10
@@ -141,8 +145,8 @@ def test_thread_work_uses_imu_yaw_instead_of_steering_for_pose() -> None:
 
     estimator._consume_state_change = lambda: None
     estimator._resolve_speed_mps = lambda _now: estimator._last_speed
-    estimator._resolve_steer_rad = lambda _now: math.radians(25.0)
-    estimator._imu_sub = _OneShotSub(str({"yaw": 10.0, "roll": 0.0, "pitch": 0.0}))
+    estimator._resolve_steer_rad = lambda _now: math.radians(float(steer_deg))
+    estimator._imu_sub = _OneShotSub(str({"yaw": float(imu_yaw_deg), "roll": 0.0, "pitch": 0.0}))
     estimator.route_context_buffer = _CaptureBuffer(None)
     estimator.lane_observation_buffer = _CaptureBuffer(None)
     estimator.stopline_observation_buffer = _CaptureBuffer(None)
@@ -159,16 +163,75 @@ def test_thread_work_uses_imu_yaw_instead_of_steering_for_pose() -> None:
     estimator._debug_log_path = None
     estimator._frame_idx = 0
     estimator._log_every = 1
+    return estimator
+
+
+def test_thread_work_uses_trusted_imu_yaw_when_steering_is_quiet() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=0.0, imu_yaw_deg=10.0)
 
     estimator.thread_work()
 
     x, y, yaw = estimator._dr.get_state()
     assert x > 0.0
     assert y > 0.0
-    assert yaw == pytest.approx(math.radians(10.0), abs=1e-9)
+    assert yaw == pytest.approx(math.radians(10.0), abs=math.radians(0.2))
     pose_estimate, _ = estimator.pose_estimate_buffer.writes[-1]
-    assert pose_estimate.fused_pose.yaw == pytest.approx(math.radians(10.0), abs=1e-9)
-    assert pose_estimate.steer_rad == pytest.approx(math.radians(25.0), abs=1e-9)
+    assert pose_estimate.fused_pose.yaw == pytest.approx(math.radians(10.0), abs=math.radians(0.2))
+    assert pose_estimate.steer_rad == pytest.approx(0.0, abs=1e-9)
+    assert estimator._last_yaw_rejected is False
+
+
+def test_thread_work_rejects_imu_yaw_spike_when_steering_at_zero_speed() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.0, steer_deg=25.0, imu_yaw_deg=45.0)
+
+    estimator.thread_work()
+
+    x, y, yaw = estimator._dr.get_state()
+    assert x == pytest.approx(0.0, abs=1e-9)
+    assert y == pytest.approx(0.0, abs=1e-9)
+    assert yaw == pytest.approx(0.0, abs=1e-9)
+    assert estimator._last_yaw_rejected is True
+    assert estimator._last_imu_yaw_gain == pytest.approx(0.0, abs=1e-9)
+
+
+def test_thread_work_uses_bicycle_yaw_when_imu_is_inhibited_in_turn() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=25.0, imu_yaw_deg=45.0)
+
+    estimator.thread_work()
+
+    x, y, yaw = estimator._dr.get_state()
+    assert x > 0.0
+    assert y < 0.0
+    assert -0.08 < yaw < -0.01
+    assert estimator._last_yaw_rejected is True
+    assert estimator._last_imu_yaw_gain == pytest.approx(0.0, abs=1e-9)
+
+
+def test_lane_yaw_reset_uses_straight_two_line_camera_yaw() -> None:
+    estimator = _make_estimator(speed_mps=0.20, dr_y=0.0)
+    estimator._lane_yaw_reset_count = 1
+    estimator._lane_yaw_reset_next_t = 0.0
+    estimator._calibrate_imu_yaw_offset_to = lambda _yaw: (True, 0.0)
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        quality=0.95,
+        curve_hint="STRAIGHT",
+        measurement_mode="two_line",
+        heading_error_rad=math.radians(0.5),
+        camera_yaw_hint_rad=math.radians(2.0),
+        camera_yaw_hint_confidence=0.95,
+    )
+
+    correction_rad = estimator._try_lane_yaw_reset(
+        now=10.0,
+        raw_yaw=0.0,
+        route_context=_make_route_context(),
+        lane_observation=lane_observation,
+    )
+
+    assert correction_rad == pytest.approx(math.radians(2.0), abs=1e-9)
+    assert estimator._dr.get_state()[2] == pytest.approx(math.radians(2.0), abs=1e-9)
+    assert estimator._lane_yaw_reset_next_t > 10.0
 
 
 def test_apply_lane_observation_skips_invalid_single_line_measurement() -> None:

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from src.core.messaging.header import MessageHeader
+
 
 @dataclass(frozen=True)
 class Pose2D:
@@ -76,3 +78,8 @@ class PoseEstimate:
     #     EKF descartó el GPS por outlier en los últimos updates.
     localization_mode: str = "dead_reckoning"
     gps_fix_quality: float = 0.0
+
+    # Plan TANDA 2.1: Header opcional para análisis de gaps de secuencia.
+    # Default ``None`` preserva retro-compat — consumidores que migran
+    # deben leer ``header.timestamp`` con fallback al ``timestamp`` toplevel.
+    header: MessageHeader | None = None

@@ -14,7 +14,7 @@ from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import QPushButton, QWidget
 
 from ..client import events as ev
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 
 
 class RecordButton(QPushButton):

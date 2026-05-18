@@ -27,7 +27,7 @@ try:
 except ImportError:
     _HAS_PG = False
 
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 
 
 class TimeSpeedSteerChart(QWidget):

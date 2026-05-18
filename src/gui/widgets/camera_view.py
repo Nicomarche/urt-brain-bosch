@@ -27,7 +27,7 @@ from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import QLabel, QSizePolicy, QWidget
 
-from ..client.socketio_client import SocketIOClient
+from ..client.zmq_bus_client import ZmqBusClient as SocketIOClient
 
 
 class CameraView(QLabel):

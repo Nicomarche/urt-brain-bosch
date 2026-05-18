@@ -58,21 +58,41 @@ class MOTTracker:
         min_confidence_to_birth: float = 0.35,
         min_hits_to_emit: int = 3,
         max_age_frames: int = 8,
+        max_age_per_class: dict[int, int] | None = None,
         gate_mahalanobis_sq: float = _GATE_CHI2_99,
         process_noise_std: float = 0.5,
         measure_noise_std: float = 0.20,
+        reid_window_frames: int = 20,
+        reid_max_distance_m: float = 0.6,
     ) -> None:
+        """SORT tracker con max_age por clase y re-ID heurístico.
+
+        Plan C3 cambios:
+          * ``max_age_per_class``: dict {class_id → max_age_frames}. Si la
+            clase no está en el dict, fallback a ``max_age_frames``. Default
+            PEDESTRIAN=20 (≈1s a 20Hz), CAR=15, signs=8.
+          * ``reid_window_frames``: frames después de la muerte de un track
+            durante los cuales se considera re-asignar el ID viejo si una
+            detección nueva tiene la misma clase y posición cercana.
+          * ``reid_max_distance_m``: distancia máxima para considerar re-ID.
+        """
         # Configuración de filtros / asociación.
         self._min_confidence_to_birth = float(min_confidence_to_birth)
         self._min_hits_to_emit = int(min_hits_to_emit)
         self._max_age_frames = int(max_age_frames)
+        self._max_age_per_class: dict[int, int] = dict(max_age_per_class or {})
         self._gate_mahalanobis_sq = float(gate_mahalanobis_sq)
         self._process_noise_std = float(process_noise_std)
         self._measure_noise_std = float(measure_noise_std)
+        self._reid_window_frames = int(reid_window_frames)
+        self._reid_max_distance_m = float(reid_max_distance_m)
 
         # Estado runtime.
         self._tracks: dict[int, TrackState] = {}
         self._next_track_id: int = 1
+        # Plan C3.2: tracks recién muertos, candidatos a re-ID. Mapa
+        # track_id → (class_id, last_xy, frames_since_death).
+        self._dead_tracks: dict[int, tuple[int, tuple[float, float], int]] = {}
 
     # ----------------------------------------------------------------
     # API IObjectTracker
@@ -126,20 +146,44 @@ class MOTTracker:
             assigned_det_set = set()
 
         # 3. Birth: detecciones no asignadas con confidence suficiente.
+        # Plan C3.2: antes de crear track nuevo, intentar re-ID con un track
+        # recién muerto de la misma clase y posición cercana.
         for global_idx, det in valid_dets:
             if global_idx in assigned_det_set:
                 continue
             if det.confidence < self._min_confidence_to_birth:
                 continue
-            self._birth_track(det)
+            reused_id = self._try_reid(det)
+            if reused_id is not None:
+                self._revive_track(reused_id, det)
+            else:
+                self._birth_track(det)
 
-        # 4. Death: expirar tracks viejos.
-        dead_ids = [
-            tid for tid, tr in self._tracks.items()
-            if tr.is_stale(self._max_age_frames)
-        ]
+        # 4. Death: expirar tracks viejos. Plan C3.1: max_age depende de la
+        # clase — peatones y autos sobreviven oclusiones más largas que signs.
+        dead_ids: list[int] = []
+        for tid, tr in self._tracks.items():
+            max_age = self._max_age_per_class.get(int(tr.class_id), self._max_age_frames)
+            if tr.is_stale(max_age):
+                dead_ids.append(tid)
         for tid in dead_ids:
-            del self._tracks[tid]
+            tr = self._tracks.pop(tid)
+            # Guardar en buffer de re-ID si tiene posición conocida.
+            try:
+                xy = tr.position()
+                self._dead_tracks[tid] = (int(tr.class_id), (float(xy[0]), float(xy[1])), 0)
+            except Exception:
+                pass
+
+        # Avanzar la edad de los dead tracks y expirar los muy viejos
+        # (más allá de reid_window_frames).
+        for tid in list(self._dead_tracks.keys()):
+            cls, xy, ago = self._dead_tracks[tid]
+            ago += 1
+            if ago > self._reid_window_frames:
+                del self._dead_tracks[tid]
+            else:
+                self._dead_tracks[tid] = (cls, xy, ago)
 
         # 5. Emit confirmados.
         return [
@@ -206,6 +250,44 @@ class MOTTracker:
         )
         self._tracks[self._next_track_id] = tr
         self._next_track_id += 1
+
+    def _try_reid(self, det: DetectedObject) -> int | None:
+        """Plan C3.2: re-asignar ID de un track muerto si distance < gate.
+
+        Heurística simple: misma clase + distancia euclidiana al last_xy
+        < ``reid_max_distance_m``. NO embedding deep, NO IoU — sólo
+        proximidad espacial. Suficiente para mitigar ID churn por
+        oclusiones cortas.
+        """
+        if not self._dead_tracks or det.position_world_xy is None:
+            return None
+        det_xy = (float(det.position_world_xy[0]), float(det.position_world_xy[1]))
+        best_id: int | None = None
+        best_dist = self._reid_max_distance_m
+        for tid, (cls, xy, _ago) in self._dead_tracks.items():
+            if int(cls) != int(det.class_id):
+                continue
+            dist = ((det_xy[0] - xy[0]) ** 2 + (det_xy[1] - xy[1]) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_id = tid
+        if best_id is not None:
+            del self._dead_tracks[best_id]
+        return best_id
+
+    def _revive_track(self, track_id: int, det: DetectedObject) -> None:
+        """Reasigna un track_id viejo a una detección nueva (re-ID)."""
+        tr = TrackState(
+            track_id=int(track_id),
+            initial_xy=det.position_world_xy,  # type: ignore[arg-type]
+            class_id=det.class_id,
+            class_name=det.class_name,
+            confidence=det.confidence,
+            timestamp=det.timestamp,
+            process_noise_std=self._process_noise_std,
+            measure_noise_std=self._measure_noise_std,
+        )
+        self._tracks[int(track_id)] = tr
 
     def _track_to_output(self, tr: TrackState) -> TrackedObject:
         x, y = tr.position()

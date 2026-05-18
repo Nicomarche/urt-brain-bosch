@@ -73,7 +73,7 @@ int bfmc_bicycle_acados_sim_create(bfmc_bicycle_sim_solver_capsule * capsule)
     const int np = BFMC_BICYCLE_NP;
     bool tmp_bool;
 
-    double Tsim = 0.05;
+    double Tsim = 0.1;
 
     capsule->acados_sim_mem = NULL;
 

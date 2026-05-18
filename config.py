@@ -231,8 +231,8 @@ STANLEY_K_D_STEER = 0.10
 USE_LATERAL_MPC = True
 
 # MPC_WHEELBASE [m]: distancia entre ejes del robot.
-# BFMC robot: 0.258 m (igual que mpc_acados2_clean.py del repo de referencia).
-MPC_WHEELBASE = 0.258
+# BFMC robot: 0.260 m (igual que los modelos *_beta del repo de referencia).
+MPC_WHEELBASE = 0.260
 
 # MPC_N: horizonte de predicción (número de pasos).
 # Más alto = anticipa mejor las curvas pero más lento de resolver.
@@ -291,23 +291,25 @@ MPC_OUTPUT_DEADBAND_DEG = 0.5
 # Mantener este flag en False evita activar dos ramas de steering en el legacy.
 USE_ACADOS_MPC = False
 
-# Horizonte de predicción.  N × T = tiempo total de anticipación.
-# N=30, T=0.05 → 1.5s de horizonte.
-ACADOS_MPC_N = 30
-ACADOS_MPC_T = 0.05
+# Horizonte de predicción del solver Acados.  N × T = tiempo interno total.
+# urt-ref usa N=40, T=0.10 en los modelos *_beta; el control runtime puede
+# seguir corriendo a 20 Hz, pero la dinámica que resuelve el OCP mira 4.0 s.
+ACADOS_MPC_N = 40
+ACADOS_MPC_T = 0.10
 
 # Velocidad de referencia por defecto [m/s].  El MPC optimiza alrededor de
 # este valor.  En competencia ajustar según la zona (highway vs curva).
 ACADOS_MPC_V_REF = 0.20
 
 # Modelo del vehículo.
-ACADOS_MPC_WHEELBASE = 0.258      # distancia entre ejes [m]
-ACADOS_MPC_L_R = 0.103            # eje trasero a CG [m]
+ACADOS_MPC_WHEELBASE = 0.260      # distancia entre ejes [m] (urt-ref)
+ACADOS_MPC_L_R = 0.105            # eje trasero a CG [m] (urt-ref)
 ACADOS_MPC_L_F = 0.155            # eje delantero a CG [m]
 
 # Límites de control.
 ACADOS_MPC_V_MAX = 0.40           # velocidad máxima [m/s] en AUTO = 40 cm/s
 ACADOS_MPC_V_MIN = -0.50          # velocidad mínima [m/s] (reversa)
+ACADOS_MPC_DELTA_MIN_DEG = -21.5  # steering mínimo [°], asimétrico como urt-ref
 ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
 
 # Pesos del costo (NONLINEAR_LS).
@@ -315,12 +317,43 @@ ACADOS_MPC_DELTA_MAX_DEG = 25.0   # steering máximo [°]
 #   R: penaliza esfuerzo de control (v, delta).
 #   S: penaliza tasa de cambio de controles (Δv, Δδ).
 ACADOS_MPC_X_COST = 2.0
-ACADOS_MPC_Y_COST = 5.0
-ACADOS_MPC_YAW_COST = 1.0
+ACADOS_MPC_Y_COST = 2.0
+ACADOS_MPC_YAW_COST = 0.5
 ACADOS_MPC_V_COST = 1.0
-ACADOS_MPC_STEER_COST = 2.0   # amortigua rectas: 0.3 todavía permitía alternancia ±25° con 2-5cm de offset
-ACADOS_MPC_DELTA_V_COST = 4.0   # sube rampa de arranque; era 1.5 (llegaba a v_ref demasiado rápido)
-ACADOS_MPC_DELTA_STEER_COST = 5.0  # penaliza cambios de steering entre ticks; 0.75 causaba nariz izquierda/derecha
+ACADOS_MPC_STEER_COST = 0.0
+ACADOS_MPC_DELTA_V_COST = 1.5
+ACADOS_MPC_DELTA_STEER_COST = 0.75
+
+# Plan B1.2: perfiles de pesos por escenario. El BehaviorPlanner llama a
+# MotionController.set_weight_profile() al entrar al scenario. ACADOS soporta
+# update_weights() runtime (no requiere regenerar el solver).
+#
+# Valores del perfil "parking" tomados del REF (mpc_config_park.yaml):
+# y_cost=7 → fuerza alineación lateral (clave para parallel parking).
+ACADOS_MPC_PROFILES = {
+    "default": {
+        "x": 2.0, "y": 2.0, "yaw": 0.5, "v": 1.0,
+        "steer": 0.0, "dv": 1.5, "dsteer": 0.75,
+    },
+    "parking": {
+        "x": 1.0, "y": 7.0, "yaw": 1.0, "v": 0.5,
+        "steer": 0.0, "dv": 0.0, "dsteer": 0.0,
+    },
+    "highway": {
+        "x": 2.0, "y": 1.5, "yaw": 0.3, "v": 1.5,
+        "steer": 0.0, "dv": 2.0, "dsteer": 1.0,
+    },
+    # Override perfilable A/B (plan B1.1): ref tiene dv=0.25, dsteer=0.5 —
+    # más permisivo. Probarlo en sim antes de hacer default.
+    "ref_permissive": {
+        "x": 2.0, "y": 2.0, "yaw": 0.5, "v": 1.0,
+        "steer": 0.0, "dv": 0.25, "dsteer": 0.5,
+    },
+}
+
+# Override perfilable: si está seteado a nombre de profile válido, el
+# MotionController arranca con ese perfil. Por defecto "default".
+MPC_WEIGHT_PROFILE = "default"
 
 # Zona muerta de salida del MPC completo [°].
 ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.75
@@ -328,6 +361,13 @@ ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.75
 # USE_ACADOS_SPEED: True = usar velocidad del MPC para el motor.
 # False = solo usar steering del MPC, mantener control de velocidad heurístico.
 USE_ACADOS_SPEED = False
+
+# Plan A3.3: motor de fusión de localización seleccionado en boot.
+#   * "yaw_ekf_1d"     : default — yaw 1D + DR plano (lo de hoy).
+#   * "ekf7"           : activa el EKF7 modular de src.localization.ekf.state_filter.
+#   * "dead_reckoning" : sólo DR sin filtro (debug).
+# Override por env: URT_LOCALIZATION_FILTER.
+LOCALIZATION_FILTER = "yaw_ekf_1d"
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # GPS-FREE TRACKING (dead reckoning + OSM lanelet centerlines)
@@ -418,6 +458,16 @@ TRACKING_STEER_SIGN_DR = 1.0
 #   Con _IMU_YAW_SIGN = +1 la señal del sim coincide con la convención
 #   del dead reckoning sin invertir.
 TRACKING_IMU_YAW_SIGN = 1.0
+
+# Confianza del yaw absoluto del BNO055 frente al servo de dirección.
+# El pose estimator propaga yaw con modelo bicicleta (velocidad + wheelbase +
+# steering filtrado) y usa el IMU sólo como corrección cuando la dirección está
+# casi quieta. Esto evita que el campo/ruido del servo rote la odometría.
+TRACKING_IMU_STEER_TRUST_FULL_DEG = 3.0       # ≤ este steer: IMU con confianza plena
+TRACKING_IMU_STEER_TRUST_ZERO_DEG = 8.0       # ≥ este steer: IMU inhibido
+TRACKING_IMU_STEER_RATE_TRUST_FULL_DEGS = 20.0  # servo lento: IMU permitido
+TRACKING_IMU_STEER_RATE_TRUST_ZERO_DEGS = 90.0  # servo rápido: IMU inhibido
+TRACKING_IMU_STEER_INHIBIT_HOLD_S = 0.35      # holdoff tras steer fuerte/rápido
 
 # DEPRECATED: el yaw de sim ya llega en `brain_map` desde `sim_bridge`, así que
 # no hace falta una corrección extra en el brain. Se conserva en config sólo
@@ -575,19 +625,19 @@ GZ_SPAWN_Z    = 0.002   # altura de spawn del coche sobre el plano
 # `BehaviorOutput.target_path` + `speed_profile` y produce el MotorCommand.
 #
 # Tasa nominal: 20 Hz (dt = 0.05 s). El MPC corre al mismo dt, así que el
-# tamaño del horizonte se mide en steps de 50 ms.
+# tamaño del horizonte se mide en steps de 50 ms. El solver Acados generado
+# puede usar T=0.10 internamente; esta tasa es la del planner/control loop.
 BEHAVIOR_DT_S = 0.05
 BEHAVIOR_HORIZON_N = 40  # must match N_horizon in c_generated_code/acados_ocp_bfmc_bicycle.json
-                         # 40 × 0.05 = 2.0s preview (era 30=1.5s) — alineado con urt-ref
+                         # N=40 queda alineado con urt-ref; T del solver vive en ACADOS_MPC_T.
 
-# El solver Acados tiene N fijo (=40), pero la distancia fisica que ve no
-# debe ser "40 puntos de mapa a 5 cm" si el auto va a 20 cm/s. Antes eso le
-# daba ~2 m de preview y anticipaba curvas demasiado temprano. El controller
-# re-temporiza la referencia que entra a Acados con el speed_profile final:
-# distancia[k] ~= sum(v_ref[k] * dt). A 0.20 m/s y 2 s mira ~0.40 m.
+# El solver Acados tiene N fijo (=40). El repo urt-ref generaba referencias
+# con paso espacial v_ref*T ~= 0.32*0.10 = 3.2 cm, o sea ~1.28 m de preview.
+# Si retimeamos sólo con v*dt a 25 cm/s, el preview cae a 0.5 m y el auto
+# empieza a doblar tarde.
 ACADOS_MPC_RETIME_REFERENCE_BY_SPEED = True
-ACADOS_MPC_REFERENCE_MIN_STEP_M = 0.0
-ACADOS_MPC_REFERENCE_MAX_PREVIEW_M = 0.85
+ACADOS_MPC_REFERENCE_MIN_STEP_M = 0.032
+ACADOS_MPC_REFERENCE_MAX_PREVIEW_M = 1.28
 
 # Límites competitivos de velocidad. 0.0 sigue siendo válido para STOP; cuando
 # el auto está en movimiento no debe mandar menos de 20 cm/s.
@@ -613,6 +663,12 @@ LIDAR_AI_SIGN_SECTOR_MAX_HALF_WIDTH_DEG = 16.0
 BEHAVIOR_NOMINAL_SPEED_MPS = 0.25   # target base; Acados re-temporiza preview con v_ref.
                                     # El planner sigue siendo la fuente única
                                     # de verdad para el perfil de velocidad.
+
+# Cap por curvatura. A escala BFMC, el valor viejo (0.45 m/s²) casi nunca
+# bajaba una velocidad nominal de 0.25 m/s; este límite fuerza curvas cerradas
+# a caer al piso competitivo antes de entrar.
+BEHAVIOR_CURVE_A_LAT_MAX_MPS2 = 0.08
+BEHAVIOR_CURVE_SPEED_FLOOR_MPS = BEHAVIOR_MIN_SPEED_MPS
 
 # Hard cap absoluto. Aplicado por velocity_overlay al final, ningún
 # scenario puede emitir velocidades por encima.
@@ -665,9 +721,9 @@ AUTO_LAUNCH_HOLD_TIMEOUT_S = 3.0
 MOTOR_COMMAND_STALE_TIMEOUT_S = 0.30
 
 # Velocidad máxima de cambio del ángulo de steering [°/s].
-# A 20 Hz (dt=0.05 s) → 60°/s = 3°/tick → 0→25° en ~8 ticks (0.4 s).
+# A 20 Hz (dt=0.05 s) → 120°/s = 6°/tick → 0→25° en ~4 ticks (0.2 s).
 # Bajar si el auto sigue oscilando; subir si es demasiado lento en curvas.
-BEHAVIOR_MAX_STEER_RATE_DEG_S = 60.0
+BEHAVIOR_MAX_STEER_RATE_DEG_S = 120.0
 
 # Lookahead del PurePursuitSolver (fallback sin acados).
 # Con el piso reglamentario de 20 cm/s, 30 cm de lookahead abre demasiado la
@@ -741,7 +797,11 @@ OVERTAKE_FORWARD_MIN_M = LIDAR_OBSTACLE_MIN_FORWARD_X_M
 OVERTAKE_FORWARD_MAX_M = 1.25
 OVERTAKE_LATERAL_OFFSET_M = 0.16
 OVERTAKE_MIN_OBSTACLE_CLEARANCE_M = 0.04
-OVERTAKE_MAX_LATERAL_OFFSET_M = 0.28
+# Plan B1.3: half-lane BFMC del repo de referencia (0.31 m). Usamos este
+# valor como techo del desplazamiento lateral durante overtake — alinear
+# con el ref permite usar todo el carril opuesto cuando hace falta.
+OVERTAKE_LANE_OFFSET_M = 0.31
+OVERTAKE_MAX_LATERAL_OFFSET_M = OVERTAKE_LANE_OFFSET_M
 OVERTAKE_SIDE_CLEAR_FORWARD_M = 1.25
 OVERTAKE_SIDE_CLEAR_HALF_WIDTH_M = 0.12
 OVERTAKE_SPEED_MPS = 0.30
@@ -776,6 +836,49 @@ TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 # can nudge the DR back toward the real lane center without teleporting it.
 TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
 TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
+
+# Plan B2: perfiles de corrección visual por escenario. La autoridad de la
+# visión sobre la pose depende del scenario activo:
+#   * lane_keep      → más fuerte (estamos en carril limpio).
+#   * default        → estándar.
+#   * intersection,
+#     roundabout    → débil (mapa OSM manda en geometría compleja).
+#   * parking        → desactivada (la maniobra es servo-directo, no
+#                      queremos que el lane perception meta artefactos).
+# El BehaviorPlanner setea el perfil activo en TrackingState al entrar al
+# scenario; pose_estimator/relocalization lee de ahí cuál usar.
+VISUAL_CORRECTION_PROFILES = {
+    "default": {
+        "gain": 0.18,
+        "max_m": 0.02,
+        "step_max_m": 0.015,
+    },
+    "lane_keep": {
+        # Recta autopista: la cámara manda. Cuando el mapa OSM tiene error
+        # de localización (~5-8 cm), este gain alto permite que la corrección
+        # visual jale al pose lateralmente con autoridad real (~1.5 cm/frame,
+        # techo 4 cm). Antes 0.22/0.025/0.018 → respuesta lenta dominada por
+        # el target_path rígido del MPC.
+        "gain": 0.30,
+        "max_m": 0.04,
+        "step_max_m": 0.022,
+    },
+    "intersection": {
+        "gain": 0.05,
+        "max_m": 0.01,
+        "step_max_m": 0.005,
+    },
+    "roundabout": {
+        "gain": 0.05,
+        "max_m": 0.01,
+        "step_max_m": 0.005,
+    },
+    "parking": {
+        "gain": 0.0,
+        "max_m": 0.0,
+        "step_max_m": 0.0,
+    },
+}
 
 # Corrección visual adicional hacia la ruta OSM/Lanelet. En la arquitectura nueva
 # esta corrección forma parte del pose estimator y queda activa por defecto.
@@ -844,6 +947,15 @@ TRACKING_COMMAND_SPEED_FALLBACK_SCALE = 1.0
 TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = True
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
 
+# Filtro de encoder portado de urt-ref: si el encoder fresco contradice fuerte
+# los últimos comandos de velocidad, se reemplaza por el comando. También clava
+# velocidades muy chicas a cero para no integrar ruido cuando el auto está quieto.
+TRACKING_ENCODER_FILTER_ENABLED = True
+TRACKING_ENCODER_FILTER_WINDOW = 5
+TRACKING_ENCODER_FILTER_OUTLIER_DIFF_MPS = 0.15
+TRACKING_ENCODER_FILTER_ZERO_EPS_MPS = 0.03
+TRACKING_ENCODER_FILTER_STOP_CMD_DIFF_MPS = 0.07
+
 # Graph node attr that represents a physical stopline. Graph guidance is only
 # allowed to take authority in this exact node type.
 TRACKING_STOPLINE_NODE_ATTR = 7
@@ -884,7 +996,18 @@ SINGLE_LINE_CURVE_STEER_HOLD_RATIO = 0.65
 LANE_MASK_DEBUG_LOG = True
 
 # Wheelbase already defined as MPC_WHEELBASE; kept here as alias for clarity.
-TRACKING_WHEELBASE_M = MPC_WHEELBASE  # 0.258 m
+TRACKING_WHEELBASE_M = MPC_WHEELBASE  # 0.260 m
+TRACKING_REAR_AXLE_TO_CG_M = ACADOS_MPC_L_R  # beta slip-angle model, same as urt-ref
+TRACKING_ENCODER_CURVE_SPEED_COMPENSATION = True
+
+# Reset suave/seguro de yaw con carriles rectos visibles, equivalente funcional
+# al lane_yaw_reset de urt-ref. No se usa en curva ni con una sola línea.
+TRACKING_LANE_YAW_RESET_ENABLED = True
+TRACKING_LANE_YAW_RESET_CONSECUTIVE = 2
+TRACKING_LANE_YAW_RESET_QUALITY_MIN = 0.80
+TRACKING_LANE_YAW_RESET_STRAIGHT_THRESH_DEG = 1.1
+TRACKING_LANE_YAW_RESET_MAX_ERROR_DEG = 3.75
+TRACKING_LANE_YAW_RESET_COOLDOWN_S = 30.0
 
 # ── 5. AMORTIGUAMIENTO DEL STEERING (historial de frames) ────────────────────
 # El steering final se promedia sobre los últimos N frames para suavizar

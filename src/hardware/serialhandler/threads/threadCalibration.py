@@ -47,6 +47,13 @@ class threadCalibration(ThreadWithStop):
             # Filter out our own replies (responses use lowercase ``action``).
             if not isinstance(cmd, dict) or "Action" not in cmd:
                 continue
+            # D4: inyectamos el correlation_id del request al adapter para
+            # que CADA emit subsiguiente de Calibration lo cargue. Esto
+            # convierte el canal CALIBRATION (pub/sub mismo topic para
+            # request y reply) en un par request↔reply matchable, sin
+            # tocar la lógica de la clase legacy Calibration.
+            correlation_id = cmd.get("correlation_id") if isinstance(cmd, dict) else None
+            self._adapter.set_correlation_id(correlation_id)
             try:
                 self._calibration.handle_calibration_signal(cmd, socketId=None)
             except Exception as exc:
@@ -56,3 +63,7 @@ class threadCalibration(ThreadWithStop):
                     print(
                         "[ threadCalibration ] ERROR - handler failed:", exc, flush=True
                     )
+            finally:
+                # Limpieza explícita — futuros emits sin request asociado
+                # NO deben pegarle un correlation_id viejo.
+                self._adapter.set_correlation_id(None)

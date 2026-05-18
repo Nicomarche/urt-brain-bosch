@@ -135,8 +135,10 @@ class processCamera(WorkerProcess):
         from src.behavior.scenarios.lane_keep import LaneKeep
         from src.behavior.scenarios.overtake import Overtake
         from src.behavior.scenarios.parking import Parking
+        from src.behavior.scenarios.pedestrian_yield import PedestrianYield
         from src.behavior.scenarios.roundabout import Roundabout
         from src.behavior.scenarios.stop_sign import StopSign
+        from src.behavior.scenarios.traffic_light import TrafficLight
         from src.control.controller_thread import threadMotionController
         from src.control.motion_controller import MotionController
         from src.control.motor_command_dispatcher import threadMotorCommandDispatcher
@@ -345,9 +347,19 @@ class processCamera(WorkerProcess):
             self.threads.append(poseEstimatorTh)
             self.threads.append(plannerTh)
 
+        # Plan C3.1: max_age_per_class — peatones (clase 11) y autos (12)
+        # sobreviven oclusiones más largas que signs estáticos. Mitiga ID
+        # churn cuando un peatón se mete detrás de un poste o un auto se
+        # tapa por otro.
+        from src.perception.object_classes import TrackedObject as _TO
+        _max_age_per_class = {
+            int(_TO.PEDESTRIAN): 20,  # ≈ 1.0 s a 20 Hz
+            int(_TO.CAR): 15,         # ≈ 0.75 s
+            int(_TO.BLOCK): 12,
+        }
         objectTrackerTh = threadObjectTracker(
             self.queuesList,
-            tracker=MOTTracker(),
+            tracker=MOTTracker(max_age_per_class=_max_age_per_class),
             detection_buffer=detection_buffer,
             pose_estimate_buffer=pose_estimate_buffer,
             tracked_objects_buffer=tracked_objects_buffer,
@@ -406,8 +418,13 @@ class processCamera(WorkerProcess):
             _behavior_max = 0.10
             _behavior_pause = 0.05
 
+        # Plan C1.3/C1.4: PedestrianYield (95) y TrafficLight (92) son los
+        # más urgentes; quedan al principio de la lista (priority sort en el
+        # PlannerManager los reordena igual, pero el orden documenta intent).
         behavior_planner = BehaviorPlanner(
             scenarios=[
+                PedestrianYield(),
+                TrafficLight(),
                 StopSign(),
                 Parking(),
                 Crosswalk(),
@@ -431,6 +448,7 @@ class processCamera(WorkerProcess):
             lidar_obstacles_buffer=lidar_obstacles_buffer,
             sign_hints_buffer=sign_hints_buffer,
             behavior_output_buffer=behavior_output_buffer,
+            tracking_state=tracking_state,
             dt_s=_behavior_dt_s,
             horizon_n=_behavior_horizon_n,
             nominal_speed_mps=_behavior_nominal,

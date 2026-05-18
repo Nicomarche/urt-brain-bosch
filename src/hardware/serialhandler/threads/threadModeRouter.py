@@ -51,12 +51,21 @@ class threadModeRouter(ThreadWithStop):
         self._sm: Optional[StateMachine] = None
 
     def _ensure_state_machine(self) -> Optional[StateMachine]:
-        """Lazy lookup so we tolerate the spawn-mode race where the child
-        starts before ``StateMachine.initialize_shared_state`` runs in the
-        parent. After main.py initialises it the singleton is reachable.
+        """Lazy lookup that handles the macOS spawn-mode race.
+
+        On Linux (fork) the class variables inherited from the parent process
+        have ``_initialized=True`` immediately.  On macOS (spawn) each child
+        gets a fresh interpreter so ``_initialized`` is False until we call
+        ``StateMachine.attach()`` with the Manager proxies that were stuffed
+        into queueList by main.py before spawning.
         """
         if self._sm is not None:
             return self._sm
+        if not StateMachine.is_initialized():
+            try:
+                StateMachine.attach(self.queuesList)
+            except RuntimeError:
+                return None
         try:
             self._sm = StateMachine.get_instance()
         except RuntimeError:
