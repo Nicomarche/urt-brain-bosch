@@ -71,7 +71,7 @@ from src.utils.gps_mode import is_gps_disabled, save_gps_disabled
 
 
 _logger = logging.getLogger(__name__)
-_LANELET_TRACKING_OK_MAX_ERROR_M = 0.12
+_MAP_LOCALIZATION_WARN_ERROR_M = 0.12
 
 class MapData:
     """Loaded map: Lanelet2 geometry + visual background metadata."""
@@ -1737,9 +1737,9 @@ class MapView(QWidget):
                 route_alignment_error_m = None
         except (TypeError, ValueError):
             route_alignment_error_m = None
-        lanelet_tracking_ok = (
-            route_alignment_error_m is None
-            or route_alignment_error_m <= _LANELET_TRACKING_OK_MAX_ERROR_M
+        map_localization_warning = (
+            route_alignment_error_m is not None
+            and route_alignment_error_m > _MAP_LOCALIZATION_WARN_ERROR_M
         )
         if route_active:
             self._active_current_lanelet_id = (
@@ -1756,19 +1756,13 @@ class MapView(QWidget):
             self._active_current_lanelet_id = None
             self._active_next_lanelet_ids = ()
             self._control_path.setPath(QPainterPath())
-            lanelet_tracking_ok = True
-        highlight_current_lanelet_id = (
-            self._active_current_lanelet_id
-            if lanelet_tracking_ok
-            else None
-        )
         self._apply_lanelet_highlights(
-            current_lanelet_id=highlight_current_lanelet_id,
+            current_lanelet_id=self._active_current_lanelet_id,
             next_lanelet_ids=self._active_next_lanelet_ids,
         )
-        if route_active and not lanelet_tracking_ok and route_alignment_error_m is not None:
+        if route_active and map_localization_warning:
             self._location_label.setText(
-                f"Lane mismatch: {route_alignment_error_m * 100.0:.0f} cm"
+                f"Map/localization mismatch: {route_alignment_error_m * 100.0:.0f} cm"
                 f" ({lanelet_source or 'route'})"
             )
 
