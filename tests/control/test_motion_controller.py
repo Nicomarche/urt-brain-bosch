@@ -231,6 +231,35 @@ def test_horizon_mismatch_with_solver() -> None:
     assert cmd.reason == "horizon_mismatch"
 
 
+def test_route_snapback_reference_is_rejected_before_solver() -> None:
+    solver = _FakeSolver(result=(0.30, 25.0))
+    mc = MotionController(solver=solver)
+    pose = PoseEstimate(fused_pose=Pose2D(x=1.0, y=2.0, yaw=0.0))
+    target_path = np.array(
+        [
+            [1.00, 2.00, 0.0],
+            [1.05, 2.31, 1.3],
+            [1.10, 2.32, 0.2],
+            [1.15, 2.33, 0.2],
+            [1.20, 2.34, 0.2],
+            [1.25, 2.35, 0.2],
+        ],
+        dtype=float,
+    )
+
+    cmd = mc.compute(
+        _bo(
+            target_path=target_path,
+            notes={"path_source": "route_waypoints", "path_authority": "map"},
+        ),
+        pose,
+    )
+
+    assert cmd.valid is False
+    assert cmd.reason == "unsafe_route_snapback_reference"
+    assert solver.compute_calls == 0
+
+
 def test_solver_returns_none_marks_failure() -> None:
     mc = MotionController(solver=_FakeSolver(return_none=True))
     cmd = mc.compute(_bo(), _pose())

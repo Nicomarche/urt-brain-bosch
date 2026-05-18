@@ -132,6 +132,7 @@ class LaneObserverTests(unittest.TestCase):
                 },
                 "visual_lane_waypoints": {
                     "center_waypoints_body": tuple((0.05 * idx, 0.04, 0.0) for idx in range(20)),
+                    "line_points_body": tuple((0.05 * idx, 0.18) for idx in range(10)),
                     "lane_width_m": 0.35,
                 },
             },
@@ -142,6 +143,7 @@ class LaneObserverTests(unittest.TestCase):
         self.assertFalse(lane_observation.direct_error_valid)
         self.assertIsNone(lane_observation.direct_error_m)
         self.assertGreaterEqual(lane_observation.quality, 0.85)
+        self.assertEqual(len(lane_observation.line_points_body), 10)
 
     def test_build_lane_observation_prefers_resolved_visible_side_over_raw_payload_counts(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)

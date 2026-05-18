@@ -1075,6 +1075,21 @@ class MotionController(IMotionController):
             self._reset_command_memory()
             return self._invalid("horizon_mismatch", backend=self._backend_name)
 
+        snap_guard = _route_snapback_guard(
+            notes=behavior_notes,
+            target_path=state_refs,
+            pose=pose,
+        )
+        if snap_guard is not None:
+            self._reset_command_memory()
+            live_log(
+                "mpc",
+                event="reference_guard",
+                backend=self._backend_name,
+                **snap_guard,
+            )
+            return self._invalid(str(snap_guard["reason"]), backend=self._backend_name)
+
         requested_profile = _desired_weight_profile_name(behavior_notes)
         if requested_profile and requested_profile != self.active_weight_profile():
             self.set_weight_profile(requested_profile)
@@ -1404,3 +1419,52 @@ def _effective_steer_rate_limit_deg_s(notes: dict | None, default_deg_s: float) 
         except (TypeError, ValueError):
             pass
     return float(default_deg_s)
+
+
+def _route_snapback_guard(
+    *,
+    notes: dict | None,
+    target_path: np.ndarray,
+    pose: PoseEstimate,
+) -> dict[str, float | str] | None:
+    if not isinstance(notes, dict):
+        return None
+    path_source = str(notes.get("path_source") or "").strip()
+    path_authority = str(notes.get("path_authority") or "").strip()
+    if path_source not in {"route_waypoints", "lanelet_centerline"}:
+        return None
+    if path_authority in {"visual", "visual_recovery"}:
+        return None
+    try:
+        import config as _cfg
+        enabled = bool(getattr(_cfg, "MPC_ROUTE_SNAP_GUARD_ENABLED", True))
+        max_forward_m = float(getattr(_cfg, "MPC_ROUTE_SNAP_GUARD_MAX_FORWARD_M", 0.12))
+        max_lateral_m = float(getattr(_cfg, "MPC_ROUTE_SNAP_GUARD_MAX_LATERAL_M", 0.20))
+    except Exception:
+        enabled = True
+        max_forward_m = 0.12
+        max_lateral_m = 0.20
+    if not enabled:
+        return None
+
+    path = np.asarray(target_path, dtype=np.float64)
+    if path.ndim != 2 or path.shape[0] < 2 or path.shape[1] < 2:
+        return None
+    pose_x = float(pose.fused_pose.x)
+    pose_y = float(pose.fused_pose.y)
+    pose_yaw = float(pose.fused_pose.yaw)
+    dx = float(path[1, 0]) - pose_x
+    dy = float(path[1, 1]) - pose_y
+    cos_yaw = math.cos(pose_yaw)
+    sin_yaw = math.sin(pose_yaw)
+    x_fwd_m = (cos_yaw * dx) + (sin_yaw * dy)
+    y_left_m = (sin_yaw * dx) - (cos_yaw * dy)
+    if x_fwd_m <= max_forward_m and abs(y_left_m) >= max_lateral_m:
+        return {
+            "reason": "unsafe_route_snapback_reference",
+            "snap_sample1_x_fwd_m": float(x_fwd_m),
+            "snap_sample1_y_left_m": float(y_left_m),
+            "snap_forward_threshold_m": float(max_forward_m),
+            "snap_lateral_threshold_m": float(max_lateral_m),
+        }
+    return None

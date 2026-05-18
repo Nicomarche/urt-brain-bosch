@@ -12,6 +12,7 @@ from src.core.types.perception import LaneObservation
 from src.core.types.pose import Pose2D
 from src.core.types.routing import RouteContext
 from src.localization.dead_reckoning import DeadReckoning
+from src.localization.chamfer_map_matcher import ChamferMatchResult
 from src.localization.pose_estimator_thread import threadPoseEstimator
 
 
@@ -438,6 +439,49 @@ def test_apply_lane_observation_accepts_valid_two_line_at_low_route_speed() -> N
     assert new_y > 0.05
     assert new_yaw == pytest.approx(0.0, abs=1e-9)
     assert len(estimator._dr.corrections) == 1
+
+
+def test_apply_chamfer_map_alignment_reanchors_pose_from_visual_lines() -> None:
+    class _FakeMatcher:
+        def match_body_points(self, *args, **kwargs):
+            return ChamferMatchResult(
+                applied=True,
+                reason="matched",
+                dx_m=0.02,
+                dy_m=-0.03,
+                best_cost_px=1.0,
+                baseline_cost_px=5.0,
+                improvement_px=4.0,
+                point_count=40,
+                valid_fraction=1.0,
+            )
+
+    estimator = _make_estimator(speed_mps=0.0, dr_y=0.10)
+    estimator.tracking_state.current_scenario = "lane_keep"
+    estimator._chamfer_matcher = _FakeMatcher()
+    estimator._chamfer_matcher_failed = False
+    estimator._last_chamfer_alignment_monotonic = 0.0
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        quality=1.0,
+        measurement_mode="two_line",
+        line_points_body=tuple((0.04 * i, 0.175) for i in range(40)),
+    )
+
+    new_x, new_y, new_yaw, correction_m, applied, result = estimator._apply_chamfer_map_alignment(
+        RouteContext(route_active=True, matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0)),
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.10,
+        raw_yaw=0.0,
+    )
+
+    assert applied is True
+    assert result is not None and result.reason == "matched"
+    assert correction_m == pytest.approx(math.hypot(0.02, -0.03), abs=1e-9)
+    assert (new_x, new_y, new_yaw) == pytest.approx((0.02, 0.07, 0.0), abs=1e-9)
+    assert estimator._dr.get_state() == pytest.approx((0.02, 0.07, 0.0), abs=1e-9)
 
 
 def test_apply_localisation_fix_manual_pose_teleports_sim(monkeypatch) -> None:

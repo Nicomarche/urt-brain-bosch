@@ -41,6 +41,17 @@ LANE_VISUAL_PRIMARY_MAX_CORRIDOR_VIOLATION_M = 0.12
 LANE_VISUAL_PRIMARY_CORRIDOR_CHECK_MAX_MAP_MATCH_ERROR_M = 0.12
 LANE_VISUAL_PRIMARY_ENTER_TICKS = 3
 LANE_VISUAL_PRIMARY_EXIT_TICKS = 2
+# Si la ruta ya no matchea bien la pose, no esperamos la histeresis completa:
+# los waypoints locales tienen que quedar sobre el centro visual del carril.
+LANE_VISUAL_PRIMARY_IMMEDIATE_ON_MAP_MATCH_ERROR_M = 0.18
+
+# Recovery: si la ruta entra en autoridad de mapa por una maniobra cercana
+# pero la odometría ya no matchea el corredor, no conviene pegar un salto
+# lateral hacia el mapa. En ese caso la cámara puede sostener lane keeping
+# mientras el mapa conserva la decisión de ruta.
+LANE_VISUAL_RECOVERY_ENABLED = True
+LANE_VISUAL_RECOVERY_MIN_MAP_MATCH_ERROR_M = 0.18
+LANE_VISUAL_RECOVERY_ALLOWED_MAP_AUTHORITY_PREFIXES = {"next_semantic:"}
 
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
@@ -380,6 +391,12 @@ MPC_WEIGHT_PROFILE = "default"
 
 # Zona muerta de salida del MPC completo [°].
 ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.25
+
+# Safety guard: si llega al MPC una ruta de mapa que pega un salto lateral
+# inmediato desde la pose actual al corredor, parar en vez de saturar steering.
+MPC_ROUTE_SNAP_GUARD_ENABLED = True
+MPC_ROUTE_SNAP_GUARD_MAX_FORWARD_M = 0.12
+MPC_ROUTE_SNAP_GUARD_MAX_LATERAL_M = 0.20
 
 # USE_ACADOS_SPEED: True = usar velocidad del MPC para el motor.
 # False = solo usar steering del MPC, mantener control de velocidad heurístico.
@@ -863,6 +880,29 @@ TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 # can nudge the DR back toward the real lane center without teleporting it.
 TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
 TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
+
+# Visual-map chamfer alignment (ref: urt-ref template_maching/chamfer.py).
+# Uses BEV lane-line points from the camera as a sparse template and matches
+# them against a distance transform of the lanelet map boundaries.  The result
+# is applied as a small local pose nudge, not as a global OSM edit.
+TRACKING_CHAMFER_ALIGNMENT_ENABLED = True
+TRACKING_CHAMFER_ALIGNMENT_ALLOWED_SCENARIOS = {"lane_keep"}
+TRACKING_CHAMFER_ALIGNMENT_MIN_QUALITY = 0.75
+TRACKING_CHAMFER_ALIGNMENT_TWO_LINE_ONLY = True
+TRACKING_CHAMFER_ALIGNMENT_MIN_POINTS = 24
+TRACKING_CHAMFER_ALIGNMENT_MAX_VISUAL_POINTS = 180
+TRACKING_CHAMFER_ALIGNMENT_MIN_FORWARD_M = 0.03
+TRACKING_CHAMFER_ALIGNMENT_MAX_FORWARD_M = 1.20
+TRACKING_CHAMFER_ALIGNMENT_MAX_LATERAL_ABS_M = 0.65
+TRACKING_CHAMFER_ALIGNMENT_SEARCH_RADIUS_M = 0.28
+TRACKING_CHAMFER_ALIGNMENT_SEARCH_STEP_M = 0.02
+TRACKING_CHAMFER_ALIGNMENT_MIN_CORRECTION_M = 0.015
+TRACKING_CHAMFER_ALIGNMENT_MAX_STEP_M = 0.045
+TRACKING_CHAMFER_ALIGNMENT_COOLDOWN_S = 0.18
+TRACKING_CHAMFER_ALIGNMENT_MAX_COST_PX = 9.0
+TRACKING_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX = 1.25
+TRACKING_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = 0.80
+TRACKING_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX = 3
 
 # Plan B2: perfiles de corrección visual por escenario. La autoridad de la
 # visión sobre la pose depende del scenario activo:

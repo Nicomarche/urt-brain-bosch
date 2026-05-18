@@ -106,7 +106,8 @@ class BaseScenario(ABC):
         lane_obs = getattr(ctx, "lane_observation", None)
         route_corridor_available = bool(ctx.route.route_active) and bool(route_waypoints)
         lanelet_corridor_available = bool(ctx.lanelet_map is not None and ctx.route.current_lanelet_id)
-        visual_decision = self._visual_primary_gate().decide(
+        visual_gate = self._visual_primary_gate()
+        visual_decision = visual_gate.decide(
             ctx=ctx,
             lane_observation=lane_obs,
             scenario_name=scenario_name,
@@ -117,6 +118,24 @@ class BaseScenario(ABC):
         visual_path_reason = str(visual_decision.reason)
         map_authority_active = bool(visual_decision.map_authority_active)
         use_visual_path = bool(visual_decision.use_visual_path)
+        visual_path_mode = "primary"
+        if not use_visual_path and map_authority_active:
+            visual_recovery = visual_gate.decide_recovery(
+                ctx=ctx,
+                lane_observation=lane_obs,
+                scenario_name=scenario_name,
+                route_corridor_available=route_corridor_available,
+                lanelet_corridor_available=lanelet_corridor_available,
+                map_authority_active=map_authority_active,
+                map_authority_reason=str(visual_decision.map_authority_reason),
+            )
+            notes.update(visual_recovery.notes)
+            if visual_recovery.use_visual_path:
+                use_visual_path = True
+                visual_path_mode = "recovery"
+                visual_path_reason = str(visual_recovery.reason)
+            elif visual_recovery.reason:
+                notes["visual_path_recovery_rejected_reason"] = str(visual_recovery.reason)
         if use_visual_path:
             visual_measurement_mode = str(getattr(lane_obs, "measurement_mode", "none") or "none")
             connect_visual_path_from_ego = visual_measurement_mode != "single_line"
@@ -129,8 +148,13 @@ class BaseScenario(ABC):
                 connect_from_ego_pose=connect_visual_path_from_ego,
             )
             notes.setdefault("path_source", "visual_lane_waypoints")
-            notes.setdefault("recovery_source", "visual_lane_waypoints")
-            notes["path_authority"] = "visual"
+            if visual_path_mode == "recovery":
+                notes["recovery_source"] = "visual_lane_map_recovery"
+                notes["path_authority"] = "visual_recovery"
+                notes["map_authority_preserved"] = True
+            else:
+                notes.setdefault("recovery_source", "visual_lane_waypoints")
+                notes["path_authority"] = "visual"
             notes["mpc_weight_profile"] = "lane_keep_visual"
             notes["steer_rate_limit_deg_s"] = 180.0
             notes["visual_lane_waypoint_count"] = int(len(lane_obs.center_waypoints_body or ()))
@@ -139,7 +163,11 @@ class BaseScenario(ABC):
                 notes["visual_lane_extrapolated_side"] = str(lane_obs.extrapolated_side)
             if lane_obs.lane_width_m is not None:
                 notes["visual_lane_width_m"] = float(lane_obs.lane_width_m)
-            notes["visual_path_primary_reason"] = str(visual_path_reason)
+            if visual_path_mode == "recovery":
+                notes["visual_path_recovery_reason"] = str(visual_path_reason)
+                notes["visual_path_primary_rejected_reason"] = str(visual_decision.reason)
+            else:
+                notes["visual_path_primary_reason"] = str(visual_path_reason)
         elif route_corridor_available:
             target_path, route_bridge_meta = build_target_path_from_route(
                 route_waypoints=route_waypoints,

@@ -373,6 +373,30 @@ class threadBehaviorPlanner(ThreadWithStop):
                         if isinstance(plan.notes, dict) else None)
         path_source = (plan.notes.get("path_source")
                        if isinstance(plan.notes, dict) else None)
+        path_authority = (plan.notes.get("path_authority")
+                          if isinstance(plan.notes, dict) else None)
+        recovery_source = (plan.notes.get("recovery_source")
+                           if isinstance(plan.notes, dict) else None)
+        visual_path_primary_reason = (
+            plan.notes.get("visual_path_primary_reason")
+            if isinstance(plan.notes, dict) else None
+        )
+        visual_path_primary_rejected_reason = (
+            plan.notes.get("visual_path_primary_rejected_reason")
+            if isinstance(plan.notes, dict) else None
+        )
+        visual_path_recovery_reason = (
+            plan.notes.get("visual_path_recovery_reason")
+            if isinstance(plan.notes, dict) else None
+        )
+        visual_path_recovery_rejected_reason = (
+            plan.notes.get("visual_path_recovery_rejected_reason")
+            if isinstance(plan.notes, dict) else None
+        )
+        mpc_weight_profile = (plan.notes.get("mpc_weight_profile")
+                              if isinstance(plan.notes, dict) else None)
+        steer_rate_limit_deg_s = (plan.notes.get("steer_rate_limit_deg_s")
+                                  if isinstance(plan.notes, dict) else None)
         stop_mode = (plan.notes.get("stop_mode")
                      if isinstance(plan.notes, dict) else None)
         stop_source = (plan.notes.get("stop_source")
@@ -408,6 +432,14 @@ class threadBehaviorPlanner(ThreadWithStop):
             ramp_speed_mps=float(self._current_speed_mps),
             nominal_speed_mps=float(ctx.nominal_speed_mps),
             path_source=path_source,
+            path_authority=path_authority,
+            recovery_source=recovery_source,
+            visual_path_primary_reason=visual_path_primary_reason,
+            visual_path_primary_rejected_reason=visual_path_primary_rejected_reason,
+            visual_path_recovery_reason=visual_path_recovery_reason,
+            visual_path_recovery_rejected_reason=visual_path_recovery_rejected_reason,
+            mpc_weight_profile=mpc_weight_profile,
+            steer_rate_limit_deg_s=_simple(steer_rate_limit_deg_s),
             sp0=sp0,
             sp_first3=sp_first3,
             tp_first3=tp_first3,

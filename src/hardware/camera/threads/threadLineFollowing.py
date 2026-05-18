@@ -1607,8 +1607,36 @@ Args:
             for i in range(center_arr.shape[0])
         )
 
+        def _line_points_body(bev_pts):
+            if bev_pts is None or getattr(bev_pts, "shape", (0,))[0] <= 0:
+                return tuple()
+            max_points = max(8, int(getattr(_config, "TRACKING_CHAMFER_ALIGNMENT_MAX_VISUAL_POINTS", 180)) // 2)
+            pts = np.asarray(bev_pts, dtype=float)
+            if pts.ndim != 2 or pts.shape[1] < 2:
+                return tuple()
+            if pts.shape[0] > max_points:
+                sample_idx = np.linspace(0, pts.shape[0] - 1, max_points, dtype=int)
+                pts = pts[sample_idx]
+            out = []
+            for bev_x, bev_y in pts[:, :2]:
+                if not (math.isfinite(float(bev_x)) and math.isfinite(float(bev_y))):
+                    continue
+                forward_m = (float(img_h) - float(bev_y)) * bev_cm_per_px / 100.0
+                lateral_left_m = -(float(bev_x) - center_bev_x) * bev_cm_per_px / 100.0
+                out.append((float(forward_m), float(lateral_left_m)))
+            return tuple(out)
+
+        left_line_points_body = _line_points_body(bev_left)
+        right_line_points_body = _line_points_body(bev_right)
+        line_points_body = tuple(left_line_points_body) + tuple(right_line_points_body)
+
         return {
             "center_waypoints_body": center_waypoints_body,
+            "line_points_body": line_points_body,
+            "line_points_body_by_side": {
+                "left": left_line_points_body,
+                "right": right_line_points_body,
+            },
             "left_poly_coeffs": left_fit[0] if left_fit is not None else None,
             "right_poly_coeffs": right_fit[0] if right_fit is not None else None,
             "lane_width_m": float(lane_width_m),

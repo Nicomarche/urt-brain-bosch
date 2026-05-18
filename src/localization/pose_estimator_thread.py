@@ -37,6 +37,7 @@ from src.localization.relocalization_thread import (
 )
 from src.localization.dead_reckoning import curve_speed_compensated
 from src.localization.lane_correction import compute_lateral_correction
+from src.localization.chamfer_map_matcher import ChamferMapMatcher, ChamferMatchResult
 from src.localization.visual_correction_profile import (
     resolve_visual_correction_profile,
 )
@@ -99,6 +100,28 @@ _LANE_YAW_RESET_MAX_ERROR_RAD = math.radians(
     float(getattr(_cfg_auto, "TRACKING_LANE_YAW_RESET_MAX_ERROR_DEG", 3.75))
 )
 _LANE_YAW_RESET_COOLDOWN_S = float(getattr(_cfg_auto, "TRACKING_LANE_YAW_RESET_COOLDOWN_S", 30.0))
+_CHAMFER_ALIGNMENT_ENABLED = bool(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_ENABLED", True))
+_CHAMFER_ALIGNMENT_ALLOWED_SCENARIOS = set(
+    getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_ALLOWED_SCENARIOS", {"lane_keep"}) or set()
+)
+_CHAMFER_ALIGNMENT_MIN_QUALITY = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MIN_QUALITY", 0.75))
+_CHAMFER_ALIGNMENT_TWO_LINE_ONLY = bool(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_TWO_LINE_ONLY", True))
+_CHAMFER_ALIGNMENT_MIN_POINTS = max(1, int(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MIN_POINTS", 24)))
+_CHAMFER_ALIGNMENT_MAX_VISUAL_POINTS = max(1, int(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAX_VISUAL_POINTS", 180)))
+_CHAMFER_ALIGNMENT_MIN_FORWARD_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MIN_FORWARD_M", 0.03))
+_CHAMFER_ALIGNMENT_MAX_FORWARD_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAX_FORWARD_M", 1.20))
+_CHAMFER_ALIGNMENT_MAX_LATERAL_ABS_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAX_LATERAL_ABS_M", 0.65))
+_CHAMFER_ALIGNMENT_SEARCH_RADIUS_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_SEARCH_RADIUS_M", 0.28))
+_CHAMFER_ALIGNMENT_SEARCH_STEP_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_SEARCH_STEP_M", 0.02))
+_CHAMFER_ALIGNMENT_MIN_CORRECTION_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MIN_CORRECTION_M", 0.015))
+_CHAMFER_ALIGNMENT_MAX_STEP_M = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAX_STEP_M", 0.045))
+_CHAMFER_ALIGNMENT_COOLDOWN_S = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_COOLDOWN_S", 0.18))
+_CHAMFER_ALIGNMENT_MAX_COST_PX = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAX_COST_PX", 9.0))
+_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX = float(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX", 1.25))
+_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = float(
+    getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M", 0.80)
+)
+_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX = max(1, int(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX", 3)))
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -173,6 +196,9 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
         self._last_camera_lateral_correction_monotonic = 0.0
+        self._last_chamfer_alignment_monotonic = 0.0
+        self._chamfer_matcher: ChamferMapMatcher | None = None
+        self._chamfer_matcher_failed = False
         self._last_absolute_yaw_fix_monotonic = 0.0
         self._last_absolute_yaw_fix_source = None
         # LOCALISATION multiplexes dashboard manual fixes and LoCSys GPS fixes.
@@ -1444,6 +1470,157 @@ class threadPoseEstimator(threadTracking):
         )
         return float(yaw_error)
 
+    def _get_chamfer_matcher(self, route_context: RouteContext | None) -> ChamferMapMatcher | None:
+        matcher = getattr(self, "_chamfer_matcher", None)
+        if matcher is not None:
+            return matcher
+        if bool(getattr(self, "_chamfer_matcher_failed", False)):
+            return None
+
+        graph = getattr(self, "_graph", None)
+        lanelet_map = getattr(graph, "lanelet_map", None)
+        if lanelet_map is None:
+            self._chamfer_matcher_failed = True
+            return None
+
+        metadata = {}
+        if route_context is not None:
+            metadata.update(dict(getattr(route_context, "map_metadata", {}) or {}))
+        if not metadata and hasattr(graph, "get_map_metadata"):
+            try:
+                metadata.update(dict(graph.get_map_metadata() or {}))
+            except Exception:
+                metadata = {}
+
+        try:
+            self._chamfer_matcher = ChamferMapMatcher.from_lanelet_map(
+                lanelet_map,
+                map_metadata=metadata or None,
+                line_width_px=int(_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX),
+            )
+        except Exception as exc:
+            self._chamfer_matcher_failed = True
+            live_log(
+                "pose_estimator",
+                event="visual_chamfer_matcher_unavailable",
+                reason=str(exc),
+            )
+            return None
+        return self._chamfer_matcher
+
+    @staticmethod
+    def _chamfer_semantic_blocked(route_context: RouteContext | None) -> bool:
+        if route_context is None:
+            return False
+        semantic_type = str(getattr(route_context, "next_semantic_type", "") or "").strip().lower()
+        expected = str(getattr(route_context, "expected_control_type", "") or "").strip().lower()
+        blocking = {"intersection", "roundabout", "stopline", "crosswalk", "parking"}
+        distance = getattr(route_context, "next_semantic_distance_m", None)
+        near = False
+        if distance is not None:
+            try:
+                near = float(distance) <= float(_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M)
+            except (TypeError, ValueError):
+                near = False
+        return (semantic_type in blocking and near) or expected in blocking
+
+    def _apply_chamfer_map_alignment(
+        self,
+        route_context: RouteContext | None,
+        lane_observation: LaneObservation | None,
+        now: float,
+        raw_x: float,
+        raw_y: float,
+        raw_yaw: float,
+    ) -> tuple[float, float, float, float, bool, ChamferMatchResult | None]:
+        if not bool(_CHAMFER_ALIGNMENT_ENABLED):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+        if self._dr is None or route_context is None or lane_observation is None:
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+        if not bool(getattr(route_context, "route_active", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+        if (float(now) - float(getattr(self, "_last_chamfer_alignment_monotonic", 0.0) or 0.0)) < float(
+            _CHAMFER_ALIGNMENT_COOLDOWN_S
+        ):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+
+        scenario_name = None
+        if self.tracking_state is not None:
+            try:
+                scenario_name = self.tracking_state.current_scenario
+            except Exception:
+                scenario_name = None
+        allowed = {str(item).strip().lower() for item in (_CHAMFER_ALIGNMENT_ALLOWED_SCENARIOS or set())}
+        clean_scenario = str(scenario_name or "").strip().lower()
+        if allowed and clean_scenario not in allowed:
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+        if self._chamfer_semantic_blocked(route_context):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+
+        if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(_CHAMFER_ALIGNMENT_MIN_QUALITY):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+        measurement_mode = str(getattr(lane_observation, "measurement_mode", "") or "").strip().lower()
+        detected_sides = {str(side).strip().lower() for side in (lane_observation.detected_sides or ())}
+        if bool(_CHAMFER_ALIGNMENT_TWO_LINE_ONLY) and (
+            measurement_mode != "two_line" or not {"left", "right"}.issubset(detected_sides)
+        ):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+
+        line_points = tuple(getattr(lane_observation, "line_points_body", ()) or ())
+        if len(line_points) < int(_CHAMFER_ALIGNMENT_MIN_POINTS):
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+
+        matcher = self._get_chamfer_matcher(route_context)
+        if matcher is None:
+            return raw_x, raw_y, raw_yaw, 0.0, False, None
+
+        result = matcher.match_body_points(
+            line_points,
+            pose_x=float(raw_x),
+            pose_y=float(raw_y),
+            pose_yaw=float(raw_yaw),
+            search_radius_m=float(_CHAMFER_ALIGNMENT_SEARCH_RADIUS_M),
+            search_step_m=float(_CHAMFER_ALIGNMENT_SEARCH_STEP_M),
+            max_points=int(_CHAMFER_ALIGNMENT_MAX_VISUAL_POINTS),
+            min_points=int(_CHAMFER_ALIGNMENT_MIN_POINTS),
+            min_forward_m=float(_CHAMFER_ALIGNMENT_MIN_FORWARD_M),
+            max_forward_m=float(_CHAMFER_ALIGNMENT_MAX_FORWARD_M),
+            max_lateral_abs_m=float(_CHAMFER_ALIGNMENT_MAX_LATERAL_ABS_M),
+            max_cost_px=float(_CHAMFER_ALIGNMENT_MAX_COST_PX),
+            min_improvement_px=float(_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX),
+            min_correction_m=float(_CHAMFER_ALIGNMENT_MIN_CORRECTION_M),
+        )
+        live_log(
+            "pose_estimator",
+            event="visual_chamfer_match",
+            applied=bool(result.applied),
+            reason=str(result.reason),
+            dx_m=float(result.dx_m),
+            dy_m=float(result.dy_m),
+            correction_norm_m=float(result.correction_norm_m),
+            best_cost_px=float(result.best_cost_px),
+            baseline_cost_px=float(result.baseline_cost_px),
+            improvement_px=float(result.improvement_px),
+            point_count=int(result.point_count),
+        )
+        if not bool(result.applied):
+            return raw_x, raw_y, raw_yaw, 0.0, False, result
+
+        dx_m = float(result.dx_m)
+        dy_m = float(result.dy_m)
+        norm = math.hypot(dx_m, dy_m)
+        max_step = max(0.0, float(_CHAMFER_ALIGNMENT_MAX_STEP_M))
+        if max_step > 0.0 and norm > max_step:
+            scale = max_step / max(norm, 1e-9)
+            dx_m *= scale
+            dy_m *= scale
+            norm = max_step
+
+        self._dr.reset(float(raw_x) + dx_m, float(raw_y) + dy_m, float(raw_yaw))
+        self._last_chamfer_alignment_monotonic = float(now)
+        new_x, new_y, new_yaw = self._dr.get_state()
+        return new_x, new_y, new_yaw, float(norm), True, result
+
     def _apply_lane_observation(
         self,
         route_context: RouteContext | None,
@@ -1905,6 +2082,9 @@ class threadPoseEstimator(threadTracking):
             yaw_correction_rad = 0.0
             raw_lateral_error_m = 0.0
             lane_relocalization_m = 0.0
+            chamfer_alignment_m = 0.0
+            chamfer_aligned = False
+            chamfer_match = None
             lane_measurement_reliable = False
             semantic_relocalized = False
             semantic_match = None
@@ -1930,6 +2110,15 @@ class threadPoseEstimator(threadTracking):
                 )
 
             raw_x, raw_y, raw_yaw, lane_relocalization_m, lane_measurement_reliable = self._apply_lane_observation(
+                route_context,
+                lane_observation,
+                now,
+                raw_x,
+                raw_y,
+                raw_yaw,
+            )
+
+            raw_x, raw_y, raw_yaw, chamfer_alignment_m, chamfer_aligned, chamfer_match = self._apply_chamfer_map_alignment(
                 route_context,
                 lane_observation,
                 now,
@@ -1969,6 +2158,11 @@ class threadPoseEstimator(threadTracking):
             relocalization_mode = "lane_yaw_reset"
             relocalization_source = "camera_yaw_hint"
             relocalization_error_m = abs(math.degrees(yaw_correction_rad)) / 180.0
+        elif chamfer_aligned:
+            relocalization_mode = "visual_chamfer"
+            reason = str(getattr(chamfer_match, "reason", "matched") or "matched")
+            relocalization_source = f"visual_chamfer:{reason}"
+            relocalization_error_m = abs(float(chamfer_alignment_m))
         elif abs(lane_relocalization_m) > 1e-9:
             relocalization_mode = "lane_relocalization"
             relocalization_source = "lane_center"
@@ -2019,6 +2213,8 @@ class threadPoseEstimator(threadTracking):
             reloc_source=relocalization_source,
             reloc_error_m=float(relocalization_error_m or 0.0),
             lane_correction_m=float(lane_relocalization_m or 0.0),
+            chamfer_alignment_m=float(chamfer_alignment_m or 0.0),
+            chamfer_aligned=bool(chamfer_aligned),
             lane_reliable=bool(lane_measurement_reliable),
             lane_measurement_mode=(
                 str(lane_observation.measurement_mode or "none")

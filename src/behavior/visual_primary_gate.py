@@ -69,6 +69,10 @@ class _GateConfig:
     corridor_check_max_map_match_error_m: float
     enter_ticks: int
     exit_ticks: int
+    immediate_on_map_match_error_m: float
+    recovery_enabled: bool
+    recovery_min_map_match_error_m: float
+    recovery_allowed_map_authority_prefixes: frozenset[str]
 
 
 class VisualPrimaryGate:
@@ -116,10 +120,27 @@ class VisualPrimaryGate:
                 notes=notes,
             )
 
+        map_match_error_m = _route_map_match_error_m(ctx)
+        notes["visual_primary_map_match_error_m"] = float(map_match_error_m)
+        immediate_reason = ""
+        if (
+            raw_allowed
+            and map_match_error_m >= cfg.immediate_on_map_match_error_m
+        ):
+            immediate_reason = "map_match_unreliable"
+            notes["visual_primary_hysteresis_bypassed"] = True
+            notes["visual_primary_hysteresis_bypass_reason"] = immediate_reason
+            notes["visual_primary_hysteresis_bypass_threshold_m"] = float(
+                cfg.immediate_on_map_match_error_m
+            )
+
         if raw_allowed:
             self._enter_ticks += 1
             self._exit_ticks = 0
-            if self._active or self._enter_ticks >= cfg.enter_ticks:
+            if immediate_reason:
+                self._active = True
+                reason = str(reason)
+            elif self._active or self._enter_ticks >= cfg.enter_ticks:
                 self._active = True
                 reason = str(reason)
             else:
@@ -147,6 +168,117 @@ class VisualPrimaryGate:
             map_authority_active=map_active,
             map_authority_reason=map_reason,
             notes=notes,
+        )
+
+    def decide_recovery(
+        self,
+        *,
+        ctx: PlanningContext,
+        lane_observation,
+        scenario_name: str,
+        route_corridor_available: bool,
+        lanelet_corridor_available: bool,
+        map_authority_active: bool,
+        map_authority_reason: str,
+    ) -> VisualPrimaryDecision:
+        """Allow visual lane keeping when map re-entry is unsafe.
+
+        This is intentionally narrower than primary visual authority. It only
+        applies when map authority is caused by an upcoming semantic marker
+        and the current map match is already unreliable; current turn lanelets
+        still keep hard map authority.
+        """
+        cfg = _load_config()
+        notes: dict[str, Any] = {
+            "visual_recovery_enabled": bool(cfg.recovery_enabled),
+            "visual_recovery_map_match_threshold_m": float(cfg.recovery_min_map_match_error_m),
+            "visual_recovery_allowed_map_authority_prefixes": sorted(
+                cfg.recovery_allowed_map_authority_prefixes
+            ),
+        }
+
+        if not cfg.recovery_enabled:
+            return VisualPrimaryDecision(
+                False,
+                "visual_recovery_disabled",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+        if not map_authority_active:
+            return VisualPrimaryDecision(
+                False,
+                "visual_recovery_map_authority_inactive",
+                False,
+                "",
+                notes,
+            )
+        if not route_corridor_available:
+            return VisualPrimaryDecision(
+                False,
+                "visual_recovery_route_corridor_missing",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+        if str(scenario_name) not in cfg.allowed_scenarios:
+            return VisualPrimaryDecision(
+                False,
+                f"visual_recovery_scenario_not_allowed:{scenario_name}",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+
+        allowed_reason = any(
+            str(map_authority_reason).startswith(prefix)
+            for prefix in cfg.recovery_allowed_map_authority_prefixes
+        )
+        notes["visual_recovery_map_authority_reason"] = str(map_authority_reason)
+        if not allowed_reason:
+            return VisualPrimaryDecision(
+                False,
+                f"visual_recovery_map_authority_hard:{map_authority_reason}",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+
+        map_match_error_m = _route_map_match_error_m(ctx)
+        notes["visual_recovery_map_match_error_m"] = float(map_match_error_m)
+        if map_match_error_m < cfg.recovery_min_map_match_error_m:
+            return VisualPrimaryDecision(
+                False,
+                "visual_recovery_map_match_still_reliable",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+
+        ok, reason, candidate_notes = _visual_candidate_is_usable(
+            cfg=cfg,
+            ctx=ctx,
+            lane_observation=lane_observation,
+            route_corridor_available=route_corridor_available,
+            lanelet_corridor_available=lanelet_corridor_available,
+        )
+        notes.update(candidate_notes)
+        if not ok:
+            return VisualPrimaryDecision(
+                False,
+                f"visual_recovery_{reason}",
+                map_authority_active,
+                map_authority_reason,
+                notes,
+            )
+
+        notes["visual_recovery_active"] = True
+        return VisualPrimaryDecision(
+            True,
+            f"visual_recovery:{reason}",
+            map_authority_active,
+            map_authority_reason,
+            notes,
         )
 
 
@@ -179,6 +311,15 @@ def _load_config() -> _GateConfig:
         ),
         enter_ticks=max(1, int(_get("LANE_VISUAL_PRIMARY_ENTER_TICKS", 3))),
         exit_ticks=max(1, int(_get("LANE_VISUAL_PRIMARY_EXIT_TICKS", 2))),
+        immediate_on_map_match_error_m=float(
+            _get("LANE_VISUAL_PRIMARY_IMMEDIATE_ON_MAP_MATCH_ERROR_M", 0.18)
+        ),
+        recovery_enabled=bool(_get("LANE_VISUAL_RECOVERY_ENABLED", True)),
+        recovery_min_map_match_error_m=float(_get("LANE_VISUAL_RECOVERY_MIN_MAP_MATCH_ERROR_M", 0.18)),
+        recovery_allowed_map_authority_prefixes=frozenset(
+            str(item)
+            for item in (_get("LANE_VISUAL_RECOVERY_ALLOWED_MAP_AUTHORITY_PREFIXES", {"next_semantic:"}) or ())
+        ),
     )
 
 
@@ -206,13 +347,43 @@ def _evaluate_raw(
     if map_active:
         return False, f"map_authority:{map_reason}", True, map_active, map_reason, notes
 
+    raw_allowed, raw_reason, raw_notes = _visual_candidate_is_usable(
+        cfg=cfg,
+        ctx=ctx,
+        lane_observation=lane_observation,
+        route_corridor_available=route_corridor_available,
+        lanelet_corridor_available=lanelet_corridor_available,
+    )
+    notes.update(raw_notes)
+    if not raw_allowed:
+        hard = raw_reason in {
+            "visual_path_geometry_invalid",
+            "visual_path_insufficient_forward_span",
+            "visual_path_transverse",
+            "visual_path_route_heading_conflict",
+            "visual_path_corridor_conflict",
+        }
+        return False, raw_reason, hard, map_active, map_reason, notes
+
+    return True, raw_reason, False, map_active, map_reason, notes
+
+
+def _visual_candidate_is_usable(
+    *,
+    cfg: _GateConfig,
+    ctx: PlanningContext,
+    lane_observation,
+    route_corridor_available: bool,
+    lanelet_corridor_available: bool,
+) -> tuple[bool, str, dict[str, Any]]:
+    notes: dict[str, Any] = {}
     mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
     if mode == "two_line":
         min_quality = cfg.two_line_min_quality
     elif mode == "single_line":
         min_quality = cfg.single_line_min_quality
     else:
-        return False, f"unsupported_measurement_mode:{mode}", False, map_active, map_reason, notes
+        return False, f"unsupported_measurement_mode:{mode}", notes
 
     if not lane_observation_has_visual_path(
         lane_observation,
@@ -224,8 +395,8 @@ def _evaluate_raw(
         notes["visual_primary_quality"] = quality
         notes["visual_primary_waypoint_count"] = int(points)
         if quality < min_quality:
-            return False, f"low_quality:{mode}", False, map_active, map_reason, notes
-        return False, "visual_path_gate_rejected", False, map_active, map_reason, notes
+            return False, f"low_quality:{mode}", notes
+        return False, "visual_path_gate_rejected", notes
 
     geometry_ok, geometry_reason, geometry_notes = _visual_geometry_is_usable(
         ctx=ctx,
@@ -236,9 +407,9 @@ def _evaluate_raw(
     )
     notes.update(geometry_notes)
     if not geometry_ok:
-        return False, geometry_reason, True, map_active, map_reason, notes
+        return False, geometry_reason, notes
 
-    return True, f"{mode}_primary", False, map_active, map_reason, notes
+    return True, f"{mode}_primary", notes
 
 
 def _map_authority_state(ctx: PlanningContext, distance_m: float) -> tuple[bool, str]:
@@ -351,8 +522,7 @@ def _visual_corridor_is_compatible(
         notes["visual_primary_corridor_check_reason"] = "no_corridor_reference"
         return True, "corridor_check_skipped", notes
 
-    route = getattr(ctx, "route", None)
-    route_map_match_error_m = abs(float(getattr(route, "map_match_error_m", 0.0) or 0.0))
+    route_map_match_error_m = _route_map_match_error_m(ctx)
     notes["visual_primary_corridor_map_match_error_m"] = route_map_match_error_m
     notes["visual_primary_corridor_map_match_threshold_m"] = float(
         cfg.corridor_check_max_map_match_error_m
@@ -433,6 +603,17 @@ def _visual_corridor_is_compatible(
 
     notes["visual_primary_corridor_check_reason"] = "ok"
     return True, "corridor_check_ok", notes
+
+
+def _route_map_match_error_m(ctx: PlanningContext) -> float:
+    route = getattr(ctx, "route", None)
+    try:
+        value = abs(float(getattr(route, "map_match_error_m", 0.0) or 0.0))
+    except (TypeError, ValueError):
+        value = 0.0
+    if not math.isfinite(value):
+        return 0.0
+    return float(value)
 
 
 def _body_waypoints_to_world_yflip(ctx: PlanningContext, body_xy: np.ndarray) -> np.ndarray:
