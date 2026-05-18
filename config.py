@@ -39,20 +39,29 @@ LANE_VISUAL_PRIMARY_MIN_FORWARD_SPAN_M = 0.25
 LANE_VISUAL_PRIMARY_MAX_LATERAL_TO_FORWARD_RATIO = 1.2
 LANE_VISUAL_PRIMARY_MAX_HEADING_ERROR_DEG = 35.0
 LANE_VISUAL_PRIMARY_MAX_CORRIDOR_VIOLATION_M = 0.18
-LANE_VISUAL_PRIMARY_CORRIDOR_CHECK_MAX_MAP_MATCH_ERROR_M = 0.12
+LANE_VISUAL_PRIMARY_CORRIDOR_CHECK_MAX_MAP_MATCH_ERROR_M = 0.07
+LANE_VISUAL_PRIMARY_LATERAL_ERROR_OVERRIDE_M = 0.08
 LANE_VISUAL_PRIMARY_ENTER_TICKS = 3
 LANE_VISUAL_PRIMARY_EXIT_TICKS = 2
 # Si la ruta ya no matchea bien la pose, no esperamos la histeresis completa:
 # los waypoints locales tienen que quedar sobre el centro visual del carril.
-LANE_VISUAL_PRIMARY_IMMEDIATE_ON_MAP_MATCH_ERROR_M = 0.18
+LANE_VISUAL_PRIMARY_IMMEDIATE_ON_MAP_MATCH_ERROR_M = 0.10
 
 # Recovery: si la ruta entra en autoridad de mapa por una maniobra cercana
 # pero la odometría ya no matchea el corredor, no conviene pegar un salto
 # lateral hacia el mapa. En ese caso la cámara puede sostener lane keeping
 # mientras el mapa conserva la decisión de ruta.
 LANE_VISUAL_RECOVERY_ENABLED = True
-LANE_VISUAL_RECOVERY_MIN_MAP_MATCH_ERROR_M = 0.18
+LANE_VISUAL_RECOVERY_MIN_MAP_MATCH_ERROR_M = 0.10
 LANE_VISUAL_RECOVERY_ALLOWED_MAP_AUTHORITY_PREFIXES = {"next_semantic:"}
+
+# Cuando la ruta sigue siendo primaria pero la camara ve una sola linea buena,
+# desplazamos el corredor hacia el centro visual. Debe ser suficientemente fuerte
+# para corregir una deriva real, pero acotado para no saltar en incorporaciones.
+BEHAVIOR_VISUAL_ROUTE_BLEND_SINGLE_LINE_WEIGHT = 0.45
+BEHAVIOR_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_SHIFT_M = 0.08
+BEHAVIOR_VISUAL_ROUTE_BLEND_SINGLE_LINE_MAX_OBSERVATION_M = 0.18
+BEHAVIOR_VISUAL_ROUTE_BLEND_SINGLE_LINE_MIN_SHIFT_M = 0.005
 
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento

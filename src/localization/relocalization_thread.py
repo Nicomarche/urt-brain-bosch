@@ -1328,23 +1328,35 @@ class threadTracking(ThreadWithStop):
 
         previous_distance_m = getattr(self, "_last_distance_m", None)
         previous_distance_t = getattr(self, "_last_distance_t", None)
-        self._last_distance_m = float(distance_m)
-        self._last_distance_t = float(now)
 
         if previous_distance_m is None or previous_distance_t is None:
-            return None
-
-        dt = float(now) - float(previous_distance_t)
-        if dt <= 1e-4 or dt > max(float(_DISTANCE_FEEDBACK_TIMEOUT_S) * 4.0, 0.50):
+            self._last_distance_m = float(distance_m)
+            self._last_distance_t = float(now)
             return None
 
         distance_delta_m = float(distance_m) - float(previous_distance_m)
-        speed_mps = distance_delta_m / dt
-        if not math.isfinite(speed_mps):
-            return None
-        if abs(float(speed_mps)) > float(_DISTANCE_SPEED_MAX_MPS):
+        if abs(distance_delta_m) < 1e-6:
+            speed = getattr(self, "_last_distance_speed_mps", None)
+            return float(speed) if self._distance_speed_is_usable(speed, now) else None
+
+        dt = float(now) - float(previous_distance_t)
+        if dt <= 1e-4 or dt > max(float(_DISTANCE_FEEDBACK_TIMEOUT_S) * 4.0, 0.50):
+            self._last_distance_m = float(distance_m)
+            self._last_distance_t = float(now)
             return None
 
+        speed_mps = distance_delta_m / dt
+        if not math.isfinite(speed_mps):
+            self._last_distance_m = float(distance_m)
+            self._last_distance_t = float(now)
+            return None
+        if abs(float(speed_mps)) > float(_DISTANCE_SPEED_MAX_MPS):
+            self._last_distance_m = float(distance_m)
+            self._last_distance_t = float(now)
+            return None
+
+        self._last_distance_m = float(distance_m)
+        self._last_distance_t = float(now)
         self._last_distance_speed_mps = float(speed_mps)
         self._last_distance_speed_t = float(now)
         return float(speed_mps) if self._distance_speed_is_usable(speed_mps, now) else None

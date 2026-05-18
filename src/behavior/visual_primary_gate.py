@@ -68,6 +68,7 @@ class _GateConfig:
     max_heading_error_deg: float
     max_corridor_violation_m: float
     corridor_check_max_map_match_error_m: float
+    lateral_error_override_m: float
     enter_ticks: int
     exit_ticks: int
     immediate_on_map_match_error_m: float
@@ -124,6 +125,9 @@ class VisualPrimaryGate:
         map_match_error_m = _route_map_match_error_m(ctx)
         notes["visual_primary_map_match_error_m"] = float(map_match_error_m)
         immediate_reason = ""
+        lateral_override_active = bool(
+            notes.get("visual_primary_lateral_error_override_active", False)
+        )
         if (
             raw_allowed
             and map_match_error_m >= cfg.immediate_on_map_match_error_m
@@ -133,6 +137,13 @@ class VisualPrimaryGate:
             notes["visual_primary_hysteresis_bypass_reason"] = immediate_reason
             notes["visual_primary_hysteresis_bypass_threshold_m"] = float(
                 cfg.immediate_on_map_match_error_m
+            )
+        elif raw_allowed and lateral_override_active:
+            immediate_reason = "visual_lateral_error"
+            notes["visual_primary_hysteresis_bypassed"] = True
+            notes["visual_primary_hysteresis_bypass_reason"] = immediate_reason
+            notes["visual_primary_hysteresis_bypass_threshold_m"] = float(
+                cfg.lateral_error_override_m
             )
 
         if raw_allowed:
@@ -311,6 +322,7 @@ def _load_config() -> _GateConfig:
         corridor_check_max_map_match_error_m=float(
             _get("LANE_VISUAL_PRIMARY_CORRIDOR_CHECK_MAX_MAP_MATCH_ERROR_M", 0.12)
         ),
+        lateral_error_override_m=float(_get("LANE_VISUAL_PRIMARY_LATERAL_ERROR_OVERRIDE_M", 0.08)),
         enter_ticks=max(1, int(_get("LANE_VISUAL_PRIMARY_ENTER_TICKS", 3))),
         exit_ticks=max(1, int(_get("LANE_VISUAL_PRIMARY_EXIT_TICKS", 2))),
         immediate_on_map_match_error_m=float(
@@ -488,6 +500,22 @@ def _visual_geometry_is_usable(
 
     visual_heading = _heading_from_body_waypoints(xy)
     notes["visual_primary_heading_body_deg"] = math.degrees(visual_heading)
+    lateral_error_override_m = _visual_lateral_error_override_m(lane_observation, xy, cfg)
+    if lateral_error_override_m is not None:
+        notes["visual_primary_lateral_error_override_m"] = float(lateral_error_override_m)
+        notes["visual_primary_lateral_error_override_abs_m"] = abs(
+            float(lateral_error_override_m)
+        )
+    notes["visual_primary_lateral_error_override_threshold_m"] = float(
+        cfg.lateral_error_override_m
+    )
+    lateral_error_override_active = (
+        lateral_error_override_m is not None
+        and abs(float(lateral_error_override_m)) >= float(cfg.lateral_error_override_m)
+    )
+    notes["visual_primary_lateral_error_override_active"] = bool(
+        lateral_error_override_active
+    )
 
     if route_corridor_available:
         route_heading = _route_heading_in_body(ctx)
@@ -497,7 +525,10 @@ def _visual_geometry_is_usable(
             notes["visual_primary_route_heading_error_deg"] = heading_error_deg
             if heading_error_deg > cfg.max_heading_error_deg:
                 map_match_error_m = _route_map_match_error_m(ctx)
-                conflict_ignored = map_match_error_m >= cfg.immediate_on_map_match_error_m
+                conflict_ignored = (
+                    map_match_error_m >= cfg.immediate_on_map_match_error_m
+                    or lateral_error_override_active
+                )
                 notes["visual_primary_route_heading_conflict_map_match_error_m"] = float(
                     map_match_error_m
                 )
@@ -506,9 +537,11 @@ def _visual_geometry_is_usable(
                 )
                 if not conflict_ignored:
                     return False, "visual_path_route_heading_conflict", notes
-                notes["visual_primary_route_heading_conflict_ignore_reason"] = (
-                    "map_match_unreliable"
-                )
+                if map_match_error_m >= cfg.immediate_on_map_match_error_m:
+                    ignore_reason = "map_match_unreliable"
+                else:
+                    ignore_reason = "visual_lateral_error"
+                notes["visual_primary_route_heading_conflict_ignore_reason"] = ignore_reason
 
     corridor_ok, corridor_reason, corridor_notes = _visual_corridor_is_compatible(
         ctx=ctx,
@@ -519,9 +552,60 @@ def _visual_geometry_is_usable(
     )
     notes.update(corridor_notes)
     if not corridor_ok:
+        if lateral_error_override_active:
+            notes["visual_primary_corridor_conflict_ignored"] = True
+            notes["visual_primary_corridor_conflict_ignore_reason"] = "visual_lateral_error"
+            return True, "geometry_ok", notes
         return False, corridor_reason, notes
 
     return True, "geometry_ok", notes
+
+
+def _visual_lateral_error_override_m(
+    lane_observation,
+    body_xy: np.ndarray,
+    cfg: _GateConfig,
+) -> float | None:
+    if bool(getattr(lane_observation, "direct_error_valid", False)):
+        for field_name in ("line_center_offset_m", "direct_error_m", "lateral_offset_m"):
+            value = _finite_float(getattr(lane_observation, field_name, None))
+            if value is not None:
+                return value
+
+    if str(getattr(lane_observation, "measurement_mode", "") or "") != "single_line":
+        return None
+    quality = _finite_float(getattr(lane_observation, "quality", None))
+    if quality is None or quality < float(cfg.single_line_min_quality):
+        return None
+
+    xy = np.asarray(body_xy, dtype=float)
+    if xy.ndim != 2 or xy.shape[0] <= 0 or xy.shape[1] < 2:
+        return None
+
+    near_y: list[float] = []
+    for x_fwd, y_left in xy[:, :2]:
+        x_value = float(x_fwd)
+        y_value = float(y_left)
+        if not (math.isfinite(x_value) and math.isfinite(y_value)):
+            continue
+        if 0.02 <= x_value <= 0.45:
+            near_y.append(y_value)
+        if len(near_y) >= 10:
+            break
+    if not near_y:
+        return None
+    # Body-waypoint lateral target uses y-left; direct_error uses the opposite sign.
+    return -float(np.median(np.asarray(near_y, dtype=float)))
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _visual_corridor_is_compatible(

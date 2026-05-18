@@ -214,9 +214,9 @@ def test_pose_estimator_reuses_fresh_imu_between_messages() -> None:
 
 def test_resolve_speed_uses_odometer_distance_when_speed_feedback_is_zero() -> None:
     estimator = threadPoseEstimator.__new__(threadPoseEstimator)
-    estimator._speed_sub = _SequenceSub([0.0, 0.0])
-    estimator._speed_cmd_sub = _SequenceSub([None, None])
-    estimator._distance_sub = _SequenceSub([1000, 1050])
+    estimator._speed_sub = _SequenceSub([0.0, 0.0, 0.0])
+    estimator._speed_cmd_sub = _SequenceSub([None, None, None])
+    estimator._distance_sub = _SequenceSub([1000, 1000, 1050])
     estimator._current_state_message = "AUTO"
     estimator._last_speed = 0.0
     estimator._last_speed_source = "none"
@@ -233,6 +233,9 @@ def test_resolve_speed_uses_odometer_distance_when_speed_feedback_is_zero() -> N
     estimator._last_raw_distance = None
 
     assert estimator._resolve_speed_mps(100.0) == pytest.approx(0.0)
+    assert estimator._last_speed_source == "encoder_zero"
+
+    assert estimator._resolve_speed_mps(100.1) == pytest.approx(0.0)
     assert estimator._last_speed_source == "encoder_zero"
 
     speed = estimator._resolve_speed_mps(100.5)
