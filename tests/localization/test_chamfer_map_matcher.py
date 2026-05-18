@@ -50,6 +50,36 @@ def test_chamfer_match_recovers_sparse_visual_lane_offset() -> None:
     assert result.best_cost_px < result.baseline_cost_px
 
 
+def test_chamfer_match_accepts_filtered_sparse_points_seen_in_runs() -> None:
+    meta = _metadata()
+    binary = np.zeros((220, 220), dtype=np.uint8)
+    cv2.line(binary, (40, 82), (170, 82), 255, 2)
+    cv2.line(binary, (40, 118), (170, 118), 255, 2)
+    matcher = ChamferMapMatcher.from_binary_map(binary, meta)
+
+    body_points = []
+    for x_fwd in np.linspace(0.03, 1.16, 9):
+        body_points.append((float(x_fwd), 0.175))
+        body_points.append((float(x_fwd), -0.175))
+
+    result = matcher.match_body_points(
+        body_points,
+        pose_x=0.40,
+        pose_y=1.12,
+        pose_yaw=0.0,
+        search_radius_m=0.20,
+        search_step_m=0.01,
+        min_points=12,
+        max_cost_px=10.0,
+        min_improvement_px=1.0,
+    )
+
+    assert result.input_point_count == 18
+    assert result.point_count == 18
+    assert result.applied is True
+    assert result.dy_m == pytest.approx(-0.12, abs=0.02)
+
+
 def test_chamfer_match_rejects_when_current_pose_is_already_aligned() -> None:
     meta = _metadata()
     binary = np.zeros((220, 220), dtype=np.uint8)

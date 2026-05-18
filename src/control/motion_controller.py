@@ -1236,17 +1236,34 @@ class MotionController(IMotionController):
             min(self.max_steering_deg, float(delta_deg)),
         )
 
-        # Rate limiter de steering — independiente del solver.
         max_steer_rate_deg_s = _effective_steer_rate_limit_deg_s(
             behavior_notes,
             self._max_steer_rate_deg_s,
         )
-        max_steer_step = max_steer_rate_deg_s * self._steer_dt_s
-        steering_deg = max(
-            self._prev_steer_deg - max_steer_step,
-            min(self._prev_steer_deg + max_steer_step, steering_deg),
-        )
-        self._prev_steer_deg = steering_deg
+        zero_speed_steering_guard = False
+        zero_speed_steering_guard_reason = ""
+        steering_deg_before_zero_guard = float(steering_deg)
+        if speed_mps <= 1e-6:
+            # If the solver decided the car should not move, holding a large
+            # steering angle only makes the wheels hunt in place. The next
+            # moving tick will re-enter through the normal rate limiter.
+            steering_deg = 0.0
+            self._prev_steer_deg = 0.0
+            zero_speed_steering_guard = abs(steering_deg_before_zero_guard) > 1e-6
+            if zero_speed_steering_guard:
+                zero_speed_steering_guard_reason = (
+                    "speed_zero_after_solver"
+                    if float(v_opt) <= 0.0
+                    else "speed_zero_after_limits"
+                )
+        else:
+            # Rate limiter de steering — independiente del solver.
+            max_steer_step = max_steer_rate_deg_s * self._steer_dt_s
+            steering_deg = max(
+                self._prev_steer_deg - max_steer_step,
+                min(self._prev_steer_deg + max_steer_step, steering_deg),
+            )
+            self._prev_steer_deg = steering_deg
         solver_debug = (
             dict(self._solver.debug)
             if hasattr(self._solver, "debug")
@@ -1270,6 +1287,9 @@ class MotionController(IMotionController):
             requested_speed_mps=float(requested_speed_mps),
             mpc_weight_profile=self.active_weight_profile(),
             steer_rate_limit_deg_s=float(max_steer_rate_deg_s),
+            zero_speed_steering_guard=bool(zero_speed_steering_guard),
+            zero_speed_steering_guard_reason=str(zero_speed_steering_guard_reason),
+            steering_deg_before_zero_guard=float(steering_deg_before_zero_guard),
             speed_recovery_reason=forward_recovery_reason,
             speed_recovery_hint=forward_recovery_hint,
             backend=self._backend_name,

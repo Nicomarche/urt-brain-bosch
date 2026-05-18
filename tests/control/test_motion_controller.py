@@ -307,6 +307,18 @@ def test_negative_speed_clamped_to_zero() -> None:
     assert cmd.speed_mps == 0.0
 
 
+def test_zero_speed_output_neutralizes_steering() -> None:
+    """Si el solver se clava en v<=0, no dejamos las ruedas cazando paradas."""
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(-0.05, 25.0))))
+
+    cmd = mc.compute(_bo(speed_mps=0.10), _pose())
+
+    assert cmd.valid is True
+    assert cmd.speed_mps == 0.0
+    assert cmd.steering_deg == pytest.approx(0.0)
+    assert mc._prev_steer_deg == pytest.approx(0.0)
+
+
 def test_negative_solver_speed_gets_forward_recovery_on_route_path() -> None:
     """Si la ruta tiene una referencia adelante, no dejamos al auto clavado."""
     target_path = np.array(

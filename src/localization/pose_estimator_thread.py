@@ -1601,7 +1601,11 @@ class threadPoseEstimator(threadTracking):
             best_cost_px=float(result.best_cost_px),
             baseline_cost_px=float(result.baseline_cost_px),
             improvement_px=float(result.improvement_px),
+            input_point_count=int(result.input_point_count),
             point_count=int(result.point_count),
+            min_point_count=int(_CHAMFER_ALIGNMENT_MIN_POINTS),
+            valid_fraction=float(result.valid_fraction),
+            best_offset_px=tuple(result.best_offset_px),
         )
         if not bool(result.applied):
             return raw_x, raw_y, raw_yaw, 0.0, False, result

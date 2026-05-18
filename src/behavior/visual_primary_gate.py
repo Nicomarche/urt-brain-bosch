@@ -491,7 +491,19 @@ def _visual_geometry_is_usable(
             notes["visual_primary_route_heading_body_deg"] = math.degrees(route_heading)
             notes["visual_primary_route_heading_error_deg"] = heading_error_deg
             if heading_error_deg > cfg.max_heading_error_deg:
-                return False, "visual_path_route_heading_conflict", notes
+                map_match_error_m = _route_map_match_error_m(ctx)
+                conflict_ignored = map_match_error_m >= cfg.immediate_on_map_match_error_m
+                notes["visual_primary_route_heading_conflict_map_match_error_m"] = float(
+                    map_match_error_m
+                )
+                notes["visual_primary_route_heading_conflict_ignored"] = bool(
+                    conflict_ignored
+                )
+                if not conflict_ignored:
+                    return False, "visual_path_route_heading_conflict", notes
+                notes["visual_primary_route_heading_conflict_ignore_reason"] = (
+                    "map_match_unreliable"
+                )
 
     corridor_ok, corridor_reason, corridor_notes = _visual_corridor_is_compatible(
         ctx=ctx,

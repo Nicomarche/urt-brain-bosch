@@ -27,6 +27,7 @@ class ChamferMatchResult:
     best_cost_px: float = math.inf
     baseline_cost_px: float = math.inf
     improvement_px: float = 0.0
+    input_point_count: int = 0
     point_count: int = 0
     valid_fraction: float = 0.0
     best_offset_px: tuple[int, int] = (0, 0)
@@ -124,8 +125,9 @@ class ChamferMapMatcher:
         min_improvement_px: float = 1.25,
         min_correction_m: float = 0.015,
     ) -> ChamferMatchResult:
+        raw_points = () if body_points is None else tuple(body_points)
         body = _clean_body_points(
-            body_points,
+            raw_points,
             max_points=max_points,
             min_forward_m=min_forward_m,
             max_forward_m=max_forward_m,
@@ -135,6 +137,7 @@ class ChamferMapMatcher:
             return ChamferMatchResult(
                 applied=False,
                 reason="not_enough_visual_points",
+                input_point_count=int(len(raw_points)),
                 point_count=int(body.shape[0]),
             )
 
@@ -150,6 +153,7 @@ class ChamferMapMatcher:
                 applied=False,
                 reason="baseline_out_of_map",
                 baseline_cost_px=float(baseline_cost),
+                input_point_count=int(len(raw_points)),
                 point_count=int(body.shape[0]),
                 valid_fraction=float(baseline_fraction),
             )
@@ -190,6 +194,7 @@ class ChamferMapMatcher:
             best_cost_px=float(best_cost),
             baseline_cost_px=float(baseline_cost),
             improvement_px=float(improvement),
+            input_point_count=int(len(raw_points)),
             point_count=int(body.shape[0]),
             valid_fraction=float(best_fraction),
             best_offset_px=(int(best_dx), int(best_dy)),
