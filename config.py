@@ -487,6 +487,38 @@ EKF_LANDMARK_R_M = 0.30
 # A 100–300 ms de latencia BFMC, 0.5 s es generoso pero no patológico.
 EKF_GPS_MAX_AGE_S = 0.5
 
+# ── Corridor yaw fix (modo sin GPS) ───────────────────────────────────────────
+# Cuando NO hay GPS llegando (real life en pista propia, o sim con GPS_ENABLED
+# off), el único yaw absoluto que tenemos son las stoplines visuales y un blend
+# suave del camera_yaw_hint. En tramos largos entre stoplines, el gyro IMU
+# acumula drift (típico 0.5–2 °/min). Este reset cruza la información del MAPA
+# (`path_psi` del corredor activo) con la VISION (`heading_error_rad` del
+# carril detectado) para producir un yaw absoluto periódico:
+#
+#   yaw_world  =  path_psi  +  heading_error_rad
+#
+# El cross-check (cámara coincide con corredor) es lo que lo hace seguro:
+# si una de las dos fuentes está rota el reset NO se aplica.
+#
+# Condiciones de activación:
+#   - No hay GPS fix fresco (si llega GPS, no tocamos).
+#   - Ruta activa y `map_match_error_m` chico (estamos sobre el corredor).
+#   - 2 líneas visibles estables (measurement_mode="two_line", quality alta).
+#   - `heading_error_rad` chico (el coche está alineado con el corredor;
+#     si no, asumir que la tangente del carril coincide con `path_psi` es falso).
+#   - Velocidad mínima.
+#   - Cooldown respetado.
+POSE_CORRIDOR_YAW_FIX_ENABLED = True
+POSE_CORRIDOR_YAW_FIX_COOLDOWN_S = 3.0          # mínima distancia temporal entre fixes
+POSE_CORRIDOR_YAW_FIX_MIN_GPS_AGE_S = 2.0       # solo aplicar si pasó >Ns sin GPS
+POSE_CORRIDOR_YAW_FIX_MAX_MAP_ERROR_M = 0.15    # `map_match_error_m` máximo
+POSE_CORRIDOR_YAW_FIX_MIN_QUALITY = 0.75        # quality mínima de la lane observation
+POSE_CORRIDOR_YAW_FIX_MAX_HEADING_ERROR_DEG = 10.0  # |heading_error_rad| máximo
+POSE_CORRIDOR_YAW_FIX_MIN_SPEED_MPS = 0.10      # velocidad mínima
+POSE_CORRIDOR_YAW_FIX_MAX_DELTA_DEG = 30.0      # safety guard: si el reset pide >30°
+                                                # de corrección, abortar (probable bug
+                                                # o map matching equivocado).
+
 # ============================================================================
 # BFMC LOCSYS GPS
 # ============================================================================

@@ -1,0 +1,839 @@
+{
+  "version": 1,
+  "generated_at": "2026-05-17T03:22:05",
+  "osm_path": "/Users/joaquinmarcoff/Desktop/Projects/BFMC/bfmc-waypoint-planner/data/lanelet2_map_FINAL_RandomStartingArea.osm",
+  "params": {
+    "speed_urban": 0.4,
+    "speed_highway": 0.5,
+    "efficiency_factor": 0.7,
+    "penalty_intersection_s": 1.5,
+    "penalty_stopline_s": 4.0,
+    "penalty_crosswalk_s": 1.0,
+    "penalty_roundabout_s": 1.0,
+    "lanelet_penalties_s": {
+      "1004": 3.0,
+      "1013": 5.0,
+      "1030": 5.0,
+      "1033": 5.0,
+      "1043": 5.0,
+      "1048": 5.0,
+      "105": 4.0,
+      "1060": 5.0,
+      "1063": 5.0,
+      "1080": 5.0,
+      "1084": 5.0,
+      "1086": 5.0,
+      "1094": 5.0,
+      "1097": 5.0,
+      "221": -2.0,
+      "245": -2.0,
+      "282": 2.0,
+      "285": -2.0,
+      "303": 3.0,
+      "333": 1.0,
+      "426": 1.0,
+      "440": 3.0,
+      "450": 3.0,
+      "460": 3.0,
+      "476": 2.0,
+      "481": -2.0,
+      "50": 3.0,
+      "502": -2.0,
+      "506": -2.0,
+      "508": -2.0,
+      "509": -2.0,
+      "511": -2.0,
+      "521": -2.0,
+      "523": -2.0,
+      "524": -2.0,
+      "526": -2.0,
+      "530": -2.0,
+      "665": 1.0,
+      "679": 1.0,
+      "740": 5.0,
+      "745": 5.0,
+      "748": 8.0,
+      "75": 1.0,
+      "828": 5.0,
+      "835": 5.0,
+      "838": 8.0,
+      "855": 5.0,
+      "858": 5.0,
+      "90": 3.0,
+      "908": 3.0,
+      "973": 31.0,
+      "995": 5.0
+    },
+    "time_budget_s": 600.0,
+    "score_random_start": 15,
+    "score_waypoint": 3
+  },
+  "first_waypoint_id": "1424",
+  "start_pose": {
+    "x": 1.1126,
+    "y": 5.269,
+    "yaw_rad": -0.0069
+  },
+  "waypoint_sequence": [
+    {
+      "order": 1,
+      "wp_id": "1424",
+      "anchor_lanelet_id": "105",
+      "entry_xy": [
+        4.9512,
+        5.4799
+      ],
+      "exit_xy": [
+        4.9503,
+        5.7301
+      ],
+      "score": 3,
+      "edge_time_s": 68.44,
+      "edge_distance_m": 12.579,
+      "cumulative_time_s": 68.44
+    },
+    {
+      "order": 2,
+      "wp_id": "1434",
+      "anchor_lanelet_id": "85",
+      "entry_xy": [
+        6.2761,
+        3.1489
+      ],
+      "exit_xy": [
+        6.0901,
+        3.1102
+      ],
+      "score": 3,
+      "edge_time_s": 21.228,
+      "edge_distance_m": 5.378,
+      "cumulative_time_s": 89.669
+    },
+    {
+      "order": 3,
+      "wp_id": "1454",
+      "anchor_lanelet_id": "138",
+      "entry_xy": [
+        5.8945,
+        -2.0426
+      ],
+      "exit_xy": [
+        5.8974,
+        -2.2946
+      ],
+      "score": 3,
+      "edge_time_s": 26.836,
+      "edge_distance_m": 5.834,
+      "cumulative_time_s": 116.505
+    },
+    {
+      "order": 4,
+      "wp_id": "1474",
+      "anchor_lanelet_id": "159",
+      "entry_xy": [
+        6.7434,
+        -3.2742
+      ],
+      "exit_xy": [
+        7.0856,
+        -3.275
+      ],
+      "score": 3,
+      "edge_time_s": 5.818,
+      "edge_distance_m": 1.449,
+      "cumulative_time_s": 122.323
+    },
+    {
+      "order": 5,
+      "wp_id": "1503",
+      "anchor_lanelet_id": "189",
+      "entry_xy": [
+        8.9859,
+        -6.2872
+      ],
+      "exit_xy": [
+        8.6431,
+        -6.2884
+      ],
+      "score": 3,
+      "edge_time_s": 24.491,
+      "edge_distance_m": 6.017,
+      "cumulative_time_s": 146.814
+    },
+    {
+      "order": 6,
+      "wp_id": "1523",
+      "anchor_lanelet_id": "221",
+      "entry_xy": [
+        4.5431,
+        -3.6608
+      ],
+      "exit_xy": [
+        4.2136,
+        -3.664
+      ],
+      "score": 3,
+      "edge_time_s": 23.078,
+      "edge_distance_m": 5.903,
+      "cumulative_time_s": 169.892
+    },
+    {
+      "order": 7,
+      "wp_id": "1543",
+      "anchor_lanelet_id": "282",
+      "entry_xy": [
+        -3.9759,
+        -5.0495
+      ],
+      "exit_xy": [
+        -4.2432,
+        -5.0488
+      ],
+      "score": 3,
+      "edge_time_s": 26.365,
+      "edge_distance_m": 8.475,
+      "cumulative_time_s": 196.257
+    },
+    {
+      "order": 8,
+      "wp_id": "1563",
+      "anchor_lanelet_id": "282",
+      "entry_xy": [
+        -8.3458,
+        -5.039
+      ],
+      "exit_xy": [
+        -8.6765,
+        -5.0382
+      ],
+      "score": 3,
+      "edge_time_s": 16.236,
+      "edge_distance_m": 4.103,
+      "cumulative_time_s": 212.493
+    },
+    {
+      "order": 9,
+      "wp_id": "1593",
+      "anchor_lanelet_id": "421",
+      "entry_xy": [
+        -6.7531,
+        -2.6233
+      ],
+      "exit_xy": [
+        -6.535,
+        -2.513
+      ],
+      "score": 3,
+      "edge_time_s": 29.799,
+      "edge_distance_m": 6.179,
+      "cumulative_time_s": 242.292
+    },
+    {
+      "order": 10,
+      "wp_id": "1623",
+      "anchor_lanelet_id": "426",
+      "entry_xy": [
+        -5.5616,
+        -0.5329
+      ],
+      "exit_xy": [
+        -5.5636,
+        -0.2898
+      ],
+      "score": 3,
+      "edge_time_s": 9.731,
+      "edge_distance_m": 2.354,
+      "cumulative_time_s": 252.023
+    },
+    {
+      "order": 11,
+      "wp_id": "1603",
+      "anchor_lanelet_id": "460",
+      "entry_xy": [
+        -9.5998,
+        -1.9468
+      ],
+      "exit_xy": [
+        -9.5998,
+        -1.687
+      ],
+      "score": 3,
+      "edge_time_s": 26.885,
+      "edge_distance_m": 4.571,
+      "cumulative_time_s": 278.908
+    },
+    {
+      "order": 12,
+      "wp_id": "1553",
+      "anchor_lanelet_id": "476",
+      "entry_xy": [
+        -4.8776,
+        -4.6548
+      ],
+      "exit_xy": [
+        -5.1225,
+        -4.6548
+      ],
+      "score": 3,
+      "edge_time_s": 24.828,
+      "edge_distance_m": 5.312,
+      "cumulative_time_s": 303.737
+    },
+    {
+      "order": 13,
+      "wp_id": "1533",
+      "anchor_lanelet_id": "530",
+      "entry_xy": [
+        4.1896,
+        -3.2733
+      ],
+      "exit_xy": [
+        3.8752,
+        -3.2737
+      ],
+      "score": 3,
+      "edge_time_s": 41.721,
+      "edge_distance_m": 12.428,
+      "cumulative_time_s": 345.458
+    },
+    {
+      "order": 14,
+      "wp_id": "1513",
+      "anchor_lanelet_id": "1132",
+      "entry_xy": [
+        5.9067,
+        -4.8279
+      ],
+      "exit_xy": [
+        5.9078,
+        -4.4916
+      ],
+      "score": 3,
+      "edge_time_s": 12.24,
+      "edge_distance_m": 3.615,
+      "cumulative_time_s": 357.698
+    },
+    {
+      "order": 15,
+      "wp_id": "1484",
+      "anchor_lanelet_id": "1138",
+      "entry_xy": [
+        8.6062,
+        -3.6585
+      ],
+      "exit_xy": [
+        8.8602,
+        -3.6601
+      ],
+      "score": 3,
+      "edge_time_s": 34.697,
+      "edge_distance_m": 8.455,
+      "cumulative_time_s": 392.395
+    },
+    {
+      "order": 16,
+      "wp_id": "1464",
+      "anchor_lanelet_id": "557",
+      "entry_xy": [
+        5.5252,
+        -2.0447
+      ],
+      "exit_xy": [
+        5.5315,
+        -2.3791
+      ],
+      "score": 3,
+      "edge_time_s": 20.295,
+      "edge_distance_m": 5.887,
+      "cumulative_time_s": 412.689
+    },
+    {
+      "order": 17,
+      "wp_id": "1444",
+      "anchor_lanelet_id": "558",
+      "entry_xy": [
+        4.9362,
+        2.491
+      ],
+      "exit_xy": [
+        4.9383,
+        2.2267
+      ],
+      "score": 3,
+      "edge_time_s": 0.46,
+      "edge_distance_m": 0.129,
+      "cumulative_time_s": 413.149
+    },
+    {
+      "order": 18,
+      "wp_id": "1772",
+      "anchor_lanelet_id": "572",
+      "entry_xy": [
+        -2.4311,
+        3.1147
+      ],
+      "exit_xy": [
+        -2.6852,
+        3.1151
+      ],
+      "score": 3,
+      "edge_time_s": 35.227,
+      "edge_distance_m": 9.444,
+      "cumulative_time_s": 448.376
+    },
+    {
+      "order": 19,
+      "wp_id": "1752",
+      "anchor_lanelet_id": "882",
+      "entry_xy": [
+        -4.2979,
+        3.0965
+      ],
+      "exit_xy": [
+        -4.5552,
+        3.0932
+      ],
+      "score": 3,
+      "edge_time_s": 5.76,
+      "edge_distance_m": 1.613,
+      "cumulative_time_s": 454.136
+    },
+    {
+      "order": 20,
+      "wp_id": "1652",
+      "anchor_lanelet_id": "835",
+      "entry_xy": [
+        -7.4175,
+        2.6438
+      ],
+      "exit_xy": [
+        -7.4586,
+        2.5609
+      ],
+      "score": 3,
+      "edge_time_s": 21.721,
+      "edge_distance_m": 3.081,
+      "cumulative_time_s": 475.858
+    },
+    {
+      "order": 21,
+      "wp_id": "1583",
+      "anchor_lanelet_id": "676",
+      "entry_xy": [
+        -6.8902,
+        -3.0322
+      ],
+      "exit_xy": [
+        -6.5944,
+        -2.943
+      ],
+      "score": 3,
+      "edge_time_s": 34.468,
+      "edge_distance_m": 6.291,
+      "cumulative_time_s": 510.325
+    },
+    {
+      "order": 22,
+      "wp_id": "1573",
+      "anchor_lanelet_id": "679",
+      "entry_xy": [
+        -9.0807,
+        -2.9047
+      ],
+      "exit_xy": [
+        -8.933,
+        -2.9037
+      ],
+      "score": 3,
+      "edge_time_s": 9.981,
+      "edge_distance_m": 2.795,
+      "cumulative_time_s": 520.307
+    },
+    {
+      "order": 23,
+      "wp_id": "1613",
+      "anchor_lanelet_id": "313",
+      "entry_xy": [
+        -9.9789,
+        -0.6187
+      ],
+      "exit_xy": [
+        -9.9789,
+        -0.2926
+      ],
+      "score": 3,
+      "edge_time_s": 14.54,
+      "edge_distance_m": 3.421,
+      "cumulative_time_s": 534.846
+    },
+    {
+      "order": 24,
+      "wp_id": "1662",
+      "anchor_lanelet_id": "1048",
+      "entry_xy": [
+        -8.3981,
+        3.1165
+      ],
+      "exit_xy": [
+        -8.7316,
+        3.1154
+      ],
+      "score": 3,
+      "edge_time_s": 31.27,
+      "edge_distance_m": 5.174,
+      "cumulative_time_s": 566.116
+    },
+    {
+      "order": 25,
+      "wp_id": "1702",
+      "anchor_lanelet_id": "363",
+      "entry_xy": [
+        -9.7964,
+        5.9698
+      ],
+      "exit_xy": [
+        -9.626,
+        6.148
+      ],
+      "score": 3,
+      "edge_time_s": 17.785,
+      "edge_distance_m": 3.719,
+      "cumulative_time_s": 583.901
+    },
+    {
+      "order": 26,
+      "wp_id": "1712",
+      "anchor_lanelet_id": "606",
+      "entry_xy": [
+        -8.693,
+        6.4081
+      ],
+      "exit_xy": [
+        -8.3727,
+        6.4094
+      ],
+      "score": 3,
+      "edge_time_s": 4.268,
+      "edge_distance_m": 1.0,
+      "cumulative_time_s": 588.169
+    },
+    {
+      "order": 27,
+      "wp_id": "1742",
+      "anchor_lanelet_id": "616",
+      "entry_xy": [
+        -6.4586,
+        6.408
+      ],
+      "exit_xy": [
+        -6.1973,
+        6.4089
+      ],
+      "score": 3,
+      "edge_time_s": 8.336,
+      "edge_distance_m": 1.914,
+      "cumulative_time_s": 596.505
+    },
+    {
+      "order": 28,
+      "wp_id": "1762",
+      "anchor_lanelet_id": "641",
+      "entry_xy": [
+        -3.7168,
+        4.017
+      ],
+      "exit_xy": [
+        -3.7184,
+        3.7681
+      ],
+      "score": 3,
+      "edge_time_s": 19.506,
+      "edge_distance_m": 4.622,
+      "cumulative_time_s": 616.011
+    },
+    {
+      "order": 29,
+      "wp_id": "1642",
+      "anchor_lanelet_id": "598",
+      "entry_xy": [
+        -4.3592,
+        0.2261
+      ],
+      "exit_xy": [
+        -4.6166,
+        0.2254
+      ],
+      "score": 3,
+      "edge_time_s": 20.061,
+      "edge_distance_m": 4.357,
+      "cumulative_time_s": 636.072
+    },
+    {
+      "order": 30,
+      "wp_id": "1672",
+      "anchor_lanelet_id": "858",
+      "entry_xy": [
+        -6.5904,
+        3.4873
+      ],
+      "exit_xy": [
+        -6.8505,
+        3.4878
+      ],
+      "score": 3,
+      "edge_time_s": 45.563,
+      "edge_distance_m": 7.04,
+      "cumulative_time_s": 681.636
+    },
+    {
+      "order": 31,
+      "wp_id": "1732",
+      "anchor_lanelet_id": "717",
+      "entry_xy": [
+        -6.8909,
+        6.0415
+      ],
+      "exit_xy": [
+        -6.646,
+        6.0403
+      ],
+      "score": 3,
+      "edge_time_s": 18.06,
+      "edge_distance_m": 3.221,
+      "cumulative_time_s": 699.696
+    },
+    {
+      "order": 32,
+      "wp_id": "1692",
+      "anchor_lanelet_id": "708",
+      "entry_xy": [
+        -9.5244,
+        5.7215
+      ],
+      "exit_xy": [
+        -9.303,
+        5.9418
+      ],
+      "score": 3,
+      "edge_time_s": 11.947,
+      "edge_distance_m": 2.837,
+      "cumulative_time_s": 711.642
+    },
+    {
+      "order": 33,
+      "wp_id": "1682",
+      "anchor_lanelet_id": "1069",
+      "entry_xy": [
+        -9.5953,
+        4.0316
+      ],
+      "exit_xy": [
+        -9.5791,
+        3.9908
+      ],
+      "score": 3,
+      "edge_time_s": 6.917,
+      "edge_distance_m": 1.796,
+      "cumulative_time_s": 718.559
+    },
+    {
+      "order": 34,
+      "wp_id": "1722",
+      "anchor_lanelet_id": "748",
+      "entry_xy": [
+        -7.8191,
+        4.1122
+      ],
+      "exit_xy": [
+        -7.8202,
+        4.436
+      ],
+      "score": 3,
+      "edge_time_s": 21.929,
+      "edge_distance_m": 2.414,
+      "cumulative_time_s": 740.488
+    },
+    {
+      "order": 35,
+      "wp_id": "1791",
+      "anchor_lanelet_id": "973",
+      "entry_xy": [
+        -2.5181,
+        6.3975
+      ],
+      "exit_xy": [
+        -2.182,
+        6.3981
+      ],
+      "score": 3,
+      "edge_time_s": 38.491,
+      "edge_distance_m": 6.863,
+      "cumulative_time_s": 778.979
+    },
+    {
+      "order": 36,
+      "wp_id": "1801",
+      "anchor_lanelet_id": "973",
+      "entry_xy": [
+        -1.4842,
+        6.3993
+      ],
+      "exit_xy": [
+        -1.2349,
+        6.3997
+      ],
+      "score": 3,
+      "edge_time_s": 5.424,
+      "edge_distance_m": 0.698,
+      "cumulative_time_s": 784.403
+    },
+    {
+      "order": 37,
+      "wp_id": "1811",
+      "anchor_lanelet_id": "973",
+      "entry_xy": [
+        2.7086,
+        6.4065
+      ],
+      "exit_xy": [
+        2.9523,
+        6.4069
+      ],
+      "score": 3,
+      "edge_time_s": 30.655,
+      "edge_distance_m": 3.943,
+      "cumulative_time_s": 815.057
+    }
+  ],
+  "lanelet_sequence": [
+    "995",
+    "996",
+    "1004",
+    "55",
+    "60",
+    "70",
+    "75",
+    "85",
+    "90",
+    "100",
+    "105",
+    "112",
+    "60",
+    "70",
+    "75",
+    "85",
+    "90",
+    "120",
+    "125",
+    "138",
+    "1167",
+    "159",
+    "169",
+    "174",
+    "184",
+    "189",
+    "199",
+    "204",
+    "1247",
+    "221",
+    "523",
+    "524",
+    "526",
+    "282",
+    "298",
+    "303",
+    "323",
+    "333",
+    "421",
+    "426",
+    "435",
+    "440",
+    "445",
+    "450",
+    "457",
+    "460",
+    "466",
+    "469",
+    "473",
+    "476",
+    "508",
+    "509",
+    "511",
+    "530",
+    "1337",
+    "1132",
+    "1133",
+    "1134",
+    "1135",
+    "1136",
+    "1137",
+    "1138",
+    "1225",
+    "557",
+    "558",
+    "567",
+    "572",
+    "882",
+    "891",
+    "828",
+    "835",
+    "838",
+    "841",
+    "786",
+    "791",
+    "665",
+    "676",
+    "679",
+    "692",
+    "313",
+    "762",
+    "765",
+    "776",
+    "740",
+    "1097",
+    "1048",
+    "1077",
+    "353",
+    "363",
+    "606",
+    "611",
+    "616",
+    "621",
+    "626",
+    "636",
+    "641",
+    "645",
+    "650",
+    "593",
+    "598",
+    "601",
+    "440",
+    "735",
+    "740",
+    "855",
+    "858",
+    "921",
+    "908",
+    "915",
+    "717",
+    "714",
+    "711",
+    "708",
+    "704",
+    "1069",
+    "1063",
+    "1060",
+    "748",
+    "1024",
+    "616",
+    "621",
+    "626",
+    "1350",
+    "973"
+  ],
+  "skipped_waypoints": [],
+  "expected_total_time_s": 815.057,
+  "expected_score": 111,
+  "expected_distance_m": 174.908,
+  "expected_waypoints_visited": 37
+}

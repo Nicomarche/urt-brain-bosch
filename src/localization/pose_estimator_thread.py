@@ -45,6 +45,38 @@ _SINGLE_LINE_ROUTE_DIRECTION_MARGIN_RAD = math.radians(10.0)
 _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD = math.radians(18.0)
 
 
+def _load_corridor_yaw_fix_config():
+    """Carga thresholds del corridor yaw reset desde `config.py`.
+
+    Se hace lazy para que los tests puedan monkeypatchear config en runtime
+    sin tener que reimportar el módulo. Devuelve una tupla `(enabled, cfg)`
+    donde `cfg` es un dict con los thresholds en sus unidades nativas (rad,
+    s, m, m/s).
+    """
+    try:
+        import config as _cfg
+    except Exception:
+        _cfg = None
+
+    def _get(name: str, default):
+        return getattr(_cfg, name, default) if _cfg is not None else default
+
+    return {
+        "enabled": bool(_get("POSE_CORRIDOR_YAW_FIX_ENABLED", True)),
+        "cooldown_s": float(_get("POSE_CORRIDOR_YAW_FIX_COOLDOWN_S", 3.0)),
+        "min_gps_age_s": float(_get("POSE_CORRIDOR_YAW_FIX_MIN_GPS_AGE_S", 2.0)),
+        "max_map_error_m": float(_get("POSE_CORRIDOR_YAW_FIX_MAX_MAP_ERROR_M", 0.15)),
+        "min_quality": float(_get("POSE_CORRIDOR_YAW_FIX_MIN_QUALITY", 0.75)),
+        "max_heading_error_rad": math.radians(
+            float(_get("POSE_CORRIDOR_YAW_FIX_MAX_HEADING_ERROR_DEG", 10.0))
+        ),
+        "min_speed_mps": float(_get("POSE_CORRIDOR_YAW_FIX_MIN_SPEED_MPS", 0.10)),
+        "max_delta_rad": math.radians(
+            float(_get("POSE_CORRIDOR_YAW_FIX_MAX_DELTA_DEG", 30.0))
+        ),
+    }
+
+
 def _wrap_angle(angle_rad: float) -> float:
     angle = float(angle_rad)
     while angle > math.pi:
@@ -119,6 +151,7 @@ class threadPoseEstimator(threadTracking):
         self._last_camera_lateral_correction_monotonic = 0.0
         self._last_absolute_yaw_fix_monotonic = 0.0
         self._last_absolute_yaw_fix_source = None
+        self._last_corridor_yaw_reset_monotonic = 0.0
         self._localisation_fix_sub = messageHandlerSubscriber(
             queuesList, Localisation, "lastOnly", subscribe=True
         )
@@ -272,6 +305,126 @@ class threadPoseEstimator(threadTracking):
         self._dr.correct_yaw(yaw_correction)
         self.tracking_state.last_yaw_correction_deg = math.degrees(yaw_correction)
         return float(yaw_correction)
+
+    def _apply_corridor_yaw_reset(
+        self,
+        now: float,
+        raw_yaw: float,
+        route_context: RouteContext | None,
+        lane_observation: LaneObservation | None,
+    ) -> tuple[float, dict | None]:
+        """Reset HARD del yaw cruzando `path_psi` (mapa) con `heading_error_rad` (visión).
+
+        Diseñado para modo SIN GPS: en tramos largos entre stoplines el gyro
+        IMU acumula drift que el `_apply_camera_yaw_hint` (blend con α=0.08)
+        absorbe lentamente. Cuando además del hint de cámara tenemos el
+        corredor del mapa bien matcheado y 2 líneas visibles estables, podemos
+        hacer el reset en UN tick:
+
+            yaw_world_target = path_psi + heading_error_rad
+
+        El cross-check (mapa + visión) es la salvaguarda de seguridad: si
+        cualquiera de las dos fuentes falla (map_match_error_m alto, una
+        sola línea visible, heading_error_rad fuera de rango), el reset NO
+        se aplica y caemos al blend de cámara existente.
+
+        Returns:
+          (yaw_correction_rad, info_dict) — `yaw_correction_rad`=0.0 cuando no
+          se aplica; info_dict trae detalles para reporting/telemetry.
+        """
+        if self._dr is None or lane_observation is None or route_context is None:
+            return 0.0, None
+
+        cfg = _load_corridor_yaw_fix_config()
+        if not cfg["enabled"]:
+            return 0.0, None
+
+        # No pisar GPS reciente — si tenemos fix absoluto fresco, ese ya manda.
+        # Además requerimos que NO haya habido GPS por al menos `min_gps_age_s`
+        # (ventana de gracia para que el reset solo dispare en "modo sin GPS").
+        last_gps = float(self._last_absolute_yaw_fix_monotonic or 0.0)
+        gps_age = float(now) - last_gps if last_gps > 0.0 else float("inf")
+        if gps_age < float(cfg["min_gps_age_s"]):
+            return 0.0, None
+
+        # Cooldown propio: no resetear más seguido que cooldown_s.
+        if (float(now) - float(self._last_corridor_yaw_reset_monotonic)) < float(cfg["cooldown_s"]):
+            return 0.0, None
+
+        if not bool(getattr(route_context, "route_active", False)):
+            return 0.0, None
+
+        try:
+            map_match_error_m = float(getattr(route_context, "map_match_error_m", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            map_match_error_m = float("inf")
+        if map_match_error_m > float(cfg["max_map_error_m"]):
+            return 0.0, None
+
+        if str(getattr(lane_observation, "measurement_mode", "none") or "none") != "two_line":
+            return 0.0, None
+        sides = tuple(getattr(lane_observation, "detected_sides", ()) or ())
+        if len(sides) != 2:
+            return 0.0, None
+        if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(cfg["min_quality"]):
+            return 0.0, None
+
+        # Heading error chico: el coche está alineado con el corredor.
+        # Si no, asumir lane_tangent ≈ path_psi es falso → el reset
+        # inyectaría un sesgo.
+        try:
+            heading_error_rad = float(getattr(lane_observation, "heading_error_rad", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0, None
+        if abs(heading_error_rad) > float(cfg["max_heading_error_rad"]):
+            return 0.0, None
+
+        if abs(float(self._last_speed or 0.0)) < float(cfg["min_speed_mps"]):
+            return 0.0, None
+
+        try:
+            path_psi = float(getattr(route_context, "path_psi", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0, None
+        if not math.isfinite(path_psi):
+            return 0.0, None
+
+        target_yaw = _wrap_angle(path_psi + heading_error_rad)
+        delta = _wrap_angle(target_yaw - float(raw_yaw))
+
+        # Safety guard: si el reset pide una corrección enorme, hay algo
+        # mal (map matching equivocado, lane observation rota, salto de
+        # discontinuidad en path_psi al cambiar de lanelet). Abortamos.
+        if abs(delta) > float(cfg["max_delta_rad"]):
+            return 0.0, {
+                "applied": False,
+                "skipped_reason": "delta_too_large",
+                "delta_rad": float(delta),
+                "max_delta_rad": float(cfg["max_delta_rad"]),
+            }
+
+        # Aplicar el reset.
+        self._dr.correct_yaw(delta)
+        self._last_yaw_rad = _wrap_angle(float(self._last_yaw_rad) + delta)
+        # Re-inicializar la covarianza del EKF de yaw a un valor moderado:
+        # acabamos de hacer un fix absoluto, así que la confianza es alta;
+        # pero como no es GPS, no reseteamos al P_INIT completo.
+        self._yaw_ekf_p = min(self._yaw_ekf_p, float(_YAW_EKF_P_INIT) * 0.25)
+        self._last_corridor_yaw_reset_monotonic = float(now)
+        if hasattr(self.tracking_state, "last_yaw_correction_deg"):
+            self.tracking_state.last_yaw_correction_deg = math.degrees(delta)
+        info = {
+            "applied": True,
+            "delta_rad": float(delta),
+            "delta_deg": float(math.degrees(delta)),
+            "target_yaw_rad": float(target_yaw),
+            "path_psi_rad": float(path_psi),
+            "heading_error_rad": float(heading_error_rad),
+            "map_match_error_m": float(map_match_error_m),
+            "lane_quality": float(getattr(lane_observation, "quality", 0.0) or 0.0),
+            "gps_age_s": float(gps_age) if math.isfinite(gps_age) else None,
+        }
+        return float(delta), info
 
     def _apply_lane_observation(
         self,
@@ -584,6 +737,7 @@ class threadPoseEstimator(threadTracking):
             stopline_observation = None
 
         gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw)
+        corridor_yaw_info: dict | None = None
         if gps_relocalized:
             raw_x, raw_y, raw_yaw = self._dr.get_state()
             raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
@@ -596,9 +750,23 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized = False
             stopline_match = None
         else:
-            yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, route_context, lane_observation)
-            if abs(yaw_correction_rad) > 1e-9:
+            # ── Modo sin GPS: intentar corridor yaw reset (mapa × visión) ──
+            # Es un reset HARD que cruza `path_psi` del mapa con
+            # `heading_error_rad` de la cámara. Cuando aplica, suplanta al
+            # `camera_yaw_hint` (blend suave) en este tick — es más fuerte y
+            # más confiable porque requiere acuerdo entre las dos fuentes.
+            corridor_yaw_correction_rad, corridor_yaw_info = self._apply_corridor_yaw_reset(
+                now, raw_yaw, route_context, lane_observation
+            )
+            if abs(corridor_yaw_correction_rad) > 1e-9:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
+                yaw_correction_rad = float(corridor_yaw_correction_rad)
+            else:
+                yaw_correction_rad = self._apply_camera_yaw_hint(
+                    now, raw_yaw, route_context, lane_observation
+                )
+                if abs(yaw_correction_rad) > 1e-9:
+                    raw_x, raw_y, raw_yaw = self._dr.get_state()
 
             self._consume_sign_observation(now)
 
@@ -642,6 +810,10 @@ class threadPoseEstimator(threadTracking):
         elif semantic_relocalized and semantic_match is not None:
             relocalization_mode = "semantic"
             relocalization_source, relocalization_error_m = semantic_match
+        elif isinstance(corridor_yaw_info, dict) and bool(corridor_yaw_info.get("applied")):
+            relocalization_mode = "corridor_yaw_reset"
+            relocalization_source = "map_x_visual"
+            relocalization_error_m = abs(float(corridor_yaw_info.get("delta_deg", 0.0))) / 180.0
         elif abs(yaw_correction_rad) > math.radians(0.25):
             relocalization_mode = "lane_yaw_reset"
             relocalization_source = "camera_yaw_hint"

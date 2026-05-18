@@ -1,0 +1,485 @@
+{
+  "version": 1,
+  "generated_at": "2026-05-17T03:20:39",
+  "osm_path": "/Users/joaquinmarcoff/Desktop/Projects/BFMC/bfmc-waypoint-planner/data/lanelet2_map_FINAL_RandomStartingArea.osm",
+  "params": {
+    "speed_urban": 0.2,
+    "speed_highway": 0.4,
+    "efficiency_factor": 0.7,
+    "penalty_intersection_s": 1.5,
+    "penalty_stopline_s": 4.0,
+    "penalty_crosswalk_s": 1.0,
+    "penalty_roundabout_s": 1.0,
+    "lanelet_penalties_s": {
+      "1004": 3.0,
+      "1013": 5.0,
+      "1030": 5.0,
+      "1033": 5.0,
+      "1043": 5.0,
+      "1048": 5.0,
+      "105": 4.0,
+      "1060": 5.0,
+      "1063": 5.0,
+      "1080": 5.0,
+      "1084": 5.0,
+      "1086": 5.0,
+      "1094": 5.0,
+      "1097": 5.0,
+      "221": -2.0,
+      "245": -2.0,
+      "282": 2.0,
+      "285": -2.0,
+      "303": 3.0,
+      "333": 1.0,
+      "426": 1.0,
+      "440": 3.0,
+      "450": 3.0,
+      "460": 3.0,
+      "476": 2.0,
+      "481": -2.0,
+      "50": 3.0,
+      "502": -2.0,
+      "506": -2.0,
+      "508": -2.0,
+      "509": -2.0,
+      "511": -2.0,
+      "521": -2.0,
+      "523": -2.0,
+      "524": -2.0,
+      "526": -2.0,
+      "530": -2.0,
+      "665": 1.0,
+      "679": 1.0,
+      "740": 5.0,
+      "745": 5.0,
+      "748": 8.0,
+      "75": 1.0,
+      "828": 5.0,
+      "835": 5.0,
+      "838": 8.0,
+      "855": 5.0,
+      "858": 5.0,
+      "90": 3.0,
+      "908": 3.0,
+      "973": 31.0,
+      "995": 5.0
+    },
+    "time_budget_s": 600.0,
+    "score_random_start": 15,
+    "score_waypoint": 3
+  },
+  "first_waypoint_id": "1434",
+  "start_pose": {
+    "x": 1.1126,
+    "y": 5.269,
+    "yaw_rad": -0.0069
+  },
+  "waypoint_sequence": [
+    {
+      "order": 1,
+      "wp_id": "1434",
+      "anchor_lanelet_id": "85",
+      "entry_xy": [
+        6.2761,
+        3.1489
+      ],
+      "exit_xy": [
+        6.0901,
+        3.1102
+      ],
+      "score": 3,
+      "edge_time_s": 70.222,
+      "edge_distance_m": 9.151,
+      "cumulative_time_s": 70.222
+    },
+    {
+      "order": 2,
+      "wp_id": "1454",
+      "anchor_lanelet_id": "138",
+      "entry_xy": [
+        5.8945,
+        -2.0426
+      ],
+      "exit_xy": [
+        5.8974,
+        -2.2946
+      ],
+      "score": 3,
+      "edge_time_s": 47.672,
+      "edge_distance_m": 5.834,
+      "cumulative_time_s": 117.894
+    },
+    {
+      "order": 3,
+      "wp_id": "1513",
+      "anchor_lanelet_id": "1132",
+      "entry_xy": [
+        5.9067,
+        -4.8279
+      ],
+      "exit_xy": [
+        5.9078,
+        -4.4916
+      ],
+      "score": 3,
+      "edge_time_s": 13.997,
+      "edge_distance_m": 2.775,
+      "cumulative_time_s": 131.891
+    },
+    {
+      "order": 4,
+      "wp_id": "1484",
+      "anchor_lanelet_id": "1138",
+      "entry_xy": [
+        8.6062,
+        -3.6585
+      ],
+      "exit_xy": [
+        8.8602,
+        -3.6601
+      ],
+      "score": 3,
+      "edge_time_s": 64.894,
+      "edge_distance_m": 8.455,
+      "cumulative_time_s": 196.785
+    },
+    {
+      "order": 5,
+      "wp_id": "1464",
+      "anchor_lanelet_id": "557",
+      "entry_xy": [
+        5.5252,
+        -2.0447
+      ],
+      "exit_xy": [
+        5.5315,
+        -2.3791
+      ],
+      "score": 3,
+      "edge_time_s": 32.392,
+      "edge_distance_m": 5.887,
+      "cumulative_time_s": 229.178
+    },
+    {
+      "order": 6,
+      "wp_id": "1444",
+      "anchor_lanelet_id": "558",
+      "entry_xy": [
+        4.9362,
+        2.491
+      ],
+      "exit_xy": [
+        4.9383,
+        2.2267
+      ],
+      "score": 3,
+      "edge_time_s": 0.919,
+      "edge_distance_m": 0.129,
+      "cumulative_time_s": 230.097
+    },
+    {
+      "order": 7,
+      "wp_id": "1772",
+      "anchor_lanelet_id": "572",
+      "entry_xy": [
+        -2.4311,
+        3.1147
+      ],
+      "exit_xy": [
+        -2.6852,
+        3.1151
+      ],
+      "score": 3,
+      "edge_time_s": 68.954,
+      "edge_distance_m": 9.444,
+      "cumulative_time_s": 299.051
+    },
+    {
+      "order": 8,
+      "wp_id": "1642",
+      "anchor_lanelet_id": "598",
+      "entry_xy": [
+        -4.3592,
+        0.2261
+      ],
+      "exit_xy": [
+        -4.6166,
+        0.2254
+      ],
+      "score": 3,
+      "edge_time_s": 31.523,
+      "edge_distance_m": 3.993,
+      "cumulative_time_s": 330.574
+    },
+    {
+      "order": 9,
+      "wp_id": "1583",
+      "anchor_lanelet_id": "676",
+      "entry_xy": [
+        -6.8902,
+        -3.0322
+      ],
+      "exit_xy": [
+        -6.5944,
+        -2.943
+      ],
+      "score": 3,
+      "edge_time_s": 21.466,
+      "edge_distance_m": 2.655,
+      "cumulative_time_s": 352.04
+    },
+    {
+      "order": 10,
+      "wp_id": "1573",
+      "anchor_lanelet_id": "679",
+      "entry_xy": [
+        -9.0807,
+        -2.9047
+      ],
+      "exit_xy": [
+        -8.933,
+        -2.9037
+      ],
+      "score": 3,
+      "edge_time_s": 19.963,
+      "edge_distance_m": 2.795,
+      "cumulative_time_s": 372.003
+    },
+    {
+      "order": 11,
+      "wp_id": "1613",
+      "anchor_lanelet_id": "313",
+      "entry_xy": [
+        -9.9789,
+        -0.6187
+      ],
+      "exit_xy": [
+        -9.9789,
+        -0.2926
+      ],
+      "score": 3,
+      "edge_time_s": 26.756,
+      "edge_distance_m": 3.421,
+      "cumulative_time_s": 398.759
+    },
+    {
+      "order": 12,
+      "wp_id": "1702",
+      "anchor_lanelet_id": "363",
+      "entry_xy": [
+        -9.7964,
+        5.9698
+      ],
+      "exit_xy": [
+        -9.626,
+        6.148
+      ],
+      "score": 3,
+      "edge_time_s": 48.542,
+      "edge_distance_m": 6.305,
+      "cumulative_time_s": 447.3
+    },
+    {
+      "order": 13,
+      "wp_id": "1712",
+      "anchor_lanelet_id": "606",
+      "entry_xy": [
+        -8.693,
+        6.4081
+      ],
+      "exit_xy": [
+        -8.3727,
+        6.4094
+      ],
+      "score": 3,
+      "edge_time_s": 7.838,
+      "edge_distance_m": 1.0,
+      "cumulative_time_s": 455.139
+    },
+    {
+      "order": 14,
+      "wp_id": "1742",
+      "anchor_lanelet_id": "616",
+      "entry_xy": [
+        -6.4586,
+        6.408
+      ],
+      "exit_xy": [
+        -6.1973,
+        6.4089
+      ],
+      "score": 3,
+      "edge_time_s": 15.172,
+      "edge_distance_m": 1.914,
+      "cumulative_time_s": 470.311
+    },
+    {
+      "order": 15,
+      "wp_id": "1762",
+      "anchor_lanelet_id": "641",
+      "entry_xy": [
+        -3.7168,
+        4.017
+      ],
+      "exit_xy": [
+        -3.7184,
+        3.7681
+      ],
+      "score": 3,
+      "edge_time_s": 36.012,
+      "edge_distance_m": 4.622,
+      "cumulative_time_s": 506.323
+    },
+    {
+      "order": 16,
+      "wp_id": "1752",
+      "anchor_lanelet_id": "946",
+      "entry_xy": [
+        -4.3026,
+        3.1078
+      ],
+      "exit_xy": [
+        -4.5663,
+        3.0916
+      ],
+      "score": 3,
+      "edge_time_s": 8.137,
+      "edge_distance_m": 0.997,
+      "cumulative_time_s": 514.46
+    },
+    {
+      "order": 17,
+      "wp_id": "1732",
+      "anchor_lanelet_id": "717",
+      "entry_xy": [
+        -6.8909,
+        6.0415
+      ],
+      "exit_xy": [
+        -6.646,
+        6.0403
+      ],
+      "score": 3,
+      "edge_time_s": 33.947,
+      "edge_distance_m": 3.89,
+      "cumulative_time_s": 548.407
+    },
+    {
+      "order": 18,
+      "wp_id": "1692",
+      "anchor_lanelet_id": "708",
+      "entry_xy": [
+        -9.5244,
+        5.7215
+      ],
+      "exit_xy": [
+        -9.303,
+        5.9418
+      ],
+      "score": 3,
+      "edge_time_s": 22.078,
+      "edge_distance_m": 2.837,
+      "cumulative_time_s": 570.485
+    },
+    {
+      "order": 19,
+      "wp_id": "1682",
+      "anchor_lanelet_id": "1069",
+      "entry_xy": [
+        -9.5953,
+        4.0316
+      ],
+      "exit_xy": [
+        -9.5791,
+        3.9908
+      ],
+      "score": 3,
+      "edge_time_s": 13.33,
+      "edge_distance_m": 1.796,
+      "cumulative_time_s": 583.815
+    }
+  ],
+  "lanelet_sequence": [
+    "995",
+    "996",
+    "1004",
+    "55",
+    "60",
+    "70",
+    "75",
+    "85",
+    "90",
+    "120",
+    "125",
+    "138",
+    "1170",
+    "1132",
+    "1133",
+    "1134",
+    "1135",
+    "1136",
+    "1137",
+    "1138",
+    "1225",
+    "557",
+    "558",
+    "567",
+    "572",
+    "580",
+    "585",
+    "593",
+    "598",
+    "662",
+    "665",
+    "676",
+    "679",
+    "692",
+    "313",
+    "338",
+    "343",
+    "348",
+    "353",
+    "363",
+    "606",
+    "611",
+    "616",
+    "621",
+    "626",
+    "636",
+    "641",
+    "946",
+    "903",
+    "908",
+    "915",
+    "717",
+    "714",
+    "711",
+    "708",
+    "704",
+    "1069"
+  ],
+  "skipped_waypoints": [
+    "1424",
+    "1474",
+    "1503",
+    "1523",
+    "1533",
+    "1543",
+    "1553",
+    "1563",
+    "1593",
+    "1603",
+    "1623",
+    "1652",
+    "1662",
+    "1672",
+    "1722",
+    "1791",
+    "1801",
+    "1811"
+  ],
+  "expected_total_time_s": 583.815,
+  "expected_score": 57,
+  "expected_distance_m": 77.899,
+  "expected_waypoints_visited": 19
+}
