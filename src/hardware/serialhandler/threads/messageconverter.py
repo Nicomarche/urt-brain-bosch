@@ -61,6 +61,7 @@ class MessageConverter:
         "alive": [["activate"], [1], [False]],
         "steerLimits": [["request"], [1], [False]],
         "imu": [["activate"], [1], [False]],
+        "hallspeed": [["activate"], [1], [False]],
         "vcd": [["speed", "steer", "time"], [3, 3, 3], [False]],
         "vcdCalib": [["speed", "steer", "time"], [3, 3, 3], [False]],
         "kl": [["mode"], [2], [False]]

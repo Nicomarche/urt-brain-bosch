@@ -93,6 +93,7 @@ class threadWrite(ThreadWithStop):
         self.last_blocked_reason = None
         self._last_status_snapshot = None
         self._last_status_send_time = 0.0
+        self._last_forced_feedback_enable = 0.0
 
         # error rate limiting
         self.last_error_time = None
@@ -310,7 +311,30 @@ class threadWrite(ThreadWithStop):
             return 1
         else :
             return 0
-        
+
+    def _force_feedback_streams(self, source):
+        """Tell the Nucleo to start publishing IMU + hallspeed telemetry.
+
+        Without these toggles, the firmware boots with periodic publishers
+        idle and the dashboard sees RX silence even when the cable is fine.
+        Ported from the `lidar` branch — call after sending `#kl:30` / `#kl:15`
+        so telemetry comes online as soon as the key turns.
+        """
+        now = time.monotonic()
+        if now - self._last_forced_feedback_enable < 0.5:
+            return
+        self._last_forced_feedback_enable = now
+        for command in (
+            {"action": "hallspeed", "activate": 1},
+            {"action": "imu", "activate": 1},
+        ):
+            self.send_to_serial(command)
+            time.sleep(0.05)
+        print(
+            f"\033[1;97m[ Serial Handler ] :\033[0m \033[1;96mFEEDBACK-ENABLE\033[0m"
+            f" - Enabled hallspeed + imu streams (source={source})"
+        )
+
     # ===================================== RUN ==========================================
     def thread_work(self):
         """In this function we check if we got the enable engine signal. After we got it we will start getting messages from raspberry PI. It will transform them into NUCLEO commands and send them."""
@@ -331,6 +355,7 @@ class threadWrite(ThreadWithStop):
                     command = {"action": "kl", "mode": 30}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    self._force_feedback_streams("kl30")
                     if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
                         self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
                     else:
@@ -343,6 +368,7 @@ class threadWrite(ThreadWithStop):
                     command = {"action": "kl", "mode": 15}
                     self.send_to_serial(command)
                     self.load_config("sensors")
+                    self._force_feedback_streams("kl15")
                     self._publish_actuator_status(force=True)
                 elif klRecv == "0":
                     self.running = False
