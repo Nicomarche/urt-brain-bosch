@@ -232,6 +232,8 @@ class threadPoseEstimator(threadTracking):
         self._lane_yaw_reset_count = 0
         self._lane_yaw_reset_next_t = 0.0
         self._last_lane_yaw_reset_deg = 0.0
+        # Throttled log de skips de _try_lane_yaw_reset (ver método).
+        self._lane_yaw_reset_skip_log_t: dict[str, float] = {}
         self._apply_start_pose_override()
         self._send_sim_relocalize()
 
@@ -1364,6 +1366,20 @@ class threadPoseEstimator(threadTracking):
         self.tracking_state.last_yaw_correction_deg = math.degrees(yaw_correction)
         return float(yaw_correction)
 
+    def _log_lane_yaw_reset_skip(self, now: float, reason: str, **fields) -> None:
+        # Throttle a 2 s por motivo para no inundar la consola y aún así dar
+        # señal de qué gate corta el reset en pista.
+        last_t = float(self._lane_yaw_reset_skip_log_t.get(reason, 0.0) or 0.0)
+        if (now - last_t) < 2.0:
+            return
+        self._lane_yaw_reset_skip_log_t[reason] = now
+        live_log(
+            "pose_estimator",
+            event="lane_yaw_reset_skip",
+            reason=reason,
+            **fields,
+        )
+
     def _try_lane_yaw_reset(
         self,
         now: float,
@@ -1375,45 +1391,93 @@ class threadPoseEstimator(threadTracking):
             return 0.0
         if self._dr is None or lane_observation is None or route_context is None:
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(
+                now,
+                "missing_inputs",
+                has_dr=self._dr is not None,
+                has_lane_obs=lane_observation is not None,
+                has_route_ctx=route_context is not None,
+            )
             return 0.0
         if float(now) < float(getattr(self, "_lane_yaw_reset_next_t", 0.0) or 0.0):
             return 0.0
         if self._has_fresh_absolute_yaw_fix(now):
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "fresh_absolute_yaw_fix")
             return 0.0
-        if abs(float(self._last_speed or 0.0)) < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
+        speed_mps = abs(float(self._last_speed or 0.0))
+        if speed_mps < float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS):
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "speed_below_min", speed_mps=speed_mps)
             return 0.0
 
         detected_sides = {str(side).lower() for side in (lane_observation.detected_sides or ())}
-        if (
-            str(lane_observation.measurement_mode or "none") != "two_line"
-            or "left" not in detected_sides
-            or "right" not in detected_sides
-            or float(lane_observation.quality or 0.0) < float(_LANE_YAW_RESET_QUALITY_MIN)
-            or str(lane_observation.curve_hint or "UNKNOWN").upper() != "STRAIGHT"
-        ):
+        measurement_mode = str(lane_observation.measurement_mode or "none")
+        quality = float(lane_observation.quality or 0.0)
+        curve_hint = str(lane_observation.curve_hint or "UNKNOWN").upper()
+        if measurement_mode != "two_line":
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "not_two_line", measurement_mode=measurement_mode)
+            return 0.0
+        if "left" not in detected_sides or "right" not in detected_sides:
+            self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "missing_side", detected_sides=sorted(detected_sides))
+            return 0.0
+        if quality < float(_LANE_YAW_RESET_QUALITY_MIN):
+            self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(
+                now,
+                "quality_below_min",
+                quality=quality,
+                quality_min=float(_LANE_YAW_RESET_QUALITY_MIN),
+            )
+            return 0.0
+        if curve_hint != "STRAIGHT":
+            self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "not_straight", curve_hint=curve_hint)
             return 0.0
 
         heading_error = float(lane_observation.heading_error_rad or 0.0)
         if abs(heading_error) > float(_LANE_YAW_RESET_STRAIGHT_THRESH_RAD):
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(
+                now,
+                "heading_above_thresh",
+                heading_error_deg=math.degrees(heading_error),
+                thresh_deg=math.degrees(float(_LANE_YAW_RESET_STRAIGHT_THRESH_RAD)),
+            )
             return 0.0
 
         cam_yaw = lane_observation.camera_yaw_hint_rad
         cam_conf = float(lane_observation.camera_yaw_hint_confidence or 0.0)
-        if cam_yaw is None or cam_conf < 0.6:
+        if cam_yaw is None:
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "no_cam_yaw")
+            return 0.0
+        if cam_conf < 0.6:
+            self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(now, "conf_below_min", confidence=cam_conf)
             return 0.0
 
         yaw_error = _wrap_angle(float(cam_yaw) - float(raw_yaw))
         if abs(yaw_error) > float(_LANE_YAW_RESET_MAX_ERROR_RAD):
             self._lane_yaw_reset_count = 0
+            self._log_lane_yaw_reset_skip(
+                now,
+                "yaw_error_above_max",
+                yaw_error_deg=math.degrees(yaw_error),
+                max_deg=math.degrees(float(_LANE_YAW_RESET_MAX_ERROR_RAD)),
+            )
             return 0.0
 
         self._lane_yaw_reset_count = int(getattr(self, "_lane_yaw_reset_count", 0) or 0) + 1
         if self._lane_yaw_reset_count < int(_LANE_YAW_RESET_CONSECUTIVE):
+            self._log_lane_yaw_reset_skip(
+                now,
+                "waiting_consecutive",
+                count=int(self._lane_yaw_reset_count),
+                needed=int(_LANE_YAW_RESET_CONSECUTIVE),
+            )
             return 0.0
 
         self._dr.correct_yaw(float(yaw_error))

@@ -848,20 +848,25 @@ TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
 # El BehaviorPlanner setea el perfil activo en TrackingState al entrar al
 # scenario; pose_estimator/relocalization lee de ahí cuál usar.
 VISUAL_CORRECTION_PROFILES = {
+    # Subidos respecto a la versión previa (default 0.18/0.02/0.015,
+    # lane_keep 0.30/0.04/0.022) para acercarnos al comportamiento de
+    # urt-brain-bosch-lgarcia, donde `recalibrate_states` aplica reset
+    # absoluto cuando |error|<0.15m. En el path activo
+    # (pose_estimator_thread._apply_lane_observation) estos valores
+    # determinan cuánto puede mover la cámara al DR por tick.
     "default": {
-        "gain": 0.18,
-        "max_m": 0.02,
-        "step_max_m": 0.015,
+        "gain": 0.50,
+        "max_m": 0.10,
+        "step_max_m": 0.04,
     },
     "lane_keep": {
-        # Recta autopista: la cámara manda. Cuando el mapa OSM tiene error
-        # de localización (~5-8 cm), este gain alto permite que la corrección
-        # visual jale al pose lateralmente con autoridad real (~1.5 cm/frame,
-        # techo 4 cm). Antes 0.22/0.025/0.018 → respuesta lenta dominada por
-        # el target_path rígido del MPC.
-        "gain": 0.30,
-        "max_m": 0.04,
-        "step_max_m": 0.022,
+        # Recta: la cámara manda. Antes 0.30/0.04/0.022 nunca enganchaba;
+        # ahora 1.0/0.15/0.08 replica el "snap" de lgarcia con un techo de 15cm
+        # (similar a lane_localization_threshold=0.15m de tunable_params.yaml).
+        # En 50Hz, step_max=0.08m permite cerrar 4m/s de error lateral.
+        "gain": 1.00,
+        "max_m": 0.15,
+        "step_max_m": 0.08,
     },
     "intersection": {
         "gain": 0.05,
