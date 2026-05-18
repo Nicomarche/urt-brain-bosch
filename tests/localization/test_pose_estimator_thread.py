@@ -101,6 +101,16 @@ class _OneShotSub:
         return value
 
 
+class _SequenceSub:
+    def __init__(self, values) -> None:
+        self.values = deque(values)
+
+    def receive(self):
+        if not self.values:
+            return None
+        return self.values.popleft()
+
+
 def _make_route_context() -> RouteContext:
     return RouteContext(
         route_active=True,
@@ -180,6 +190,56 @@ def test_thread_work_uses_trusted_imu_yaw_when_steering_is_quiet() -> None:
     assert pose_estimate.fused_pose.yaw == pytest.approx(math.radians(10.0), abs=math.radians(0.2))
     assert pose_estimate.steer_rad == pytest.approx(0.0, abs=1e-9)
     assert estimator._last_yaw_rejected is False
+
+
+def test_pose_estimator_reuses_fresh_imu_between_messages() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=0.0, imu_yaw_deg=12.0)
+    now = 100.0
+
+    imu_dict, previous_imu_t = estimator._read_imu_sample_for_fusion(now)
+    assert imu_dict is not None and float(imu_dict["yaw"]) == pytest.approx(12.0)
+    assert previous_imu_t is not None
+    assert estimator._last_imu_sample_reused is False
+
+    imu_dict, previous_imu_t = estimator._read_imu_sample_for_fusion(now + 0.10)
+    assert imu_dict is not None and float(imu_dict["yaw"]) == pytest.approx(12.0)
+    assert previous_imu_t == pytest.approx(now)
+    assert estimator._last_imu_sample_reused is True
+    assert estimator._last_imu_sample_age_s == pytest.approx(0.10)
+
+    imu_dict, _ = estimator._read_imu_sample_for_fusion(now + 1.00)
+    assert imu_dict is None
+    assert estimator._last_imu_sample_reused is False
+
+
+def test_resolve_speed_uses_odometer_distance_when_speed_feedback_is_zero() -> None:
+    estimator = threadPoseEstimator.__new__(threadPoseEstimator)
+    estimator._speed_sub = _SequenceSub([0.0, 0.0])
+    estimator._speed_cmd_sub = _SequenceSub([None, None])
+    estimator._distance_sub = _SequenceSub([1000, 1050])
+    estimator._current_state_message = "AUTO"
+    estimator._last_speed = 0.0
+    estimator._last_speed_source = "none"
+    estimator._last_speed_t = None
+    estimator._last_cmd_speed_raw = 0.0
+    estimator._last_cmd_speed_t = None
+    estimator._cmd_speed_history = deque(maxlen=5)
+    estimator._last_encoder_filter_reason = "uninitialized"
+    estimator._last_encoder_raw_mps = 0.0
+    estimator._last_distance_m = None
+    estimator._last_distance_t = None
+    estimator._last_distance_speed_mps = 0.0
+    estimator._last_distance_speed_t = None
+    estimator._last_raw_distance = None
+
+    assert estimator._resolve_speed_mps(100.0) == pytest.approx(0.0)
+    assert estimator._last_speed_source == "encoder_zero"
+
+    speed = estimator._resolve_speed_mps(100.5)
+
+    assert speed == pytest.approx(0.10)
+    assert estimator._last_speed_source == "encoder_distance"
+    assert estimator._last_distance_speed_mps == pytest.approx(0.10)
 
 
 def test_thread_work_rejects_imu_yaw_spike_when_steering_at_zero_speed() -> None:

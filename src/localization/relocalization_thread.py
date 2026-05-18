@@ -21,7 +21,7 @@ from collections import deque
 from src.templates.threadwithstop import ThreadWithStop
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.messaging.messageHandlerSender import messageHandlerSender
-from src.core.bus.topics import CURRENT_SPEED, CURRENT_STEER, IMU_DATA, LOCATION, NAVIGATION_COMMAND, NAVIGATION_STATUS, SPEED_MOTOR, SIGN_DETECTED, STATE_CHANGE, STEER_MOTOR
+from src.core.bus.topics import CURRENT_DISTANCE, CURRENT_SPEED, CURRENT_STEER, IMU_DATA, LOCATION, NAVIGATION_COMMAND, NAVIGATION_STATUS, SPEED_MOTOR, SIGN_DETECTED, STATE_CHANGE, STEER_MOTOR
 
 from src.localization.dead_reckoning import DeadReckoning, curve_speed_compensated
 from src.routing.lanelet.attributes import ATTR_NAMES, ATTR_STOPLINE
@@ -148,6 +148,9 @@ try:
     _SPEED_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_SPEED_FEEDBACK_TIMEOUT_S", 0.35
     )
+    _IMU_FEEDBACK_TIMEOUT_S = getattr(
+        cfg, "TRACKING_IMU_FEEDBACK_TIMEOUT_S", 0.35
+    )
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S", 0.50
     )
@@ -171,6 +174,21 @@ try:
     )
     _STEER_FEEDBACK_TIMEOUT_S = getattr(
         cfg, "TRACKING_STEER_FEEDBACK_TIMEOUT_S", 0.35
+    )
+    _DISTANCE_FEEDBACK_ENABLED = bool(
+        getattr(cfg, "TRACKING_DISTANCE_FEEDBACK_ENABLED", True)
+    )
+    _DISTANCE_FEEDBACK_TIMEOUT_S = getattr(
+        cfg, "TRACKING_DISTANCE_FEEDBACK_TIMEOUT_S", _SPEED_FEEDBACK_TIMEOUT_S
+    )
+    _DISTANCE_UNIT_M = float(
+        getattr(cfg, "TRACKING_DISTANCE_UNIT_M", 0.001) or 0.001
+    )
+    _DISTANCE_SPEED_MIN_MPS = float(
+        getattr(cfg, "TRACKING_DISTANCE_SPEED_MIN_MPS", 0.005) or 0.005
+    )
+    _DISTANCE_SPEED_MAX_MPS = float(
+        getattr(cfg, "TRACKING_DISTANCE_SPEED_MAX_MPS", 1.50) or 1.50
     )
 except Exception:
     _OSM_PATH = "lanelet2_map.osm"
@@ -222,6 +240,7 @@ except Exception:
     _VISUAL_STOPLINE_ROUTE_AHEAD_M = 0.85
     _VISUAL_STOPLINE_MAX_MAP_ERROR_M = 0.75
     _SPEED_FEEDBACK_TIMEOUT_S = 0.35
+    _IMU_FEEDBACK_TIMEOUT_S = 0.35
     _COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
     _COMMAND_SPEED_FALLBACK_ENABLED = True
     _ENCODER_FILTER_ENABLED = True
@@ -230,6 +249,11 @@ except Exception:
     _ENCODER_FILTER_ZERO_EPS_MPS = 0.03
     _ENCODER_FILTER_STOP_CMD_DIFF_MPS = 0.07
     _STEER_FEEDBACK_TIMEOUT_S = 0.35
+    _DISTANCE_FEEDBACK_ENABLED = True
+    _DISTANCE_FEEDBACK_TIMEOUT_S = 0.35
+    _DISTANCE_UNIT_M = 0.001
+    _DISTANCE_SPEED_MIN_MPS = 0.005
+    _DISTANCE_SPEED_MAX_MPS = 1.50
 
 # Maximum plausible physical yaw rate of the vehicle (rad/s).
 # Used to compute a dynamic re-zero detection threshold that scales with the
@@ -777,6 +801,9 @@ class threadTracking(ThreadWithStop):
         self._speed_sub = messageHandlerSubscriber(
             queuesList, CURRENT_SPEED, "lastOnly", subscribe=True
         )
+        self._distance_sub = messageHandlerSubscriber(
+            queuesList, CURRENT_DISTANCE, "lastOnly", subscribe=True
+        )
         self._speed_cmd_sub = messageHandlerSubscriber(
             queuesList, SPEED_MOTOR, "lastOnly", subscribe=True
         )
@@ -859,6 +886,11 @@ class threadTracking(ThreadWithStop):
         self._yaw_offset = 0.0
         self._yaw_offset_calibrated = False
         self._last_raw_speed = None   # raw value from message queue (for log)
+        self._last_raw_distance = None
+        self._last_distance_m = None
+        self._last_distance_t = None
+        self._last_distance_speed_mps = 0.0
+        self._last_distance_speed_t = None
         self._last_raw_imu = None     # raw imu dict (for log)
         self._last_imu_t = None       # monotonic time of last IMU message
         self._last_speed_t = None     # monotonic time of last speed message
@@ -1187,6 +1219,13 @@ class threadTracking(ThreadWithStop):
             return None
 
     @staticmethod
+    def _parse_distance_m(raw_value) -> float | None:
+        try:
+            return float(raw_value) * float(_DISTANCE_UNIT_M)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
     def _parse_steer_rad(raw_value) -> float | None:
         try:
             # Raw steering follows the legacy wire convention:
@@ -1259,6 +1298,63 @@ class threadTracking(ThreadWithStop):
             return None
         return self._parse_speed_mps(getattr(self, "_last_cmd_speed_raw", 0.0))
 
+    def _distance_speed_is_usable(self, speed_mps: float | None, now: float) -> bool:
+        if speed_mps is None:
+            return False
+        last_t = getattr(self, "_last_distance_speed_t", None)
+        if last_t is None:
+            return False
+        if (float(now) - float(last_t)) > float(_DISTANCE_FEEDBACK_TIMEOUT_S):
+            return False
+        return abs(float(speed_mps)) >= float(_DISTANCE_SPEED_MIN_MPS)
+
+    def _resolve_distance_speed_mps(self, now: float) -> float | None:
+        if not bool(_DISTANCE_FEEDBACK_ENABLED):
+            return None
+        distance_sub = getattr(self, "_distance_sub", None)
+        if distance_sub is None:
+            return None
+
+        raw_distance = distance_sub.receive()
+        if raw_distance is None:
+            speed = getattr(self, "_last_distance_speed_mps", None)
+            return float(speed) if self._distance_speed_is_usable(speed, now) else None
+
+        distance_m = self._parse_distance_m(raw_distance)
+        self._last_raw_distance = raw_distance
+        if distance_m is None:
+            speed = getattr(self, "_last_distance_speed_mps", None)
+            return float(speed) if self._distance_speed_is_usable(speed, now) else None
+
+        previous_distance_m = getattr(self, "_last_distance_m", None)
+        previous_distance_t = getattr(self, "_last_distance_t", None)
+        self._last_distance_m = float(distance_m)
+        self._last_distance_t = float(now)
+
+        if previous_distance_m is None or previous_distance_t is None:
+            return None
+
+        dt = float(now) - float(previous_distance_t)
+        if dt <= 1e-4 or dt > max(float(_DISTANCE_FEEDBACK_TIMEOUT_S) * 4.0, 0.50):
+            return None
+
+        distance_delta_m = float(distance_m) - float(previous_distance_m)
+        speed_mps = distance_delta_m / dt
+        if not math.isfinite(speed_mps):
+            return None
+        if abs(float(speed_mps)) > float(_DISTANCE_SPEED_MAX_MPS):
+            return None
+
+        self._last_distance_speed_mps = float(speed_mps)
+        self._last_distance_speed_t = float(now)
+        return float(speed_mps) if self._distance_speed_is_usable(speed_mps, now) else None
+
+    def _use_distance_speed(self, speed_mps: float, now: float) -> float:
+        self._last_speed = float(speed_mps)
+        self._last_speed_t = float(now)
+        self._last_speed_source = "encoder_distance"
+        return float(self._last_speed)
+
     def _filter_encoder_speed_mps(
         self,
         encoder_speed_mps: float,
@@ -1310,6 +1406,7 @@ class threadTracking(ThreadWithStop):
 
         cmd_speed_for_filter = self._current_command_speed_mps_for_encoder_filter(now)
         self._remember_speed_command_for_encoder_filter(cmd_speed_for_filter)
+        distance_speed_mps = self._resolve_distance_speed_mps(now)
 
         if speed_raw is not None:
             self._last_raw_speed = speed_raw
@@ -1322,6 +1419,21 @@ class threadTracking(ThreadWithStop):
                 )
                 self._last_speed = float(filtered_speed)
                 self._last_speed_source = str(source)
+                if (
+                    self._distance_speed_is_usable(distance_speed_mps, now)
+                    and str(source) in {"encoder_zero", "encoder_filtered_stop_command"}
+                ):
+                    return self._use_distance_speed(float(distance_speed_mps), now)
+
+        if (
+            self._distance_speed_is_usable(distance_speed_mps, now)
+            and (
+                speed_raw is None
+                or str(getattr(self, "_last_speed_source", "none") or "none")
+                in {"none", "encoder_zero", "encoder_filtered_stop_command", "command", "auto_command_hold"}
+            )
+        ):
+            return self._use_distance_speed(float(distance_speed_mps), now)
 
         # In MANUAL mode the Nucleo feedback may stay at 0 (no odometry), so DR
         # would never advance. Only use the commanded speed when encoder
@@ -1408,6 +1520,9 @@ class threadTracking(ThreadWithStop):
         self._last_speed_source = "none"
         self._last_cmd_speed_raw = 0.0
         self._last_cmd_speed_t = None
+        self._last_distance_t = None
+        self._last_distance_speed_t = None
+        self._last_distance_speed_mps = 0.0
         try:
             self._speed_command_history().clear()
         except Exception:

@@ -1052,12 +1052,18 @@ TRACKING_VISUAL_STOPLINE_MAX_VISIBLE_STREAK = 6
 TRACKING_SPEED_FEEDBACK_TIMEOUT_S = 0.35
 TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
 TRACKING_COMMAND_SPEED_FALLBACK_SCALE = 1.0
+TRACKING_IMU_FEEDBACK_TIMEOUT_S = 0.35
 # True = si falta encoder reciente, el pose estimator puede propagar la pose con
 # el último comando de velocidad fresco en lugar de congelar el DR.
 TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = (
     _os.environ.get("URT_TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", "1") == "1"
 )
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
+TRACKING_DISTANCE_FEEDBACK_ENABLED = True
+TRACKING_DISTANCE_FEEDBACK_TIMEOUT_S = 0.35
+TRACKING_DISTANCE_UNIT_M = 0.001
+TRACKING_DISTANCE_SPEED_MIN_MPS = 0.005
+TRACKING_DISTANCE_SPEED_MAX_MPS = 1.50
 
 # Filtro de encoder portado de urt-ref: si el encoder fresco contradice fuerte
 # los últimos comandos de velocidad, se reemplaza por el comando. También clava

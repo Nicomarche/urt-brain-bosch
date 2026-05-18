@@ -13,6 +13,7 @@ from src.utils.gps_mode import gps_mode_path, is_gps_disabled, save_gps_disabled
 from src.utils.sim_start_pose import resolve_saved_start_pose
 from src.localization.relocalization_thread import (
     _CAMERA_LATERAL_CORRECTION_COOLDOWN_S,
+    _IMU_FEEDBACK_TIMEOUT_S,
     _IMU_YAW_SIGN,
     _ENCODER_CURVE_SPEED_COMPENSATION,
     _MAX_INTEGRATION_DT,
@@ -250,6 +251,8 @@ class threadPoseEstimator(threadTracking):
         self._last_yaw_fusion_steer_rad = 0.0
         self._imu_yaw_inhibit_until = 0.0
         self._last_imu_yaw_raw_deg = None
+        self._last_imu_sample_age_s = None
+        self._last_imu_sample_reused = False
         self._last_yaw_used_rad = float(getattr(self, "_last_yaw_rad", 0.0) or 0.0)
         self._last_yaw_kinematic_rad = self._last_yaw_used_rad
         self._last_imu_yaw_limited_rad = None
@@ -269,6 +272,38 @@ class threadPoseEstimator(threadTracking):
         # arranca en su pose de spawn (.world) en vez de la startup pose
         # del brain → cross-track masivo en el ground truth.
         self._sim_relocalize_retries_remaining = 10
+
+    def _read_imu_sample_for_fusion(self, now: float) -> tuple[dict | None, float | None]:
+        previous_imu_t = getattr(self, "_last_imu_t", None)
+        imu_raw = self._imu_sub.receive()
+        if imu_raw is not None:
+            try:
+                imu_dict = ast.literal_eval(str(imu_raw))
+                if not isinstance(imu_dict, dict):
+                    raise ValueError("IMU payload is not a dict")
+                self._last_raw_imu = imu_dict
+                self._last_imu_t = float(now)
+                self._imu_received = True
+                self._last_imu_sample_age_s = 0.0
+                self._last_imu_sample_reused = False
+                return imu_dict, previous_imu_t
+            except Exception:
+                self._last_imu_sample_age_s = None
+                self._last_imu_sample_reused = False
+                return None, previous_imu_t
+
+        last_raw_imu = getattr(self, "_last_raw_imu", None)
+        last_imu_t = getattr(self, "_last_imu_t", None)
+        if isinstance(last_raw_imu, dict) and last_imu_t is not None:
+            age_s = float(now) - float(last_imu_t)
+            if 0.0 <= age_s <= float(_IMU_FEEDBACK_TIMEOUT_S):
+                self._last_imu_sample_age_s = float(age_s)
+                self._last_imu_sample_reused = True
+                return dict(last_raw_imu), float(last_imu_t)
+
+        self._last_imu_sample_age_s = None
+        self._last_imu_sample_reused = False
+        return None, previous_imu_t
 
     @staticmethod
     def _gps_dashboard_calibration_enabled() -> bool:
@@ -2036,17 +2071,7 @@ class threadPoseEstimator(threadTracking):
         yaw_start_rad = float(self._last_yaw_rad)
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
 
-        imu_dict = None
-        previous_imu_t = getattr(self, "_last_imu_t", None)
-        imu_raw = self._imu_sub.receive()
-        if imu_raw is not None:
-            try:
-                imu_dict = ast.literal_eval(str(imu_raw))
-                self._last_raw_imu = imu_dict
-                self._last_imu_t = now
-                self._imu_received = True
-            except Exception:
-                imu_dict = None
+        imu_dict, previous_imu_t = self._read_imu_sample_for_fusion(now)
 
         if self._dr is None:
             return
@@ -2216,6 +2241,14 @@ class threadPoseEstimator(threadTracking):
             yaw_kinematic=float(getattr(self, "_last_yaw_kinematic_rad", fused_pose.yaw)),
             yaw_rejected=bool(getattr(self, "_last_yaw_rejected", False)),
             imu_yaw_gain=float(getattr(self, "_last_imu_yaw_gain", 0.0) or 0.0),
+            imu_sample_age_s=(
+                None
+                if getattr(self, "_last_imu_sample_age_s", None) is None
+                else float(self._last_imu_sample_age_s)
+            ),
+            imu_sample_reused=bool(getattr(self, "_last_imu_sample_reused", False)),
+            distance_raw_mm=getattr(self, "_last_raw_distance", None),
+            distance_speed_mps=float(getattr(self, "_last_distance_speed_mps", 0.0) or 0.0),
             reloc_mode=relocalization_mode,
             reloc_source=relocalization_source,
             reloc_error_m=float(relocalization_error_m or 0.0),
