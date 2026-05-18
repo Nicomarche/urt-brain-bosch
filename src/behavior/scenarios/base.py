@@ -18,15 +18,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
-import config as _config
 from src.behavior.context import PlanningContext
 from src.behavior.trajectory_builder import (
     build_target_path,
     build_target_path_from_route,
     build_target_path_from_visual,
 )
+from src.behavior.visual_primary_gate import VisualPrimaryGate
 from src.core.types.behavior import BehaviorOutput, ScenarioName
-from src.core.types.perception import lane_observation_has_visual_path
 
 
 @dataclass
@@ -105,22 +104,19 @@ class BaseScenario(ABC):
         notes = dict(notes or {})
         route_waypoints = list(ctx.route.route_waypoints or [])
         lane_obs = getattr(ctx, "lane_observation", None)
-        min_visual_quality = float(
-            getattr(_config, "LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH", 0.55)
-        )
-        min_visual_points = int(
-            getattr(_config, "LANE_VISUAL_MIN_POLY_POINTS", 8)
-        )
         route_corridor_available = bool(ctx.route.route_active) and bool(route_waypoints)
         lanelet_corridor_available = bool(ctx.lanelet_map is not None and ctx.route.current_lanelet_id)
-        use_visual_path, visual_path_reason = _select_visual_primary_path(
+        visual_decision = self._visual_primary_gate().decide(
             ctx=ctx,
             lane_observation=lane_obs,
-            min_quality=min_visual_quality,
-            min_points=min_visual_points,
+            scenario_name=scenario_name,
             route_corridor_available=route_corridor_available,
             lanelet_corridor_available=lanelet_corridor_available,
         )
+        notes.update(visual_decision.notes)
+        visual_path_reason = str(visual_decision.reason)
+        map_authority_active = bool(visual_decision.map_authority_active)
+        use_visual_path = bool(visual_decision.use_visual_path)
         if use_visual_path:
             visual_measurement_mode = str(getattr(lane_obs, "measurement_mode", "none") or "none")
             connect_visual_path_from_ego = visual_measurement_mode != "single_line"
@@ -134,6 +130,9 @@ class BaseScenario(ABC):
             )
             notes.setdefault("path_source", "visual_lane_waypoints")
             notes.setdefault("recovery_source", "visual_lane_waypoints")
+            notes["path_authority"] = "visual"
+            notes["mpc_weight_profile"] = "lane_keep_visual"
+            notes["steer_rate_limit_deg_s"] = 180.0
             notes["visual_lane_waypoint_count"] = int(len(lane_obs.center_waypoints_body or ()))
             notes["visual_path_connected_from_ego_pose"] = bool(connect_visual_path_from_ego)
             if lane_obs.extrapolated_side:
@@ -158,6 +157,12 @@ class BaseScenario(ABC):
             )
             notes.setdefault("path_source", "route_waypoints")
             notes.setdefault("recovery_source", "route_waypoints_reentry")
+            if map_authority_active:
+                notes["path_authority"] = "map"
+                notes["mpc_weight_profile"] = "map_turn_authority"
+                notes["steer_rate_limit_deg_s"] = 160.0
+            else:
+                notes.setdefault("path_authority", "route")
             if visual_path_reason:
                 notes["visual_path_primary_rejected_reason"] = str(visual_path_reason)
             for key in ("bridge_mode", "protected_prefix_m", "merge_start_idx", "merge_end_idx"):
@@ -175,6 +180,12 @@ class BaseScenario(ABC):
             )
             notes.setdefault("path_source", "lanelet_centerline")
             notes.setdefault("recovery_source", "lanelet_corridor")
+            if map_authority_active:
+                notes["path_authority"] = "map"
+                notes["mpc_weight_profile"] = "map_turn_authority"
+                notes["steer_rate_limit_deg_s"] = 160.0
+            else:
+                notes.setdefault("path_authority", "lanelet")
             if visual_path_reason:
                 notes["visual_path_primary_rejected_reason"] = str(visual_path_reason)
         else:
@@ -195,6 +206,13 @@ class BaseScenario(ABC):
             stop_required=stop_required,
             notes=notes,
         )
+
+    def _visual_primary_gate(self) -> VisualPrimaryGate:
+        gate = getattr(self, "_lane_visual_primary_gate", None)
+        if gate is None:
+            gate = VisualPrimaryGate()
+            setattr(self, "_lane_visual_primary_gate", gate)
+        return gate
 
     def _fallback_plan(self, ctx: PlanningContext, reason: str) -> BehaviorOutput:
         """BehaviorOutput inválido — el `safety_gate` toma control.
@@ -222,33 +240,3 @@ def _supports_visual_lane_reentry_bias(lane_observation) -> bool:
         and float(getattr(lane_observation, "quality", 0.0) or 0.0) >= 0.8
         and getattr(lane_observation, "direct_error_m", None) is not None
     )
-
-
-def _select_visual_primary_path(
-    *,
-    ctx: PlanningContext,
-    lane_observation,
-    min_quality: float,
-    min_points: int,
-    route_corridor_available: bool,
-    lanelet_corridor_available: bool,
-) -> tuple[bool, str]:
-    if not lane_observation_has_visual_path(
-        lane_observation,
-        min_quality=min_quality,
-        min_points=min_points,
-    ):
-        return False, "visual_path_gate_rejected"
-
-    measurement_mode = str(getattr(lane_observation, "measurement_mode", "none") or "none")
-
-    if route_corridor_available:
-        return False, "route_corridor_primary"
-
-    if measurement_mode == "two_line":
-        return True, "two_line_primary"
-
-    if measurement_mode == "single_line":
-        return True, "single_line_primary"
-
-    return False, f"unsupported_measurement_mode:{measurement_mode}"

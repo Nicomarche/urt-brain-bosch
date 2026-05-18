@@ -83,6 +83,18 @@ class _CaptureSolver(_FakeSolver):
         return super().compute(x_current, state_refs, input_refs, **kwargs)
 
 
+class _ProfileSolver(_FakeSolver):
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.active_profile_name = "default"
+        self.profile_calls: list[str] = []
+
+    def set_weight_profile(self, profile_name: str) -> bool:
+        self.active_profile_name = str(profile_name)
+        self.profile_calls.append(str(profile_name))
+        return True
+
+
 def _bo(
     *,
     valid: bool = True,
@@ -310,6 +322,47 @@ def test_steering_clamped_to_asymmetric_min() -> None:
     mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(0.30, -40.0))))
     cmd = mc.compute(_bo(), _pose())
     assert cmd.steering_deg == pytest.approx(min_deg)
+
+
+def test_motion_controller_applies_behavior_weight_profile_and_returns_to_default() -> None:
+    solver = _ProfileSolver(result=(0.30, 0.0))
+    mc = _disable_rate_limits(MotionController(solver=solver))
+
+    cmd = mc.compute(_bo(notes={"mpc_weight_profile": "lane_keep_visual"}), _pose())
+
+    assert cmd.valid is True
+    assert solver.profile_calls == ["lane_keep_visual"]
+    assert solver.active_profile_name == "lane_keep_visual"
+
+    cmd = mc.compute(_bo(), _pose())
+
+    assert cmd.valid is True
+    assert solver.profile_calls == ["lane_keep_visual", "default"]
+    assert solver.active_profile_name == "default"
+
+
+def test_motion_controller_uses_behavior_steer_rate_limit() -> None:
+    mc = MotionController(solver=_FakeSolver(result=(0.30, 20.0)))
+    mc._max_speed_rate_mps2 = 1e6
+    mc._max_steer_rate_deg_s = 120.0
+    mc._steer_dt_s = 0.05
+
+    cmd = mc.compute(_bo(notes={"steer_rate_limit_deg_s": 180.0}), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(9.0)
+
+
+def test_motion_controller_uses_default_steer_rate_without_behavior_note() -> None:
+    mc = MotionController(solver=_FakeSolver(result=(0.30, 20.0)))
+    mc._max_speed_rate_mps2 = 1e6
+    mc._max_steer_rate_deg_s = 120.0
+    mc._steer_dt_s = 0.05
+
+    cmd = mc.compute(_bo(), _pose())
+
+    assert cmd.valid is True
+    assert cmd.steering_deg == pytest.approx(6.0)
 
 
 def test_solver_speed_is_capped_to_current_planner_request() -> None:
