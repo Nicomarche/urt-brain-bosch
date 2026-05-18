@@ -551,6 +551,64 @@ class OsmRouteGraph:
             start_pose_xy=self._extract_pose_xy(start_spec),
         )
 
+    def _orient_centerlines_for_route(
+        self,
+        route_ids: list[str],
+        *,
+        closed_loop: bool = False,
+    ) -> list[bool]:
+        """For each lanelet in route_ids, return True if its centerline should be
+        used in parser order, False if it should be reversed.
+
+        Strategy: compare the lanelet's endpoints to the neighbor's centerline.
+        - If neighbor is the SUCCESSOR (next in route): the endpoint of current
+          closer to neighbor is the "exit". If that endpoint is `cl[-1]`,
+          forward (True); else reverse (False).
+        - If neighbor is the PREDECESSOR (only for the last lanelet of a non-
+          closed route): the endpoint of current closer to neighbor is the
+          "entry". If that endpoint is `cl[0]`, forward (True); else reverse.
+
+        For routes with only ONE lanelet, defaults to forward (no signal).
+        """
+        n = len(route_ids)
+        orientations: list[bool] = [True] * n
+        if n == 0:
+            return orientations
+        for i, lid in enumerate(route_ids):
+            l = self.lanelet_map.get_lanelet(str(lid))
+            if l is None or l.centerline.shape[0] < 2:
+                continue
+            cl = l.centerline
+            cl_start = np.asarray(cl[0], dtype=float)
+            cl_end = np.asarray(cl[-1], dtype=float)
+
+            neighbor_id: str | None = None
+            is_successor = True
+            if closed_loop and n > 1:
+                neighbor_id = route_ids[(i + 1) % n]
+                is_successor = True
+            elif i + 1 < n:
+                neighbor_id = route_ids[i + 1]
+                is_successor = True
+            elif i - 1 >= 0:
+                neighbor_id = route_ids[i - 1]
+                is_successor = False
+            if neighbor_id is None or neighbor_id == lid:
+                continue
+            neighbor = self.lanelet_map.get_lanelet(str(neighbor_id))
+            if neighbor is None or neighbor.centerline.shape[0] == 0:
+                continue
+            neighbor_pts = np.asarray(neighbor.centerline, dtype=float)
+            d_start = float(np.min(np.linalg.norm(neighbor_pts - cl_start, axis=1)))
+            d_end = float(np.min(np.linalg.norm(neighbor_pts - cl_end, axis=1)))
+            if is_successor:
+                # exit endpoint closer to neighbor → forward iff cl[-1] is closer
+                orientations[i] = d_end <= d_start
+            else:
+                # entry endpoint closer to neighbor → forward iff cl[0] is closer
+                orientations[i] = d_start <= d_end
+        return orientations
+
     def build_dense_path(
         self,
         lanelet_ids: Iterable[str],
@@ -574,6 +632,13 @@ class OsmRouteGraph:
         if closed_loop and len(route_ids) > 1 and route_ids[0] == route_ids[-1]:
             route_ids = route_ids[:-1]
 
+        # Decide if each lanelet's centerline should be used forward or reversed
+        # based on the route flow. The OSM parser may orient a lanelet's
+        # centerline in the opposite direction to the actual route traversal,
+        # which would otherwise cause the dense path to zig-zag (frenazos +
+        # target jumping backwards + flecha del sentido invertida).
+        orientations = self._orient_centerlines_for_route(route_ids, closed_loop=bool(closed_loop))
+
         path_points: list[np.ndarray] = []
         wp_lanelet_ids: list[str] = []
         wp_attrs: list[int] = []
@@ -583,6 +648,8 @@ class OsmRouteGraph:
             if lanelet is None or lanelet.centerline.shape[0] == 0:
                 continue
             cl = np.asarray(lanelet.centerline, dtype=float)
+            if not orientations[idx]:
+                cl = cl[::-1].copy()
             if idx == 0 and start_pose_xy is not None and not closed_loop:
                 cl = _trim_centerline_from_pose(cl, float(start_pose_xy[0]), float(start_pose_xy[1]))
             if path_points and np.linalg.norm(path_points[-1] - cl[0]) <= 1e-6:

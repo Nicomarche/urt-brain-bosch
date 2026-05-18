@@ -2883,6 +2883,43 @@ def _contain_path_within_corridor(
     )
 
 
+def _orient_corridor_centerlines(lanelet_map, lanelet_ids: list[str]) -> list[bool]:
+    """For each lanelet in sequence, decide forward (True) or reverse (False).
+    Same rule as OsmRouteGraph._orient_centerlines_for_route: the endpoint of
+    the current centerline closer to the neighbor (next, else prev) is the
+    exit/entry. Used to align the route-flow direction with the parser-side
+    centerline so the corridor boundaries don't cross."""
+    n = len(lanelet_ids)
+    out = [True] * n
+    for i, lid in enumerate(lanelet_ids):
+        ll = lanelet_map.get_lanelet(lid)
+        if ll is None or getattr(ll, "centerline", None) is None:
+            continue
+        cl = np.asarray(ll.centerline, dtype=float)
+        if cl.ndim != 2 or cl.shape[0] < 2:
+            continue
+        if i + 1 < n:
+            neighbor_id = lanelet_ids[i + 1]
+            is_succ = True
+        elif i - 1 >= 0:
+            neighbor_id = lanelet_ids[i - 1]
+            is_succ = False
+        else:
+            continue
+        if neighbor_id == lid:
+            continue
+        neighbor = lanelet_map.get_lanelet(neighbor_id)
+        if neighbor is None or getattr(neighbor, "centerline", None) is None:
+            continue
+        nb = np.asarray(neighbor.centerline, dtype=float)
+        if nb.shape[0] == 0:
+            continue
+        d_start = float(np.min(np.linalg.norm(nb - cl[0], axis=1)))
+        d_end = float(np.min(np.linalg.norm(nb - cl[-1], axis=1)))
+        out[i] = (d_end <= d_start) if is_succ else (d_start <= d_end)
+    return out
+
+
 def _build_lanelet_corridor(ctx: PlanningContext) -> tuple[_CorridorGeometry | None, dict[str, Any]]:
     lanelet_ids = _extract_lanelet_corridor_ids(ctx)
     if not lanelet_ids:
@@ -2895,21 +2932,37 @@ def _build_lanelet_corridor(ctx: PlanningContext) -> tuple[_CorridorGeometry | N
             "corridor_lanelet_ids": list(lanelet_ids),
         }
 
+    # Pre-compute centerline orientation per route position so axis + boundaries
+    # are flipped consistently when the parser-side centerline is reversed
+    # relative to the route flow (same bug seen in build_dense_path and the
+    # trajectory walker).
+    lanelet_ids_str = [str(lid) for lid in lanelet_ids]
+    orientations: list[bool] = _orient_corridor_centerlines(lanelet_map, lanelet_ids_str)
+
     axis_parts: list[np.ndarray] = []
     left_parts: list[np.ndarray] = []
     right_parts: list[np.ndarray] = []
     used_lanelet_ids: list[str] = []
     missing_lanelet_ids: list[str] = []
-    for lanelet_id in lanelet_ids:
-        lanelet = lanelet_map.get_lanelet(str(lanelet_id))
+    for idx, lanelet_id in enumerate(lanelet_ids_str):
+        lanelet = lanelet_map.get_lanelet(lanelet_id)
         if lanelet is None:
-            missing_lanelet_ids.append(str(lanelet_id))
+            missing_lanelet_ids.append(lanelet_id)
             continue
         axis = np.asarray(lanelet.centerline, dtype=float)
         if axis.ndim != 2 or axis.shape[0] < 2:
             continue
         left = np.asarray(getattr(lanelet, "left_boundary", np.zeros((0, 2), dtype=float)), dtype=float)
         right = np.asarray(getattr(lanelet, "right_boundary", np.zeros((0, 2), dtype=float)), dtype=float)
+        forward = orientations[idx] if idx < len(orientations) else True
+        if not forward:
+            axis = axis[::-1].copy()
+            if left.ndim == 2 and left.shape[0] >= 2:
+                left = left[::-1].copy()
+            if right.ndim == 2 and right.shape[0] >= 2:
+                right = right[::-1].copy()
+            # When the centerline is reversed, left and right swap (handedness flips).
+            left, right = right, left
         if left.ndim != 2 or left.shape[0] < 2 or right.ndim != 2 or right.shape[0] < 2:
             left, right = _synthetic_bounds_from_xy(axis, half_width_m=_DRIVABLE_HALF_WIDTH_M)
         else:
@@ -2918,7 +2971,7 @@ def _build_lanelet_corridor(ctx: PlanningContext) -> tuple[_CorridorGeometry | N
         axis_parts.append(axis)
         left_parts.append(left)
         right_parts.append(right)
-        used_lanelet_ids.append(str(lanelet_id))
+        used_lanelet_ids.append(lanelet_id)
 
     if not axis_parts:
         return None, {

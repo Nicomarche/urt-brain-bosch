@@ -200,10 +200,10 @@ export URT_VIDEO_JPEG_QUALITY="${URT_VIDEO_JPEG_QUALITY:-70}"
 export URT_LAUNCHER="${URT_LAUNCHER:-run.sh}"
 if [[ -z "${URT_EXPECTED_MPC_BACKEND:-}" ]]; then
     _URT_FORCE_PP_LC="$(printf '%s' "${URT_FORCE_PURE_PURSUIT:-}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "$_URT_FORCE_PP_LC" =~ ^(1|true|yes|on)$ ]]; then
-        export URT_EXPECTED_MPC_BACKEND="pure_pursuit"
-    else
+    if [[ "$_URT_FORCE_PP_LC" =~ ^(0|false|no|off)$ ]]; then
         export URT_EXPECTED_MPC_BACKEND="acados"
+    else
+        export URT_EXPECTED_MPC_BACKEND="pure_pursuit"
     fi
     unset _URT_FORCE_PP_LC
 fi

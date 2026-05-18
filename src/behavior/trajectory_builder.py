@@ -610,6 +610,7 @@ def _walk_centerlines(
 
     visited: set[str] = set()
     is_first = True
+    last_appended_end: np.ndarray | None = None  # para orientar el SIGUIENTE chunk
     debug = {
         "lanelet_sequence": [],
         "successor_choices": [],
@@ -629,7 +630,7 @@ def _walk_centerlines(
             debug["termination_reason"] = "lanelet_missing"
             break
 
-        cl = ll.centerline
+        cl = np.asarray(ll.centerline, dtype=float)
         if cl.shape[0] < 2:
             current_id, pick_reason = _pick_next(ll, hint_set, hint_iter, lanelet_map)
             debug["successor_choices"].append(
@@ -639,16 +640,28 @@ def _walk_centerlines(
                 debug["termination_reason"] = "no_successor_after_short_centerline"
             continue
 
+        # Orientación de la centerline: la dirección del parser puede estar
+        # invertida respecto al flujo real de la ruta. Decidir según el
+        # vecino (sucesor preferido) o el último chunk encolado.
         if is_first:
+            # Para la PRIMERA lanelet, orientar mirando hacia el primer hint
+            # (sucesor de la ruta activa) si está disponible.
+            forward = _orient_against_hint(
+                cl, lanelet_map, next_lanelet_hint_ids, ll.successor_ids
+            )
+            if not forward:
+                cl = cl[::-1].copy()
             # Recortamos la centerline al sub-arco que arranca en la
-            # proyección del ego sobre la lanelet actual. Elegir solo el
-            # vértice más cercano hace que, si el ego viene lateralmente
-            # desplazado cerca del final de una lanelet corta, el path salte
-            # prematuramente al nodo terminal y pierda el resto del tramo
-            # actual. Eso vuelve demasiado brusca la transición al siguiente
-            # segmento y el controlador termina "cortando" el giro.
+            # proyección del ego sobre la lanelet actual.
             cl = _trim_centerline_from_projection(cl, start_xy)
             is_first = False
+        else:
+            # Para las siguientes, orientar pegándose al fin del chunk anterior.
+            if last_appended_end is not None:
+                d_start = float(np.linalg.norm(cl[0] - last_appended_end))
+                d_end = float(np.linalg.norm(cl[-1] - last_appended_end))
+                if d_end < d_start:
+                    cl = cl[::-1].copy()
 
         if cl.shape[0] < 2:
             current_id, pick_reason = _pick_next(ll, hint_set, hint_iter, lanelet_map)
@@ -660,6 +673,7 @@ def _walk_centerlines(
             continue
 
         pieces.append(cl)
+        last_appended_end = np.asarray(cl[-1], dtype=float)
         seg_lens = np.linalg.norm(np.diff(cl, axis=0), axis=1)
         accumulated_arc += float(np.sum(seg_lens))
 
@@ -693,6 +707,38 @@ def _walk_centerlines(
     if debug["termination_reason"] == "unknown":
         debug["termination_reason"] = "joined_polyline"
     return np.concatenate(out, axis=0), debug
+
+
+def _orient_against_hint(
+    cl: np.ndarray,
+    lanelet_map: "LaneletMap",
+    next_lanelet_hint_ids,
+    successor_ids: tuple,
+) -> bool:
+    """Decide forward (True) or reverse (False) for the FIRST lanelet of the
+    walk. Looks at the next hinted lanelet that's actually a successor and
+    compares which endpoint of `cl` is closer to that neighbor's centerline."""
+    if cl.shape[0] < 2:
+        return True
+    succ_set = set(successor_ids or [])
+    chosen_next: str | None = None
+    for hinted in next_lanelet_hint_ids:
+        hid = str(hinted or "")
+        if hid in succ_set:
+            chosen_next = hid
+            break
+    if chosen_next is None and successor_ids:
+        chosen_next = successor_ids[0]
+    if chosen_next is None:
+        return True
+    neighbor = lanelet_map.get_lanelet(chosen_next)
+    if neighbor is None or neighbor.centerline.shape[0] == 0:
+        return True
+    nb = np.asarray(neighbor.centerline, dtype=float)
+    d_start = float(np.min(np.linalg.norm(nb - cl[0], axis=1)))
+    d_end = float(np.min(np.linalg.norm(nb - cl[-1], axis=1)))
+    # successor case: exit endpoint closer to neighbor → forward iff cl[-1]
+    return d_end <= d_start
 
 
 def _pick_next(

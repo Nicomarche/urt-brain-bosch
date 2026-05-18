@@ -372,16 +372,34 @@ def _build_world_path(
     points: list[tuple[float, float]],
     *,
     world_to_pixel,
+    max_segment_m: float = 0.50,
 ) -> QPainterPath:
+    """Build a QPainterPath from world-coordinate points.
+
+    Consecutive points farther apart than ``max_segment_m`` are treated as a
+    discontinuity and split into a new sub-path (via ``moveTo``) instead of
+    being connected by a long chord. This keeps the visualization clean when
+    the route's lanelet_sequence intentionally skips between non-contiguous
+    successors declared in the corrected topology — the brain follows that
+    topology, but we don't want to draw a fake straight line across the map.
+    """
     if len(points) < 2:
         return QPainterPath()
     path = QPainterPath()
     first_x_m, first_y_m = points[0]
     first_px, first_py = world_to_pixel(first_x_m, first_y_m)
     path.moveTo(first_px, first_py)
+    prev_x_m, prev_y_m = first_x_m, first_y_m
+    max_seg2 = float(max_segment_m) ** 2
     for x_m, y_m in points[1:]:
+        dx = x_m - prev_x_m
+        dy = y_m - prev_y_m
         px, py = world_to_pixel(x_m, y_m)
-        path.lineTo(px, py)
+        if (dx * dx + dy * dy) > max_seg2:
+            path.moveTo(px, py)
+        else:
+            path.lineTo(px, py)
+        prev_x_m, prev_y_m = x_m, y_m
     return path
 
 
@@ -540,7 +558,8 @@ class MapView(QWidget):
             self._save_start_btn = QPushButton("Save start")
             self._save_start_btn.setToolTip(
                 "Stop only: save the current car pose into "
-                "config/sim_start_pose.json so startup calibration uses it."
+                "config/sim_start_pose.json (sim) or config/jetson_start_pose.json "
+                "(hardware) so startup calibration uses it."
             )
             self._save_start_btn.clicked.connect(self._save_current_pose_as_start)
             self._calibrate_start_btn = QPushButton("Calibrate start")
@@ -758,7 +777,7 @@ class MapView(QWidget):
         self._cars_items: list[QGraphicsItem] = []
         self._semaphore_items: list[QGraphicsItem] = []
         self._nav_path = QGraphicsPathItem()
-        self._nav_path.setPen(QPen(QColor("#7db5ff"), 2, Qt.DashLine, Qt.RoundCap, Qt.RoundJoin))
+        self._nav_path.setPen(QPen(QColor("#ffb84d"), 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         self._nav_path.setZValue(50)
         self._scene.addItem(self._nav_path)
         self._control_path = QGraphicsPathItem()

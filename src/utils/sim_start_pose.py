@@ -12,10 +12,22 @@ _logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SIM_START_POSE_PATH = REPO_ROOT / "config" / "sim_start_pose.json"
+JETSON_START_POSE_PATH = REPO_ROOT / "config" / "jetson_start_pose.json"
+
+
+def _is_real_hardware() -> bool:
+    # MOTOR_OUTPUT == "zmq" en sim (publica al sim_bridge), "serial" en Jetson real.
+    # Cuando se corre en hardware persistimos el start pose físico aparte para que
+    # las recalibraciones manuales de cada arranque no pisen el spawn de Gazebo.
+    try:
+        import config as _cfg
+        return str(getattr(_cfg, "MOTOR_OUTPUT", "")).lower() != "zmq"
+    except Exception:
+        return False
 
 
 def saved_start_pose_path() -> Path:
-    return Path(SIM_START_POSE_PATH)
+    return Path(JETSON_START_POSE_PATH if _is_real_hardware() else SIM_START_POSE_PATH)
 
 
 def _resolve_repo_path(path_like: str | os.PathLike[str] | None) -> Path | None:

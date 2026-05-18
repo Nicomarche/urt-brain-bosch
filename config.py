@@ -71,6 +71,26 @@ CAMERA_HORIZONTAL_FOV_DEG = 62.2
 # Rango típico para robots BFMC: 10°–25°.
 CAMERA_PITCH_DEG = 16.4
 
+# CAMERA_ROLL_DEG / CAMERA_YAW_DEG: rotaciones residuales del mount respecto del
+# chasis. Para una cámara perfectamente alineada ambos son 0. Roll > 0 inclina la
+# imagen en sentido horario; yaw > 0 apunta la cámara a la izquierda (convención
+# math, igual que `+delta`). Si la cámara está visiblemente torcida o sesga la
+# detección de carril hacia un lado con auto centrado, calibrar acá antes que
+# tocar pesos del MPC o thresholds de reloc visual.
+CAMERA_ROLL_DEG = 0.0
+CAMERA_YAW_DEG = 0.0
+
+# CAMERA_X_OFFSET_M / CAMERA_Y_OFFSET_M: posición del centro óptico de la cámara
+# respecto al EJE TRASERO (frame del bicicleta usado en DR y MPC). X positivo
+# hacia adelante, Y positivo hacia la izquierda. Para BFMC el mount típico está
+# unos ~15–20 cm adelante del eje trasero y centrado lateralmente. Estos offsets
+# se usan para llevar los waypoints visuales (referidos al frame de cámara) al
+# frame del eje trasero antes de pasarlos al planner. Si quedan en 0 el frame
+# de la cámara se asume coincidente con el eje trasero (introduce sesgo
+# constante en `lane_observation.direct_error_m`).
+CAMERA_X_OFFSET_M = 0.0
+CAMERA_Y_OFFSET_M = 0.0
+
 # ===================== PARKING MANEUVER =====================
 # Secuencia: LANE_KEEPING → SPOT_TRACKED → FORWARD_PAST_SPOT →
 #            WAIT_STEER_1 → REVERSING_ENTRY → WAIT_STEER_2 →
@@ -495,13 +515,15 @@ TRACKING_IMU_STEER_INHIBIT_HOLD_S = 0.35      # holdoff tras steer fuerte/rápid
 # para compatibilidad con checkouts viejos.
 SIM_IMU_YAW_OFFSET_DEG = 0.0
 
-# Forzar PurePursuit en lugar de AcadosMPC. Default: Acados también en sim.
-# PurePursuit queda como escape manual para diagnóstico sin cambiar código:
-#   URT_FORCE_PURE_PURSUIT=1  fuerza PurePursuit
-#   URT_FORCE_PURE_PURSUIT=0  fuerza Acados
+# Backend de control lateral. Default: PurePursuit (más robusto cuando el
+# target_path queda momentáneamente detrás del ego en intersecciones; Acados
+# en cartesian pediría reversa y el coche se atasca contra v_min_runtime).
+# Acados sigue disponible como opt-in para mejor tracking en pista limpia:
+#   URT_FORCE_PURE_PURSUIT=1 o unset  → PurePursuit (default)
+#   URT_FORCE_PURE_PURSUIT=0          → Acados
 _FORCE_PP_ENV = _os.environ.get("URT_FORCE_PURE_PURSUIT")
 FORCE_PURE_PURSUIT = (
-    False
+    True
     if _FORCE_PP_ENV is None
     else _FORCE_PP_ENV.strip().lower() in {"1", "true", "yes", "on"}
 )
@@ -524,7 +546,7 @@ TRACKING_STEER_LAG_ALPHA = 1.0
 #   R_STEER_K:   increase if heading drifts during turns (servo EMI strong on your unit)
 #   Q:           increase if kinematic model drifts fast (encoder slip, steer inaccuracy)
 TRACKING_YAW_EKF_Q          = 1e-4   # process noise [rad²/s] — kinematic drift rate
-TRACKING_YAW_EKF_R_STRAIGHT = 0.005  # IMU noise [rad²] when straight (≈ 4° std dev)
+TRACKING_YAW_EKF_R_STRAIGHT = 0.05   # IMU noise [rad²] when straight — subido ×10 vs 0.005 porque a v≈0 el EKF derivaba con bias del IMU (~3°/s) y PP amplificaba el sesgo en α → correcciones falsas de steering. Con 0.05 (≈12° std dev) el EKF se apoya más en la cinemática cuando va recto.
 TRACKING_YAW_EKF_R_STEER_K  = 50.0   # R grows by this per rad² of steering angle
 TRACKING_YAW_EKF_P_INIT     = 0.5    # initial covariance [rad²] — high = trust first IMU
 

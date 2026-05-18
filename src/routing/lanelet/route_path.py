@@ -23,7 +23,7 @@ class RoutePath:
     map_metadata: dict = field(default_factory=dict)
     available_destinations: list[dict] = field(default_factory=list)
 
-    def preview_points(self, max_points: int = 140) -> list[dict[str, float]]:
+    def preview_points(self, max_points: int = 600) -> list[dict[str, float]]:
         if self.waypoints.size == 0:
             return []
         total = int(self.waypoints.shape[0])
