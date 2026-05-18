@@ -145,6 +145,37 @@ class SystemMode(Enum):
         }
     }
 
+    FOLLOW_RIGHT = {
+        "mode": "follow_right",
+        "camera": {
+            "process": {
+                "enabled": True,
+            },
+            "thread": {
+                "resolution": "1080p",
+            },
+            "lineFollowing": {
+                "enabled": True,
+                "force_right_line": True,
+            },
+        },
+        "serial_handler": {
+            "process": {
+                "enabled": True,
+            }
+        },
+        "semaphore": {
+            "process": {
+                "enabled": False,
+            }
+        },
+        "traffic_com": {
+            "process": {
+                "enabled": False,
+            }
+        }
+    }
+
     PARKING = {
         "mode": "parking",
         "camera": {

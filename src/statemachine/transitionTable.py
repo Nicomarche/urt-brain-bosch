@@ -48,20 +48,23 @@ class TransitionTable:
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
-            "dashboard_stop_button" : SystemMode.STOP
+            "dashboard_stop_button" : SystemMode.STOP,
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
         },
         SystemMode.AUTO: {
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP,
-            "dashboard_auto_button" : SystemMode.AUTO # this is a special case, because the auto button is always available
+            "dashboard_auto_button" : SystemMode.AUTO, # this is a special case, because the auto button is always available
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
         },
-        SystemMode.MANUAL: {    
+        SystemMode.MANUAL: {
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_stop_button" : SystemMode.STOP,
             "dashboard_manual_button" : SystemMode.MANUAL, # this is a special case, because the manual button is always available
             "dashboard_parking_button" : SystemMode.PARKING,
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
         },
         SystemMode.PARKING: {
             "dashboard_manual_button" : SystemMode.MANUAL,
@@ -69,19 +72,29 @@ class TransitionTable:
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_legacy_button" : SystemMode.LEGACY,
             "dashboard_parking_button" : SystemMode.PARKING, # idempotent
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
         },
         SystemMode.LEGACY: {
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_stop_button" : SystemMode.STOP,
-            "dashboard_legacy_button" : SystemMode.LEGACY # this is a special case, because the legacy button is always available
+            "dashboard_legacy_button" : SystemMode.LEGACY, # this is a special case, because the legacy button is always available
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
         },
         SystemMode.STOP: {
             "dashboard_auto_button" : SystemMode.AUTO,
             "dashboard_manual_button" : SystemMode.MANUAL,
             "dashboard_legacy_button" : SystemMode.LEGACY,
-            "dashboard_stop_button" : SystemMode.STOP # this is a special case, because the stop button is always available
-        }
+            "dashboard_stop_button" : SystemMode.STOP, # this is a special case, because the stop button is always available
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT,
+        },
+        SystemMode.FOLLOW_RIGHT: {
+            "dashboard_auto_button" : SystemMode.AUTO,
+            "dashboard_manual_button" : SystemMode.MANUAL,
+            "dashboard_legacy_button" : SystemMode.LEGACY,
+            "dashboard_stop_button" : SystemMode.STOP,
+            "dashboard_follow_right_button" : SystemMode.FOLLOW_RIGHT, # idempotent
+        },
     }
     
     @classmethod

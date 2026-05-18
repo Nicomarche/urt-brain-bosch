@@ -770,6 +770,13 @@ Args:
         self.last_seen_side = "both"
         self.single_line_correction = 1
         self.last_turn_direction = 0
+
+        # FOLLOW_RIGHT mode: ignore the full pipeline and just track the right line.
+        self._follow_right_only = False
+        self._follow_right_target_ratio = 0.75  # right line x target at lookahead row, fraction of img_w
+        self._follow_right_gain = 1.0           # P gain on normalized error → ±max_steering
+        self._follow_right_miss_frames = 0
+        self._follow_right_last_right_x = None
         
         # Frame noise rejection filter (handles reflections/glare)
         self.use_noise_filter = True         # Enable noise rejection
@@ -7762,7 +7769,10 @@ Returns:
                         2,
                     )
             else:
-                steering_angle, speed, debug_frame = self.process_frame(frame)
+                if self._follow_right_only:
+                    steering_angle, speed, debug_frame = self._step_follow_right_only(frame)
+                else:
+                    steering_angle, speed, debug_frame = self.process_frame(frame)
                 if steering_angle is not None:
                     self._last_safe_steering = steering_angle
                     if speed is not None:
@@ -7887,6 +7897,124 @@ Returns:
                 self._flush_preview_windows()
         except Exception as e:
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - {e}")
+
+    def _step_follow_right_only(self, frame):
+        """Minimal right-line tracker for SystemMode.FOLLOW_RIGHT.
+
+        Strategy: HSV white/yellow mask on a lower-right ROI, HoughLinesP, keep the
+        rightmost segment with a "right-line" slope, extrapolate x at the lookahead
+        row, P-control on (right_x - target_x). No memory of the global map, no
+        path planner, no fusion — purely reactive.
+
+        If no right line is found for `max_frames_without_line` frames, returns
+        steer=0 with min_speed so the car keeps going straight as requested.
+
+        Returns:
+            (steering_deg, speed, debug_frame) — same shape as ``process_frame``.
+        """
+        img_h, img_w = frame.shape[:2]
+        debug_frame = frame.copy() if self._needs_debug else None
+
+        # ROI: lower portion of the frame, right 60% horizontally.
+        roi_top = int(img_h * max(0.0, min(0.95, float(getattr(self, 'roi_height_start', 0.35)))))
+        roi_bottom = img_h
+        roi_left = int(img_w * 0.40)
+        roi_right = img_w
+        roi = frame[roi_top:roi_bottom, roi_left:roi_right]
+        if roi.size == 0:
+            self._follow_right_miss_frames += 1
+            return 0.0, float(self.min_speed), debug_frame
+
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+        white_mask = cv2.inRange(hsv, self.white_lower, self.white_upper)
+        yellow_mask = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        mask = cv2.bitwise_or(white_mask, yellow_mask)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        edges = cv2.Canny(mask, 50, 150)
+
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=30,
+            minLineLength=20,
+            maxLineGap=120,
+        )
+
+        # Lookahead row in *full-frame* coordinates.
+        lookahead = float(getattr(self, 'lookahead', 0.4))
+        y_look_full = int(img_h * (1.0 - lookahead))
+        y_look_roi = y_look_full - roi_top  # row inside ROI
+
+        right_x_full = None
+        if lines is not None and len(lines) > 0:
+            best_avg_x = -1.0
+            for seg in lines:
+                x1, y1, x2, y2 = seg[0]
+                dy = float(y2 - y1)
+                dx = float(x2 - x1)
+                if abs(dy) < 1e-3:
+                    continue  # horizontal noise
+                slope = dy / dx if abs(dx) > 1e-3 else float('inf')
+                # Right-lane segments go from bottom-right to top-left as y decreases,
+                # which gives slope > 0 in image coords (y grows downward). Accept
+                # near-vertical too (very steep slope, |slope| > 0.4) to be robust.
+                if not (slope > 0.3 or abs(slope) > 2.0):
+                    continue
+                avg_x = 0.5 * (x1 + x2)
+                if avg_x > best_avg_x:
+                    best_avg_x = avg_x
+                    # Extrapolate x at y_look_roi
+                    t = (y_look_roi - y1) / dy
+                    x_at = x1 + t * dx
+                    right_x_full = float(x_at + roi_left)
+
+        target_x = float(img_w) * float(self._follow_right_target_ratio)
+
+        if right_x_full is None:
+            # No right line detected this frame.
+            self._follow_right_miss_frames += 1
+            steer = 0.0
+            speed = float(self.min_speed)
+            self._set_frame_trace({
+                "status": "follow_right_no_line",
+                "miss_frames": int(self._follow_right_miss_frames),
+                "steering_deg": steer,
+                "speed": speed,
+            })
+        else:
+            self._follow_right_miss_frames = 0
+            self._follow_right_last_right_x = right_x_full
+            error = right_x_full - target_x  # +ve → line is right of target → steer right
+            error_norm = max(-1.0, min(1.0, error / (0.5 * float(img_w))))
+            steer = max(-float(self.max_steering),
+                        min(float(self.max_steering),
+                            self._follow_right_gain * error_norm * float(self.max_steering)))
+            speed = float(self.base_speed)
+            self._set_frame_trace({
+                "status": "follow_right_tracking",
+                "right_x": right_x_full,
+                "target_x": target_x,
+                "error_norm": float(error_norm),
+                "steering_deg": float(steer),
+                "speed": float(speed),
+            })
+
+        if debug_frame is not None:
+            cv2.rectangle(debug_frame, (roi_left, roi_top), (roi_right - 1, roi_bottom - 1),
+                          (255, 0, 0), 1)
+            cv2.line(debug_frame, (0, y_look_full), (img_w - 1, y_look_full), (0, 255, 255), 1)
+            cv2.line(debug_frame, (int(target_x), y_look_full - 12),
+                     (int(target_x), y_look_full + 12), (0, 200, 200), 2)
+            if right_x_full is not None:
+                cv2.circle(debug_frame, (int(right_x_full), y_look_full), 8, (0, 255, 0), -1)
+                cv2.arrowedLine(debug_frame, (int(target_x), y_look_full),
+                                (int(right_x_full), y_look_full), (0, 255, 0), 2)
+            status = "TRACKING" if right_x_full is not None else f"NO_LINE ({self._follow_right_miss_frames})"
+            cv2.putText(debug_frame, f"FOLLOW_RIGHT {status}  steer={steer:+.1f}",
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+
+        return float(steer), float(speed), debug_frame
 
     def process_frame(self, frame):
         """Process frame using selected detection mode.
@@ -9162,7 +9290,14 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             try:
                 mode_dict = SystemMode[message].value.get("camera", {}).get("lineFollowing", {})
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - lineFollowing config: {mode_dict}")
-                
+
+                # FOLLOW_RIGHT: bypass the full pipeline. The flag is sticky to the mode.
+                self._follow_right_only = bool(mode_dict.get("force_right_line", False))
+                if self._follow_right_only:
+                    self._follow_right_miss_frames = 0
+                    self._follow_right_last_right_x = None
+                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;95mFOLLOW_RIGHT\033[0m - Right-line-only mode armed")
+
                 if mode_dict.get("enabled", False):
                     self.is_line_following_active = True
                     self._last_inactive_log = False  # Reset inactive log flag
