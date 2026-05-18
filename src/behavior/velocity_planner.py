@@ -656,7 +656,9 @@ def _visual_lane_error_m(ctx: PlanningContext) -> float | None:
         return None
     if float(getattr(lane_observation, "quality", 0.0) or 0.0) < 0.8:
         return None
-    value = getattr(lane_observation, "direct_error_m", None)
+    value = getattr(lane_observation, "line_center_offset_m", None)
+    if value is None:
+        value = getattr(lane_observation, "direct_error_m", None)
     if value is None:
         return None
     try:

@@ -31,6 +31,7 @@ from src.core.bus.topics import DRIVING_MODE
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.statemachine.stateMachine import StateMachine
 from src.templates.threadwithstop import ThreadWithStop
+from src.utils.live_log import live_log
 
 
 class threadModeRouter(ThreadWithStop):
@@ -49,6 +50,7 @@ class threadModeRouter(ThreadWithStop):
         )
         self._sub.subscribe()
         self._sm: Optional[StateMachine] = None
+        self._pending_mode: Optional[str] = None
 
     def _ensure_state_machine(self) -> Optional[StateMachine]:
         """Lazy lookup that handles the macOS spawn-mode race.
@@ -73,13 +75,17 @@ class threadModeRouter(ThreadWithStop):
         return self._sm
 
     def thread_work(self) -> None:
+        if self._pending_mode is not None:
+            mode = self._pending_mode
+            self._pending_mode = None
+            self._dispatch(mode, from_pending=True)
         for _ in range(8):
             cmd = self._sub.receive()
             if cmd is None:
                 return
             self._dispatch(cmd)
 
-    def _dispatch(self, raw: object) -> None:
+    def _dispatch(self, raw: object, *, from_pending: bool = False) -> None:
         # GUI sends the bare mode string ("auto", "stop", …) — same as the
         # value the dashboard used to receive in dataDict["Value"].
         mode = str(raw).strip().lower()
@@ -88,21 +94,51 @@ class threadModeRouter(ThreadWithStop):
                 "warning",
                 f"DRIVING_MODE ignored — unknown value {raw!r}",
             )
+            live_log(
+                "mode_router",
+                event="driving_mode_ignored",
+                mode=str(raw),
+                reason="unknown_value",
+            )
             return
         sm = self._ensure_state_machine()
         if sm is None:
+            self._pending_mode = mode
             self._log(
                 "warning",
-                "DRIVING_MODE received before StateMachine initialised; dropping",
+                "DRIVING_MODE received before StateMachine initialised; retrying",
+            )
+            live_log(
+                "mode_router",
+                event="driving_mode_pending",
+                mode=mode,
+                reason="state_machine_unavailable",
+                from_pending=bool(from_pending),
             )
             return
         action = f"dashboard_{mode}_button"
         try:
-            sm.request_mode(action)
+            changed = sm.request_mode(action)
+            live_log(
+                "mode_router",
+                event="driving_mode_dispatched",
+                mode=mode,
+                action=action,
+                changed=bool(changed),
+                from_pending=bool(from_pending),
+            )
         except Exception as exc:
             self._log(
                 "warning",
                 f"StateMachine.request_mode({action!r}) failed: {exc}",
+            )
+            live_log(
+                "mode_router",
+                event="driving_mode_failed",
+                mode=mode,
+                action=action,
+                error=str(exc),
+                from_pending=bool(from_pending),
             )
 
     def _log(self, level: str, message: str) -> None:

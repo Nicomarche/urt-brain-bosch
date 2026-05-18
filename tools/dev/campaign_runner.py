@@ -1146,6 +1146,13 @@ def _compute_metrics(
     closer_side_counts = {"left": 0, "right": 0, "balanced": 0}
     per_lanelet: dict[str, dict[str, list[float]]] = {}
     route_ts = [float(ev.get("ts", 0.0) or 0.0) for ev in route_updates]
+    behavior_outputs = [
+        ev
+        for ev in brain_events
+        if ev.get("thread") == "behavior_planner" and ev.get("event") == "plan_output"
+    ]
+    behavior_ts = [float(ev.get("ts", 0.0) or 0.0) for ev in behavior_outputs]
+    per_scenario: dict[str, list[float]] = {}
 
     def lanelet_at(ts: float) -> str | None:
         if not route_ts:
@@ -1155,6 +1162,19 @@ def _compute_metrics(
             return None
         lanelet = route_updates[idx].get("current_lanelet_id")
         return str(lanelet) if lanelet is not None else None
+
+    def scenario_at(ts: float) -> str:
+        if not behavior_ts:
+            return "unknown"
+        idx = bisect.bisect_right(behavior_ts, ts) - 1
+        if idx < 0:
+            return "unknown"
+        scenario = (
+            behavior_outputs[idx].get("scenario")
+            or behavior_outputs[idx].get("scenario_name")
+            or "unknown"
+        )
+        return str(scenario)
 
     for ev in lane_events:
         offset_m = _finite_float(ev.get("offset_m"))
@@ -1166,6 +1186,10 @@ def _compute_metrics(
         visual_offset_m = center_offset_m if center_offset_m is not None else offset_m
         if visual_offset_m is not None:
             lane_offsets.append(visual_offset_m)
+            per_scenario.setdefault(
+                scenario_at(float(ev.get("ts", 0.0) or 0.0)),
+                [],
+            ).append(abs(visual_offset_m))
         if left_m is not None and right_m is not None:
             line_left_distances.append(left_m)
             line_right_distances.append(right_m)
@@ -1205,8 +1229,10 @@ def _compute_metrics(
             bucket["line_center_offset_abs_m"].append(abs(center_offset_m))
 
     lane_abs_offsets = [abs(value) for value in lane_offsets]
-    lane_p90 = _percentile(lane_abs_offsets, 90) if lane_abs_offsets else None
-    lane_max = max(lane_abs_offsets) if lane_abs_offsets else None
+    scored_lane_abs_offsets = per_scenario.get("lane_keep") or lane_abs_offsets
+    lane_score_scope = "lane_keep" if per_scenario.get("lane_keep") else "all"
+    lane_p90 = _percentile(scored_lane_abs_offsets, 90) if scored_lane_abs_offsets else None
+    lane_max = max(scored_lane_abs_offsets) if scored_lane_abs_offsets else None
 
     per_lanelet_summary: dict[str, Any] = {}
     for lanelet_id, bucket in sorted(per_lanelet.items(), key=lambda item: item[0]):
@@ -1222,7 +1248,11 @@ def _compute_metrics(
             "line_center_offset_m": _summary(center_offsets),
             "line_center_offset_abs_m": _summary(bucket["line_center_offset_abs_m"]),
         }
-    if lane_abs_offsets:
+    per_scenario_summary = {
+        scenario: _summary(values)
+        for scenario, values in sorted(per_scenario.items(), key=lambda item: item[0])
+    }
+    if scored_lane_abs_offsets:
         if lane_p90 is not None and lane_p90 <= max_lane_offset_p90_m:
             pass_reasons.append("visual_lane_offset_p90_ok")
         else:
@@ -1261,6 +1291,64 @@ def _compute_metrics(
     else:
         fail_reasons.append("mpc_backend_not_acados")
 
+    pose_events = [
+        ev
+        for ev in brain_events
+        if ev.get("thread") == "pose_estimator" and ev.get("event") == "pose_published"
+    ]
+    if auto_start_ts is not None:
+        pose_events = [
+            ev
+            for ev in pose_events
+            if float(ev.get("ts", 0.0) or 0.0) >= float(auto_start_ts)
+        ]
+    feedback_invalid_sources = {"command", "auto_command_hold", "manual_command_hold"}
+    speed_source_counts: dict[str, int] = {}
+    invalid_speed_events: list[dict[str, Any]] = []
+    imu_missing = 0
+    longest_invalid_s = 0.0
+    invalid_start_ts: float | None = None
+    previous_invalid_ts: float | None = None
+    previous_ts: float | None = None
+    for ev in pose_events:
+        ts = float(ev.get("ts", 0.0) or 0.0)
+        source = str(ev.get("speed_source") or "unknown")
+        speed_source_counts[source] = speed_source_counts.get(source, 0) + 1
+        if ev.get("imu_yaw_raw") is None:
+            imu_missing += 1
+        is_invalid = source in feedback_invalid_sources
+        contiguous = (
+            previous_invalid_ts is not None
+            and previous_ts is not None
+            and (ts - previous_ts) <= 0.20
+        )
+        if is_invalid:
+            invalid_speed_events.append(ev)
+            if invalid_start_ts is None or not contiguous:
+                invalid_start_ts = ts
+            previous_invalid_ts = ts
+            longest_invalid_s = max(longest_invalid_s, ts - invalid_start_ts)
+        else:
+            invalid_start_ts = None
+            previous_invalid_ts = None
+        previous_ts = ts
+
+    invalid_ratio = (
+        len(invalid_speed_events) / len(pose_events) if pose_events else 1.0
+    )
+    imu_missing_ratio = imu_missing / len(pose_events) if pose_events else 1.0
+    if pose_events:
+        if invalid_ratio <= 0.10 and longest_invalid_s <= 1.50:
+            pass_reasons.append("odometry_feedback_real")
+        else:
+            fail_reasons.append("odometry_feedback_lost")
+        if imu_missing_ratio <= 0.20:
+            pass_reasons.append("imu_feedback_present")
+        else:
+            fail_reasons.append("imu_feedback_missing_high")
+    else:
+        fail_reasons.append("no_pose_feedback_samples")
+
     passed = not fail_reasons
     return {
         "passed": passed,
@@ -1271,6 +1359,14 @@ def _compute_metrics(
             "compute_backends": compute_backends,
             "non_acados_compute_backends": non_acados_compute_backends,
             "backend_selected_events": backend_selected_events,
+        },
+        "feedback": {
+            "pose_samples": len(pose_events),
+            "speed_source_counts": speed_source_counts,
+            "invalid_speed_sources": sorted(feedback_invalid_sources),
+            "invalid_speed_source_ratio": invalid_ratio,
+            "longest_invalid_speed_source_s": longest_invalid_s,
+            "imu_missing_ratio": imu_missing_ratio,
         },
         "route": {
             "completed": route_completed,
@@ -1298,15 +1394,18 @@ def _compute_metrics(
         },
         "visual_lane": {
             "samples": len(lane_abs_offsets),
+            "scored_samples": len(scored_lane_abs_offsets),
+            "score_scope": lane_score_scope,
             "offset_source": "line_center_offset_m when available, offset_m fallback",
             "offset_abs_m": {
-                "p50": _percentile(lane_abs_offsets, 50) if lane_abs_offsets else None,
+                "p50": _percentile(scored_lane_abs_offsets, 50) if scored_lane_abs_offsets else None,
                 "p90": lane_p90,
-                "p99": _percentile(lane_abs_offsets, 99) if lane_abs_offsets else None,
+                "p99": _percentile(scored_lane_abs_offsets, 99) if scored_lane_abs_offsets else None,
                 "max": lane_max,
                 "threshold_p90": max_lane_offset_p90_m,
                 "threshold_max": max_lane_offset_max_m,
             },
+            "all_offset_abs_m": _summary(lane_abs_offsets),
             "offset_signed_mean_m": (
                 sum(lane_offsets) / len(lane_offsets)
                 if lane_offsets
@@ -1320,6 +1419,7 @@ def _compute_metrics(
             "line_center_offset_m": _summary(line_center_offsets),
             "line_center_offset_abs_m": _summary([abs(value) for value in line_center_offsets]),
             "closer_side_counts": closer_side_counts,
+            "by_scenario": per_scenario_summary,
             "per_lanelet": per_lanelet_summary,
         },
     }
@@ -2378,11 +2478,15 @@ def main() -> int:
         if not args.skip_cleanup_before:
             _cleanup_known_processes(brain_dir, sim_dir)
 
+        sim_env = os.environ.copy()
+        sim_env.setdefault("URT_SIM_GPS_ENABLED", "0")
+        sim_env.setdefault("URT_SIM_POSE_FEEDBACK_ENABLED", "0")
         processes.append(
             _run(
                 ["./run_sim.sh", "--headless"],
                 cwd=sim_dir,
                 stdout_path=sim_run_dir / "sim.stdout",
+                env=sim_env,
                 name="gz_sim",
             )
         )
@@ -2413,6 +2517,8 @@ def main() -> int:
         brain_env = os.environ.copy()
         brain_env["URT_LIVE_LOG_PATH"] = str(brain_jsonl)
         brain_env["URT_SIM_MODE"] = "1"
+        brain_env.setdefault("URT_GPS_ENABLED", "0")
+        brain_env.setdefault("URT_TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", "0")
         brain_env.setdefault("URT_FORCE_PURE_PURSUIT", "0")
         brain_env.setdefault("URT_EXPECTED_MPC_BACKEND", "acados")
         brain_env.setdefault("URT_DISABLE_AUTO_PARKING", "1")

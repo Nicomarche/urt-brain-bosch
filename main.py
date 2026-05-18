@@ -137,6 +137,7 @@ from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.bus.topics import STATE_CHANGE, WARNING_SIGNAL
+from src.core.log_paths import ensure_live_log_environment
 from src.recording.manual_session_recorder import ManualSessionRecorder
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
@@ -192,6 +193,9 @@ def manage_process_life(process_class, process_instance, process_args, enabled, 
 # ======================================== SETTING UP ====================================
 
 def main():
+    log_env = ensure_live_log_environment()
+    print(f"[ main ] Live log -> {log_env['live_log_path']}")
+    print(f"[ main ] Run log dir -> {log_env['run_dir']}")
     print(BigPrint.PLEASE_WAIT.value)
     allProcesses = list()
     allEvents = list()
@@ -302,7 +306,7 @@ def main():
     # ------ New component initialize starts here ------#
 
     # ManualSessionRecorder: archiva el bus completo a disco mientras
-    # el vehículo está en MANUAL. No tiene ready_event porque su loop
+    # el vehículo está en MANUAL/AUTO. No tiene ready_event porque su loop
     # de drenaje es no-bloqueante y arranca grabando vacío hasta que
     # llegue la primera transición a manual (gratis vía LATCHED).
     manualSessionRecorderInstance = ManualSessionRecorder(queueList, logger)

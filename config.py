@@ -606,7 +606,8 @@ LOCSYS_DIRECT_FALLBACK_ENABLED = _os.environ.get("URT_LOCSYS_DIRECT_FALLBACK", "
 TRAFFIC_COMM_SEND_EGO_DATA = False if _SIM_MODE else True
 TRAFFIC_COMM_SEND_PERIOD_S = 0.25
 
-GPS_ENABLED          = _os.environ.get("URT_GPS_ENABLED", "1") == "1"  # habilitar threadLocSys
+_GPS_ENABLED_DEFAULT = "0" if _SIM_MODE else "1"
+GPS_ENABLED          = _os.environ.get("URT_GPS_ENABLED", _GPS_ENABLED_DEFAULT) == "1"  # habilitar threadLocSys
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
 
 # DEPRECATED: el bridge nativo ahora hace toda la conversión `brain_map ↔ gz`
@@ -643,7 +644,8 @@ ACADOS_MPC_REFERENCE_MAX_PREVIEW_M = 1.28
 # el auto está en movimiento no debe mandar menos de 20 cm/s.
 BEHAVIOR_MIN_SPEED_MPS = 0.20       # velocidad mínima de movimiento = 20 cm/s
 BEHAVIOR_CITY_MIN_SPEED_MPS = 0.20  # ciudad: mínimo de movimiento = 20 cm/s
-BEHAVIOR_HIGHWAY_MIN_SPEED_MPS = 0.40  # autopista: mínimo de movimiento = 40 cm/s
+BEHAVIOR_HIGHWAY_SPEED_MPS = 0.25 if _SIM_MODE else 0.80
+BEHAVIOR_HIGHWAY_MIN_SPEED_MPS = 0.20 if _SIM_MODE else 0.40  # autopista: mínimo de movimiento
 TRAFFIC_SIGN_LOW_SPEED_MPS = 0.10   # parking/crosswalk: excepción visible = 10 cm/s
 TRAFFIC_SIGN_STOP_HOLD_S = 3.0      # STOP: tiempo detenido antes de continuar
 SIGN_HINT_MAX_AGE_S = 1.5           # vida útil de hints de señales en BehaviorPlanner
@@ -668,7 +670,9 @@ BEHAVIOR_NOMINAL_SPEED_MPS = 0.25   # target base; Acados re-temporiza preview c
 # bajaba una velocidad nominal de 0.25 m/s; este límite fuerza curvas cerradas
 # a caer al piso competitivo antes de entrar.
 BEHAVIOR_CURVE_A_LAT_MAX_MPS2 = 0.08
-BEHAVIOR_CURVE_SPEED_FLOOR_MPS = BEHAVIOR_MIN_SPEED_MPS
+BEHAVIOR_CURVE_SPEED_FLOOR_MPS = 0.10
+BEHAVIOR_INTERSECTION_SPEED_MPS = 0.12
+BEHAVIOR_INTERSECTION_MIN_SPEED_MPS = 0.08
 
 # Hard cap absoluto. Aplicado por velocity_overlay al final, ningún
 # scenario puede emitir velocidades por encima.
@@ -864,14 +868,19 @@ VISUAL_CORRECTION_PROFILES = {
         "step_max_m": 0.022,
     },
     "intersection": {
-        "gain": 0.05,
-        "max_m": 0.01,
-        "step_max_m": 0.005,
+        # En sim sin GPS/GT, la odometría puede quedarse "en ruta" mientras
+        # el chasis físico se abre hacia el carril paralelo en bifurcaciones
+        # (post-mortem run_to282_no_gps_iter2, salida 1247→221). Cuando hay
+        # two_line, usamos la cámara con autoridad moderada también en
+        # intersección. Single_line sigue ignorado desde pose_estimator.
+        "gain": 0.10,
+        "max_m": 0.02,
+        "step_max_m": 0.008,
     },
     "roundabout": {
-        "gain": 0.05,
-        "max_m": 0.01,
-        "step_max_m": 0.005,
+        "gain": 0.10,
+        "max_m": 0.02,
+        "step_max_m": 0.008,
     },
     "parking": {
         "gain": 0.0,
@@ -892,6 +901,43 @@ TRACKING_VISUAL_LANE_RELOCALIZATION_MAX_RAW_ERROR_M = 0.25
 # allow the local MPC target to nudge toward the visually observed lane center
 # when the lanelet map and the simulator texture disagree by a few centimetres.
 BEHAVIOR_ROUTE_VISUAL_REENTRY_ENABLED = True
+BEHAVIOR_ROUTE_VISUAL_REENTRY_PROFILES = {
+    "default": {
+        "enabled": True,
+        "gain_scale": 1.0,
+        "max_shift_m": 0.10,
+        "fade_distance_m": 0.80,
+        "min_error_m": 0.03,
+    },
+    "lane_keep": {
+        "enabled": True,
+        "gain_scale": 1.0,
+        "max_shift_m": 0.10,
+        "fade_distance_m": 0.80,
+        "min_error_m": 0.03,
+    },
+    "intersection": {
+        "enabled": True,
+        "gain_scale": 0.50,
+        "max_shift_m": 0.05,
+        "fade_distance_m": 0.50,
+        "min_error_m": 0.035,
+    },
+    "roundabout": {
+        "enabled": True,
+        "gain_scale": 0.50,
+        "max_shift_m": 0.05,
+        "fade_distance_m": 0.50,
+        "min_error_m": 0.035,
+    },
+    "parking": {
+        "enabled": False,
+        "gain_scale": 0.0,
+        "max_shift_m": 0.0,
+        "fade_distance_m": 0.0,
+        "min_error_m": 0.03,
+    },
+}
 
 # Recovery del matcher/ruta a escala BFMC. En un carril de 35 cm no podemos
 # esperar 60-75 cm de error para intentar volver a la ruta.
@@ -944,7 +990,9 @@ TRACKING_COMMAND_SPEED_FALLBACK_TIMEOUT_S = 0.50
 TRACKING_COMMAND_SPEED_FALLBACK_SCALE = 1.0
 # True = si falta encoder reciente, el pose estimator puede propagar la pose con
 # el último comando de velocidad fresco en lugar de congelar el DR.
-TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = True
+TRACKING_COMMAND_SPEED_FALLBACK_ENABLED = (
+    _os.environ.get("URT_TRACKING_COMMAND_SPEED_FALLBACK_ENABLED", "1") == "1"
+)
 TRACKING_STEER_FEEDBACK_TIMEOUT_S = 0.35
 
 # Filtro de encoder portado de urt-ref: si el encoder fresco contradice fuerte

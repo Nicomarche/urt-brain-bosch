@@ -73,6 +73,13 @@ def test_session_path_uses_env_when_set(monkeypatch, tmp_path):
     assert out.name.startswith("manual_")
 
 
+def test_session_path_uses_mode_prefix(monkeypatch, tmp_path):
+    monkeypatch.setenv("URT_LOG_RUN_DIR", str(tmp_path))
+    out = _safe_session_path(0.0, "AUTO")
+    assert str(out).startswith(str(tmp_path))
+    assert out.name.startswith("auto_")
+
+
 def test_session_path_falls_back_to_temp(monkeypatch):
     monkeypatch.delenv("URT_LOG_RUN_DIR", raising=False)
     out = _safe_session_path(0.0)
@@ -127,7 +134,7 @@ def session_state(tmp_path: Path) -> _SessionState:
     session_dir = tmp_path / "manual_20260518_000000"
     session_dir.mkdir()
     topics = [bus_topics.IMU_DATA, bus_topics.LOCAL_LANE_PERCEPTION]
-    state = _SessionState(session_dir, topics, started_at=1000.0)
+    state = _SessionState(session_dir, topics, started_at=1000.0, mode="MANUAL")
     yield state
     state.close(reason="test")
 
@@ -144,7 +151,7 @@ def test_session_state_creates_layout(session_state: _SessionState):
 def test_session_state_writes_to_both_streams(tmp_path: Path):
     session_dir = tmp_path / "manual_test"
     session_dir.mkdir()
-    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=1.0)
+    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=1.0, mode="MANUAL")
     state.write(bus_topics.IMU_DATA.name, {"yaw": 0.1})
     state.close(reason="test")
 
@@ -160,7 +167,7 @@ def test_session_state_writes_to_both_streams(tmp_path: Path):
 def test_session_state_closes_manifest_with_reason(tmp_path: Path):
     session_dir = tmp_path / "manual_test"
     session_dir.mkdir()
-    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=10.0)
+    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=10.0, mode="AUTO")
     state.write(bus_topics.IMU_DATA.name, {"a": 1})
     state.write(bus_topics.IMU_DATA.name, {"a": 2})
     state.close(reason="mode_exit")
@@ -169,12 +176,13 @@ def test_session_state_closes_manifest_with_reason(tmp_path: Path):
     assert manifest["end_ts"] is not None
     assert manifest["events_count"] == 2
     assert manifest["session_dir"] == str(session_dir)
+    assert manifest["mode"] == "AUTO"
 
 
 def test_session_state_silently_ignores_unserializable(tmp_path: Path):
     session_dir = tmp_path / "manual_test"
     session_dir.mkdir()
-    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=1.0)
+    state = _SessionState(session_dir, [bus_topics.IMU_DATA], started_at=1.0, mode="MANUAL")
 
     class Foo:
         pass
@@ -320,9 +328,13 @@ def test_recorder_mode_handler_preserves_short_manual_session(monkeypatch):
     rec = ManualSessionRecorder({})
     calls = []
 
-    def open_session(reason_for_open):
-        calls.append(("open", reason_for_open))
-        rec._session = object()
+    class Session:
+        def __init__(self, mode):
+            self.mode = mode
+
+    def open_session(mode, reason_for_open):
+        calls.append(("open", mode, reason_for_open))
+        rec._session = Session(mode)
 
     def close_session(reason):
         calls.append(("close", reason))
@@ -337,9 +349,13 @@ def test_recorder_mode_handler_preserves_short_manual_session(monkeypatch):
     rec._handle_mode("AUTO")
 
     assert calls == [
-        ("open", "mode_enter"),
+        ("open", "AUTO", "startup"),
         ("drain", None),
-        ("close", "mode_exit"),
+        ("close", "mode_switch"),
+        ("open", "MANUAL", "mode_enter"),
+        ("drain", None),
+        ("close", "mode_switch"),
+        ("open", "AUTO", "mode_enter"),
     ]
 
 
@@ -365,15 +381,30 @@ def test_driving_mode_manual_command_opens_session(monkeypatch):
     rec = ManualSessionRecorder({})
     calls = []
 
-    def open_session(reason_for_open):
-        calls.append(("open", reason_for_open))
+    def open_session(mode, reason_for_open):
+        calls.append(("open", mode, reason_for_open))
         rec._session = object()
 
     monkeypatch.setattr(rec, "_open_session", open_session)
 
     rec._handle_mode("MANUAL", source="driving_mode")
 
-    assert calls == [("open", "driving_mode_manual")]
+    assert calls == [("open", "MANUAL", "driving_mode_manual")]
+
+
+def test_driving_mode_auto_command_opens_session(monkeypatch):
+    rec = ManualSessionRecorder({})
+    calls = []
+
+    def open_session(mode, reason_for_open):
+        calls.append(("open", mode, reason_for_open))
+        rec._session = object()
+
+    monkeypatch.setattr(rec, "_open_session", open_session)
+
+    rec._handle_mode("AUTO", source="driving_mode")
+
+    assert calls == [("open", "AUTO", "driving_mode_auto")]
 
 
 def test_recorder_records_real_bus_messages_and_closes_on_stop(

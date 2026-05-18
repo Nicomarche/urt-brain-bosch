@@ -356,6 +356,44 @@ def test_velocity_planner_caps_speed_for_lane_containment_warning() -> None:
     )
 
 
+def test_velocity_planner_prefers_line_center_offset_for_visual_containment() -> None:
+    ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.25, max_speed_mps=0.40)
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            direct_error_m=0.22,
+            line_center_offset_m=0.04,
+            control_policy_mode="ROUTE_TRACKING",
+        ),
+    )
+    target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=target_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.25, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+    )
+
+    out = BehaviorVelocityPlanner().build_output(
+        path_plan=plan,
+        target_path=target_path,
+        drivable_left_bound=np.zeros((21, 2), dtype=float),
+        drivable_right_bound=np.zeros((21, 2), dtype=float),
+        optimizer_notes={"ego_corridor_error_m": 0.0},
+        ctx=ctx,
+    )
+
+    assert not any(
+        note.get("kind") == "lane_containment"
+        for note in out.notes.get("velocity_modules", [])
+    )
+
+
 def test_velocity_planner_crawls_when_corridor_touches_bound() -> None:
     ctx = make_context(horizon_n=20, dt=0.1, nominal_speed_mps=0.25, max_speed_mps=0.40)
     target_path = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21), np.zeros(21)])

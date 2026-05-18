@@ -23,10 +23,13 @@ from src.routing.lanelet.attributes import (
 )
 
 
-_HIGHWAY_SPEED_MPS = 0.80
 try:
-    from config import BEHAVIOR_HIGHWAY_MIN_SPEED_MPS as _HIGHWAY_MIN_SPEED_MPS
+    from config import (
+        BEHAVIOR_HIGHWAY_MIN_SPEED_MPS as _HIGHWAY_MIN_SPEED_MPS,
+        BEHAVIOR_HIGHWAY_SPEED_MPS as _HIGHWAY_SPEED_MPS,
+    )
 except Exception:
+    _HIGHWAY_SPEED_MPS = 0.80
     _HIGHWAY_MIN_SPEED_MPS = 0.40
 
 

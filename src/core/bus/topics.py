@@ -254,9 +254,9 @@ PERCEPTION_DEBUG: Topic[dict] = Topic(
 
 # ─── ManualSessionRecorder lifecycle ────────────────────────────────────────
 # Publicado por ``src.recording.manual_session_recorder`` al abrir/cerrar una
-# sesión de grabación exhaustiva en modo MANUAL. Payload::
+# sesión de grabación exhaustiva en modo MANUAL/AUTO. Payload::
 #   {"active": bool, "session_dir": str, "started_at": float,
-#    "session_id": str}
+#    "session_id": str, "mode": str}
 # ``session_dir`` es absoluto y ya existe en disco cuando el mensaje se emite.
 # LATCHED para que los grabadores de video (threadCamera, threadLocalPerception)
 # que arrancan después del recorder vean inmediatamente la sesión activa.

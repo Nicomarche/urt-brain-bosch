@@ -981,6 +981,55 @@ def test_path_optimizer_biases_prefix_back_toward_visual_lane_center() -> None:
     assert out.target_path[peak_idx, 1] > out.target_path[-1, 1]
 
 
+def test_path_optimizer_limits_visual_reentry_in_intersection_scenario() -> None:
+    ctx = replace(
+        make_context(
+            pose_x=0.0,
+            pose_y=0.0,
+            pose_yaw=0.0,
+            speed_mps=0.04,
+            horizon_n=12,
+            dt=0.05,
+            current_lanelet_id="lanelet-a",
+            nominal_speed_mps=0.1,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            direct_error_m=-0.40,
+            line_center_offset_m=-0.22,
+            quality=1.0,
+            measurement_mode="two_line",
+            direct_error_valid=True,
+            control_policy_mode="ROUTE_TRACKING",
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.1, dtype=float),
+        scenario_name=ScenarioName.INTERSECTION.value,
+        valid=True,
+        notes={"path_source": "route_waypoints"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_active"] is True
+    assert out.notes["visual_lane_reentry_profile"] == ScenarioName.INTERSECTION.value
+    assert out.notes["visual_lane_measurement_source"] == "line_center_offset_m"
+    assert abs(out.notes["visual_lane_shift_m"]) <= 0.05 + 1e-9
+    assert out.notes["visual_lane_prefix_samples"] >= 1
+    assert float(np.max(np.abs(out.target_path[:, 1]))) < 0.06
+
+
 def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measurement() -> None:
     ctx = replace(
         make_context(

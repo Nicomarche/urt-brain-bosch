@@ -1,10 +1,11 @@
-"""Persistencia exhaustiva de runs en modo MANUAL.
+"""Persistencia exhaustiva de runs en modo MANUAL/AUTO.
 
 El productor central es :class:`ManualSessionRecorder` (proceso aparte
 arrancado por :mod:`main`). Suscribe a ``STATE_CHANGE`` y, mientras dura
-cada entrada a ``SystemMode.MANUAL``, drena todo el bus a JSONL bajo
-``$URT_LOG_RUN_DIR/manual_<ts>/``. Para coordinarse con los grabadores
-de video que viven dentro de ``processCamera`` (que tap'ean buffers
+cada entrada a ``SystemMode.MANUAL`` o ``SystemMode.AUTO``, drena todo el
+bus a JSONL bajo ``$URT_LOG_RUN_DIR/manual_<ts>/`` o
+``$URT_LOG_RUN_DIR/auto_<ts>/``. Para coordinarse con los grabadores de
+video que viven dentro de ``processCamera`` (que tap'ean buffers
 intra-proceso sin pasar por el bus), publica el topic LATCHED
 ``MANUAL_RECORDING_SESSION`` con el path absoluto de la subcarpeta.
 """
