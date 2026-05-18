@@ -541,7 +541,17 @@ LOCSYS_DEVICE_ID     = 1               # ID del coche en la red BFMC (1–4)
 SIM_LOCSYS_HOST      = "localhost"
 SIM_LOCSYS_PORT      = 4691
 
-GPS_ENABLED          = True            # habilitar threadLocSys (sim + competencia)
+# GPS está OFF en sim para reproducir el escenario "sin GPS" que vemos en
+# pista real (donde no tenemos el LOCSYS device de BFMC). De ese modo el
+# coche depende de DR + correcciones visuales + corridor_yaw_reset, igual
+# que en hardware. En Jetson (sim_mode=False) GPS_ENABLED=True para
+# conectar al locsys real durante la competencia. Override con env var
+# `URT_GPS_ENABLED=1` (forzar on) o `URT_GPS_ENABLED=0` (forzar off).
+_GPS_DEFAULT_ENABLED = not _SIM_MODE
+GPS_ENABLED          = _os.environ.get(
+    "URT_GPS_ENABLED",
+    "1" if _GPS_DEFAULT_ENABLED else "0",
+) == "1"
 GPS_RECONNECT_S      = 2.0             # segundos entre reintentos de conexión
 
 # DEPRECATED: el bridge nativo ahora hace toda la conversión `brain_map ↔ gz`
