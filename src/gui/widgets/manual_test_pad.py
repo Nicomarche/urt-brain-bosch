@@ -27,6 +27,11 @@ Layout
       ┌── Steer=-100 ─┐ ┌─── Stop ───┐ ┌── Steer=+100 ─┐
       ┌─ Speed=-200 ┐  ┌── Brake ──┐
       ┌─ Speed=50 ─┐  ┌─ Speed=0 ─┐
+
+Extended for steering-calibration work:
+
+      ┌─ Speed=100 ─┐  ┌── Steer=-250 ─┐  ┌── Steer=+250 ─┐
+      ┌ Arc L 100/-250 ┐               ┌ Arc R 100/+250 ┐
 """
 
 from __future__ import annotations
@@ -57,9 +62,11 @@ _logger = logging.getLogger(__name__)
 # acumulás presses de W o sostenés A/D — solo que acá los mandamos
 # de un saque.
 _SPEED_LOW = 50      # 5 cm/s — debajo de la fricción estática típica
+_SPEED_MED = 100     # 10 cm/s — útil para radio/curvatura en pista chica
 _SPEED_HIGH = 200    # 20 cm/s — debería arrancar en cualquier setup
 _SPEED_REV = -200    # marcha atrás
 _STEER_FULL = 100    # 10° (la mitad del rango ±25°)
+_STEER_MAX = 250     # 25° (límite típico del coche real)
 
 
 class ManualTestPad(QWidget):
@@ -75,6 +82,8 @@ class ManualTestPad(QWidget):
         # Fila 1: speed forward + reverse
         b_spd_low = self._btn(f"▲ Speed={_SPEED_LOW}",
                               lambda: self._emit(ev.CMD_SPEED, _SPEED_LOW))
+        b_spd_med = self._btn(f"▲ Speed={_SPEED_MED}",
+                              lambda: self._emit(ev.CMD_SPEED, _SPEED_MED))
         b_spd_high = self._btn(f"▲▲ Speed={_SPEED_HIGH}",
                                lambda: self._emit(ev.CMD_SPEED, _SPEED_HIGH))
         b_spd_rev = self._btn(f"▼ Speed={_SPEED_REV}",
@@ -90,7 +99,21 @@ class ManualTestPad(QWidget):
         b_str_r = self._btn(f"Steer={_STEER_FULL} ▶",
                             lambda: self._emit(ev.CMD_STEER, _STEER_FULL))
 
-        # Fila 3: brake (mantengo separado porque corta speed Y steer en firmware)
+        # Fila 3: steer calibration / constant-turn helpers
+        b_str_l_max = self._btn(f"◀◀ Steer={-_STEER_MAX}",
+                                lambda: self._emit(ev.CMD_STEER, -_STEER_MAX))
+        b_arc_l = self._btn(
+            f"Arc L {_SPEED_MED}/{-_STEER_MAX}",
+            lambda: self._emit_pair(_SPEED_MED, -_STEER_MAX),
+        )
+        b_arc_r = self._btn(
+            f"Arc R {_SPEED_MED}/{_STEER_MAX}",
+            lambda: self._emit_pair(_SPEED_MED, _STEER_MAX),
+        )
+        b_str_r_max = self._btn(f"Steer={_STEER_MAX} ▶▶",
+                                lambda: self._emit(ev.CMD_STEER, _STEER_MAX))
+
+        # Fila 4: brake (mantengo separado porque corta speed Y steer en firmware)
         b_brake = self._btn("⏹ BRAKE",
                             lambda: self._emit(ev.CMD_BRAKE, 0))
         b_brake.setStyleSheet(self._btn_style(accent="#d9534f"))
@@ -99,14 +122,20 @@ class ManualTestPad(QWidget):
         grid.setSpacing(6)
         grid.addWidget(b_spd_high, 0, 0)
         grid.addWidget(b_spd_low,  0, 1)
-        grid.addWidget(b_spd_zero, 0, 2)
-        grid.addWidget(b_spd_rev,  0, 3)
+        grid.addWidget(b_spd_med,  0, 2)
+        grid.addWidget(b_spd_zero, 0, 3)
+        grid.addWidget(b_spd_rev,  0, 4)
 
         grid.addWidget(b_str_l, 1, 0)
-        grid.addWidget(b_str_0, 1, 1, 1, 2)
-        grid.addWidget(b_str_r, 1, 3)
+        grid.addWidget(b_str_0, 1, 1, 1, 3)
+        grid.addWidget(b_str_r, 1, 4)
 
-        grid.addWidget(b_brake, 2, 0, 1, 4)
+        grid.addWidget(b_str_l_max, 2, 0)
+        grid.addWidget(b_arc_l,     2, 1)
+        grid.addWidget(b_arc_r,     2, 2)
+        grid.addWidget(b_str_r_max, 2, 4)
+
+        grid.addWidget(b_brake, 3, 0, 1, 5)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 4, 8, 4)
@@ -126,6 +155,19 @@ class ManualTestPad(QWidget):
             f" {cmd}={wire}"
         )
         self._client.emit_message(cmd, wire)
+
+    def _emit_pair(self, speed: int, steer: int) -> None:
+        """Convenience macro for constant-turn tests.
+
+        Send speed first, then steer, so the operator can trigger a
+        repeatable arc with one click instead of holding keyboard keys.
+        """
+        print(
+            f"\033[1;97m[ ManualTestPad ] :\033[0m \033[1;96mSEND\033[0m"
+            f" pair speed={speed} steer={steer}"
+        )
+        self._client.emit_message(ev.CMD_SPEED, str(speed))
+        self._client.emit_message(ev.CMD_STEER, str(steer))
 
     # ------------------------------------------------------------------
     def _btn(self, label: str, slot) -> QPushButton:

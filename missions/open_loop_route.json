@@ -1,0 +1,49 @@
+{
+  "name": "Pista Open-Loop",
+  "description": "Ruta abierta por tiempo. La GUI la ejecuta en MANUAL mandando speed/steer crudos y no depende de AUTO, camara, IMU ni planner. Edita durations/speeds/angles segun tu pista real.",
+  "final_brake": true,
+  "steps": [
+    {
+      "label": "Arm neutral",
+      "duration_s": 0.5,
+      "speed_cms": 0.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Straight 1",
+      "duration_s": 2.5,
+      "speed_cms": 20.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Right arc 1",
+      "duration_s": 2.0,
+      "speed_cms": 20.0,
+      "steer_deg": 20.0
+    },
+    {
+      "label": "Straight 2",
+      "duration_s": 2.5,
+      "speed_cms": 20.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Left arc 1",
+      "duration_s": 2.0,
+      "speed_cms": 20.0,
+      "steer_deg": -20.0
+    },
+    {
+      "label": "Straight 3",
+      "duration_s": 2.5,
+      "speed_cms": 20.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Stop neutral",
+      "duration_s": 0.5,
+      "speed_cms": 0.0,
+      "steer_deg": 0.0
+    }
+  ]
+}

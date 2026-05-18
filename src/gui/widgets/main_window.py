@@ -315,6 +315,7 @@ def _build_driving_tab(client: SocketIOClient, window: "MainWindow",
     from .control_panel import ControlPanel
     from .manual_test_pad import ManualTestPad
     from .map_view import MapView
+    from .scripted_route_pad import ScriptedRoutePad
     from .telemetry import TelemetryCluster
 
     container = QWidget()
@@ -326,6 +327,7 @@ def _build_driving_tab(client: SocketIOClient, window: "MainWindow",
     control.install_keyboard_on(QApplication.instance())
     layout.addWidget(control)
     layout.addWidget(ManualTestPad(client))
+    layout.addWidget(ScriptedRoutePad(client))
 
     body = QSplitter(_Qt.Horizontal)
     body.addWidget(CameraView(client, show_fps=True, video_source=video_source))

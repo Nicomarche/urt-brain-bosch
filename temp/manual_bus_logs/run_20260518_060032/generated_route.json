@@ -1,0 +1,49 @@
+{
+  "name": "Generated Route Test",
+  "description": "Generated from 20 cm/s right-turn run",
+  "final_brake": true,
+  "steps": [
+    {
+      "label": "Arm neutral",
+      "duration_s": 0.3,
+      "speed_cms": 0.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Right steer hold 1",
+      "duration_s": 3.709,
+      "speed_cms": 0.0,
+      "steer_deg": 25.0
+    },
+    {
+      "label": "Right arc 2",
+      "duration_s": 0.847,
+      "speed_cms": 10.0,
+      "steer_deg": 25.0
+    },
+    {
+      "label": "Right arc 3",
+      "duration_s": 0.594,
+      "speed_cms": 15.0,
+      "steer_deg": 25.0
+    },
+    {
+      "label": "Right arc 4",
+      "duration_s": 20.056,
+      "speed_cms": 20.0,
+      "steer_deg": 25.0
+    },
+    {
+      "label": "Straight 5",
+      "duration_s": 1.895,
+      "speed_cms": 20.0,
+      "steer_deg": 0.0
+    },
+    {
+      "label": "Stop neutral",
+      "duration_s": 0.5,
+      "speed_cms": 0.0,
+      "steer_deg": 0.0
+    }
+  ]
+}

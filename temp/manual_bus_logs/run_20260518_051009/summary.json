@@ -1,0 +1,29 @@
+{
+  "distance_delta_m": null,
+  "duration_s": 7.19,
+  "ended_wall_s": 1779091816.4648147,
+  "final_cmd_speed_cms": 0.0,
+  "final_cmd_steer_deg_wire": 0.0,
+  "final_distance_m": null,
+  "final_feedback_speed_cms": null,
+  "final_feedback_steer_deg_wire": null,
+  "final_state": "STOP",
+  "first_payload_seen_wall_s": 1779091809.4103782,
+  "host": "192.168.1.101",
+  "sample_rows": 142,
+  "started_wall_s": 1779091809.2752326,
+  "states_seen": [
+    "STOP"
+  ],
+  "topic_message_counts": {
+    "actuator_status": 15,
+    "current_distance": 0,
+    "current_speed": 0,
+    "current_steer": 0,
+    "imu_data": 0,
+    "localisation": 0,
+    "motor_command": 255,
+    "state_change": 1,
+    "steering_limits": 0
+  }
+}
