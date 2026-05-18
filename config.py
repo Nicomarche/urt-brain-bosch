@@ -37,7 +37,7 @@ LANE_VISUAL_PRIMARY_MAP_AUTHORITY_DISTANCE_M = 0.25
 LANE_VISUAL_PRIMARY_MIN_FORWARD_SPAN_M = 0.25
 LANE_VISUAL_PRIMARY_MAX_LATERAL_TO_FORWARD_RATIO = 1.2
 LANE_VISUAL_PRIMARY_MAX_HEADING_ERROR_DEG = 35.0
-LANE_VISUAL_PRIMARY_MAX_CORRIDOR_VIOLATION_M = 0.12
+LANE_VISUAL_PRIMARY_MAX_CORRIDOR_VIOLATION_M = 0.18
 LANE_VISUAL_PRIMARY_CORRIDOR_CHECK_MAX_MAP_MATCH_ERROR_M = 0.12
 LANE_VISUAL_PRIMARY_ENTER_TICKS = 3
 LANE_VISUAL_PRIMARY_EXIT_TICKS = 2
@@ -898,9 +898,9 @@ TRACKING_CHAMFER_ALIGNMENT_SEARCH_RADIUS_M = 0.28
 TRACKING_CHAMFER_ALIGNMENT_SEARCH_STEP_M = 0.02
 TRACKING_CHAMFER_ALIGNMENT_MIN_CORRECTION_M = 0.015
 TRACKING_CHAMFER_ALIGNMENT_MAX_STEP_M = 0.045
-TRACKING_CHAMFER_ALIGNMENT_COOLDOWN_S = 0.18
+TRACKING_CHAMFER_ALIGNMENT_COOLDOWN_S = 0.75
 TRACKING_CHAMFER_ALIGNMENT_MAX_COST_PX = 9.0
-TRACKING_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX = 1.25
+TRACKING_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX = 0.75
 TRACKING_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = 0.25
 TRACKING_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX = 3
 
@@ -967,31 +967,31 @@ BEHAVIOR_ROUTE_VISUAL_REENTRY_ENABLED = True
 BEHAVIOR_ROUTE_VISUAL_REENTRY_PROFILES = {
     "default": {
         "enabled": True,
-        "gain_scale": 1.0,
-        "max_shift_m": 0.10,
+        "gain_scale": 1.25,
+        "max_shift_m": 0.14,
         "fade_distance_m": 0.80,
-        "min_error_m": 0.03,
+        "min_error_m": 0.02,
     },
     "lane_keep": {
         "enabled": True,
-        "gain_scale": 1.0,
-        "max_shift_m": 0.10,
+        "gain_scale": 1.25,
+        "max_shift_m": 0.14,
         "fade_distance_m": 0.80,
-        "min_error_m": 0.03,
+        "min_error_m": 0.02,
     },
     "intersection": {
         "enabled": True,
-        "gain_scale": 0.50,
-        "max_shift_m": 0.05,
-        "fade_distance_m": 0.50,
-        "min_error_m": 0.035,
+        "gain_scale": 0.85,
+        "max_shift_m": 0.10,
+        "fade_distance_m": 0.70,
+        "min_error_m": 0.025,
     },
     "roundabout": {
         "enabled": True,
-        "gain_scale": 0.50,
-        "max_shift_m": 0.05,
-        "fade_distance_m": 0.50,
-        "min_error_m": 0.035,
+        "gain_scale": 0.85,
+        "max_shift_m": 0.10,
+        "fade_distance_m": 0.70,
+        "min_error_m": 0.025,
     },
     "parking": {
         "enabled": False,

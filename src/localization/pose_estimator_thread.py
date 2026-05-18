@@ -1574,6 +1574,7 @@ class threadPoseEstimator(threadTracking):
         if matcher is None:
             return raw_x, raw_y, raw_yaw, 0.0, False, None
 
+        match_started = time.monotonic()
         result = matcher.match_body_points(
             line_points,
             pose_x=float(raw_x),
@@ -1590,6 +1591,8 @@ class threadPoseEstimator(threadTracking):
             min_improvement_px=float(_CHAMFER_ALIGNMENT_MIN_IMPROVEMENT_PX),
             min_correction_m=float(_CHAMFER_ALIGNMENT_MIN_CORRECTION_M),
         )
+        match_finished = time.monotonic()
+        self._last_chamfer_alignment_monotonic = float(match_finished)
         live_log(
             "pose_estimator",
             event="visual_chamfer_match",
@@ -1606,6 +1609,7 @@ class threadPoseEstimator(threadTracking):
             min_point_count=int(_CHAMFER_ALIGNMENT_MIN_POINTS),
             valid_fraction=float(result.valid_fraction),
             best_offset_px=tuple(result.best_offset_px),
+            duration_ms=float((match_finished - match_started) * 1000.0),
         )
         if not bool(result.applied):
             return raw_x, raw_y, raw_yaw, 0.0, False, result
@@ -1621,7 +1625,6 @@ class threadPoseEstimator(threadTracking):
             norm = max_step
 
         self._dr.reset(float(raw_x) + dx_m, float(raw_y) + dy_m, float(raw_yaw))
-        self._last_chamfer_alignment_monotonic = float(now)
         new_x, new_y, new_yaw = self._dr.get_state()
         return new_x, new_y, new_yaw, float(norm), True, result
 

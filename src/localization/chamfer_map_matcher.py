@@ -163,24 +163,33 @@ class ChamferMapMatcher:
         step_px_x = max(1, int(round(float(search_step_m) / float(self.metadata["meters_per_pixel_x"]))))
         step_px_y = max(1, int(round(float(search_step_m) / float(self.metadata["meters_per_pixel_y"]))))
 
+        offsets = np.asarray(
+            [
+                (int(dx), int(dy))
+                for dy in _offset_range(radius_px_y, step_px_y)
+                for dx in _offset_range(radius_px_x, step_px_x)
+            ],
+            dtype=np.int32,
+        )
+        costs, fractions = self._costs_at_offsets(pixels, offsets)
         best_cost = float(baseline_cost)
         best_fraction = float(baseline_fraction)
         best_dx = 0
         best_dy = 0
-        best_offset_norm_sq = 0
-        for dy in _offset_range(radius_px_y, step_px_y):
-            for dx in _offset_range(radius_px_x, step_px_x):
-                cost, fraction = self._cost_at_offset(pixels, dx, dy)
-                offset_norm_sq = int(dx) * int(dx) + int(dy) * int(dy)
-                if (
-                    cost < best_cost - 1e-6
-                    or (abs(cost - best_cost) <= 1e-6 and offset_norm_sq < best_offset_norm_sq)
-                ):
-                    best_cost = float(cost)
-                    best_fraction = float(fraction)
-                    best_dx = int(dx)
-                    best_dy = int(dy)
-                    best_offset_norm_sq = int(offset_norm_sq)
+        finite_better = np.isfinite(costs) & (costs < (float(baseline_cost) - 1e-6))
+        if np.any(finite_better):
+            candidate_cost = float(np.min(costs[finite_better]))
+            tied = finite_better & (np.abs(costs - candidate_cost) <= 1e-6)
+            tied_indices = np.flatnonzero(tied)
+            offset_norm_sq = (
+                offsets[tied_indices, 0].astype(np.int64) * offsets[tied_indices, 0].astype(np.int64)
+                + offsets[tied_indices, 1].astype(np.int64) * offsets[tied_indices, 1].astype(np.int64)
+            )
+            best_index = int(tied_indices[int(np.argmin(offset_norm_sq))])
+            best_cost = float(costs[best_index])
+            best_fraction = float(fractions[best_index])
+            best_dx = int(offsets[best_index, 0])
+            best_dy = int(offsets[best_index, 1])
 
         dx_m = float(best_dx) * float(self.metadata["meters_per_pixel_x"])
         dy_sign = -1.0 if bool(self.metadata.get("y_axis_inverted", False)) else 1.0
@@ -228,28 +237,51 @@ class ChamferMapMatcher:
         return out
 
     def _cost_at_offset(self, pixels: np.ndarray, dx_px: int, dy_px: int) -> tuple[float, float]:
-        shifted_x = np.rint(pixels[:, 0] + int(dx_px)).astype(np.int32)
-        shifted_y = np.rint(pixels[:, 1] + int(dy_px)).astype(np.int32)
+        offsets = np.asarray([[int(dx_px), int(dy_px)]], dtype=np.int32)
+        costs, fractions = self._costs_at_offsets(pixels, offsets)
+        return float(costs[0]), float(fractions[0])
+
+    def _costs_at_offsets(
+        self,
+        pixels: np.ndarray,
+        offsets: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        offset_arr = np.asarray(offsets, dtype=np.int32)
+        if offset_arr.ndim != 2 or offset_arr.shape[0] <= 0 or offset_arr.shape[1] < 2:
+            return (
+                np.empty((0,), dtype=np.float32),
+                np.empty((0,), dtype=np.float32),
+            )
+        base_x = np.rint(pixels[:, 0]).astype(np.int32)
+        base_y = np.rint(pixels[:, 1]).astype(np.int32)
+        shifted_x = base_x[None, :] + offset_arr[:, 0:1]
+        shifted_y = base_y[None, :] + offset_arr[:, 1:2]
         valid = (
             (shifted_x >= 0)
             & (shifted_x < self.width_px)
             & (shifted_y >= 0)
             & (shifted_y < self.height_px)
         )
-        valid_count = int(np.count_nonzero(valid))
         total = int(pixels.shape[0])
-        if total <= 0 or valid_count <= 0:
-            return math.inf, 0.0
+        if total <= 0:
+            return (
+                np.full((offset_arr.shape[0],), math.inf, dtype=np.float32),
+                np.zeros((offset_arr.shape[0],), dtype=np.float32),
+            )
+        valid_count = np.count_nonzero(valid, axis=1).astype(np.float32)
         valid_fraction = valid_count / float(total)
-        if valid_fraction < 0.70:
-            return math.inf, float(valid_fraction)
-        costs = self.distance_field_px[shifted_y[valid], shifted_x[valid]]
+        clipped_x = np.clip(shifted_x, 0, self.width_px - 1)
+        clipped_y = np.clip(shifted_y, 0, self.height_px - 1)
+        sampled_costs = self.distance_field_px[clipped_y, clipped_x]
+        cost_sum = np.sum(np.where(valid, sampled_costs, 0.0), axis=1, dtype=np.float32)
         missing_penalty = float(max(self.width_px, self.height_px))
-        mean_cost = (
-            float(np.mean(costs))
-            + ((total - valid_count) / float(total)) * missing_penalty
+        mean_cost = np.full((offset_arr.shape[0],), math.inf, dtype=np.float32)
+        usable = (valid_count > 0.0) & (valid_fraction >= 0.70)
+        mean_cost[usable] = (
+            cost_sum[usable] / valid_count[usable]
+            + ((float(total) - valid_count[usable]) / float(total)) * missing_penalty
         )
-        return mean_cost, float(valid_fraction)
+        return mean_cost.astype(np.float32, copy=False), valid_fraction.astype(np.float32, copy=False)
 
 
 def _require_cv2():

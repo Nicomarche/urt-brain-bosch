@@ -1121,7 +1121,7 @@ def test_path_optimizer_biases_prefix_back_toward_visual_lane_center() -> None:
     assert out.target_path[peak_idx, 1] > out.target_path[-1, 1]
 
 
-def test_path_optimizer_limits_visual_reentry_in_intersection_scenario() -> None:
+def test_path_optimizer_bounds_visual_reentry_in_intersection_scenario() -> None:
     ctx = replace(
         make_context(
             pose_x=0.0,
@@ -1165,9 +1165,9 @@ def test_path_optimizer_limits_visual_reentry_in_intersection_scenario() -> None
     assert out.notes["visual_lane_reentry_active"] is True
     assert out.notes["visual_lane_reentry_profile"] == ScenarioName.INTERSECTION.value
     assert out.notes["visual_lane_measurement_source"] == "line_center_offset_m"
-    assert abs(out.notes["visual_lane_shift_m"]) <= 0.05 + 1e-9
+    assert abs(out.notes["visual_lane_shift_m"]) <= 0.10 + 1e-9
     assert out.notes["visual_lane_prefix_samples"] >= 1
-    assert float(np.max(np.abs(out.target_path[:, 1]))) < 0.06
+    assert float(np.max(np.abs(out.target_path[:, 1]))) < 0.11
 
 
 def test_path_optimizer_biases_prefix_with_valid_single_line_physical_measurement() -> None:
