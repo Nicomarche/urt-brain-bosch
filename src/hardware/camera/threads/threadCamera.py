@@ -37,13 +37,20 @@ try:
 except ImportError:
     PICAMERA2_AVAILABLE = False
 
-from src.core.bus.topics import MAIN_CAMERA, RECORDING, RECORD, BRIGHTNESS, CONTRAST
+from src.core.bus.topics import (
+    BRIGHTNESS,
+    CONTRAST,
+    MAIN_CAMERA,
+    MANUAL_RECORDING_SESSION,
+    RECORD,
+    RECORDING,
+    STATE_CHANGE,
+)
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
-from src.templates.threadwithstop import ThreadWithStop
-from src.core.bus.topics import STATE_CHANGE
-from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
+from src.recording.video_writer import SessionVideoWriter
 from src.statemachine.systemMode import SystemMode
+from src.templates.threadwithstop import ThreadWithStop
 
 class threadCamera(ThreadWithStop):
     """Thread which will handle camera functionalities.\n
@@ -97,6 +104,13 @@ class threadCamera(ThreadWithStop):
         self._recording_path = None
         self._recording_size = None
 
+        # Grabador de ``raw_video.avi`` por sesión MANUAL. Lo activa/desactiva
+        # un suscriptor a ``MANUAL_RECORDING_SESSION`` (ver ``subscribe()``).
+        # Independiente del flag ``recording`` del dashboard: ambos pueden
+        # coexistir sin pisarse (escriben a archivos distintos).
+        self._manual_session_writer: SessionVideoWriter | None = None
+        self._manual_session_dir: str | None = None
+
         # PiCamera adaptive exposure controls (robustness against direct sunlight).
         self._picamera_control_lock = threading.RLock()
         self._picamera_brightness = 0.0  # libcamera range: [-1.0, 1.0], 0.0 = neutral
@@ -141,6 +155,13 @@ class threadCamera(ThreadWithStop):
         self.brightnessSubscriber = messageHandlerSubscriber(self.queuesList, BRIGHTNESS, "lastOnly", True)
         self.contrastSubscriber = messageHandlerSubscriber(self.queuesList, CONTRAST, "lastOnly", True)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, STATE_CHANGE, "lastOnly", True)
+        # MANUAL_RECORDING_SESSION es LATCHED: si la sesión ya estaba activa
+        # cuando arrancamos (caso típico cuando el camera process tarda en
+        # bootear y el recorder ya publicó el "active=True"), el primer
+        # ``receive()`` nos entrega el último valor.
+        self.manualSessionSubscriber = messageHandlerSubscriber(
+            self.queuesList, MANUAL_RECORDING_SESSION, "lastOnly", True
+        )
 
     def queue_sending(self):
         """Callback function for recording flag."""
@@ -154,6 +175,10 @@ class threadCamera(ThreadWithStop):
         """This function will run while the running flag is True. 
         It captures the image from camera and make the required modifies 
         and then it send the data to process gateway."""
+        # Poll siempre: si llega STOP y la cámara queda sin frames, igual hay
+        # que cerrar ``raw_video.avi`` inmediatamente.
+        self._handle_manual_session_message()
+
         # if camera is not available, skip processing
         if self.camera is None:
             time.sleep(0.1)
@@ -162,7 +187,7 @@ class threadCamera(ThreadWithStop):
         try:
             recordRecv = self.recordSubscriber.receive()
             if recordRecv is not None:
-                if bool(recordRecv):
+                if self._record_command_enabled(recordRecv):
                     if not self.recording:
                         self._prepare_recording()
                 else:
@@ -173,7 +198,9 @@ class threadCamera(ThreadWithStop):
             print(f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
         try:
-            need_main_frame = self.recording or self.show_preview
+            need_main_frame = (
+                self.recording or self.show_preview or self._manual_session_writer is not None
+            )
             if self.camera_type in ("usb", "jetson", "zmq"):
                 mainRequest, serialRequest = self._capture_usb(need_main_frame)
             else:
@@ -191,6 +218,9 @@ class threadCamera(ThreadWithStop):
 
             if self.recording == True and mainRequest is not None:
                 self._write_recording_frame(mainRequest)
+
+            if self._manual_session_writer is not None and mainRequest is not None:
+                self._manual_session_writer.write(mainRequest)
 
             # Phase 6: este thread ya no publica `serialCamera`. El productor
             # único de ese canal pasó a ser `threadLocalPerception`, que envía
@@ -213,6 +243,71 @@ class threadCamera(ThreadWithStop):
         self._recording_path = "output_video" + str(time.time()) + ".avi"
         self._recording_size = None
         self.recording = True
+
+    def _handle_manual_session_message(self):
+        """Reacciona a la apertura/cierre de una sesión MANUAL del recorder.
+
+        El payload viene como dict con ``active`` y ``session_dir``. Sólo
+        actuamos en cambios de estado: abrir un writer cuando antes no
+        había y cerrar cuando se desactiva. ``LATCHED`` garantiza que el
+        valor está disponible aún si arrancamos después del recorder.
+        """
+        try:
+            payload = self.manualSessionSubscriber.receive()
+        except Exception as e:
+            print(
+                f"\033[1;97m[ Camera ] :\033[0m \033[1;93mWARNING\033[0m - "
+                f"manual session subscriber error: {e}"
+            )
+            return
+        if payload is None:
+            return
+        if not isinstance(payload, dict):
+            return
+        active = bool(payload.get("active", False))
+        session_dir = payload.get("session_dir") or ""
+        if active and session_dir and session_dir != self._manual_session_dir:
+            self._close_manual_session_writer()
+            try:
+                import os
+                os.makedirs(session_dir, exist_ok=True)
+                target = os.path.join(session_dir, "camera.avi")
+                self._manual_session_writer = SessionVideoWriter(
+                    target, fps=self.frame_rate
+                )
+                self._manual_session_dir = session_dir
+                print(
+                    f"\033[1;97m[ Camera ] :\033[0m \033[1;92mMANUAL REC\033[0m - "
+                    f"raw → {target}"
+                )
+            except Exception as e:
+                print(
+                    f"\033[1;97m[ Camera ] :\033[0m \033[1;91mERROR\033[0m - "
+                    f"cannot open manual raw writer: {e}"
+                )
+                self._manual_session_writer = None
+                self._manual_session_dir = None
+        elif not active:
+            self._close_manual_session_writer()
+
+    def _close_manual_session_writer(self):
+        if self._manual_session_writer is not None:
+            try:
+                self._manual_session_writer.close()
+            except Exception:
+                pass
+            self._manual_session_writer = None
+            self._manual_session_dir = None
+
+    def _record_command_enabled(self, value):
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"start", "true", "1", "on", "yes"}:
+            return True
+        if text in {"stop", "false", "0", "off", "no", ""}:
+            return False
+        return bool(value)
 
     def _release_video_writer(self):
         writer = self.video_writer
@@ -728,6 +823,7 @@ class threadCamera(ThreadWithStop):
     def stop(self):
         if self.recording and self.video_writer:
             self.video_writer.release() # type: ignore
+        self._close_manual_session_writer()
         if self.camera is not None:
             if self.camera_type in ("usb", "jetson"):
                 self._usb_reader_running = False

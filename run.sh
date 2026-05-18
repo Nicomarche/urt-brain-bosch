@@ -40,8 +40,22 @@ setup_live_log() {
     logs_root="$SCRIPT_DIR/temp/logs"
     mkdir -p "$logs_root"
 
+    if [[ -n "${URT_LOG_RUN_DIR:-}" ]]; then
+        mkdir -p "$URT_LOG_RUN_DIR"
+        if [[ -z "${URT_LIVE_LOG_PATH:-}" || "${URT_LIVE_LOG_PATH}" == "0" ]]; then
+            export URT_LIVE_LOG_PATH="$URT_LOG_RUN_DIR/brain.jsonl"
+        fi
+        mkdir -p "$(dirname "$URT_LIVE_LOG_PATH")"
+        echo "[run.sh] Log run dir preset -> $URT_LOG_RUN_DIR"
+        echo "[run.sh] Live log -> $URT_LIVE_LOG_PATH"
+        return 0
+    fi
+
     if [[ -n "${URT_LIVE_LOG_PATH:-}" && "${URT_LIVE_LOG_PATH}" != "0" ]]; then
         mkdir -p "$(dirname "$URT_LIVE_LOG_PATH")"
+        export URT_LOG_RUN_DIR="$(dirname "$URT_LIVE_LOG_PATH")"
+        mkdir -p "$URT_LOG_RUN_DIR"
+        echo "[run.sh] Log run dir -> $URT_LOG_RUN_DIR"
         echo "[run.sh] Live log preset -> $URT_LIVE_LOG_PATH"
         return 0
     fi
@@ -54,6 +68,7 @@ setup_live_log() {
     mkdir -p "$run_dir"
 
     export URT_LIVE_LOG_PATH="$run_dir/brain.jsonl"
+    export URT_LOG_RUN_DIR="$run_dir"
 
     latest_link="$logs_root/latest"
     ln -sfn "$(basename "$run_dir")" "$latest_link"

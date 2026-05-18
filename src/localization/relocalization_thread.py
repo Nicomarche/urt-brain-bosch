@@ -1347,6 +1347,34 @@ class threadTracking(ThreadWithStop):
                 self._last_speed_source = "manual_command_hold"
                 return float(self._last_speed)
 
+        # AUTO command fallback (sim-encoder workaround): si el encoder
+        # filtra a cero pero el MPC manda comandos de avance significativos,
+        # el simulador típicamente tiene feedback poco confiable (Gazebo
+        # bullet-featherstone reporta velocidad ~0 a baja resolución). En
+        # esos casos preferimos el comando del controlador antes que un
+        # DR estancado — sin esto, la pose interna queda muy atrasada del
+        # robot real (post-mortem run_20260518_030858: 9549/11036 ticks
+        # con encoder_zero, drift acumulado ≫ 10 m).
+        # Condiciones estrictas:
+        #   1) No estamos en MANUAL (ya cubierto arriba).
+        #   2) El filtro de encoder dijo "encoder_zero" (no es ruido, es 0
+        #      reportado por el firmware/sim).
+        #   3) El comando del MPC indica movimiento real (≥ umbral).
+        _CMD_FALLBACK_AUTO_MIN_MPS = 0.05
+        if (
+            current_state_message != "MANUAL"
+            and self._last_speed_source == "encoder_zero"
+            and _cmd_fresh
+        ):
+            cmd_speed = self._parse_speed_mps(self._last_cmd_speed_raw)
+            if cmd_speed is not None and abs(float(cmd_speed)) >= _CMD_FALLBACK_AUTO_MIN_MPS:
+                scale = float(
+                    getattr(cfg, "TRACKING_COMMAND_SPEED_FALLBACK_SCALE", 1.0) or 1.0
+                )
+                self._last_speed = float(cmd_speed) * scale
+                self._last_speed_source = "auto_command_hold"
+                return float(self._last_speed)
+
         if self._last_speed_t is not None:
             if (now - self._last_speed_t) <= float(_SPEED_FEEDBACK_TIMEOUT_S):
                 return float(self._last_speed)

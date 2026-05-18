@@ -12,12 +12,13 @@ from src.perception.signs.sign_classifier import (
 from src.perception.object_classes import confidence_threshold_for, needs_lidar_confirmation
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
-from src.core.bus.topics import DETECTED_OBJECTS_MSG, LINE_FOLLOWING_CONFIG, LINE_FOLLOWING_STATUS, LOCAL_LANE_PERCEPTION, LOCAL_PERCEPTION_STATUS, SIGN_DETECTED, SIGN_DETECTION_STATUS, STATE_CHANGE
+from src.core.bus.topics import DETECTED_OBJECTS_MSG, LINE_FOLLOWING_CONFIG, LINE_FOLLOWING_STATUS, LOCAL_LANE_PERCEPTION, LOCAL_PERCEPTION_STATUS, MANUAL_RECORDING_SESSION, SIGN_DETECTED, SIGN_DETECTION_STATUS, STATE_CHANGE
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.types.perception import DetectedObject
 from src.core.types.pose import PoseEstimate
 from src.perception.lidar.processing import distance_in_sector
+from src.recording.video_writer import SessionVideoWriter
 from src.utils.live_log import live_log
 
 
@@ -117,6 +118,13 @@ class threadLocalPerception(ThreadWithStop):
         self.lineFollowingStatusSubscriber = messageHandlerSubscriber(
             self.queuesList, LINE_FOLLOWING_STATUS, "lastOnly", True
         )
+        # LATCHED: si la sesión MANUAL ya estaba abierta cuando este thread
+        # arranca, recibimos el último valor en el primer poll.
+        self.manualSessionSubscriber = messageHandlerSubscriber(
+            self.queuesList, MANUAL_RECORDING_SESSION, "lastOnly", True
+        )
+        self._manual_session_writer: SessionVideoWriter | None = None
+        self._manual_session_dir: str | None = None
 
         self.localLaneSender = messageHandlerSender(self.queuesList, LOCAL_LANE_PERCEPTION)
         self.localStatusSender = messageHandlerSender(self.queuesList, LOCAL_PERCEPTION_STATUS)
@@ -751,9 +759,6 @@ class threadLocalPerception(ThreadWithStop):
         cajas de señales dibujadas. Si no existe (modelo no listo todavía),
         se publica el frame raw para evitar pantalla negra en el GUI.
         """
-        if not self.stream_to_dashboard or self.overlay_buffer is None:
-            return
-
         overlay = None
         if isinstance(result, dict):
             lane_debug = result.get("lane_debug")
@@ -763,7 +768,64 @@ class threadLocalPerception(ThreadWithStop):
         img = overlay if overlay is not None else frame
         if img is None:
             return
+
+        # Sesión MANUAL: el mismo frame anotado que se envía al GUI se
+        # archiva a ``annotated_video.avi`` dentro de la subcarpeta de la
+        # sesión. Independiente de ``stream_to_dashboard`` para que
+        # corridas headless también queden grabadas.
+        self._handle_manual_session_message()
+        if self._manual_session_writer is not None:
+            self._manual_session_writer.write(img)
+
+        if not self.stream_to_dashboard or self.overlay_buffer is None:
+            return
         self.overlay_buffer.write(img)
+
+    def _handle_manual_session_message(self):
+        """Abre/cierra el writer del anotado segun MANUAL_RECORDING_SESSION."""
+        try:
+            payload = self.manualSessionSubscriber.receive()
+        except Exception:
+            return
+        if payload is None or not isinstance(payload, dict):
+            return
+        active = bool(payload.get("active", False))
+        session_dir = payload.get("session_dir") or ""
+        if active and session_dir and session_dir != self._manual_session_dir:
+            self._close_manual_session_writer()
+            try:
+                import os
+                os.makedirs(session_dir, exist_ok=True)
+                target = os.path.join(session_dir, "annotated_video.avi")
+                # FPS objetivo del overlay = 1 / local_ai_interval (la
+                # cadencia real a la que escribimos overlay frames).
+                fps = (
+                    1.0 / self.local_ai_interval if self.local_ai_interval > 0 else 10.0
+                )
+                self._manual_session_writer = SessionVideoWriter(target, fps=fps)
+                self._manual_session_dir = session_dir
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mMANUAL REC\033[0m - "
+                    f"annotated → {target}"
+                )
+            except Exception as e:
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - "
+                    f"cannot open annotated writer: {e}"
+                )
+                self._manual_session_writer = None
+                self._manual_session_dir = None
+        elif not active:
+            self._close_manual_session_writer()
+
+    def _close_manual_session_writer(self):
+        if self._manual_session_writer is not None:
+            try:
+                self._manual_session_writer.close()
+            except Exception:
+                pass
+            self._manual_session_writer = None
+            self._manual_session_dir = None
 
     def _build_local_lane_payload(self, result, frame_timestamp, frame_sequence):
         result_timestamp = time.time()
@@ -810,6 +872,10 @@ class threadLocalPerception(ThreadWithStop):
         }
 
     def thread_work(self):
+        # Poll siempre: si STOP corta el flujo de frames/inferencia, igual hay
+        # que cerrar ``annotated_video.avi`` y soltar el fd de inmediato.
+        self._handle_manual_session_message()
+
         self.state_change_handler()
         self._check_config()
         self._poll_line_following_context()
@@ -876,6 +942,7 @@ class threadLocalPerception(ThreadWithStop):
             print(f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mERROR\033[0m - {e}")
 
     def stop(self):
+        self._close_manual_session_writer()
         super(threadLocalPerception, self).stop()
 
 

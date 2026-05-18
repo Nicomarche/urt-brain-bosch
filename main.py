@@ -137,6 +137,7 @@ from src.data.Semaphores.processSemaphores import processSemaphores
 from src.data.TrafficCommunication.processTrafficCommunication import processTrafficCommunication
 from src.core.messaging.messageHandlerSubscriber import messageHandlerSubscriber
 from src.core.bus.topics import STATE_CHANGE, WARNING_SIGNAL
+from src.recording.manual_session_recorder import ManualSessionRecorder
 from src.statemachine.stateMachine import StateMachine
 from src.statemachine.systemMode import SystemMode
 from config import (
@@ -299,6 +300,13 @@ def main():
     allEvents.extend([camera_ready, serial_handler_ready])
 
     # ------ New component initialize starts here ------#
+
+    # ManualSessionRecorder: archiva el bus completo a disco mientras
+    # el vehículo está en MANUAL. No tiene ready_event porque su loop
+    # de drenaje es no-bloqueante y arranca grabando vacío hasta que
+    # llegue la primera transición a manual (gratis vía LATCHED).
+    manualSessionRecorderInstance = ManualSessionRecorder(queueList, logger)
+    allProcesses.append(manualSessionRecorderInstance)
 
     # ------ New component initialize ends here ------#
 

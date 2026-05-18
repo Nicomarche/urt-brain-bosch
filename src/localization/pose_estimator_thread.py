@@ -234,6 +234,15 @@ class threadPoseEstimator(threadTracking):
         self._last_lane_yaw_reset_deg = 0.0
         self._apply_start_pose_override()
         self._send_sim_relocalize()
+        # Slow-joiner ZMQ: en sim mode el threadWrite (suscriptor de
+        # SIM_RELOCALIZE) puede no estar suscrito todavía cuando publicamos
+        # en __init__. SIM_RELOCALIZE ahora es LATCHED (broker cachea el
+        # último), pero como defensa extra reintentamos durante los
+        # primeros segundos del thread_work — si threadWrite suscribe en
+        # ese rango, ve la publicación live. Sin esto el auto en Gazebo
+        # arranca en su pose de spawn (.world) en vez de la startup pose
+        # del brain → cross-track masivo en el ground truth.
+        self._sim_relocalize_retries_remaining = 10
 
     @staticmethod
     def _gps_dashboard_calibration_enabled() -> bool:
@@ -1829,6 +1838,13 @@ class threadPoseEstimator(threadTracking):
         wall_now = time.time()
         dt = now - self._last_t
         self._last_t = now
+        # Slow-joiner retry del SIM_RELOCALIZE (ver __init__). Las primeras
+        # ~10 iteraciones republicamos la pose inicial para asegurar que el
+        # threadWrite recibió el set_pose. Cuesta una republicación de un
+        # dict pequeño — negligible.
+        if getattr(self, "_sim_relocalize_retries_remaining", 0) > 0:
+            self._send_sim_relocalize()
+            self._sim_relocalize_retries_remaining -= 1
         self._consume_state_change()
         self._resolve_speed_mps(now)
         self._last_steer_rad = self._resolve_steer_rad(now)

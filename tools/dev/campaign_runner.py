@@ -26,6 +26,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -239,6 +240,242 @@ class DashboardClient:
                 return True
             time.sleep(0.1)
         return False
+
+
+class BusDashboardClient:
+    """Bus-only equivalent of :class:`DashboardClient`.
+
+    Mantiene la misma API que el DashboardClient SocketIO (emit_message,
+    request_session, close, latest_nav_status, *_events listas) pero
+    publica/suscribe directamente al bus ZMQ. Necesario porque el viejo
+    ``processDashboard`` en :5005 fue eliminado ("SACAR COLAS 2" commits);
+    el GUI ahora también habla directo al bus.
+
+    El mapeo nombre→topic reutiliza ``LEGACY_NAME_TO_TOPIC`` para mantener
+    paridad con el patrón SocketIO legacy.
+    """
+
+    # Topics que el campaign consume del brain.
+    _SUBSCRIBED_NAMES = (
+        "NavigationStatus",
+        "SignDetected",
+        "BehaviorOutputMsg",
+        "MotorCommandMsg",
+    )
+
+    def __init__(self) -> None:
+        # campaign_runner es un cliente externo del brain, igual que el GUI.
+        # Preferimos los endpoints TCP del broker dual-bind sobre ipc:// para
+        # evitar depender de sockets internos/stale del proceso backend.
+        pub_port = int(os.environ.get("URT_BUS_GUI_PUB_PORT", "5556"))
+        sub_port = int(os.environ.get("URT_BUS_GUI_SUB_PORT", "5557"))
+        os.environ.setdefault("URT_BUS_XSUB_ENDPOINT", f"tcp://127.0.0.1:{pub_port}")
+        os.environ.setdefault("URT_BUS_XPUB_ENDPOINT", f"tcp://127.0.0.1:{sub_port}")
+
+        # Import dentro del init para no romper la importación del módulo
+        # si el repo brain no está en el PYTHONPATH (e.g. tools/dev tests).
+        from src.core.bus.shim import (
+            messageHandlerSender,
+            messageHandlerSubscriber,
+        )
+        from src.core.bus.topics import LEGACY_NAME_TO_TOPIC
+
+        self._sender_cls = messageHandlerSender
+        self._subscriber_cls = messageHandlerSubscriber
+        self._name_to_topic = LEGACY_NAME_TO_TOPIC
+
+        # Estado compatible con DashboardClient para que _compute_metrics
+        # y el main loop lean los mismos atributos sin diferenciar.
+        self.session_granted = True  # bus no tiene handshake — siempre granted
+        self.latest_nav_status: dict[str, Any] = {}
+        self.sign_events: list[dict[str, Any]] = []
+        self.behavior_output_events: list[dict[str, Any]] = []
+        self.motor_command_events: list[dict[str, Any]] = []
+        self.nav_status_events: list[dict[str, Any]] = []
+        self.response_count = 0
+        self.last_response: dict[str, Any] = {}
+
+        self._senders: dict[str, Any] = {}
+        self._subscribers: dict[str, Any] = {}
+        self._stop_event = threading.Event()
+        self._consumer_thread: threading.Thread | None = None
+
+    def _resolve_topic(self, name: str):
+        return self._name_to_topic.get(name)
+
+    def _sender_for(self, name: str):
+        sender = self._senders.get(name)
+        if sender is not None:
+            return sender
+        topic = self._resolve_topic(name)
+        if topic is None:
+            return None
+        sender = self._sender_cls({}, topic)
+        self._senders[name] = sender
+        return sender
+
+    def connect(self, timeout_s: float = 10.0) -> None:
+        # Pre-suscribimos a los topics relevantes para no perder eventos
+        # tempranos. messageHandlerSubscriber resuelve el socket lazy,
+        # forzamos materialización llamando subscribe().
+        for name in self._SUBSCRIBED_NAMES:
+            topic = self._resolve_topic(name)
+            if topic is None:
+                continue
+            sub = self._subscriber_cls({}, topic, "fifo", True)
+            try:
+                sub.subscribe()
+            except Exception:
+                pass
+            self._subscribers[name] = sub
+
+        # Pre-warm los senders de los comandos que vamos a usar. El shim
+        # crea el PUB ZMQ lazy en el primer ``send()``, y al conectar a
+        # XSUB hay ~5-50ms de "slow-joiner": durante ese arranque, el
+        # primer mensaje puede perderse. Pre-creando los sockets ANTES
+        # del primer NavigationCommand evitamos ese race (post-mortem
+        # run_20260518_035516: el primer attempt del nav command se
+        # perdía y los 3 retries quedaban en la misma carrera).
+        for name in ("NavigationCommand", "DrivingMode", "Record"):
+            try:
+                sender = self._sender_for(name)
+                ensure_pub = getattr(sender, "_ensure_pub", None)
+                if callable(ensure_pub):
+                    ensure_pub()
+            except Exception:
+                pass
+
+        # Thread consumer — cada N ms drena los subscribers y popula listas.
+        self._stop_event.clear()
+        self._consumer_thread = threading.Thread(
+            target=self._consume_loop,
+            name="BusDashboardClient.consume",
+            daemon=True,
+        )
+        self._consumer_thread.start()
+
+        # Pequeña pausa post-creación para que el broker procese SUB/PUB
+        # connects antes del primer publish/receive útil. 200ms es lo
+        # que main.py usa después de levantar processBus (ver
+        # main.py:217), y es el mismo motivo: ipc:// es rápido pero no
+        # instantáneo.
+        time.sleep(0.2)
+
+    def close(self) -> None:
+        try:
+            self.emit_message("DrivingMode", "stop")
+            self.emit_message("Record", "stop")
+            time.sleep(0.2)
+        except Exception:
+            pass
+        self._stop_event.set()
+        if self._consumer_thread is not None:
+            self._consumer_thread.join(timeout=1.0)
+        for sub in self._subscribers.values():
+            try:
+                sub.unsubscribe()
+            except Exception:
+                pass
+
+    def _consume_loop(self) -> None:
+        while not self._stop_event.is_set():
+            any_received = False
+            for name, sub in list(self._subscribers.items()):
+                try:
+                    payload = sub.receive()
+                except Exception:
+                    payload = None
+                if payload is None:
+                    continue
+                any_received = True
+                self._handle_event(name, payload)
+            if not any_received:
+                time.sleep(0.01)
+
+    def _handle_event(self, name: str, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            # Algunos topics publican primitivos (str/bool); los envolvemos
+            # para mantener forma uniforme con DashboardClient.
+            payload = {"value": payload}
+        if name == "NavigationStatus":
+            self.latest_nav_status = payload
+            self.nav_status_events.append(
+                _slim_socket_event("NavigationStatus", _slim_nav_status(payload))
+            )
+        elif name == "SignDetected":
+            self.sign_events.append(_slim_socket_event("SignDetected", payload))
+        elif name == "BehaviorOutputMsg":
+            self.behavior_output_events.append(
+                _slim_socket_event("BehaviorOutputMsg", _slim_behavior_output(payload))
+            )
+        elif name == "MotorCommandMsg":
+            self.motor_command_events.append(
+                _slim_socket_event("MotorCommandMsg", _slim_motor_command(payload))
+            )
+
+    def emit_message(
+        self,
+        name: str,
+        value: Any = None,
+        *,
+        wait_response: bool = False,
+        timeout_s: float = 3.0,
+    ) -> bool:
+        # SessionAccess/Heartbeat/SessionEnd no tienen topic en el bus.
+        # El GUI las trata como no-ops (zmq_bus_client.emit_message:290).
+        # Replicamos para que el flow del main() no falle.
+        if name in {"SessionAccess", "Heartbeat", "SessionEnd"}:
+            return True
+        sender = self._sender_for(name)
+        if sender is None:
+            print(
+                f"[campaign] WARNING: emit_message: unknown topic '{name}'",
+                file=sys.stderr,
+            )
+            return False
+        # DrivingMode acepta str ("auto"/"stop"/"manual"); Record acepta
+        # str ("start"/"stop"). NavigationCommand acepta dict.
+        # El valor llega ya con el tipo correcto del caller.
+        payload = value
+        # Record legacy emite bool — el bus espera str. Mapeamos.
+        if name == "Record" and isinstance(payload, bool):
+            payload = "start" if payload else "stop"
+        try:
+            sender.send(payload)
+        except Exception as exc:
+            print(f"[campaign] WARNING: send({name}) failed: {exc}", file=sys.stderr)
+            return False
+        # No hay request/response en el bus; consideramos siempre OK si
+        # el envío no levantó. wait_response es un no-op pero respetamos
+        # el contrato (return True ⇔ acknowledged).
+        self.response_count += 1
+        return True
+
+    def request_session(self, timeout_s: float = 10.0) -> bool:
+        # Sin handshake en el bus, devolvemos True directo.
+        return True
+
+
+def _wait_for_bus_ready(timeout_s: float = 60.0) -> bool:
+    """Espera a que el broker ZMQ del brain acepte conexiones.
+
+    Reemplaza ``_wait_port :5005`` (processDashboard, eliminado). El
+    broker dual-bind del proceso ``processBus`` expone TCP para clientes
+    externos como el GUI y este campaign runner. Esperamos ambos lados:
+    XSUB (publish hacia brain, puerto 5556) y XPUB (subscribe desde brain,
+    puerto 5557).
+    """
+    pub_port = int(os.environ.get("URT_BUS_GUI_PUB_PORT", "5556"))
+    sub_port = int(os.environ.get("URT_BUS_GUI_SUB_PORT", "5557"))
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if (
+            _wait_port("127.0.0.1", pub_port, 0.25)
+            and _wait_port("127.0.0.1", sub_port, 0.25)
+        ):
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def _slim_socket_event(name: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2189,9 +2426,9 @@ def main() -> int:
             )
         )
 
-        print("[campaign] waiting for dashboard :5005")
-        if not _wait_port("localhost", 5005, 60.0):
-            raise RuntimeError("brain dashboard port :5005 did not become ready")
+        print("[campaign] waiting for bus broker (XPUB)")
+        if not _wait_for_bus_ready(60.0):
+            raise RuntimeError("brain ZMQ bus broker did not become ready")
 
         print("[campaign] waiting for first pose_published")
         _wait_for_jsonl_event(
@@ -2201,10 +2438,12 @@ def main() -> int:
             timeout_s=90.0,
         )
 
-        client = DashboardClient(args.host)
+        # processDashboard fue eliminado (commits "SACAR COLAS"). El campaign
+        # publica al bus ZMQ directamente, igual que el GUI moderno.
+        client = BusDashboardClient()
         client.connect()
         if not client.request_session():
-            raise RuntimeError("dashboard session was not granted")
+            raise RuntimeError("bus session was not granted")
         # Mirror the GUI/headless-controller handshake: give the backend a
         # short beat to register the socket as the active session before the
         # route and mode commands start flowing.
@@ -2218,11 +2457,19 @@ def main() -> int:
         nav_ok = False
         for attempt in range(1, 4):
             print(f"[campaign] sending route command attempt {attempt}: {nav_command}")
-            if not client.emit_message("NavigationCommand", nav_command, wait_response=True):
-                print("[campaign] WARNING: dashboard did not acknowledge NavigationCommand")
-            if _wait_for_navigation_acceptance(brain_jsonl, 5.0):
-                nav_ok = True
+            deadline = time.monotonic() + 5.0
+            burst_idx = 0
+            while time.monotonic() < deadline:
+                burst_idx += 1
+                if not client.emit_message("NavigationCommand", nav_command, wait_response=True):
+                    print("[campaign] WARNING: dashboard did not acknowledge NavigationCommand")
+                if _wait_for_navigation_acceptance(brain_jsonl, 0.25):
+                    nav_ok = True
+                    break
+                time.sleep(0.2)
+            if nav_ok:
                 break
+            print(f"[campaign] route command attempt {attempt} timed out after {burst_idx} sends")
             time.sleep(0.5)
         if not nav_ok:
             raise RuntimeError("navigation command was not accepted by the brain")
@@ -2230,11 +2477,19 @@ def main() -> int:
         auto_ok = False
         for attempt in range(1, 4):
             print(f"[campaign] requesting AUTO attempt {attempt}")
-            if not client.emit_message("DrivingMode", "auto", wait_response=True):
-                print("[campaign] WARNING: dashboard did not acknowledge DrivingMode=auto")
-            if _wait_for_auto_state(brain_jsonl, 5.0):
-                auto_ok = True
+            deadline = time.monotonic() + 5.0
+            burst_idx = 0
+            while time.monotonic() < deadline:
+                burst_idx += 1
+                if not client.emit_message("DrivingMode", "auto", wait_response=True):
+                    print("[campaign] WARNING: dashboard did not acknowledge DrivingMode=auto")
+                if _wait_for_auto_state(brain_jsonl, 0.25):
+                    auto_ok = True
+                    break
+                time.sleep(0.2)
+            if auto_ok:
                 break
+            print(f"[campaign] AUTO attempt {attempt} timed out after {burst_idx} sends")
             time.sleep(0.5)
         if not auto_ok:
             raise RuntimeError("AUTO mode was not confirmed by the brain")

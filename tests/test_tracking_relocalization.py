@@ -93,6 +93,73 @@ class TrackingRelocalizationTests(unittest.TestCase):
         self.assertAlmostEqual(speed_mps, 0.0, places=4)
         self.assertEqual(tracker._last_speed_source, "encoder_zero")
 
+    def test_auto_uses_command_when_encoder_zero_but_cmd_moving(self):
+        """Post-mortem run_20260518_030858: en sim el encoder de Gazebo
+        reporta ~0 el 87% del tiempo aunque el robot se mueve. El DR
+        quedaba estancado. En AUTO con encoder_zero + cmd>=0.05 m/s, el
+        comando del MPC debe sustituir al encoder.
+        """
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub(["5"])  # 0.005 m/s — encoder zero clamp
+        tracker._speed_cmd_sub = _FakeSub(["300"])  # 0.30 m/s comando MPC
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 0.0
+        tracker._last_cmd_speed_t = None
+        tracker._cmd_speed_history = deque([0.30] * 5, maxlen=5)
+        tracker._current_state_message = "AUTO"
+
+        speed_mps = tracker._resolve_speed_mps(now=10.0)
+
+        # El encoder clampea a 0 (encoder_zero), pero el AUTO command
+        # fallback toma el valor del cmd (0.30 m/s).
+        self.assertAlmostEqual(speed_mps, 0.30, places=4)
+        self.assertEqual(tracker._last_speed_source, "auto_command_hold")
+
+    def test_auto_keeps_encoder_zero_when_cmd_is_below_threshold(self):
+        """Si el cmd del MPC es bajo (stop progresivo), no sobrescribir el
+        encoder_zero — el robot realmente se está deteniendo.
+        """
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub(["5"])  # encoder zero
+        tracker._speed_cmd_sub = _FakeSub(["30"])  # 0.03 m/s — bajo umbral
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 0.0
+        tracker._last_cmd_speed_t = None
+        tracker._cmd_speed_history = deque([0.03] * 5, maxlen=5)
+        tracker._current_state_message = "AUTO"
+
+        speed_mps = tracker._resolve_speed_mps(now=10.0)
+
+        # cmd 0.03 < _CMD_FALLBACK_AUTO_MIN_MPS (0.05) → mantiene encoder_zero.
+        self.assertAlmostEqual(speed_mps, 0.0, places=4)
+        self.assertEqual(tracker._last_speed_source, "encoder_zero")
+
+    def test_manual_path_still_uses_manual_command_hold(self):
+        """El fallback AUTO no debe robar el caso MANUAL. En MANUAL con
+        encoder zero, debe seguir saliendo manual_command_hold (no
+        auto_command_hold).
+        """
+        tracker = threadTracking.__new__(threadTracking)
+        tracker._speed_sub = _FakeSub(["5"])
+        tracker._speed_cmd_sub = _FakeSub(["300"])
+        tracker._last_raw_speed = None
+        tracker._last_speed_t = None
+        tracker._last_speed = 0.0
+        tracker._last_speed_source = "none"
+        tracker._last_cmd_speed_raw = 0.0
+        tracker._last_cmd_speed_t = None
+        tracker._cmd_speed_history = deque([0.30] * 5, maxlen=5)
+        tracker._current_state_message = "MANUAL"
+
+        tracker._resolve_speed_mps(now=10.0)
+        self.assertEqual(tracker._last_speed_source, "manual_command_hold")
+
     def test_current_steer_feedback_is_preferred_over_command(self):
         tracker = threadTracking.__new__(threadTracking)
         tracker._steer_feedback_sub = _FakeSub(["250"])

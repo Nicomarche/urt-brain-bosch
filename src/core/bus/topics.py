@@ -213,7 +213,12 @@ TRACKED_OBJECTS_MSG: Topic[dict] = Topic(
 )
 
 # ─── Sim control (sim mode only) ────────────────────────────────────────────
-SIM_RELOCALIZE: Topic[dict] = Topic("/auto/threadposeestimator/simrelocalize", dict, "EVENT")
+# LATCHED porque el pose_estimator publica el startup pose en __init__ —
+# si threadWrite todavía no suscribió (slow-joiner ZMQ típico al boot del
+# brain), el mensaje se perdía y el sim_bridge nunca teleportaba el auto
+# a la pose inicial del brain. Con LATCHED el último valor se cachea y
+# se entrega cuando threadWrite suscribe.
+SIM_RELOCALIZE: Topic[dict] = Topic("/auto/threadposeestimator/simrelocalize", dict, "LATCHED")
 
 # ─── From MotionController + Dispatcher ─────────────────────────────────────
 # MotorCommandMsg is the dispatcher's post-safety-gate snapshot, NOT the
@@ -247,6 +252,18 @@ PERCEPTION_DEBUG: Topic[dict] = Topic(
     "/auto/perception/debug", dict, "STREAM"
 )
 
+# ─── ManualSessionRecorder lifecycle ────────────────────────────────────────
+# Publicado por ``src.recording.manual_session_recorder`` al abrir/cerrar una
+# sesión de grabación exhaustiva en modo MANUAL. Payload::
+#   {"active": bool, "session_dir": str, "started_at": float,
+#    "session_id": str}
+# ``session_dir`` es absoluto y ya existe en disco cuando el mensaje se emite.
+# LATCHED para que los grabadores de video (threadCamera, threadLocalPerception)
+# que arrancan después del recorder vean inmediatamente la sesión activa.
+MANUAL_RECORDING_SESSION: Topic[dict] = Topic(
+    "/auto/recording/manualsession", dict, "LATCHED"
+)
+
 
 # Topics whose last value the broker must replay to late subscribers (ROS:
 # "transient_local"). Derived from the LATCHED constants above so we don't
@@ -256,6 +273,8 @@ LATCHED_TOPIC_NAMES: frozenset[str] = frozenset({
     STATE_CHANGE.name,
     BEHAVIOR_OUTPUT_MSG.name,
     NAVIGATION_STATUS.name,
+    SIM_RELOCALIZE.name,
+    MANUAL_RECORDING_SESSION.name,
 })
 
 
