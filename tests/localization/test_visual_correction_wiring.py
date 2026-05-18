@@ -50,16 +50,16 @@ def test_tracking_state_set_scenario_empty_string_normalizes_to_none():
 
 
 def test_profile_lane_keep_uses_aggressive_gain():
-    """Plan T1.4: el perfil lane_keep sube a gain=0.30 / max=0.04 / step=0.022.
+    """Plan T1.4: el perfil lane_keep usa autoridad fuerte de cámara.
 
     Esto resuelve el síntoma reportado de "se guía mucho por la posición y
     muy poco por el carril" en recta. Si alguien baja estos valores, este
     test obliga a revisar la decisión.
     """
     profile = resolve_visual_correction_profile("lane_keep")
-    assert profile.gain == pytest.approx(0.30)
-    assert profile.max_m == pytest.approx(0.04)
-    assert profile.step_max_m == pytest.approx(0.022)
+    assert profile.gain == pytest.approx(0.45)
+    assert profile.max_m == pytest.approx(0.06)
+    assert profile.step_max_m == pytest.approx(0.035)
     assert not profile.is_disabled
 
 
@@ -73,8 +73,8 @@ def test_profile_parking_is_disabled():
 def test_profile_intersection_is_weak():
     """En intersección la cámara aporta poco — el mapa OSM dicta la trayectoria."""
     profile = resolve_visual_correction_profile("intersection")
-    assert profile.gain < 0.10
-    assert profile.max_m < 0.02
+    assert profile.gain <= 0.10
+    assert profile.max_m <= 0.02
 
 
 def test_profile_default_fallback_for_unknown_scenario():

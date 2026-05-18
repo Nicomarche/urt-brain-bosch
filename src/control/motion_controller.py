@@ -1054,6 +1054,12 @@ class MotionController(IMotionController):
             self._reset_command_memory()
             return self._invalid("mpc_solver_not_ready", backend=self._backend_name)
 
+        behavior_notes = (
+            getattr(behavior_output, "notes", None)
+            if isinstance(getattr(behavior_output, "notes", None), dict)
+            else {}
+        )
+
         # 4. Construir arrays de referencia. target_path es (N+1, 3) y
         #    speed_profile es (N,). El solver espera input_refs (N, 2)
         #    con [v_ref, delta_ref]; delta_ref siempre es 0 en BFMC
@@ -1068,6 +1074,10 @@ class MotionController(IMotionController):
         if n != self._solver.N:
             self._reset_command_memory()
             return self._invalid("horizon_mismatch", backend=self._backend_name)
+
+        requested_profile = _desired_weight_profile_name(behavior_notes)
+        if requested_profile and requested_profile != self.active_weight_profile():
+            self.set_weight_profile(requested_profile)
 
         # The planner publishes the path in the OSM/map frame (y-down, yaw CW+),
         # while the bicycle model in Acados/PurePursuit expects the standard
@@ -1146,7 +1156,7 @@ class MotionController(IMotionController):
         speed_mps = min(max(0.0, float(v_opt)), requested_speed_mps)
         forward_recovery_reason = ""
         forward_recovery_hint: dict[str, float] | None = None
-        notes = getattr(behavior_output, "notes", None)
+        notes = behavior_notes
         path_source = str((notes or {}).get("path_source") or "") if isinstance(notes, dict) else ""
         if (
             speed_mps <= 1e-6
@@ -1212,7 +1222,11 @@ class MotionController(IMotionController):
         )
 
         # Rate limiter de steering — independiente del solver.
-        max_steer_step = self._max_steer_rate_deg_s * self._steer_dt_s
+        max_steer_rate_deg_s = _effective_steer_rate_limit_deg_s(
+            behavior_notes,
+            self._max_steer_rate_deg_s,
+        )
+        max_steer_step = max_steer_rate_deg_s * self._steer_dt_s
         steering_deg = max(
             self._prev_steer_deg - max_steer_step,
             min(self._prev_steer_deg + max_steer_step, steering_deg),
@@ -1239,6 +1253,8 @@ class MotionController(IMotionController):
             delta_deg_raw=float(delta_deg), steering_deg=float(steering_deg),
             scenario=behavior_output.scenario_name,
             requested_speed_mps=float(requested_speed_mps),
+            mpc_weight_profile=self.active_weight_profile(),
+            steer_rate_limit_deg_s=float(max_steer_rate_deg_s),
             speed_recovery_reason=forward_recovery_reason,
             speed_recovery_hint=forward_recovery_hint,
             backend=self._backend_name,
@@ -1365,3 +1381,26 @@ def _effective_min_moving_speed_mps(
         return max(0.0, float(value))
     except (TypeError, ValueError):
         return max(0.0, float(default_min_mps))
+
+
+def _desired_weight_profile_name(notes: dict | None) -> str:
+    if isinstance(notes, dict):
+        raw = notes.get("mpc_weight_profile")
+        if raw is not None and str(raw).strip():
+            return str(raw).strip()
+    try:
+        import config as _cfg
+        return str(getattr(_cfg, "MPC_WEIGHT_PROFILE", "default") or "default")
+    except Exception:
+        return "default"
+
+
+def _effective_steer_rate_limit_deg_s(notes: dict | None, default_deg_s: float) -> float:
+    if isinstance(notes, dict) and notes.get("steer_rate_limit_deg_s") is not None:
+        try:
+            value = float(notes.get("steer_rate_limit_deg_s"))
+            if math.isfinite(value) and value > 0.0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return float(default_deg_s)

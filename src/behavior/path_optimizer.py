@@ -459,6 +459,7 @@ class PathOptimizer:
         )
 
         polyline = raw_path[:, :2]
+        path_source_visual = _path_note_str(path_plan, "path_source") == "visual_lane_waypoints"
         protected_prefix_xy = None
         if protected_prefix_samples > 0:
             protected_prefix_xy = _resample_polyline(
@@ -466,7 +467,12 @@ class PathOptimizer:
                 step_arc=step_arc,
                 n_samples=protected_prefix_samples,
             )
-        polyline = _smooth_polyline(polyline, preserve_count=protected_prefix_samples)
+        smooth_window = 3 if path_source_visual else _SMOOTH_WINDOW
+        polyline = _smooth_polyline(
+            polyline,
+            preserve_count=protected_prefix_samples,
+            window_size=smooth_window,
+        )
         sampled_xy = _resample_polyline(polyline, step_arc=step_arc, n_samples=ctx.horizon_n + 1)
         pose_xy = np.array([ctx.pose.fused_pose.x, ctx.pose.fused_pose.y], dtype=float)
         # Cuando el path viene de waypoints visuales, sample[0] está en el
@@ -474,7 +480,6 @@ class PathOptimizer:
         # crearía una "L" entre sample[0] y sample[1] que el MPC interpreta
         # como giro brusco. En ese caso dejamos el path tal como vino y el
         # MPC penaliza la deviación naturalmente (paradigma urt-ref).
-        path_source_visual = _path_note_str(path_plan, "path_source") == "visual_lane_waypoints"
         if not path_source_visual:
             sampled_xy[0] = pose_xy
         if protected_prefix_xy is not None:
@@ -1916,10 +1921,18 @@ def _protected_prefix_sample_count(
     return min(horizon_n + 1, count)
 
 
-def _smooth_polyline(polyline: np.ndarray, *, preserve_count: int = 0) -> np.ndarray:
+def _smooth_polyline(
+    polyline: np.ndarray,
+    *,
+    preserve_count: int = 0,
+    window_size: int = _SMOOTH_WINDOW,
+) -> np.ndarray:
     if polyline.shape[0] < 3:
         return np.array(polyline, copy=True)
-    window = min(_SMOOTH_WINDOW, polyline.shape[0] if polyline.shape[0] % 2 == 1 else polyline.shape[0] - 1)
+    requested_window = max(3, int(window_size))
+    if requested_window % 2 == 0:
+        requested_window -= 1
+    window = min(requested_window, polyline.shape[0] if polyline.shape[0] % 2 == 1 else polyline.shape[0] - 1)
     if window < 3:
         return np.array(polyline, copy=True)
     radius = window // 2

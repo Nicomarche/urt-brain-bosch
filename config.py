@@ -27,6 +27,19 @@ LANE_VISUAL_POLY_DEGREE_HIGH = 3                # grado del polinomio con ≥12 
 LANE_VISUAL_POLY_DEGREE_LOW = 2                 # grado con <12 muestras (evita overshoot)
 LANE_VISUAL_MIN_QUALITY_FOR_PRIMARY_PATH = 0.55 # quality mínima para usar waypoints como path
 
+# Lane keeping: autoridad primaria de cámara sólo en tramos normales. En zonas
+# de maniobra (turn_direction/intersection/roundabout/stopline/etc.) manda mapa.
+LANE_VISUAL_PRIMARY_ENABLED = True
+LANE_VISUAL_PRIMARY_ALLOWED_SCENARIOS = {"lane_keep"}
+LANE_VISUAL_PRIMARY_TWO_LINE_MIN_QUALITY = 0.75
+LANE_VISUAL_PRIMARY_SINGLE_LINE_MIN_QUALITY = 0.85
+LANE_VISUAL_PRIMARY_MAP_AUTHORITY_DISTANCE_M = 0.60
+LANE_VISUAL_PRIMARY_MIN_FORWARD_SPAN_M = 0.25
+LANE_VISUAL_PRIMARY_MAX_LATERAL_TO_FORWARD_RATIO = 1.2
+LANE_VISUAL_PRIMARY_MAX_HEADING_ERROR_DEG = 35.0
+LANE_VISUAL_PRIMARY_ENTER_TICKS = 3
+LANE_VISUAL_PRIMARY_EXIT_TICKS = 2
+
 # Parking spot dimensions (BFMC spec)
 PARKING_SPOT_LENGTH_CM = 76.5  # longitud del espacio de estacionamiento
 PARKING_SPOT_WIDTH_CM  = 35.0  # ancho del espacio de estacionamiento
@@ -343,6 +356,14 @@ ACADOS_MPC_PROFILES = {
         "x": 2.0, "y": 1.5, "yaw": 0.3, "v": 1.5,
         "steer": 0.0, "dv": 2.0, "dsteer": 1.0,
     },
+    "lane_keep_visual": {
+        "x": 1.5, "y": 5.0, "yaw": 1.2, "v": 1.0,
+        "steer": 0.0, "dv": 0.5, "dsteer": 0.25,
+    },
+    "map_turn_authority": {
+        "x": 2.5, "y": 3.5, "yaw": 1.6, "v": 1.0,
+        "steer": 0.0, "dv": 0.5, "dsteer": 0.35,
+    },
     # Override perfilable A/B (plan B1.1): ref tiene dv=0.25, dsteer=0.5 —
     # más permisivo. Probarlo en sim antes de hacer default.
     "ref_permissive": {
@@ -356,7 +377,7 @@ ACADOS_MPC_PROFILES = {
 MPC_WEIGHT_PROFILE = "default"
 
 # Zona muerta de salida del MPC completo [°].
-ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.75
+ACADOS_MPC_OUTPUT_DEADBAND_DEG = 0.25
 
 # USE_ACADOS_SPEED: True = usar velocidad del MPC para el motor.
 # False = solo usar steering del MPC, mantener control de velocidad heurístico.
@@ -863,9 +884,9 @@ VISUAL_CORRECTION_PROFILES = {
         # visual jale al pose lateralmente con autoridad real (~1.5 cm/frame,
         # techo 4 cm). Antes 0.22/0.025/0.018 → respuesta lenta dominada por
         # el target_path rígido del MPC.
-        "gain": 0.30,
-        "max_m": 0.04,
-        "step_max_m": 0.022,
+        "gain": 0.45,
+        "max_m": 0.06,
+        "step_max_m": 0.035,
     },
     "intersection": {
         # En sim sin GPS/GT, la odometría puede quedarse "en ruta" mientras

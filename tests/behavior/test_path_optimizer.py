@@ -112,6 +112,85 @@ def test_path_optimizer_builds_drivable_bounds() -> None:
     assert lateral_span > 0.25
 
 
+def test_path_optimizer_visual_primary_uses_lighter_smoothing() -> None:
+    raw = np.array(
+        [
+            [0.00, 0.00],
+            [0.10, 0.00],
+            [0.20, 0.18],
+            [0.30, 0.00],
+            [0.40, 0.00],
+            [0.50, -0.12],
+            [0.60, 0.00],
+        ],
+        dtype=float,
+    )
+
+    default_smoothed = path_optimizer_module._smooth_polyline(raw, window_size=5)
+    visual_smoothed = path_optimizer_module._smooth_polyline(raw, window_size=3)
+
+    visual_peak = float(np.max(np.abs(visual_smoothed[2:5, 1])))
+    default_peak = float(np.max(np.abs(default_smoothed[2:5, 1])))
+    assert visual_peak > default_peak
+
+
+def test_path_optimizer_map_authority_keeps_route_source_not_visual_primary() -> None:
+    base_ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        horizon_n=8,
+        dt=0.05,
+        current_lanelet_id="n1->n2",
+        route_waypoints=[
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [0.6, 0.0, 0.0],
+            [0.9, 0.0, 0.0],
+        ],
+    )
+    ctx = replace(
+        base_ctx,
+        route=replace(
+            base_ctx.route,
+            next_semantic_type="intersection",
+            next_semantic_distance_m=0.30,
+        ),
+        lane_observation=LaneObservation(
+            detected_sides=("left", "right"),
+            measurement_mode="two_line",
+            quality=1.0,
+            direct_error_valid=True,
+            direct_error_m=0.06,
+            center_waypoints_body=tuple((0.05 * i, 0.12, 0.0) for i in range(20)),
+            lane_width_m=0.35,
+        ),
+    )
+    raw_path = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [0.3, 0.0, 0.0],
+            [0.6, 0.0, 0.0],
+            [0.9, 0.0, 0.0],
+        ],
+        dtype=float,
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=raw_path,
+        base_speed_profile=np.full(ctx.horizon_n, 0.30, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints", "path_authority": "map"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_lane_reentry_reason"] != "path_source_visual_waypoints"
+    assert out.notes["route_corridor_authoritative"] is True
+    assert abs(float(out.target_path[0, 1]) - ctx.pose.fused_pose.y) < 1e-6
+
+
 def test_path_optimizer_clamps_route_back_inside_lanelet_corridor() -> None:
     lanelet_map = from_track_graph(
         _build_track_graph(
@@ -2177,6 +2256,7 @@ def test_path_optimizer_keeps_route_precision_after_semantic_distance_jump() -> 
         step_arc=base_step_arc,
         ref_speed_mps=0.4,
         raw_path=raw_path,
+        scenario_name=ScenarioName.LANE_KEEP.value,
         ctx=ctx,
     )
 
@@ -2247,6 +2327,7 @@ def test_path_optimizer_keeps_waypoint_precision_without_semantic_distance() -> 
         step_arc=base_step_arc,
         ref_speed_mps=0.4,
         raw_path=raw_path,
+        scenario_name=ScenarioName.LANE_KEEP.value,
         ctx=ctx,
     )
 
