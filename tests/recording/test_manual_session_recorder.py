@@ -18,7 +18,11 @@ import pytest
 
 from src.core.messaging.messageHandlerSender import messageHandlerSender
 from src.core.bus import topics as bus_topics
-from src.recording.campaign_artifacts import write_campaign_artifacts
+from src.recording.campaign_artifacts import (
+    _actual_path_segments_from_brain_events,
+    _collect_visual_lane_samples,
+    write_campaign_artifacts,
+)
 from src.recording.manual_session_recorder import (
     ManualSessionRecorder,
     _SessionState,
@@ -254,6 +258,130 @@ def test_campaign_artifacts_create_camera_frames_and_map_overlays(tmp_path: Path
     assert (run_dir / "camera.avi").exists()
     assert (run_dir / "frames").exists()
     assert "camera_video" in artifacts
+
+
+def test_actual_path_segments_filter_session_window_and_relocalization_jumps():
+    events = [
+        {
+            "ts": 999.9,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 9.0,
+            "fused_y": 9.0,
+            "reloc_mode": "gps_fix",
+            "reloc_source": "manual_dashboard",
+        },
+        {
+            "ts": 1000.0,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 1.0,
+            "fused_y": 2.0,
+            "reloc_mode": "dead_reckoning",
+            "reloc_source": "dead_reckoning",
+        },
+        {
+            "ts": 1000.1,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 1.02,
+            "fused_y": 2.0,
+            "reloc_mode": "dead_reckoning",
+            "reloc_source": "dead_reckoning",
+        },
+        {
+            "ts": 1000.2,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 1.50,
+            "fused_y": 2.50,
+            "reloc_mode": "gps_fix",
+            "reloc_source": "manual_dashboard",
+        },
+        {
+            "ts": 1000.3,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 1.52,
+            "fused_y": 2.50,
+            "reloc_mode": "dead_reckoning",
+            "reloc_source": "dead_reckoning",
+        },
+        {
+            "ts": 1001.1,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 4.0,
+            "fused_y": 4.0,
+            "reloc_mode": "dead_reckoning",
+            "reloc_source": "dead_reckoning",
+        },
+    ]
+
+    segments = _actual_path_segments_from_brain_events(
+        events,
+        start_ts=1000.0,
+        end_ts=1001.0,
+    )
+
+    assert segments == [
+        [[1.0, 2.0], [1.02, 2.0]],
+        [[1.5, 2.5], [1.52, 2.5]],
+    ]
+
+
+def test_visual_lane_samples_filter_session_window():
+    events = [
+        {
+            "ts": 999.9,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 9.0,
+            "fused_y": 9.0,
+        },
+        {
+            "ts": 999.95,
+            "thread": "lane_observer",
+            "event": "lane_obs",
+            "quality": 1.0,
+            "offset_m": 0.20,
+        },
+        {
+            "ts": 1000.0,
+            "thread": "pose_estimator",
+            "event": "pose_published",
+            "fused_x": 1.0,
+            "fused_y": 2.0,
+        },
+        {
+            "ts": 1000.1,
+            "thread": "lane_observer",
+            "event": "lane_obs",
+            "quality": 1.0,
+            "offset_m": 0.12,
+            "measurement_mode": "two_line",
+        },
+        {
+            "ts": 1001.1,
+            "thread": "lane_observer",
+            "event": "lane_obs",
+            "quality": 1.0,
+            "offset_m": 0.18,
+        },
+    ]
+
+    samples = _collect_visual_lane_samples(
+        events,
+        record_start_ts=1000.0,
+        record_end_ts=1001.0,
+        fps=10.0,
+    )
+
+    assert len(samples) == 1
+    assert samples[0]["pose_x"] == 1.0
+    assert samples[0]["pose_y"] == 2.0
+    assert samples[0]["visual_offset_m"] == 0.12
+    assert samples[0]["frame"] == 2
 
 
 # ─── Construction smoke-test ───────────────────────────────────────────────

@@ -48,23 +48,30 @@ def write_campaign_artifacts(session_dir: Path, *, run_dir: Path | None = None) 
     brain_jsonl = run_dir / "brain.jsonl"
     brain_events = _load_jsonl(brain_jsonl)
     expected_route = _load_expected_route(run_dir)
-    actual_xy = _actual_path_from_brain_events(brain_events)
+    start_ts, end_ts = _session_time_window(session_dir)
+    actual_segments = _actual_path_segments_from_brain_events(
+        brain_events,
+        start_ts=start_ts,
+        end_ts=end_ts,
+    )
     overlay_path = session_dir / "overlay.png"
     if _write_overlay(
         out_path=overlay_path,
         track_png=_DEFAULT_TRACK_PNG,
         expected_route=expected_route,
-        actual_xy=actual_xy,
+        actual_xy=actual_segments,
     ):
         artifacts["overlay_png"] = str(overlay_path)
+        artifacts["actual_path_segments"] = len(actual_segments)
+        artifacts["actual_path_points"] = sum(len(segment) for segment in actual_segments)
 
     fps = None
-    start_ts = _session_started_at(session_dir)
     if isinstance(artifacts.get("video_frames"), dict):
         fps = _finite_float(artifacts["video_frames"].get("fps"))
     visual_samples = _collect_visual_lane_samples(
         brain_events,
         record_start_ts=start_ts,
+        record_end_ts=end_ts,
         fps=fps,
     )
     visual_overlay_path = session_dir / "overlay_visual_lane.png"
@@ -72,7 +79,7 @@ def write_campaign_artifacts(session_dir: Path, *, run_dir: Path | None = None) 
         out_path=visual_overlay_path,
         track_png=_DEFAULT_TRACK_PNG,
         expected_route=expected_route,
-        actual_xy=actual_xy,
+        actual_xy=actual_segments,
         visual_samples=visual_samples,
     ):
         artifacts["overlay_visual_lane_png"] = str(visual_overlay_path)
@@ -231,25 +238,98 @@ def _track_metadata(track_png: Path) -> dict[str, Any]:
 
 
 def _actual_path_from_brain_events(events: list[dict[str, Any]]) -> list[list[float]]:
-    points: list[list[float]] = []
-    last: tuple[float, float] | None = None
+    """Backward-compatible flattened driven path for tests/tools."""
+    return [
+        point
+        for segment in _actual_path_segments_from_brain_events(events)
+        for point in segment
+    ]
+
+
+def _actual_path_segments_from_brain_events(
+    events: list[dict[str, Any]],
+    *,
+    start_ts: float | None = None,
+    end_ts: float | None = None,
+    max_jump_m: float = 0.08,
+    max_speed_mps: float = 1.0,
+) -> list[list[list[float]]]:
+    """Return actual driven pose segments, excluding setup/relocalization jumps.
+
+    Campaign overlays are meant to show what the car physically drove during
+    this session. Manual map_view relocalization and start calibration are
+    pose resets, not travelled distance, so they must not be connected into
+    the red "actual" trajectory.
+    """
+    segments: list[list[list[float]]] = []
+    current_segment: list[list[float]] = []
+    last_xy_ts: tuple[float, float, float] | None = None
+
+    def finish_segment() -> None:
+        nonlocal current_segment, last_xy_ts
+        if len(current_segment) >= 2:
+            segments.append(current_segment)
+        current_segment = []
+        last_xy_ts = None
+
     for ev in events:
-        if ev.get("thread") == "nav_planner" and ev.get("event") == "route_update":
-            x = _finite_float(ev.get("pose_x"))
-            y = _finite_float(ev.get("pose_y"))
-        elif ev.get("thread") == "pose_estimator" and ev.get("event") == "pose_published":
-            x = _finite_float(ev.get("fused_x"))
-            y = _finite_float(ev.get("fused_y"))
-        else:
+        ts = _finite_float(ev.get("ts"))
+        if ts is None:
             continue
+        if start_ts is not None and ts < float(start_ts):
+            continue
+        if end_ts is not None and ts > float(end_ts):
+            continue
+        if ev.get("thread") != "pose_estimator" or ev.get("event") != "pose_published":
+            continue
+
+        x = _finite_float(ev.get("fused_x"))
+        y = _finite_float(ev.get("fused_y"))
         if x is None or y is None:
             continue
-        current = (round(float(x), 4), round(float(y), 4))
-        if current == last:
+
+        if _pose_event_is_external_relocalization(ev):
+            finish_segment()
+            current_segment.append([float(x), float(y)])
+            last_xy_ts = (float(ts), float(x), float(y))
             continue
-        points.append([float(x), float(y)])
-        last = current
-    return points
+
+        if last_xy_ts is not None:
+            prev_ts, prev_x, prev_y = last_xy_ts
+            dt_s = max(0.0, float(ts) - float(prev_ts))
+            distance_m = math.hypot(float(x) - float(prev_x), float(y) - float(prev_y))
+            allowed_step_m = max(float(max_jump_m), float(max_speed_mps) * dt_s)
+            if distance_m > allowed_step_m:
+                finish_segment()
+
+        current = (round(float(x), 4), round(float(y), 4))
+        if current_segment:
+            previous = current_segment[-1]
+            if current == (round(float(previous[0]), 4), round(float(previous[1]), 4)):
+                last_xy_ts = (float(ts), float(x), float(y))
+                continue
+        current_segment.append([float(x), float(y)])
+        last_xy_ts = (float(ts), float(x), float(y))
+
+    finish_segment()
+    return segments
+
+
+def _pose_event_is_external_relocalization(ev: dict[str, Any]) -> bool:
+    mode = str(ev.get("reloc_mode") or ev.get("relocalization_mode") or "").strip().lower()
+    source = str(ev.get("reloc_source") or ev.get("last_relocalization_source") or "").strip().lower()
+    external_modes = {
+        "auto_gps_disabled",
+        "auto_gps_entry_pending",
+        "gps_disabled_start",
+        "gps_fix",
+        "start_gps_calibration",
+        "start_gps_calibration_failed",
+        "start_gps_calibration_pending",
+    }
+    if mode in external_modes:
+        return True
+    return "manual_dashboard" in source or "start_calibration" in source
 
 
 def _overlay_map_metadata(track_png: Path, expected_route: dict[str, Any]) -> dict[str, Any]:
@@ -263,7 +343,7 @@ def _write_overlay(
     out_path: Path,
     track_png: Path,
     expected_route: dict[str, Any],
-    actual_xy: list[list[float]],
+    actual_xy: list[list[float]] | list[list[list[float]]],
 ) -> bool:
     try:
         import cv2  # type: ignore
@@ -286,16 +366,20 @@ def _write_overlay(
         pix = np.asarray([world_to_pixel(x, y) for x, y in points], dtype=np.int32)
         cv2.polylines(img, [pix], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
 
+    def draw_segments(segments: list[list[tuple[float, float]]], color: tuple[int, int, int], thickness: int) -> None:
+        for segment in segments:
+            draw_polyline(segment, color, thickness)
+
     expected_xy = [
         (float(pt[0]), float(pt[1]))
         for pt in expected_route.get("waypoints", [])
         if isinstance(pt, list) and len(pt) >= 2
     ]
-    actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
+    actual_segments = _normalize_path_segments(actual_xy)
     draw_polyline(expected_xy, (0, 170, 0), 4)
-    draw_polyline(actual_points, (30, 30, 220), 3)
+    draw_segments(actual_segments, (30, 30, 220), 3)
     cv2.putText(img, "expected", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 120, 0), 2, cv2.LINE_AA)
-    cv2.putText(img, "actual", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
+    cv2.putText(img, "actual driven", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(out_path), img))
 
@@ -304,12 +388,14 @@ def _collect_visual_lane_samples(
     brain_events: list[dict[str, Any]],
     *,
     record_start_ts: float | None = None,
+    record_end_ts: float | None = None,
     fps: float | None = None,
 ) -> list[dict[str, Any]]:
     pose_events = [
         ev for ev in brain_events
         if ev.get("thread") in {"nav_planner", "pose_estimator"}
         and ev.get("event") in {"route_update", "pose_published"}
+        and _event_in_window(ev, start_ts=record_start_ts, end_ts=record_end_ts)
     ]
     pose_ts = [float(ev.get("ts", 0.0) or 0.0) for ev in pose_events]
 
@@ -324,6 +410,8 @@ def _collect_visual_lane_samples(
     samples: list[dict[str, Any]] = []
     for ev in brain_events:
         if ev.get("thread") != "lane_observer" or ev.get("event") != "lane_obs":
+            continue
+        if not _event_in_window(ev, start_ts=record_start_ts, end_ts=record_end_ts):
             continue
         if float(ev.get("quality", 0.0) or 0.0) <= 0.5:
             continue
@@ -370,7 +458,7 @@ def _write_visual_lane_overlay(
     out_path: Path,
     track_png: Path,
     expected_route: dict[str, Any],
-    actual_xy: list[list[float]],
+    actual_xy: list[list[float]] | list[list[list[float]]],
     visual_samples: list[dict[str, Any]],
     min_abs_m: float = 0.08,
 ) -> bool:
@@ -395,14 +483,18 @@ def _write_visual_lane_overlay(
         pix = np.asarray([world_to_pixel(x, y) for x, y in points], dtype=np.int32)
         cv2.polylines(img, [pix], isClosed=False, color=color, thickness=thickness, lineType=cv2.LINE_AA)
 
+    def draw_segments(segments: list[list[tuple[float, float]]], color: tuple[int, int, int], thickness: int) -> None:
+        for segment in segments:
+            draw_polyline(segment, color, thickness)
+
     expected_xy = [
         (float(pt[0]), float(pt[1]))
         for pt in expected_route.get("waypoints", [])
         if isinstance(pt, list) and len(pt) >= 2
     ]
-    actual_points = [(float(pt[0]), float(pt[1])) for pt in actual_xy if len(pt) >= 2]
+    actual_segments = _normalize_path_segments(actual_xy)
     draw_polyline(expected_xy, (0, 170, 0), 4)
-    draw_polyline(actual_points, (30, 30, 220), 3)
+    draw_segments(actual_segments, (30, 30, 220), 3)
 
     drawn: list[dict[str, Any]] = []
     for sample in visual_samples:
@@ -439,7 +531,7 @@ def _write_visual_lane_overlay(
         cv2.putText(img, label, (px + 8, py - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 1, cv2.LINE_AA)
 
     cv2.putText(img, "expected", (24, 36), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 120, 0), 2, cv2.LINE_AA)
-    cv2.putText(img, "actual GT", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
+    cv2.putText(img, "actual driven", (24, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (30, 30, 220), 2, cv2.LINE_AA)
     cv2.putText(img, "visual lane offset: cyan>8cm orange>12cm magenta>18cm", (24, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.62, (255, 255, 255), 2, cv2.LINE_AA)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(out_path), img))
@@ -488,14 +580,61 @@ def _mirror_campaign_artifacts(session_dir: Path, run_dir: Path) -> None:
 
 
 def _session_started_at(session_dir: Path) -> float | None:
+    start_ts, _ = _session_time_window(session_dir)
+    return start_ts
+
+
+def _session_time_window(session_dir: Path) -> tuple[float | None, float | None]:
     manifest_path = session_dir / "manifest.json"
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, None
     if not isinstance(payload, dict):
-        return None
-    return _finite_float(payload.get("started_at"))
+        return None, None
+    return _finite_float(payload.get("started_at")), _finite_float(payload.get("end_ts"))
+
+
+def _event_in_window(
+    ev: dict[str, Any],
+    *,
+    start_ts: float | None,
+    end_ts: float | None,
+) -> bool:
+    ts = _finite_float(ev.get("ts"))
+    if ts is None:
+        return False
+    if start_ts is not None and ts < float(start_ts):
+        return False
+    if end_ts is not None and ts > float(end_ts):
+        return False
+    return True
+
+
+def _normalize_path_segments(
+    path_or_segments: list[list[float]] | list[list[list[float]]],
+) -> list[list[tuple[float, float]]]:
+    if not path_or_segments:
+        return []
+    first = path_or_segments[0]
+    if isinstance(first, list) and first and isinstance(first[0], list):
+        raw_segments = path_or_segments  # type: ignore[assignment]
+    else:
+        raw_segments = [path_or_segments]  # type: ignore[list-item]
+
+    segments: list[list[tuple[float, float]]] = []
+    for raw_segment in raw_segments:
+        segment: list[tuple[float, float]] = []
+        for pt in raw_segment:
+            try:
+                if len(pt) < 2:  # type: ignore[arg-type]
+                    continue
+                segment.append((float(pt[0]), float(pt[1])))  # type: ignore[index]
+            except (TypeError, ValueError, IndexError):
+                continue
+        if len(segment) >= 2:
+            segments.append(segment)
+    return segments
 
 
 def _finite_float(value: Any) -> float | None:
