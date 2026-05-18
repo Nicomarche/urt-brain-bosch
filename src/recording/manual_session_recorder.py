@@ -1,9 +1,10 @@
-"""Recorder exhaustivo de runs en modo MANUAL.
+"""Recorder exhaustivo de runs en modo MANUAL/AUTO.
 
-Cada vez que el vehículo entra a ``SystemMode.MANUAL`` (publicación en
-``STATE_CHANGE``) este proceso abre una **sesión**: crea una subcarpeta
-``manual_<YYYYMMDD_HHMMSS>/`` dentro del run actual y drena todo el bus a
-disco hasta que se sale de manual o se apaga el sistema.
+Cada vez que el vehículo entra a ``SystemMode.MANUAL`` o ``SystemMode.AUTO``
+(publicación en ``STATE_CHANGE``) este proceso abre una **sesión**: crea una
+subcarpeta ``manual_<YYYYMMDD_HHMMSS>/`` o ``auto_<YYYYMMDD_HHMMSS>/`` dentro
+del run actual y drena todo el bus a disco hasta que se sale de ese modo o se
+apaga el sistema.
 
 Layout por sesión::
 
@@ -66,6 +67,8 @@ from src.utils.live_log import live_log
 
 
 _MANUAL_MODE = "MANUAL"
+_AUTO_MODE = "AUTO"
+_RECORDED_MODES = {_MANUAL_MODE, _AUTO_MODE}
 _STOP_MODE = "STOP"
 _DRAIN_PAUSE_S = 0.01      # 100 Hz polling loop — fino para no acumular
 _STATE_POLL_PAUSE_S = 0.05  # cuando no hay sesión activa, latencia OK
@@ -81,20 +84,23 @@ _QOS_PRESETS: dict[str, QoSProfile] = {
 }
 
 
-def _safe_session_path(now_ts: float) -> Path:
-    """Resuelve ``$URT_LOG_RUN_DIR/manual_<ts>``.
+def _safe_session_path(now_ts: float, mode: str = _MANUAL_MODE) -> Path:
+    """Resuelve ``$URT_LOG_RUN_DIR/<mode>_<ts>``.
 
-    Fallback a ``./temp/manual_<ts>`` si la env var no está seteada
+    Fallback a ``./temp/<mode>_<ts>`` si la env var no está seteada
     (invocación legacy de ``main.py`` sin pasar por ``run.sh``).
     """
     ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(now_ts))
+    prefix = str(mode or _MANUAL_MODE).strip().lower()
+    if prefix not in {"manual", "auto"}:
+        prefix = "session"
     run_dir_env = os.environ.get("URT_LOG_RUN_DIR", "").strip()
     if run_dir_env:
         base = Path(run_dir_env)
     else:
         repo_root = Path(__file__).resolve().parents[2]
         base = repo_root / "temp"
-    return base / f"manual_{ts}"
+    return base / f"{prefix}_{ts}"
 
 
 def _read_git_sha() -> Optional[str]:
@@ -146,10 +152,11 @@ class _SessionState:
 
     _MAX_LINE_BYTES = 3072
 
-    def __init__(self, session_dir: Path, topics: list[Topic], started_at: float) -> None:
+    def __init__(self, session_dir: Path, topics: list[Topic], started_at: float, mode: str) -> None:
         self.session_dir = session_dir
         self.started_at = started_at
         self.session_id = session_dir.name
+        self.mode = str(mode or _MANUAL_MODE).upper()
         self._closed = False
 
         (session_dir / "per_topic").mkdir(parents=True, exist_ok=True)
@@ -176,6 +183,7 @@ class _SessionState:
         self._manifest_path = session_dir / "manifest.json"
         manifest = {
             "session_id": self.session_id,
+            "mode": self.mode,
             "session_dir": str(session_dir),
             "started_at": started_at,
             "started_at_monotonic": time.monotonic(),
@@ -265,7 +273,7 @@ class _SessionState:
 
 
 class ManualSessionRecorder(WorkerProcess):
-    """Proceso worker que graba el bus completo durante runs MANUAL.
+    """Proceso worker que graba el bus completo durante runs MANUAL/AUTO.
 
     El constructor sigue la convención ``(queueList, logger, ...)`` del
     resto de procesos del stack (ver ``main.py``). El logger es opcional;
@@ -427,15 +435,20 @@ class ManualSessionRecorder(WorkerProcess):
             return
         previous = self._last_mode
         self._last_mode = mode
-        if mode == _MANUAL_MODE and self._session is None:
+
+        if mode in _RECORDED_MODES:
+            if self._session is not None:
+                self._drain_topics()
+                self._close_session(reason="mode_switch")
             self._open_session(
+                mode=mode,
                 reason_for_open=(
                     ("startup" if previous is None else "mode_enter")
                     if source == "state_change"
-                    else f"{source}_manual"
+                    else f"{source}_{mode.lower()}"
                 )
             )
-        elif mode != _MANUAL_MODE and self._session is not None:
+        elif self._session is not None:
             # Capturar la cola que ya llegó antes del StateChange de salida,
             # luego cerrar manifest y sockets.
             self._drain_topics()
@@ -443,9 +456,9 @@ class ManualSessionRecorder(WorkerProcess):
                 reason=("stop_mode" if mode == _STOP_MODE else "mode_exit")
             )
 
-    def _open_session(self, reason_for_open: str) -> None:
+    def _open_session(self, mode: str, reason_for_open: str) -> None:
         now = time.time()
-        session_dir = _safe_session_path(now)
+        session_dir = _safe_session_path(now, mode)
         # Si entran 2 sesiones en el mismo segundo (raro pero posible)
         # apilamos un sufijo numérico.
         attempt = 0
@@ -453,19 +466,20 @@ class ManualSessionRecorder(WorkerProcess):
             attempt += 1
             session_dir = session_dir.with_name(f"{session_dir.name}_{attempt}")
         session_dir.mkdir(parents=True, exist_ok=True)
-        self._session = _SessionState(session_dir, self._topics, now)
+        self._session = _SessionState(session_dir, self._topics, now, mode)
         self._announce_session(active=True)
         try:
             live_log(
                 "manual_recorder",
                 event="session_start",
                 session_dir=str(session_dir),
+                mode=str(mode).upper(),
                 trigger=reason_for_open,
             )
         except Exception:
             pass
         self._logger.info(
-            "MANUAL session opened: %s (trigger=%s)", session_dir, reason_for_open,
+            "%s session opened: %s (trigger=%s)", str(mode).upper(), session_dir, reason_for_open,
         )
 
     def _close_session(self, reason: str) -> None:
@@ -483,12 +497,13 @@ class ManualSessionRecorder(WorkerProcess):
                 "manual_recorder",
                 event="session_end",
                 session_dir=str(session.session_dir),
+                mode=session.mode,
                 reason=reason,
             )
         except Exception:
             pass
         self._logger.info(
-            "MANUAL session closed: %s (reason=%s)", session.session_dir, reason,
+            "%s session closed: %s (reason=%s)", session.mode, session.session_dir, reason,
         )
         try:
             artifacts = write_campaign_artifacts(session.session_dir)
@@ -504,6 +519,7 @@ class ManualSessionRecorder(WorkerProcess):
     def _session_payload(self, session: _SessionState, active: bool, **extra) -> dict:
         payload = {
             "active": active,
+            "mode": session.mode,
             "session_dir": str(session.session_dir),
             "session_id": session.session_id,
             "started_at": session.started_at,

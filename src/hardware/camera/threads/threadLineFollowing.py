@@ -1007,25 +1007,12 @@ Args:
         self._lane_observation_history = deque(maxlen=12)
         self._last_local_ai_duplicate_collapse = None
         self._last_single_line_projection_debug = {}
-        self.auto_run_log_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "..", "..",
-                "temp",
-                "line_following_auto_last_run.txt",
-            )
-        )
+        from src.core.log_paths import resolve_log_path
+        self.auto_run_log_path = resolve_log_path("line_following_auto_last_run.txt")
         self._auto_run_log_enabled = False
         self._auto_run_log_frame_idx = 0
         self._last_frame_trace = {}
-        self.manual_run_log_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                "..", "..", "..", "..",
-                "temp",
-                "line_following_manual_last_run.txt",
-            )
-        )
+        self.manual_run_log_path = resolve_log_path("line_following_manual_last_run.txt")
         self._manual_run_log_enabled = False
         self._manual_run_log_frame_idx = 0
 
@@ -1034,8 +1021,7 @@ Args:
         # toplevel. ``resolve_log_path`` cae a temp/<file> si el env var no
         # está seteado (compat con invocaciones legacy de main.py).
         self._mask_debug_log_enabled = bool(getattr(_config, 'LANE_MASK_DEBUG_LOG', False))
-        from src.core.log_paths import resolve_log_path as _resolve_log_path
-        self._mask_debug_log_path = _resolve_log_path("lane_mask_debug.log")
+        self._mask_debug_log_path = resolve_log_path("lane_mask_debug.log")
         self._mask_debug_frame_idx = 0
         self._last_bev_reclassify_debug = {}   # filled by _reclassify_masks_via_bev
         self._last_yolo_raw_debug = {}          # filled by _detect_with_local_ai
@@ -1067,7 +1053,6 @@ Args:
         self._calib_log_frame_idx = 0
         # E5: usar URT_LOG_RUN_DIR si está seteado, fallback a temp/ toplevel
         # para preservar comportamiento legacy cuando se corre main.py directo.
-        from src.core.log_paths import resolve_log_path
         self._calib_log_path = resolve_log_path("lane_calib_log.txt")
         self._last_requested_motor_command = None
         self._last_sl_shadow_debug = None  # populated each two-line frame for calib diagnostics
