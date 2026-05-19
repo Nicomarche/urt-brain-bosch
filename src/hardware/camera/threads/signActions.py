@@ -34,7 +34,7 @@ class SignActions:
     # pasó y se inicia un giro a la derecha fijo (ignorando la cámara) por
     # ROUNDABOUT_DURATION segundos hasta caer en el siguiente carril.
     ROUNDABOUT_STEER_DEG    = getattr(config, "SIGN_ROUNDABOUT_STEER_DEG",    25.0)
-    ROUNDABOUT_SPEED        = getattr(config, "SIGN_ROUNDABOUT_SPEED",         3)
+    ROUNDABOUT_SPEED        = getattr(config, "SIGN_ROUNDABOUT_SPEED",        20)
     ROUNDABOUT_DURATION     = getattr(config, "SIGN_ROUNDABOUT_DURATION",     5.0)
     ROUNDABOUT_LOST_THRESHOLD = getattr(config, "SIGN_ROUNDABOUT_LOST_THRESHOLD", 0.4)
 
