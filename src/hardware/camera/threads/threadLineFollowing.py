@@ -7836,21 +7836,7 @@ Returns:
             f"({self._startup_replay_duration_s:.2f}s) before lane following"
         )
         self._publish_startup_move_status(force=True)
-        self._force_show_final_result_active()
         return True
-
-    def _force_show_final_result_active(self):
-        if not self.show_debug or not self._is_window_enabled("final_result"):
-            return
-        frame = getattr(self, "_last_final_result_frame", None)
-        if frame is None:
-            return
-        refreshed = frame.copy()
-        cv2.rectangle(refreshed, (5, 75), (340, 100), (0, 0, 0), -1)
-        cv2.putText(refreshed, "ACTIVE", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.imshow("1. Final Result", refreshed)
-        cv2.waitKey(1)
-        self._last_final_result_frame = refreshed
 
     def _maybe_start_pending_startup_replay(self):
         if not self._startup_replay_pending_green:
@@ -7888,7 +7874,6 @@ Returns:
                 f"{len(self._startup_replay_samples)} samples"
             )
             self._publish_startup_move_status(force=True)
-            self._force_show_final_result_active()
             return True
 
         return self._activate_startup_replay()
@@ -8279,10 +8264,8 @@ Returns:
             self._read_sensor_data()
             if self._startup_replay_pending_green:
                 self._maybe_start_pending_startup_replay()
-                return
             if self._startup_replay_active:
                 self._step_startup_replay()
-                return
             self._publish_startup_move_status()
 
             # Parking maneuver phases that bypass lane detection entirely
@@ -8500,7 +8483,6 @@ Returns:
                     status_text = "ACTIVE" if show_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
                                (0, 255, 0) if show_active else (0, 0, 255), 2)
-                    self._last_final_result_frame = debug_frame.copy()
                     self._show_preview_window("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
