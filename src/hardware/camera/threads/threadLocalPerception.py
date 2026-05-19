@@ -317,7 +317,7 @@ class threadLocalPerception(ThreadWithStop):
         pass
 
     def _enter_parking_mode(self):
-        """Legacy hook kept for tests; parking_sign is now only a SignDetected flag."""
+        """Legacy hook kept for tests; parking is driven only by parking_area."""
         return
 
     def _handle_walk_area(self, detections, now):
@@ -498,19 +498,7 @@ class threadLocalPerception(ThreadWithStop):
         return best
 
     def _handle_parking_sign(self, detections):
-        """Parking sign no longer changes mode; LineFollowing arms parking from SignDetected."""
-        parking_sign = self._best_detection_for_classes(detections, self.PARKING_SIGN_CLASSES)
-        if parking_sign is None:
-            return
-        confidence = float(parking_sign.get("confidence", 0.0) or 0.0)
-        if confidence < self.sign_min_confidence:
-            return
-        box_area = self._box_area(parking_sign)
-        effective_min_box = self.sign_min_box_area_per_sign.get(
-            "parking_sign", self.sign_min_box_area
-        )
-        if box_area < effective_min_box:
-            return
+        """Parking signs are ignored; only parking_area can start parking."""
         return
 
     def _best_traffic_light_detection(self, detections):
@@ -604,38 +592,21 @@ class threadLocalPerception(ThreadWithStop):
             if traffic_light is not None:
                 best = traffic_light
             else:
-                parking_sign = self._best_detection_for_classes(
-                    detections, self.PARKING_SIGN_CLASSES
-                )
                 parking_area = self._best_detection_for_classes(
                     detections, self.PARKING_AREA_CLASSES
                 )
-                parking_sign_last_seen = float(getattr(self, "_parking_sign_last_triggered", 0.0) or 0.0)
-                parking_sign_recent = (
-                    parking_sign_last_seen > 0.0
-                    and now - parking_sign_last_seen < self._parking_sign_cooldown
-                )
-                parking_sign_ready = False
-                if parking_sign is not None:
-                    parking_sign_conf = float(parking_sign.get("confidence", 0.0) or 0.0)
-                    parking_sign_area = self._box_area(parking_sign)
-                    parking_sign_min_box = self.sign_min_box_area_per_sign.get(
-                        "parking_sign", self.sign_min_box_area
-                    )
-                    parking_sign_ready = (
-                        parking_sign_conf >= self.sign_min_confidence
-                        and parking_sign_area >= parking_sign_min_box
-                        and (
-                            parking_sign_last_seen <= 0.0
-                            or now - parking_sign_last_seen >= self._parking_sign_cooldown
-                        )
-                    )
-                if parking_sign_ready:
-                    best = parking_sign
-                elif parking_area is not None and parking_sign_recent:
+                if parking_area is not None:
                     best = parking_area
-                elif parking_sign is not None:
-                    best = parking_sign
+                else:
+                    best = next(
+                        (
+                            detection for detection in detections
+                            if self._normalized_detection_class(detection) not in self.PARKING_SIGN_CLASSES
+                        ),
+                        None,
+                    )
+                    if best is None:
+                        return
         confidence = float(best.get("confidence", 0.0))
         if confidence < self.sign_min_confidence:
             return
@@ -664,12 +635,6 @@ class threadLocalPerception(ThreadWithStop):
             "distance_cm": distance_cm,
             "timestamp": now,
         }
-        parking_sign_last_seen = float(getattr(self, "_parking_sign_last_triggered", 0.0) or 0.0)
-        if parking_sign_last_seen > 0.0:
-            payload["parking_sign_recent"] = (
-                now - parking_sign_last_seen < self._parking_sign_cooldown
-            )
-            payload["parking_sign_last_seen"] = round(parking_sign_last_seen, 3)
         if img_shape is not None and len(img_shape) >= 2:
             img_h = int(img_shape[0])
             img_w = int(img_shape[1])
@@ -701,8 +666,6 @@ class threadLocalPerception(ThreadWithStop):
                 sign_name, self.sign_min_box_area
             )
         is_close = box_area >= effective_min_box
-        if sign_name in self.PARKING_SIGN_CLASSES and is_close:
-            self._parking_sign_last_triggered = now
         is_actionable = SignActions.is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
         dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""

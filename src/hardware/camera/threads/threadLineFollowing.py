@@ -58,7 +58,8 @@ class ParkingState(Enum):
       REVERSING_ALIGN    → reverse with max LEFT steer (straighten inside spot)
       WAIT_STEER_3       → stop + pre-steer wheels RIGHT again before forward correction
       FORWARD_CORRECTION → go forward with max RIGHT steer (same as entry = parallel alignment)
-      PARKED             → hold still, maneuver complete
+      PARKED             → brief hold, then run the inverse path to exit
+      EXIT_*             → undo the maneuver and return to lane following
     """
     IDLE               = "idle"
     LANE_KEEPING       = "lane_keeping"
@@ -71,6 +72,12 @@ class ParkingState(Enum):
     WAIT_STEER_3       = "wait_steer_3"       # Stopped, wheels turning back to entry steer
     FORWARD_CORRECTION = "forward_correction" # Forward with max entry steer (same as initial)
     PARKED             = "parked"
+    EXIT_REVERSING_CORRECTION = "exit_reversing_correction"
+    EXIT_WAIT_STEER_1  = "exit_wait_steer_1"
+    EXIT_FORWARD_ALIGN = "exit_forward_align"
+    EXIT_WAIT_STEER_2  = "exit_wait_steer_2"
+    EXIT_FORWARD_ENTRY = "exit_forward_entry"
+    EXIT_WAIT_STRAIGHT = "exit_wait_straight"
 
 
 # ---------------------------------------------------------------------------
@@ -95,15 +102,10 @@ PARKING_SPOT_LENGTH_MIN_CM = max(0.0, float(getattr(_config, "PARKING_SPOT_LENGT
 PARKING_SPOT_LENGTH_MAX_CM = max(PARKING_SPOT_LENGTH_MIN_CM, float(getattr(_config, "PARKING_SPOT_LENGTH_MAX_CM", 140.0)))
 PARKING_AREA_MIN_BOX_AREA = max(0.0, float(getattr(_config, "PARKING_AREA_MIN_BOX_AREA", 0.08)))
 PARKING_SPOT_LOST_GRACE_S = max(0.0, float(getattr(_config, "PARKING_SPOT_LOST_GRACE_S", 1.0)))
+PARKING_EXIT_REARM_DELAY_S = max(0.0, float(getattr(_config, "PARKING_EXIT_REARM_DELAY_S", 5.0)))
 PARKING_SEARCH_SIDE_BIAS_STEER = abs(float(getattr(_config, "PARKING_SEARCH_SIDE_BIAS_STEER", 4.0)))
-PARKING_SIGN_ENABLE_CLASSES = frozenset({"parking", "parking_sign"})
+PARKING_IGNORED_SIGN_CLASSES = frozenset({"parking", "parking_sign"})
 PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
-PARKING_SIGN_MIN_CONFIDENCE = float(getattr(_config, "SIGN_MIN_CONFIDENCE", 0.50))
-PARKING_SIGN_MIN_BOX_AREA = float(
-    getattr(_config, "SIGN_MIN_BOX_AREA_PER_SIGN", {}).get(
-        "parking_sign", getattr(_config, "SIGN_MIN_BOX_AREA", 0.01)
-    )
-)
 
 # Distancias por fase (odometria integrada con CurrentSpeed de la Nucleo)
 PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          40.0))
@@ -957,6 +959,8 @@ Args:
         self._parking_spot_length_px       = 0.0
         self._parking_spot_px_per_cm       = 0.0
         self._parking_last_spot_seen_at    = 0.0
+        self._parking_area_ignore_until    = 0.0
+        self._parking_run_consumed         = False   # One parking run per process start
         self._parking_enabled              = False
         self._parking_enabled_at           = 0.0
         self._parking_side                 = None    # "right" or "left" once parking_area is seen
@@ -8285,7 +8289,7 @@ Returns:
             self._check_calib_mode()
             self._check_config()
             self._poll_local_ai_messages()
-            self._poll_sign_detected()
+            parking_spot_seen = self._poll_sign_detected()
             self._read_sensor_data()
             if self._startup_replay_pending_green:
                 self._maybe_start_pending_startup_replay()
@@ -8303,6 +8307,12 @@ Returns:
                 ParkingState.WAIT_STEER_3,
                 ParkingState.FORWARD_CORRECTION,
                 ParkingState.PARKED,
+                ParkingState.EXIT_REVERSING_CORRECTION,
+                ParkingState.EXIT_WAIT_STEER_1,
+                ParkingState.EXIT_FORWARD_ALIGN,
+                ParkingState.EXIT_WAIT_STEER_2,
+                ParkingState.EXIT_FORWARD_ENTRY,
+                ParkingState.EXIT_WAIT_STRAIGHT,
             )
             if self._parking_state in _maneuver_states:
                 park_steer, park_speed = self._parking_state_machine()
@@ -8314,7 +8324,8 @@ Returns:
             # The local-AI publisher may alternate parking_sign/parking_area while both
             # are visible, so frame misses alone are too eager.
             if self._parking_state == ParkingState.SPOT_TRACKED:
-                self._parking_spot_miss_frames += 1
+                if not parking_spot_seen:
+                    self._parking_spot_miss_frames += 1
                 now_t = time.time()
                 if self._parking_spot_lost_ready(now_t):
                     self._parking_state = ParkingState.FORWARD_PAST_SPOT
@@ -8333,6 +8344,7 @@ Returns:
                         f"Spot lost after {self._parking_spot_miss_frames} frames, "
                         f"last distance={dist_str}, "
                         f"measured length={length_str}, "
+                        f"side={getattr(self, '_parking_side', None) or 'unknown'}, "
                         f"advance={self._parking_dynamic_forward_cm:.0f}cm "
                         f"(fallback={PARKING_D_FORWARD_CM:.0f}cm, "
                         f"timer={self._parking_forward_timer_s():.1f}s)"
@@ -10122,11 +10134,6 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
     # Parking maneuver helpers
     # ------------------------------------------------------------------
 
-    def _parking_sign_is_close_enough(self, data):
-        confidence = self._safe_float(data.get("confidence"), 0.0)
-        box_area = self._safe_float(data.get("box_area"), 0.0)
-        return confidence >= PARKING_SIGN_MIN_CONFIDENCE and box_area >= PARKING_SIGN_MIN_BOX_AREA
-
     def _parking_area_box_area(self, data):
         box_area = self._safe_float(data.get("box_area"), 0.0)
         if box_area > 0.0:
@@ -10140,15 +10147,22 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             return 0.0
         return max(0.0, (y2 - y1) * (x2 - x1))
 
-    def _enable_parking_search(self, now=None, source="parking_sign"):
+    def _enable_parking_search(self, now=None, source="parking_area", arm_delay=True):
         """Arm parking search without switching out of AUTO lane following."""
         now = time.time() if now is None else now
         if self._parking_state not in (ParkingState.IDLE, ParkingState.LANE_KEEPING):
-            return
+            return False
 
         already_enabled = bool(getattr(self, "_parking_enabled", False))
         if already_enabled and self._parking_state == ParkingState.LANE_KEEPING:
-            return
+            return True
+        if bool(getattr(self, "_parking_run_consumed", False)) and not already_enabled:
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
+                    "parking already ran once in this program start"
+                )
+            return False
         if self._parking_state == ParkingState.IDLE:
             self._reset_parking_state()
 
@@ -10156,13 +10170,15 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_enabled_at = now
         self._parking_state = ParkingState.LANE_KEEPING
         self._parking_mode_started_at = now
-        self._parking_spot_ignore_until = now + PARKING_SPOT_ARM_DELAY_S
+        self._parking_spot_ignore_until = now + PARKING_SPOT_ARM_DELAY_S if arm_delay else 0.0
 
         if not already_enabled:
+            action = "tracking parking_area" if source == "parking_area" else "searching for parking_area"
             print(
                 f"\033[1;97m[ Parking ] :\033[0m \033[1;92mENABLED\033[0m - "
-                f"{source} detected; searching for parking_area"
+                f"{source} detected; {action}"
             )
+        return True
 
     def _parking_spot_side_from_box(self, data):
         box = data.get("box")
@@ -10225,8 +10241,8 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         """Consume SignDetected messages and update parking-area/spot tracking.
 
         Returns True if a parking-area/spot detection was received this cycle.
-        The parking sign arms parking search; the parking area/spot is the only
-        thing that can start spot tracking and the reverse maneuver.
+        Parking starts only from the floor parking_area/parking_spot, not from
+        the parking sign.
 
         The LANE_KEEPING → SPOT_TRACKED transition is gated by metric distance:
         the spot must be within PARKING_TRIGGER_DISTANCE_CM to activate tracking.
@@ -10249,17 +10265,32 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             self._update_traffic_light_hold(data, now=now)
             return False
 
-        if sign_name in PARKING_SIGN_ENABLE_CLASSES:
-            if self._is_auto_mode() and self._parking_sign_is_close_enough(data):
-                self._enable_parking_search(now=now, source=sign_name)
-            elif self.show_debug:
+        if sign_name in PARKING_IGNORED_SIGN_CLASSES:
+            if self.show_debug:
                 print(
                     "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
-                    f"{sign_name} ignored (mode/size/confidence gate)"
+                    f"{sign_name} ignored; parking starts from parking_area"
                 )
             return False
 
         if sign_name not in PARKING_SPOT_SIGN_CLASSES:
+            return False
+
+        ignore_until = self._safe_float(getattr(self, "_parking_area_ignore_until", 0.0), 0.0)
+        if now < ignore_until:
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
+                    "parking_area ignored during exit rearm cooldown"
+                )
+            return False
+
+        if self._current_system_mode not in (SystemMode.AUTO, SystemMode.PARKING):
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
+                    "parking_area ignored outside AUTO/PARKING mode"
+                )
             return False
 
         area_box = self._parking_area_box_area(data)
@@ -10268,22 +10299,28 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 print(
                     "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
                     f"{sign_name} too small for parking_area "
-                    f"(box={area_box:.2%} < {PARKING_AREA_MIN_BOX_AREA:.2%}); likely parking_sign"
+                    f"(box={area_box:.2%} < {PARKING_AREA_MIN_BOX_AREA:.2%})"
                 )
             return False
 
-        if not bool(getattr(self, "_parking_enabled", False)):
-            sign_seen_at = self._safe_float(data.get("parking_sign_last_seen"), 0.0)
-            if bool(data.get("parking_sign_recent")) and sign_seen_at > 0.0:
-                self._enable_parking_search(now=sign_seen_at, source="parking_sign_recent")
-
-        if not bool(getattr(self, "_parking_enabled", False)):
+        parking_active = bool(getattr(self, "_parking_enabled", False)) or self._parking_state != ParkingState.IDLE
+        if bool(getattr(self, "_parking_run_consumed", False)) and not parking_active:
             if self.show_debug:
                 print(
                     "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
-                    "parking_area ignored until parking_sign enables parking"
+                    "parking_area ignored; one parking run already consumed"
                 )
             return False
+
+        if not bool(getattr(self, "_parking_enabled", False)):
+            payload_ts = self._safe_float(data.get("timestamp"), 0.0)
+            if not self._enable_parking_search(
+                now=payload_ts if payload_ts > 0.0 else now,
+                source="parking_area",
+                arm_delay=False,
+            ):
+                return False
+            self._parking_run_consumed = True
         if self._parking_state == ParkingState.IDLE:
             self._parking_state = ParkingState.LANE_KEEPING
 
@@ -10315,6 +10352,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_last_spot_seen_at = now
         self._update_parking_side_from_spot(data)
         self._update_parking_spot_measurement(data)
+
+        if self._parking_state == ParkingState.FORWARD_PAST_SPOT:
+            self._parking_state = ParkingState.SPOT_TRACKED
+            self._parking_phase_start_time = 0.0
+            self._parking_phase_dist_cm = 0.0
+            self._parking_last_sm_time = 0.0
+            self._parking_dynamic_forward_cm = PARKING_D_FORWARD_CM
+            side = getattr(self, "_parking_side", None) or "unknown"
+            print(
+                f"\033[1;97m[ Parking ] :\033[0m \033[1;94mREACQUIRED\033[0m - "
+                f"parking_area visible again, side={side}; keep lane-following before maneuver"
+            )
 
         raw_dist = data.get("distance_cm")
         if raw_dist is not None:
@@ -10525,12 +10574,13 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             else:
                 odom_text = f"stale {odom_age_s:.1f}s"
             speed_cm_s = self._safe_float(getattr(self, "_parking_last_speed_cm_s", 0.0), 0.0)
+            side = getattr(self, "_parking_side", None) or "unknown"
             self._parking_state          = next_state
             self._parking_phase_start_time = now
             self._parking_phase_dist_cm  = 0.0
             self._parking_last_sm_time   = now
             print(f"\033[1;97m[ Parking ] :\033[0m \033[1;96m{label}\033[0m "
-                  f"(prev dist={dist_done:.0f}cm, odom={odom_text}, v={speed_cm_s:.1f}cm/s)")
+                  f"(prev dist={dist_done:.0f}cm, side={side}, odom={odom_text}, v={speed_cm_s:.1f}cm/s)")
 
         # ---------------------------------------------------------------
         # Phase 1: go forward past the spot (straight, no steer).
@@ -10595,17 +10645,61 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 dist_done = self._parking_phase_dist_cm
                 speed_cm_s = self._safe_float(getattr(self, "_parking_last_speed_cm_s", 0.0), 0.0)
                 self._parking_state = ParkingState.PARKED
+                self._parking_phase_start_time = now
+                self._parking_phase_dist_cm = 0.0
+                self._parking_last_sm_time = now
                 print(
                     f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
-                    f"Corrected {dist_done:.0f}cm forward, v={speed_cm_s:.1f}cm/s, maneuver complete"
+                    f"Corrected {dist_done:.0f}cm forward, v={speed_cm_s:.1f}cm/s; preparing exit"
                 )
             return self._parking_entry_steer(), PARKING_FORWARD_SPEED
 
         # ---------------------------------------------------------------
-        # PARKED: hold still
+        # PARKED: brief hold before undoing the maneuver to exit the spot.
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.PARKED:
+            if now - self._parking_phase_start_time >= PARKING_T_WAIT_STEER:
+                _advance(ParkingState.EXIT_REVERSING_CORRECTION, "EXIT_REVERSING_CORRECTION - reverse with entry steer")
             return 0.0, 0.0
+
+        # ---------------------------------------------------------------
+        # Exit sequence: inverse of the in-spot parking maneuver.
+        # ---------------------------------------------------------------
+        if self._parking_state == ParkingState.EXIT_REVERSING_CORRECTION:
+            if self._parking_phase_complete(now, PARKING_D_FORWARD_CORR_CM, PARKING_T_FORWARD_CORR):
+                _advance(ParkingState.EXIT_WAIT_STEER_1, "EXIT_WAIT_STEER_1 - stopped, turning wheels to align steer")
+            return self._parking_entry_steer(), PARKING_REVERSE_SPEED
+
+        if self._parking_state == ParkingState.EXIT_WAIT_STEER_1:
+            if now - self._parking_phase_start_time >= PARKING_T_WAIT_STEER:
+                _advance(ParkingState.EXIT_FORWARD_ALIGN, "EXIT_FORWARD_ALIGN - forward with align steer")
+            return self._parking_align_steer(), 0
+
+        if self._parking_state == ParkingState.EXIT_FORWARD_ALIGN:
+            if self._parking_phase_complete(now, PARKING_D_REVERSING_ALIGN_CM, PARKING_T_REVERSING_ALIGN):
+                _advance(ParkingState.EXIT_WAIT_STEER_2, "EXIT_WAIT_STEER_2 - stopped, turning wheels to entry steer")
+            return self._parking_align_steer(), PARKING_FORWARD_SPEED
+
+        if self._parking_state == ParkingState.EXIT_WAIT_STEER_2:
+            if now - self._parking_phase_start_time >= PARKING_T_WAIT_STEER:
+                _advance(ParkingState.EXIT_FORWARD_ENTRY, "EXIT_FORWARD_ENTRY - forward with entry steer into lane")
+            return self._parking_entry_steer(), 0
+
+        if self._parking_state == ParkingState.EXIT_FORWARD_ENTRY:
+            if self._parking_phase_complete(now, PARKING_D_REVERSING_ENTRY_CM, PARKING_T_REVERSING_ENTRY):
+                _advance(ParkingState.EXIT_WAIT_STRAIGHT, "EXIT_WAIT_STRAIGHT - wheels straight, returning to AUTO lane following")
+            return self._parking_entry_steer(), PARKING_FORWARD_SPEED
+
+        if self._parking_state == ParkingState.EXIT_WAIT_STRAIGHT:
+            if now - self._parking_phase_start_time >= PARKING_T_WAIT_STEER:
+                side = getattr(self, "_parking_side", None) or "unknown"
+                self._reset_parking_state()
+                self._parking_area_ignore_until = now + PARKING_EXIT_REARM_DELAY_S
+                print(
+                    f"\033[1;97m[ Parking ] :\033[0m \033[1;92mEXIT_DONE\033[0m - "
+                    f"merged back to lane from {side} parking; AUTO lane following resumes"
+                )
+            return 0.0, 0
 
         return None, None
 
@@ -10628,6 +10722,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_spot_length_px       = 0.0
         self._parking_spot_px_per_cm       = 0.0
         self._parking_last_spot_seen_at    = 0.0
+        self._parking_area_ignore_until    = 0.0
         self._parking_enabled              = False
         self._parking_enabled_at           = 0.0
         self._parking_side                 = None
