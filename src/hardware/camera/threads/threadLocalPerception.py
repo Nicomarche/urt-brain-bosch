@@ -25,8 +25,8 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 class threadLocalPerception(ThreadWithStop):
     """Runs the local lane/sign model and publishes perception outputs."""
 
-    PARKING_SIGN_CLASSES = frozenset({"parking_sign"})
-    PARKING_AREA_CLASSES = frozenset({"parking_area", "parking_spot", "parking"})
+    PARKING_SIGN_CLASSES = frozenset({"parking", "parking_sign"})
+    PARKING_AREA_CLASSES = frozenset({"parking_area", "parking_spot"})
     TRAFFIC_LIGHT_CLASSES = frozenset({
         "traffic_light",
         "traffic_light_unknown",
@@ -404,7 +404,15 @@ class threadLocalPerception(ThreadWithStop):
 
     def _normalized_detection_class(self, detection):
         raw_name = str(detection.get("class", "") or "")
-        return SignActions.normalize_sign_name(raw_name) or raw_name
+        normalized = SignActions.normalize_sign_name(raw_name) or raw_name
+        sign_map = getattr(config, "LOCAL_AI_SIGN_CLASS_MAP", {})
+        mapped = sign_map.get(normalized)
+        if mapped is not None:
+            return mapped
+        for alias, canonical in sign_map.items():
+            if SignActions.normalize_sign_name(alias) == normalized:
+                return canonical
+        return normalized
 
     def _box_area(self, detection):
         box = detection.get("box", [])
@@ -541,7 +549,7 @@ class threadLocalPerception(ThreadWithStop):
             return
 
         raw_sign_name = str(best.get("class", ""))
-        sign_name = SignActions.normalize_sign_name(raw_sign_name) or raw_sign_name
+        sign_name = self._normalized_detection_class(best)
         box = best.get("box", [0, 0, 0, 0])
         if len(box) != 4:
             box = [0, 0, 0, 0]

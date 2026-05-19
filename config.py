@@ -344,6 +344,7 @@ SIGN_MIN_BOX_AREA = 0.010
 SIGN_MIN_BOX_AREA_PER_SIGN = {
     "highway_exit":     0.003,   # 0.3% – señal lateral, vista a alta velocidad
     "highway_entrance": 0.003,   # 0.3% – señal lateral, igual que exit
+    "parking_sign":     0.003,   # 0.3% – cartel chico; parking_area sigue sin disparar modo
 }
 
 # ===================== TRAFFIC LIGHT OPENCV =====================
@@ -500,6 +501,7 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "no-entry-road-sign": "no_entry",
     "one-way-road-sign": "one_way",
     "parking-sign": "parking_sign",
+    "parking": "parking_sign",
     "parking_sign": "parking_sign",
     "parking sign": "parking_sign",
     "parking-spot": "parking_area",

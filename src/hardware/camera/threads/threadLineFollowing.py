@@ -90,7 +90,7 @@ PARKING_ALIGN_STEER = float(getattr(_config, "PARKING_ALIGN_STEER", -20.0))
 # Detección del spot
 PARKING_SPOT_MISS_THRESHOLD = int(getattr(_config,   "PARKING_SPOT_MISS_THRESHOLD",  8))
 PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
-PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot", "parking"})
+PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
 
 # Distancias por fase (odometría del encoder)
 PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          40.0))
