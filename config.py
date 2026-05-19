@@ -54,6 +54,7 @@ PARKING_ALIGN_STEER = -25.0  # Giro máx IZQUIERDA: REVERSING_ALIGN
 # --- Detección / seguimiento del spot ---
 PARKING_SPOT_MISS_THRESHOLD  = 8      # Frames consecutivos sin detección → spot perdido
 PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot está a ≤ esta distancia (cm)
+PARKING_SPOT_ARM_DELAY_S     = 0.75   # Ignorar spots viejos al entrar en PARKING; primero buscar adelante
 
 # --- Distancias de cada fase (odometría del encoder) ---
 PARKING_D_FORWARD_CM         = 55.0   # Avanzar más allá del spot antes de reversar

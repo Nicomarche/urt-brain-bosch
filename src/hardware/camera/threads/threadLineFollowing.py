@@ -90,6 +90,7 @@ PARKING_ALIGN_STEER = float(getattr(_config, "PARKING_ALIGN_STEER", -20.0))
 # Detección del spot
 PARKING_SPOT_MISS_THRESHOLD = int(getattr(_config,   "PARKING_SPOT_MISS_THRESHOLD",  8))
 PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
+PARKING_SPOT_ARM_DELAY_S = max(0.0, float(getattr(_config, "PARKING_SPOT_ARM_DELAY_S", 0.75)))
 PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
 
 # Distancias por fase (odometría del encoder)
@@ -917,6 +918,8 @@ Args:
         self._parking_phase_dist_cm        = 0.0     # Odometry-based distance traveled in current phase
         self._parking_last_sm_time         = 0.0     # Last time state machine was called (for delta dt)
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM  # Computed at spot-lost transition
+        self._parking_mode_started_at      = 0.0
+        self._parking_spot_ignore_until    = 0.0
 
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
@@ -9895,6 +9898,10 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     elif next_mode == SystemMode.PARKING:
                         self._reset_parking_state()
                         self._parking_state = ParkingState.LANE_KEEPING
+                        self._parking_mode_started_at = time.time()
+                        self._parking_spot_ignore_until = (
+                            self._parking_mode_started_at + PARKING_SPOT_ARM_DELAY_S
+                        )
                         print("\033[1;97m[ Parking ] :\033[0m \033[1;92mLANE_KEEPING\033[0m - Parking mode activated, searching for spot")
                     if not replay_started:
                         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
@@ -10102,6 +10109,29 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         if sign_name not in PARKING_SPOT_SIGN_CLASSES:
             return False
 
+        parking_started_at = self._safe_float(
+            getattr(self, "_parking_mode_started_at", 0.0), 0.0
+        )
+        payload_ts = self._safe_float(data.get("timestamp"), 0.0)
+        if parking_started_at > 0.0 and payload_ts > 0.0 and payload_ts < parking_started_at:
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
+                    "Ignoring stale spot detection from before PARKING mode"
+                )
+            return False
+
+        ignore_until = self._safe_float(
+            getattr(self, "_parking_spot_ignore_until", 0.0), 0.0
+        )
+        if self._parking_state == ParkingState.LANE_KEEPING and now < ignore_until:
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mARMING\033[0m - "
+                    "Ignoring initial spot while searching forward"
+                )
+            return False
+
         self._parking_last_spot_box = data.get("box")
         self._parking_spot_miss_frames = 0
 
@@ -10302,6 +10332,8 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_phase_dist_cm        = 0.0
         self._parking_last_sm_time         = 0.0
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
+        self._parking_mode_started_at      = 0.0
+        self._parking_spot_ignore_until    = 0.0
 
     def stop(self):
         """Stop the thread and cleanup."""

@@ -1,4 +1,5 @@
 import unittest
+import time
 
 import config
 from src.hardware.camera.threads.threadLineFollowing import ParkingState, threadLineFollowing
@@ -69,6 +70,8 @@ def make_line_following(payload):
     detector._parking_last_spot_box = None
     detector._parking_spot_miss_frames = 3
     detector._parking_last_spot_distance_cm = None
+    detector._parking_mode_started_at = 0.0
+    detector._parking_spot_ignore_until = 0.0
     detector.show_debug = False
     return detector
 
@@ -258,6 +261,33 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertTrue(detector._poll_sign_detected())
         self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
         self.assertEqual(detector._parking_spot_miss_frames, 0)
+
+    def test_line_following_ignores_spot_seen_before_parking_mode(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "timestamp": 9.0,
+            "box": [0.1, 0.1, 0.3, 0.3],
+        })
+        detector._parking_mode_started_at = 10.0
+
+        self.assertFalse(detector._poll_sign_detected())
+        self.assertEqual(detector._parking_state, ParkingState.LANE_KEEPING)
+        self.assertIsNone(detector._parking_last_spot_box)
+
+    def test_line_following_ignores_initial_spot_during_parking_arm_delay(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "timestamp": time.time(),
+            "box": [0.1, 0.1, 0.3, 0.3],
+        })
+        detector._parking_mode_started_at = time.time() - 0.1
+        detector._parking_spot_ignore_until = time.time() + 10.0
+
+        self.assertFalse(detector._poll_sign_detected())
+        self.assertEqual(detector._parking_state, ParkingState.LANE_KEEPING)
+        self.assertIsNone(detector._parking_last_spot_box)
 
 
 if __name__ == "__main__":
