@@ -468,9 +468,13 @@ class SignActions:
 
         # Frenar primero. Durante el frenado y la parada, el line-following sigue
         # controlando el steer para mantener la alineación de carril (comportamiento correcto).
-        self._send_speed(0)
+        # Reissue speed=0 every 20ms — a single send does not hold the motor at 0
+        # for the full duration (see _execute_first_stop_right_turn for the same pattern).
         self.is_stopped = True
-        time.sleep(self.STOP_DURATION)
+        stop_start = time.time()
+        while time.time() - stop_start < self.STOP_DURATION:
+            self._send_speed(0)
+            time.sleep(0.02)
         self.is_stopped = False
 
         if is_first_stop:
@@ -488,8 +492,12 @@ class SignActions:
         )
         if self.sign_action_event:
             self.sign_action_event.set()
-        self._send_speed(self.LOW_SPEED)
-        time.sleep(self.CROSSWALK_DURATION)
+        # Hold the slow speed at 20ms cadence so the motor stays at LOW_SPEED
+        # for the full crosswalk duration.
+        cross_start = time.time()
+        while time.time() - cross_start < self.CROSSWALK_DURATION:
+            self._send_speed(self.LOW_SPEED)
+            time.sleep(0.02)
         self._send_speed(self.current_speed)
         if self.sign_action_event:
             self.sign_action_event.clear()

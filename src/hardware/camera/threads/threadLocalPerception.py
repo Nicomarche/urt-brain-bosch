@@ -109,6 +109,7 @@ class threadLocalPerception(ThreadWithStop):
 
         # AUTO-mode pedestrian/obstacle stop (independent of walk_area)
         self._pedestrian_stop_active = False
+        self._pedestrian_stop_last_send = 0.0  # last time speed=0 was reissued
 
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
@@ -460,11 +461,13 @@ class threadLocalPerception(ThreadWithStop):
                 self._pedestrian_stop_active = True
                 if self.sign_actions.sign_action_event:
                     self.sign_actions.sign_action_event.set()
+                # Force an immediate brake — thread_work will keep holding it at 50Hz.
+                self.sign_actions._send_speed(0)
+                self._pedestrian_stop_last_send = now
                 print(
                     f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mAUTO_STOP\033[0m - "
                     f"Pedestrian/obstacle detectado, frenando hasta que despeje"
                 )
-            self.sign_actions._send_speed(0)
         elif self._pedestrian_stop_active:
             self._pedestrian_stop_active = False
             if self.sign_actions.sign_action_event:
@@ -818,6 +821,16 @@ class threadLocalPerception(ThreadWithStop):
                 curve_state=self._lf_curve_state,
                 steering_deg=self._lf_steering_deg,
             )
+
+        # Hold speed=0 at ~50Hz while a pedestrian/obstacle stop is active.
+        # A single send per AI frame (10Hz) isn't enough — the motor needs
+        # repeated commands to stay braked (same pattern as the 20ms tight
+        # loop in SignActions._execute_first_stop_right_turn).
+        if self._pedestrian_stop_active:
+            _now = time.time()
+            if _now - self._pedestrian_stop_last_send >= 0.02:
+                self.sign_actions._send_speed(0)
+                self._pedestrian_stop_last_send = _now
 
         if self.frame_buffer is None:
             time.sleep(0.02)
