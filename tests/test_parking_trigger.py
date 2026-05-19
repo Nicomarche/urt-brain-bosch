@@ -84,6 +84,14 @@ def make_line_following(payload, parking_state=ParkingState.LANE_KEEPING, parkin
     detector._parking_spot_length_cm = 0.0
     detector._parking_spot_length_px = 0.0
     detector._parking_spot_px_per_cm = 0.0
+    detector._parking_last_spot_seen_at = 0.0
+    detector._parking_phase_start_time = 0.0
+    detector._parking_phase_dist_cm = 0.0
+    detector._parking_last_sm_time = 0.0
+    detector._parking_last_odom_fresh = False
+    detector._parking_last_odom_age_s = None
+    detector._parking_last_speed_cm_s = 0.0
+    detector._parking_dynamic_forward_cm = config.PARKING_D_FORWARD_CM
     detector._stanley_last_px_per_cm = 0.0
     detector._last_two_line_ref_px_per_cm = 0.0
     detector._last_px_per_cm = 0.0
@@ -94,7 +102,8 @@ def make_line_following(payload, parking_state=ParkingState.LANE_KEEPING, parkin
     detector.max_steering = 25
     detector._curve_state = "STRAIGHT"
     detector._measured_speed = 0.0
-    detector.stanley_measured_speed_to_mps = 1.0
+    detector._last_speed_time = None
+    detector.stanley_measured_speed_to_mps = 0.001
     detector.show_debug = False
     return detector
 
@@ -389,6 +398,71 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
         self.assertAlmostEqual(detector._parking_spot_length_cm, 80.0)
         self.assertAlmostEqual(detector._parking_forward_target_cm(), 80.0)
+
+    def test_line_following_forward_target_never_shrinks_below_fallback(self):
+        detector = make_line_following({})
+        detector._parking_spot_length_cm = 32.0
+
+        self.assertAlmostEqual(detector._parking_forward_target_cm(), config.PARKING_D_FORWARD_CM)
+
+    def test_line_following_waits_grace_before_spot_lost(self):
+        detector = make_line_following({}, parking_state=ParkingState.SPOT_TRACKED)
+        detector._parking_spot_miss_frames = 999
+        detector._parking_last_spot_seen_at = 100.0
+
+        self.assertFalse(detector._parking_spot_lost_ready(100.0 + config.PARKING_SPOT_LOST_GRACE_S * 0.5))
+        self.assertTrue(detector._parking_spot_lost_ready(100.0 + config.PARKING_SPOT_LOST_GRACE_S + 0.1))
+
+    def test_line_following_forward_timer_scales_with_target_without_encoder(self):
+        detector = make_line_following({})
+        detector._parking_dynamic_forward_cm = config.PARKING_D_FORWARD_CM
+
+        self.assertGreater(detector._parking_forward_timer_s(), config.PARKING_T_FORWARD)
+
+    def test_line_following_parking_uses_fresh_odometry_before_timer(self):
+        detector = make_line_following({})
+        detector._parking_phase_start_time = 0.0
+        detector._parking_last_sm_time = 10.0
+        detector._last_speed_time = 10.1
+        detector._measured_speed = 0.0
+
+        complete = detector._parking_phase_complete(
+            now=10.1,
+            dist_threshold_cm=10.0,
+            timer_threshold_s=0.1,
+        )
+
+        self.assertFalse(complete)
+
+    def test_line_following_parking_falls_back_to_timer_without_odometry(self):
+        detector = make_line_following({})
+        detector._parking_phase_start_time = 0.0
+        detector._parking_last_sm_time = 0.0
+        detector._last_speed_time = None
+
+        complete = detector._parking_phase_complete(
+            now=10.0,
+            dist_threshold_cm=10.0,
+            timer_threshold_s=0.1,
+        )
+
+        self.assertTrue(complete)
+
+    def test_line_following_parking_integrates_nucleo_speed(self):
+        detector = make_line_following({})
+        detector._parking_phase_start_time = 9.0
+        detector._parking_last_sm_time = 9.0
+        detector._last_speed_time = 10.0
+        detector._measured_speed = 150.0  # 15 cm/s from Nucleo x10 cm/s units
+
+        complete = detector._parking_phase_complete(
+            now=10.0,
+            dist_threshold_cm=10.0,
+            timer_threshold_s=99.0,
+        )
+
+        self.assertTrue(complete)
+        self.assertAlmostEqual(detector._parking_phase_dist_cm, 15.0)
 
     def test_line_following_ignores_spot_seen_before_parking_mode(self):
         detector = make_line_following({

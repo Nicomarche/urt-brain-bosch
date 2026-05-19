@@ -58,19 +58,23 @@ PARKING_SPOT_ARM_DELAY_S     = 0.75   # Ignorar spots viejos al entrar en PARKIN
 PARKING_SPOT_LENGTH_MIN_CM   = 30.0   # Clamp inferior para medición dinámica por bbox
 PARKING_SPOT_LENGTH_MAX_CM   = 140.0  # Clamp superior para medición dinámica por bbox
 PARKING_AREA_MIN_BOX_AREA    = 0.08   # parking_area real en piso debe verse grande; evita confundirlo con cartel
+PARKING_SPOT_LOST_GRACE_S    = 1.0    # Debe perderse por este tiempo antes de iniciar FORWARD_PAST_SPOT
 PARKING_SEARCH_SIDE_BIAS_STEER = 4.0  # Sesgo suave hacia la linea del lado del spot mientras lo trackea
 
-# --- Distancias de cada fase (odometría del encoder) ---
+# --- Distancias de cada fase (odometria integrada con CurrentSpeed de la Nucleo) ---
 PARKING_D_FORWARD_CM         = 55.0   # Avanzar más allá del spot antes de reversar
 PARKING_D_REVERSING_ENTRY_CM = 75.0   # Reversa con entry steer (meter el trasero al spot)
 PARKING_D_REVERSING_ALIGN_CM = 45.0   # Reversa con align steer (alinear dentro del spot)
 PARKING_D_FORWARD_CORR_CM    = 20.0   # Corrección hacia adelante con entry steer
 
-# --- Tiempos fallback (cuando el encoder no reporta velocidad) ---
+# --- Tiempos fallback (cuando no llega odometria de la Nucleo) ---
 PARKING_T_FORWARD         = 1.5  # seg — FORWARD_PAST_SPOT
 PARKING_T_REVERSING_ENTRY = 3.0  # seg — REVERSING_ENTRY
 PARKING_T_REVERSING_ALIGN = 1.5  # seg — REVERSING_ALIGN
 PARKING_T_FORWARD_CORR    = 1.5  # seg — FORWARD_CORRECTION
+PARKING_FORWARD_TIMER_MARGIN = 1.1  # Fallback sin odometria: target_cm / speed_cm_s * margen
+PARKING_ODOMETRY_TIMEOUT_S = 0.7  # Si CurrentSpeed es mas viejo que esto, usar fallback por tiempo
+PARKING_TRUST_FRESH_ODOMETRY = True  # Con odometria fresca, las fases avanzan solo por distancia
 
 # --- Tiempo de espera para que el servo alcance el ángulo (seg) ---
 PARKING_T_WAIT_STEER = 1.0  # WAIT_STEER_1 / WAIT_STEER_2 / WAIT_STEER_3

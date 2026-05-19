@@ -94,6 +94,7 @@ PARKING_SPOT_ARM_DELAY_S = max(0.0, float(getattr(_config, "PARKING_SPOT_ARM_DEL
 PARKING_SPOT_LENGTH_MIN_CM = max(0.0, float(getattr(_config, "PARKING_SPOT_LENGTH_MIN_CM", 30.0)))
 PARKING_SPOT_LENGTH_MAX_CM = max(PARKING_SPOT_LENGTH_MIN_CM, float(getattr(_config, "PARKING_SPOT_LENGTH_MAX_CM", 140.0)))
 PARKING_AREA_MIN_BOX_AREA = max(0.0, float(getattr(_config, "PARKING_AREA_MIN_BOX_AREA", 0.08)))
+PARKING_SPOT_LOST_GRACE_S = max(0.0, float(getattr(_config, "PARKING_SPOT_LOST_GRACE_S", 1.0)))
 PARKING_SEARCH_SIDE_BIAS_STEER = abs(float(getattr(_config, "PARKING_SEARCH_SIDE_BIAS_STEER", 4.0)))
 PARKING_SIGN_ENABLE_CLASSES = frozenset({"parking", "parking_sign"})
 PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
@@ -104,17 +105,20 @@ PARKING_SIGN_MIN_BOX_AREA = float(
     )
 )
 
-# Distancias por fase (odometría del encoder)
+# Distancias por fase (odometria integrada con CurrentSpeed de la Nucleo)
 PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          40.0))
 PARKING_D_REVERSING_ENTRY_CM = float(getattr(_config, "PARKING_D_REVERSING_ENTRY_CM",  60.0))
 PARKING_D_REVERSING_ALIGN_CM = float(getattr(_config, "PARKING_D_REVERSING_ALIGN_CM",  22.0))
 PARKING_D_FORWARD_CORR_CM    = float(getattr(_config, "PARKING_D_FORWARD_CORR_CM",     20.0))
 
-# Tiempos fallback (cuando encoder speed == 0)
+# Tiempos fallback (cuando no llega odometria de la Nucleo)
 PARKING_T_FORWARD         = float(getattr(_config, "PARKING_T_FORWARD",         1.5))
 PARKING_T_REVERSING_ENTRY = float(getattr(_config, "PARKING_T_REVERSING_ENTRY", 3.0))
 PARKING_T_REVERSING_ALIGN = float(getattr(_config, "PARKING_T_REVERSING_ALIGN", 1.5))
 PARKING_T_FORWARD_CORR    = float(getattr(_config, "PARKING_T_FORWARD_CORR",    1.5))
+PARKING_FORWARD_TIMER_MARGIN = max(1.0, float(getattr(_config, "PARKING_FORWARD_TIMER_MARGIN", 1.1)))
+PARKING_ODOMETRY_TIMEOUT_S = max(0.0, float(getattr(_config, "PARKING_ODOMETRY_TIMEOUT_S", 0.7)))
+PARKING_TRUST_FRESH_ODOMETRY = bool(getattr(_config, "PARKING_TRUST_FRESH_ODOMETRY", True))
 
 # Tiempo de espera servo
 PARKING_T_WAIT_STEER = float(getattr(_config, "PARKING_T_WAIT_STEER", 1.0))
@@ -928,12 +932,16 @@ Args:
         self._parking_phase_start_time     = 0.0     # Timestamp when current phase started
         self._parking_phase_dist_cm        = 0.0     # Odometry-based distance traveled in current phase
         self._parking_last_sm_time         = 0.0     # Last time state machine was called (for delta dt)
+        self._parking_last_odom_fresh      = False
+        self._parking_last_odom_age_s      = None
+        self._parking_last_speed_cm_s      = 0.0
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM  # Computed at spot-lost transition
         self._parking_mode_started_at      = 0.0
         self._parking_spot_ignore_until    = 0.0
         self._parking_spot_length_cm       = 0.0
         self._parking_spot_length_px       = 0.0
         self._parking_spot_px_per_cm       = 0.0
+        self._parking_last_spot_seen_at    = 0.0
         self._parking_enabled              = False
         self._parking_enabled_at           = 0.0
         self._parking_side                 = None    # "right" or "left" once parking_area is seen
@@ -8278,12 +8286,13 @@ Returns:
                     self.send_motor_commands(park_steer, park_speed)
                 return
 
-            # In SPOT_TRACKED, count consecutive frames without detection.
-            # (_poll_sign_detected resets the counter when the spot is seen.)
+            # In SPOT_TRACKED, wait until the spot has really disappeared.
+            # The local-AI publisher may alternate parking_sign/parking_area while both
+            # are visible, so frame misses alone are too eager.
             if self._parking_state == ParkingState.SPOT_TRACKED:
                 self._parking_spot_miss_frames += 1
-                if self._parking_spot_miss_frames >= PARKING_SPOT_MISS_THRESHOLD:
-                    now_t = time.time()
+                now_t = time.time()
+                if self._parking_spot_lost_ready(now_t):
                     self._parking_state = ParkingState.FORWARD_PAST_SPOT
                     self._parking_phase_start_time = now_t
                     self._parking_phase_dist_cm = 0.0
@@ -8301,7 +8310,8 @@ Returns:
                         f"last distance={dist_str}, "
                         f"measured length={length_str}, "
                         f"advance={self._parking_dynamic_forward_cm:.0f}cm "
-                        f"(fallback={PARKING_D_FORWARD_CM:.0f}cm)"
+                        f"(fallback={PARKING_D_FORWARD_CM:.0f}cm, "
+                        f"timer={self._parking_forward_timer_s():.1f}s)"
                     )
                     # Transition immediately to maneuver in this cycle
                     park_steer, park_speed = self._parking_state_machine()
@@ -10182,6 +10192,14 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         adjusted = float(steering_angle) + (direction * PARKING_SEARCH_SIDE_BIAS_STEER)
         return max(-max_steer, min(max_steer, adjusted))
 
+    def _parking_spot_lost_ready(self, now):
+        if self._parking_spot_miss_frames < PARKING_SPOT_MISS_THRESHOLD:
+            return False
+        last_seen = self._safe_float(getattr(self, "_parking_last_spot_seen_at", 0.0), 0.0)
+        if last_seen <= 0.0:
+            return True
+        return (now - last_seen) >= PARKING_SPOT_LOST_GRACE_S
+
     def _poll_sign_detected(self):
         """Consume SignDetected messages and update parking-area/spot tracking.
 
@@ -10273,6 +10291,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
 
         self._parking_last_spot_box = data.get("box")
         self._parking_spot_miss_frames = 0
+        self._parking_last_spot_seen_at = now
         self._update_parking_side_from_spot(data)
         self._update_parking_spot_measurement(data)
 
@@ -10361,19 +10380,48 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
 
     def _parking_forward_target_cm(self, last_dist=None):
         measured_length = self._safe_float(getattr(self, "_parking_spot_length_cm", 0.0), 0.0)
-        target_cm = measured_length if measured_length > 0.0 else PARKING_D_FORWARD_CM
+        target_cm = max(PARKING_D_FORWARD_CM, measured_length) if measured_length > 0.0 else PARKING_D_FORWARD_CM
 
         lost_thr = float(getattr(_config, "PARKING_SPOT_LOST_DIST_THRESHOLD_CM", 10.0))
         if last_dist is not None and last_dist > lost_thr:
             target_cm += last_dist - lost_thr
         return max(0.0, target_cm)
 
+    def _parking_forward_timer_s(self):
+        target_cm = self._safe_float(
+            getattr(self, "_parking_dynamic_forward_cm", PARKING_D_FORWARD_CM),
+            PARKING_D_FORWARD_CM,
+        )
+        speed_cm_s = abs(float(PARKING_FORWARD_SPEED or 0.0))
+        if target_cm <= 0.0 or speed_cm_s <= 0.1:
+            return PARKING_T_FORWARD
+        return max(PARKING_T_FORWARD, (target_cm / speed_cm_s) * PARKING_FORWARD_TIMER_MARGIN)
+
+    def _parking_measured_speed_cm_s(self, now=None):
+        """Return Nucleo CurrentSpeed as cm/s plus freshness metadata."""
+        now = time.time() if now is None else now
+        last_speed_time = getattr(self, "_last_speed_time", None)
+        if last_speed_time is None:
+            return 0.0, None, False
+
+        try:
+            age_s = max(0.0, float(now) - float(last_speed_time))
+        except (TypeError, ValueError):
+            return 0.0, None, False
+
+        if age_s > PARKING_ODOMETRY_TIMEOUT_S:
+            return 0.0, age_s, False
+
+        raw_speed = self._safe_float(getattr(self, "_measured_speed", 0.0), 0.0)
+        scale_mps = self._safe_float(getattr(self, "stanley_measured_speed_to_mps", 0.001), 0.001)
+        return abs(raw_speed) * scale_mps * 100.0, age_s, True
+
     def _parking_advance_distance(self, now):
-        """Integrate encoder odometry to get distance traveled in the current phase (cm).
+        """Integrate Nucleo speed telemetry to get phase distance traveled (cm).
 
         Uses _measured_speed (Nucleo CurrentSpeed in ×10 cm/s units) converted to
-        m/s via stanley_measured_speed_to_mps. If the encoder is not reporting
-        (speed == 0), accumulation is skipped and only the timer fallback is used.
+        m/s via stanley_measured_speed_to_mps. Timer fallback is used only when
+        that telemetry is stale or unavailable.
 
         During FORWARD_PAST_SPOT, accumulation is paused while the car is still
         in a curve (curve_state IN_CURVE or ENTERING). This ensures the distance is
@@ -10395,29 +10443,34 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             self._parking_phase_start_time = now
             return self._parking_phase_dist_cm  # no accumulation yet
 
-        speed_mps = abs(float(self._measured_speed or 0.0)) * float(self.stanley_measured_speed_to_mps)
-        if speed_mps > 0.001 and dt > 0.0:
-            self._parking_phase_dist_cm += speed_mps * 100.0 * dt  # m/s → cm/s × s = cm
+        speed_cm_s, odom_age_s, odom_fresh = self._parking_measured_speed_cm_s(now)
+        self._parking_last_odom_fresh = odom_fresh
+        self._parking_last_odom_age_s = odom_age_s
+        self._parking_last_speed_cm_s = speed_cm_s
+
+        if odom_fresh and speed_cm_s > 0.05 and dt > 0.0:
+            self._parking_phase_dist_cm += speed_cm_s * dt
 
         return self._parking_phase_dist_cm
 
     def _parking_phase_complete(self, now, dist_threshold_cm, timer_threshold_s):
         """Return True when the current phase should transition.
 
-        Primary criterion: encoder distance traveled >= dist_threshold_cm.
-        Timer fallback: elapsed time >= timer_threshold_s (used when encoder
-        speed is 0 throughout the phase, i.e., no odometry available).
+        Primary criterion: Nucleo odometry distance traveled >= dist_threshold_cm.
+        Timer fallback: elapsed time >= timer_threshold_s, used only when
+        Nucleo odometry is stale or unavailable.
         """
         dist_cm = self._parking_advance_distance(now)
         elapsed = now - self._parking_phase_start_time
 
-        # Threshold of 5.0 = 0.5 cm/s actual speed (measured_speed is in ×10 cm/s units).
-        # The old threshold of 0.5 (= 0.05 cm/s) triggered odometry mode on encoder
-        # noise at rest, accumulating phantom distance. 5.0 filters noise correctly.
-        speed_available = abs(float(self._measured_speed or 0.0)) > 5.0
-        if speed_available:
-            return dist_cm >= dist_threshold_cm
-        # Fallback: use timer when encoder is not reporting
+        if dist_cm >= dist_threshold_cm:
+            return True
+
+        odom_fresh = bool(getattr(self, "_parking_last_odom_fresh", False))
+        speed_cm_s = self._safe_float(getattr(self, "_parking_last_speed_cm_s", 0.0), 0.0)
+        if odom_fresh and (PARKING_TRUST_FRESH_ODOMETRY or speed_cm_s > 0.5):
+            return False
+
         return elapsed >= timer_threshold_s
 
     def _parking_state_machine(self):
@@ -10426,8 +10479,8 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         Returns (steering_angle, speed) to be sent to the motors, or
         (None, None) when the state machine is IDLE.
 
-        Phase transitions use encoder odometry (distance in cm) as the primary
-        criterion. Timer fallbacks are used when encoder speed == 0.
+        Phase transitions use Nucleo speed telemetry as odometry. Timer fallback
+        is used only when that telemetry is stale or unavailable.
         """
         now = time.time()
 
@@ -10443,12 +10496,20 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         # ---------------------------------------------------------------
         def _advance(next_state, label):
             dist_done = self._parking_phase_dist_cm
+            odom_age_s = getattr(self, "_parking_last_odom_age_s", None)
+            if bool(getattr(self, "_parking_last_odom_fresh", False)):
+                odom_text = f"fresh {odom_age_s:.1f}s" if odom_age_s is not None else "fresh"
+            elif odom_age_s is None:
+                odom_text = "missing"
+            else:
+                odom_text = f"stale {odom_age_s:.1f}s"
+            speed_cm_s = self._safe_float(getattr(self, "_parking_last_speed_cm_s", 0.0), 0.0)
             self._parking_state          = next_state
             self._parking_phase_start_time = now
             self._parking_phase_dist_cm  = 0.0
             self._parking_last_sm_time   = now
             print(f"\033[1;97m[ Parking ] :\033[0m \033[1;96m{label}\033[0m "
-                  f"(prev dist={dist_done:.0f}cm)")
+                  f"(prev dist={dist_done:.0f}cm, odom={odom_text}, v={speed_cm_s:.1f}cm/s)")
 
         # ---------------------------------------------------------------
         # Phase 1: go forward past the spot (straight, no steer).
@@ -10458,7 +10519,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         # FOV (typical when parking is detected while exiting a curve).
         # ---------------------------------------------------------------
         if self._parking_state == ParkingState.FORWARD_PAST_SPOT:
-            if self._parking_phase_complete(now, self._parking_dynamic_forward_cm, PARKING_T_FORWARD):
+            if self._parking_phase_complete(now, self._parking_dynamic_forward_cm, self._parking_forward_timer_s()):
                 _advance(ParkingState.WAIT_STEER_1, "WAIT_STEER_1 - stopped, turning wheels to entry steer")
             return 0.0, PARKING_FORWARD_SPEED
 
@@ -10511,10 +10572,11 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         if self._parking_state == ParkingState.FORWARD_CORRECTION:
             if self._parking_phase_complete(now, PARKING_D_FORWARD_CORR_CM, PARKING_T_FORWARD_CORR):
                 dist_done = self._parking_phase_dist_cm
+                speed_cm_s = self._safe_float(getattr(self, "_parking_last_speed_cm_s", 0.0), 0.0)
                 self._parking_state = ParkingState.PARKED
                 print(
                     f"\033[1;97m[ Parking ] :\033[0m \033[1;92mPARKED\033[0m - "
-                    f"Corrected {dist_done:.0f}cm forward, maneuver complete"
+                    f"Corrected {dist_done:.0f}cm forward, v={speed_cm_s:.1f}cm/s, maneuver complete"
                 )
             return self._parking_entry_steer(), PARKING_FORWARD_SPEED
 
@@ -10535,12 +10597,16 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_phase_start_time     = 0.0
         self._parking_phase_dist_cm        = 0.0
         self._parking_last_sm_time         = 0.0
+        self._parking_last_odom_fresh      = False
+        self._parking_last_odom_age_s      = None
+        self._parking_last_speed_cm_s      = 0.0
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
         self._parking_mode_started_at      = 0.0
         self._parking_spot_ignore_until    = 0.0
         self._parking_spot_length_cm       = 0.0
         self._parking_spot_length_px       = 0.0
         self._parking_spot_px_per_cm       = 0.0
+        self._parking_last_spot_seen_at    = 0.0
         self._parking_enabled              = False
         self._parking_enabled_at           = 0.0
         self._parking_side                 = None
