@@ -1,8 +1,49 @@
-docs/build/
+# OS/editor files
+.DS_Store
 .vscode/
-__pycache__
-**/*.pyc
-/src/dashboard/frontend/node_modules
+.idea/
+
+# Local assistant/worktree state
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
 **/venv/
+
+# JavaScript/frontend
+node_modules/
+**/node_modules/
+.angular/cache/
+**/.angular/cache/
+*.tsbuildinfo
+
+# Build output
+docs/build/
+dist/
+build/
+
+# Runtime logs and generated run artifacts
+*.log
+*.stdout
+*.stderr
+*.out
+*.err
+temp/
+logs/
+remote_logs/
+
+# Generated videos
+output_video*.avi
+
+# Large local model artifact
 aiserver/models/supercombo.onnx
-src/dashboard/frontend/.angular/cache/18.2.21/dashboard/.tsbuildinfo

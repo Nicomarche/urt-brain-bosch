@@ -54,6 +54,7 @@ PARKING_ALIGN_STEER = -25.0  # Giro máx IZQUIERDA: REVERSING_ALIGN
 # --- Detección / seguimiento del spot ---
 PARKING_SPOT_MISS_THRESHOLD  = 8      # Frames consecutivos sin detección → spot perdido
 PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot está a ≤ esta distancia (cm)
+PARKING_SPOT_ARM_DELAY_S     = 0.75   # Ignorar spots viejos al entrar en PARKING; primero buscar adelante
 
 # --- Distancias de cada fase (odometría del encoder) ---
 PARKING_D_FORWARD_CM         = 55.0   # Avanzar más allá del spot antes de reversar
@@ -118,6 +119,9 @@ PARKING_FRONT_MARGIN_CM      = 5.0
 # Reversa mínima útil: si el espacio restante hacia atrás es menor que esto,
 # no se inicia otro ciclo de maniobra (el auto ya está bien posicionado).
 PARKING_MIN_USEFUL_REVERSE_CM = 8.0
+
+# Evita reenviar PARKING en cada frame mientras el parking_sign sigue visible.
+PARKING_SIGN_COOLDOWN        = 8.0
 
 # ═══════════════════════════════════════════════════════════════════════════
 #                     PARÁMETROS DE CALIBRACIÓN DE GIRO
@@ -341,7 +345,44 @@ SIGN_MIN_BOX_AREA = 0.010
 SIGN_MIN_BOX_AREA_PER_SIGN = {
     "highway_exit":     0.003,   # 0.3% – señal lateral, vista a alta velocidad
     "highway_entrance": 0.003,   # 0.3% – señal lateral, igual que exit
+    "parking_sign":     0.003,   # 0.3% – cartel chico; parking_area sigue sin disparar modo
 }
+
+# ===================== TRAFFIC LIGHT OPENCV =====================
+# El modelo local detecta el bbox del semaforo ("traffic_light"). El color se
+# decide dentro de ese recorte con OpenCV, sin otro modelo de AI.
+TRAFFIC_LIGHT_OPENCV_ENABLED = True
+
+# En AUTO, si hay un semaforo visible y vigente, solo se permite velocidad
+# positiva cuando el estado clasificado es green_light.
+TRAFFIC_LIGHT_HOLD_ENABLED = True
+TRAFFIC_LIGHT_HOLD_TIMEOUT_S = 1.5
+TRAFFIC_LIGHT_MIN_BOX_AREA = SIGN_MIN_BOX_AREA
+TRAFFIC_LIGHT_GREEN_CONFIRMATIONS = 2
+
+# AUTO startup replay waits here instead of consuming the hardcoded move at red.
+STARTUP_MOVE_WAIT_FOR_GREEN_LIGHT = True
+
+# Defaults portados del LightClassifier de referencia.
+TRAFFIC_LIGHT_ACTIVE_COLORS = ("red", "green")
+TRAFFIC_LIGHT_RED_HSV_1 = ((0, 80, 80), (12, 255, 255))
+TRAFFIC_LIGHT_RED_HSV_2 = ((165, 80, 80), (180, 255, 255))
+TRAFFIC_LIGHT_YELLOW_HSV = ((22, 150, 150), (28, 255, 255))
+TRAFFIC_LIGHT_GREEN_HSV = ((40, 80, 80), (95, 255, 255))
+TRAFFIC_LIGHT_HSV_COLOR_MIN_RATIO = 0.60
+TRAFFIC_LIGHT_HSV_COLOR_MIN_AREA_RATIO = 0.005
+TRAFFIC_LIGHT_HSV_COLOR_DOMINANCE = 1.15
+TRAFFIC_LIGHT_ADAPTIVE_SAT_MIN = 100.0
+TRAFFIC_LIGHT_ADAPTIVE_SAT_MAX = 200.0
+TRAFFIC_LIGHT_ADAPTIVE_VAL_MIN = 50.0
+TRAFFIC_LIGHT_ADAPTIVE_VAL_MAX = 150.0
+TRAFFIC_LIGHT_MIN_CIRCULARITY = 0.357
+TRAFFIC_LIGHT_MIN_LIGHT_HEIGHT_RATIO = 0.08
+TRAFFIC_LIGHT_MAX_LIGHT_HEIGHT_RATIO = 0.40
+TRAFFIC_LIGHT_MAX_CENTER_X_OFFSET_RATIO = 0.20
+TRAFFIC_LIGHT_BRIGHTNESS_THRESHOLD_SCALE = 0.8595
+TRAFFIC_LIGHT_BRIGHTNESS_THRESHOLD_MIN = 0.20
+TRAFFIC_LIGHT_BACKUP_COLOR_RATIO_MIN = 0.20
 
 # ===================== LINE FOLLOWING - VELOCIDADES =====================
 # Escala interna 0–25; el motor recibe speed*10 (ej: LF_MAX_SPEED=13 → 130 PWM).
@@ -356,6 +397,13 @@ LF_HIGHWAY_SPEED_RAMP_STEP   = 3.0  # Aceleración más rápida en autopista (re
 # Factor de reducción de velocidad por steering en autopista (0.0 = sin reducción, 1.0 = igual que modo normal).
 # Con 0.0 el auto mantiene max speed incluso durante correcciones en autopista.
 LF_HIGHWAY_STEER_SPEED_FACTOR = 0.2
+
+# ===================== AUTO STARTUP MANUAL MOVE =====================
+# Trayectoria manual fija que se reproduce una vez al entrar en AUTO,
+# antes de liberar el seguimiento autonomo de carril.
+STARTUP_MOVE_PATH = "temp/startup_manual_trajectory.json"
+STARTUP_MOVE_MAX_DURATION_S = 20.0
+STARTUP_MOVE_AUTO_REPLAY = True
 
 # ===================== SIGN ACTIONS - VELOCIDADES =====================
 # Velocidades enviadas al motor por las acciones de señales.
@@ -453,8 +501,14 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "highway-exit-sign": "highway_exit",
     "no-entry-road-sign": "no_entry",
     "one-way-road-sign": "one_way",
-    "parking-sign": "parking",
-    "parking-spot": "parking",
+    "parking-sign": "parking_sign",
+    "parking": "parking_sign",
+    "parking_sign": "parking_sign",
+    "parking sign": "parking_sign",
+    "parking-spot": "parking_area",
+    "parking_spot": "parking_area",
+    "parking-area": "parking_area",
+    "parking_area": "parking_area",
     "pedestrian": "pedestrian",
     "priority-sign": "priority",
     "round-about-sign": "roundabout",
@@ -463,7 +517,7 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "traffic-light": "traffic_light",
     "dur": "stop",
     "girisyok": "no_entry",
-    "park": "parking",
+    "park": "parking_sign",
     "yayagecidi": "crosswalk",
     "tasitrafiginekapali": "no_entry",
     "kirmizi": "red_light",
@@ -503,7 +557,7 @@ LOCAL_AI_SIGN_CLASS_MAP = {
     "yayabolgesi": "walk_area",
 }
 
-# Walk area stop behavior
-WALK_AREA_STOP_DURATION = 3.0   # seconds to wait after pedestrians clear
-WALK_AREA_COOLDOWN      = 10.0  # seconds before a new walk_area stop can trigger
-WALK_AREA_MIN_BOX_AREA  = 0.04  # min bbox area (normalized) to trigger stop — filters far detections
+# Walk area behavior
+WALK_AREA_MIN_BOX_AREA  = 0.04  # min bbox area (normalized) to react — filters far detections
+WALK_AREA_SLOW_SPEED_CM_S = 10.0  # speed cap while crossing an empty walk_area
+WALK_AREA_CLEAR_GRACE   = 0.5   # seconds without walk_area before returning to normal speed

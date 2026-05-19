@@ -42,6 +42,7 @@ from src.utils.messages.allMessages import (
     LocalPerceptionStatus,
     SignDetectionDebug,
     SignDetectionStatus,
+    StartupMoveStatus,
     mainCamera,
     serialCamera,
 )
@@ -72,6 +73,7 @@ class threadGateway(ThreadWithStop):
             (serialCamera.Owner.value, serialCamera.msgID.value),
             (LineFollowingDebug.Owner.value, LineFollowingDebug.msgID.value),
             (LineFollowingStatus.Owner.value, LineFollowingStatus.msgID.value),
+            (StartupMoveStatus.Owner.value, StartupMoveStatus.msgID.value),
             (LocalLanePerception.Owner.value, LocalLanePerception.msgID.value),
             (LocalPerceptionStatus.Owner.value, LocalPerceptionStatus.msgID.value),
             (SignDetectionDebug.Owner.value, SignDetectionDebug.msgID.value),

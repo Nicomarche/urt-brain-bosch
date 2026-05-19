@@ -6,6 +6,7 @@ import cv2
 import config
 from src.hardware.camera.threads.localPerceptionEngine import LocalPerceptionEngine
 from src.hardware.camera.threads.signActions import SignActions
+from src.hardware.camera.threads.trafficLightClassifier import TrafficLightClassifier
 from src.statemachine.systemMode import SystemMode
 from src.templates.threadwithstop import ThreadWithStop
 from src.utils.messages.allMessages import (
@@ -23,6 +24,19 @@ from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 
 class threadLocalPerception(ThreadWithStop):
     """Runs the local lane/sign model and publishes perception outputs."""
+
+    PARKING_SIGN_CLASSES = frozenset({"parking", "parking_sign"})
+    PARKING_AREA_CLASSES = frozenset({"parking_area", "parking_spot"})
+    TRAFFIC_LIGHT_CLASSES = frozenset({
+        "traffic_light",
+        "traffic_light_unknown",
+        "red",
+        "yellow",
+        "green",
+        "red_light",
+        "yellow_light",
+        "green_light",
+    })
 
     def __init__(self, queuesList, logger, debugger, frame_buffer=None,
                  show_debug=False, debug_windows=None,
@@ -47,6 +61,15 @@ class threadLocalPerception(ThreadWithStop):
             getattr(config, "SIGN_MIN_BOX_AREA_PER_SIGN", {})
         )
         self.is_sign_actions_active = False
+        self.traffic_light_opencv_enabled = bool(
+            getattr(config, "TRAFFIC_LIGHT_OPENCV_ENABLED", True)
+        )
+        self.traffic_light_min_box_area = float(
+            getattr(config, "TRAFFIC_LIGHT_MIN_BOX_AREA", self.sign_min_box_area)
+        )
+        self.traffic_light_classifier = (
+            TrafficLightClassifier() if self.traffic_light_opencv_enabled else None
+        )
 
         self.local_ai_interval = float(getattr(config, "LOCAL_AI_INTERVAL", 0.10))
         self.local_ai_model_path = str(
@@ -75,12 +98,14 @@ class threadLocalPerception(ThreadWithStop):
         self._last_frame_shape = None  # (height, width) of last processed frame
 
         # Walk-area pedestrian stop logic
-        self._walk_area_stop_duration     = float(getattr(config, "WALK_AREA_STOP_DURATION", 3.0))
         self._walk_area_min_box_area      = float(getattr(config, "WALK_AREA_MIN_BOX_AREA",  0.04))
-        self._walk_area_active            = False   # True while stopped for a walk_area
-        self._walk_area_no_obstacle_since = None    # timestamp when obstacle last cleared
-        self._walk_area_cooldown          = float(getattr(config, "WALK_AREA_COOLDOWN", 10.0))
-        self._walk_area_last_cleared      = 0.0     # timestamp of last walk_area resume
+        self._walk_area_slow_speed        = float(getattr(config, "WALK_AREA_SLOW_SPEED_CM_S", 10.0))
+        self._walk_area_clear_grace       = float(getattr(config, "WALK_AREA_CLEAR_GRACE", 0.5))
+        self._walk_area_active            = False   # True while handling a walk_area (slow/stop)
+        self._walk_area_mode              = None    # "slow" or "stop"
+        self._walk_area_last_seen         = 0.0
+        self._parking_sign_cooldown       = float(getattr(config, "PARKING_SIGN_COOLDOWN", 8.0))
+        self._parking_sign_last_triggered = 0.0
 
         # AUTO-mode pedestrian/obstacle stop (independent of walk_area)
         self._pedestrian_stop_active = False
@@ -294,9 +319,13 @@ class threadLocalPerception(ThreadWithStop):
         """Send a StateChange PARKING when in AUTO mode to start the parking sequence."""
         if self._current_mode != "auto":
             return
+        now = time.time()
+        if now - self._parking_sign_last_triggered < self._parking_sign_cooldown:
+            return
+        self._parking_sign_last_triggered = now
         print(
-            f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA→PARKING\033[0m - "
-            f"Walk area cruzada en modo AUTO, cambiando a modo PARKING"
+            f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mPARKING_SIGN→PARKING\033[0m - "
+            f"Parking sign detectado en modo AUTO, cambiando a modo PARKING"
         )
         try:
             self.stateChangeSender.send("PARKING")
@@ -307,17 +336,24 @@ class threadLocalPerception(ThreadWithStop):
             )
 
     def _handle_walk_area(self, detections, now):
-        """Stop when a walk_area is detected close enough; resume after pedestrians clear.
+        """Slow down in empty walk_area; stop only when pedestrians/obstacles are present.
 
         Rules:
+        - Only applies in AUTO mode; MANUAL/PARKING must not be overridden.
         - Only trigger when the walk_area bbox area >= WALK_AREA_MIN_BOX_AREA
           (filters detections that are too far away).
-        - On first trigger (outside cooldown): stop the car.
-        - While stopped:
-            · If an obstacle/pedestrian is visible → keep stopped, reset timer.
-            · If no obstacle → start WALK_AREA_STOP_DURATION-second clear timer.
-            · Once the timer expires → resume and (if AUTO mode) enter PARKING mode.
+        - If obstacle/pedestrian is visible in the walk_area → stop the car.
+        - If the walk_area is clear → hold speed at WALK_AREA_SLOW_SPEED_CM_S.
+        - Once the walk_area is no longer visible/close → return control to line following.
         """
+        if self._current_mode != "auto":
+            if self._walk_area_active:
+                self._walk_area_active = False
+                self._walk_area_mode = None
+                if self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.clear()
+            return
+
         _OBSTACLE_CLASSES = frozenset({
             "obstacle", "pedestrian", "person", "yaya", "human",
         })
@@ -339,62 +375,49 @@ class threadLocalPerception(ThreadWithStop):
                     pass
 
         walk_area_close = best_walk_area_box_area >= self._walk_area_min_box_area
-        walk_area_seen = best_walk_area_box_area > 0.0
-
         obstacle_seen = any(
             str(d.get("class", "")).strip().lower() in _OBSTACLE_CLASSES
             for d in detections
         )
 
-        if not self._walk_area_active:
-            # Only activate when the walk_area is close (large enough bbox)
-            if not walk_area_close:
-                return
-            # Respect cooldown after last resume
-            if now - self._walk_area_last_cleared < self._walk_area_cooldown:
-                return
-            # Activate walk-area stop
-            self._walk_area_active = True
-            self._walk_area_no_obstacle_since = None if obstacle_seen else now
-            if self.sign_actions.sign_action_event:
-                self.sign_actions.sign_action_event.set()
-            self.sign_actions._send_speed(0)
-            print(
-                f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mWALK_AREA\033[0m - "
-                f"Walk area detectada (box={best_walk_area_box_area:.1%}), auto detenido "
-                f"{'(obstáculo presente)' if obstacle_seen else '(sin obstáculo, esperando 3s)'}"
-            )
-            return
-
-        # Walk area is active — keep car stopped and track obstacle state
-        self.sign_actions._send_speed(0)
-
-        if obstacle_seen:
-            if self._walk_area_no_obstacle_since is not None:
-                print(
-                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
-                    f"Obstáculo detectado, reiniciando espera"
-                )
-            self._walk_area_no_obstacle_since = None
-        else:
-            if self._walk_area_no_obstacle_since is None:
-                self._walk_area_no_obstacle_since = now
-                print(
-                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
-                    f"Sin obstáculo, esperando {self._walk_area_stop_duration:.0f}s para reanudar"
-                )
-            elif now - self._walk_area_no_obstacle_since >= self._walk_area_stop_duration:
-                # Zona despejada por suficiente tiempo → reanudar y entrar en modo PARKING
+        if not walk_area_close:
+            if self._walk_area_active and now - self._walk_area_last_seen >= self._walk_area_clear_grace:
                 self._walk_area_active = False
-                self._walk_area_no_obstacle_since = None
-                self._walk_area_last_cleared = now
+                self._walk_area_mode = None
                 if self.sign_actions.sign_action_event:
                     self.sign_actions.sign_action_event.clear()
                 print(
                     f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mWALK_AREA\033[0m - "
-                    f"Zona despejada, reanudando marcha"
+                    f"Walk area pasada, velocidad normal"
                 )
-                self._enter_parking_mode()
+            return
+
+        self._walk_area_last_seen = now
+
+        if obstacle_seen:
+            if not self._walk_area_active or self._walk_area_mode != "stop":
+                self._walk_area_active = True
+                self._walk_area_mode = "stop"
+                if self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.set()
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mWALK_AREA\033[0m - "
+                    f"Peatón/obstáculo en walk area (box={best_walk_area_box_area:.1%}), auto detenido"
+                )
+            self.sign_actions._send_speed(0)
+            return
+
+        if not self._walk_area_active or self._walk_area_mode != "slow":
+            self._walk_area_active = True
+            self._walk_area_mode = "slow"
+            if self.sign_actions.sign_action_event:
+                self.sign_actions.sign_action_event.set()
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;93mWALK_AREA\033[0m - "
+                f"Walk area libre (box={best_walk_area_box_area:.1%}), velocidad {self._walk_area_slow_speed:.0f} cm/s"
+            )
+
+        self.sign_actions._send_speed(self._walk_area_slow_speed)
 
     def _handle_pedestrian_obstacle(self, detections, now):
         """In AUTO mode, freeze the car while a pedestrian/obstacle is visible.
@@ -451,17 +474,154 @@ class threadLocalPerception(ThreadWithStop):
                 f"Vía despejada, reanudando marcha"
             )
 
-    def _publish_sign(self, detections, now, img_shape=None):
+    def _normalized_detection_class(self, detection):
+        raw_name = str(detection.get("class", "") or "")
+        normalized = SignActions.normalize_sign_name(raw_name) or raw_name
+        sign_map = getattr(config, "LOCAL_AI_SIGN_CLASS_MAP", {})
+        mapped = sign_map.get(normalized)
+        if mapped is not None:
+            return mapped
+        for alias, canonical in sign_map.items():
+            if SignActions.normalize_sign_name(alias) == normalized:
+                return canonical
+        return normalized
+
+    def _box_area(self, detection):
+        box = detection.get("box", [])
+        if len(box) != 4:
+            return 0.0
+        try:
+            return max(0.0, (float(box[2]) - float(box[0])) * (float(box[3]) - float(box[1])))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _best_detection_for_classes(self, detections, target_classes):
+        best = None
+        best_score = -1.0
+        for detection in detections:
+            sign_name = self._normalized_detection_class(detection)
+            if sign_name not in target_classes:
+                continue
+            confidence = float(detection.get("confidence", 0.0) or 0.0)
+            box_area = self._box_area(detection)
+            score = confidence * max(box_area, 1e-6)
+            if score > best_score:
+                best = detection
+                best_score = score
+        return best
+
+    def _handle_parking_sign(self, detections):
+        """Enter parking mode only from the parking sign, not from the parking area."""
+        parking_sign = self._best_detection_for_classes(detections, self.PARKING_SIGN_CLASSES)
+        if parking_sign is None:
+            return
+        confidence = float(parking_sign.get("confidence", 0.0) or 0.0)
+        if confidence < self.sign_min_confidence:
+            return
+        box_area = self._box_area(parking_sign)
+        effective_min_box = self.sign_min_box_area_per_sign.get(
+            "parking_sign", self.sign_min_box_area
+        )
+        if box_area < effective_min_box:
+            return
+        self._enter_parking_mode()
+
+    def _best_traffic_light_detection(self, detections):
+        detection = self._best_detection_for_classes(detections, self.TRAFFIC_LIGHT_CLASSES)
+        if detection is None:
+            return None
+        confidence = float(detection.get("confidence", 0.0) or 0.0)
+        if confidence < self.sign_min_confidence:
+            return None
+        min_box_area = float(
+            getattr(self, "traffic_light_min_box_area", self.sign_min_box_area)
+        )
+        if self._box_area(detection) < min_box_area:
+            return None
+        return detection
+
+    def _classify_traffic_light_detection(self, sign_name, box, frame):
+        sign_name = TrafficLightClassifier.normalize_sign_name(sign_name)
+        if getattr(self, "traffic_light_opencv_enabled", True):
+            if getattr(self, "traffic_light_classifier", None) is None:
+                self.traffic_light_classifier = TrafficLightClassifier()
+
+            if frame is not None:
+                traffic_light_info = self.traffic_light_classifier.classify(frame, box)
+                if traffic_light_info.get("sign") != TrafficLightClassifier.UNKNOWN_SIGN:
+                    return self._coerce_traffic_light_no_yellow(traffic_light_info)
+
+        if sign_name in {"red", "green", "red_light", "green_light"}:
+            return TrafficLightClassifier.payload_for_known_sign(sign_name)
+        if sign_name in {"yellow", "yellow_light"}:
+            return self._coerce_traffic_light_no_yellow(
+                TrafficLightClassifier.payload_for_known_sign(sign_name)
+            )
+
+        if not getattr(self, "traffic_light_opencv_enabled", True):
+            return {
+                "sign": TrafficLightClassifier.UNKNOWN_SIGN,
+                "color": TrafficLightClassifier.UNKNOWN_COLOR,
+                "state": TrafficLightClassifier.UNKNOWN_SIGN,
+                "reason": "opencv_disabled",
+                "scores": {},
+            }
+
+        if frame is None:
+            return {
+                "sign": TrafficLightClassifier.UNKNOWN_SIGN,
+                "color": TrafficLightClassifier.UNKNOWN_COLOR,
+                "state": TrafficLightClassifier.UNKNOWN_SIGN,
+                "reason": "missing_frame",
+                "scores": {},
+            }
+
+        return self._coerce_traffic_light_no_yellow(
+            self.traffic_light_classifier.classify(frame, box)
+        )
+
+    def _coerce_traffic_light_no_yellow(self, traffic_light_info):
+        """This track has only red/green lights; yellow is treated as a red hold."""
+        if not isinstance(traffic_light_info, dict):
+            return traffic_light_info
+        sign = TrafficLightClassifier.normalize_sign_name(
+            traffic_light_info.get("sign") or traffic_light_info.get("state")
+        )
+        color = str(traffic_light_info.get("color") or "").strip().lower()
+        if sign not in {"yellow", "yellow_light"} and color != "yellow":
+            return traffic_light_info
+
+        coerced = dict(traffic_light_info)
+        coerced["source_sign"] = coerced.get("sign", sign)
+        coerced["source_color"] = coerced.get("color", color)
+        coerced["sign"] = "red_light"
+        coerced["state"] = "red_light"
+        coerced["color"] = "red"
+        reason = str(coerced.get("reason") or "")
+        coerced["reason"] = f"{reason}+yellow_as_red" if reason else "yellow_as_red"
+        return coerced
+
+    def _publish_sign(self, detections, now, img_shape=None, frame=None):
         if not self.enable_sign_detection or not detections:
             return
 
         best = detections[0]
+        if self._current_mode == "parking":
+            parking_area = self._best_detection_for_classes(
+                detections, self.PARKING_AREA_CLASSES
+            )
+            if parking_area is not None:
+                best = parking_area
+        else:
+            traffic_light = self._best_traffic_light_detection(detections)
+            if traffic_light is not None:
+                best = traffic_light
         confidence = float(best.get("confidence", 0.0))
         if confidence < self.sign_min_confidence:
             return
 
         raw_sign_name = str(best.get("class", ""))
-        sign_name = SignActions.normalize_sign_name(raw_sign_name) or raw_sign_name
+        sign_name = self._normalized_detection_class(best)
         box = best.get("box", [0, 0, 0, 0])
         if len(box) != 4:
             box = [0, 0, 0, 0]
@@ -469,39 +629,67 @@ class threadLocalPerception(ThreadWithStop):
 
         img_height = img_shape[0] if img_shape is not None else None
         distance_cm = self._estimate_sign_distance_cm(box, img_height)
+        traffic_light_info = None
+        if TrafficLightClassifier.is_traffic_light_sign(sign_name):
+            traffic_light_info = self._classify_traffic_light_detection(sign_name, box, frame)
+            sign_name = traffic_light_info.get("sign") or TrafficLightClassifier.UNKNOWN_SIGN
 
         self.detection_count += 1
         self.last_sign_name = sign_name
-        self.signDetectedSender.send({
+        payload = {
             "sign": sign_name,
             "confidence": round(confidence, 3),
             "box": [round(float(v), 5) for v in box],
             "box_area": round(box_area, 5),
             "distance_cm": distance_cm,
             "timestamp": now,
-        })
+        }
+        if traffic_light_info is not None:
+            payload.update({
+                "traffic_light_color": traffic_light_info.get("color", "unknown"),
+                "traffic_light_state": traffic_light_info.get("state", sign_name),
+                "traffic_light_reason": traffic_light_info.get("reason", ""),
+                "traffic_light_scores": traffic_light_info.get("scores", {}),
+                "traffic_light_source_sign": raw_sign_name,
+            })
+            crop = traffic_light_info.get("crop")
+            if isinstance(crop, dict):
+                payload["traffic_light_crop"] = crop
+        self.signDetectedSender.send(payload)
 
-        effective_min_box = self.sign_min_box_area_per_sign.get(
-            sign_name, self.sign_min_box_area
-        )
+        if traffic_light_info is not None:
+            effective_min_box = float(
+                getattr(self, "traffic_light_min_box_area", self.sign_min_box_area)
+            )
+        else:
+            effective_min_box = self.sign_min_box_area_per_sign.get(
+                sign_name, self.sign_min_box_area
+            )
         is_close = box_area >= effective_min_box
         is_actionable = SignActions.is_actionable_sign(sign_name)
         sign_display = raw_sign_name if raw_sign_name == sign_name else f"{raw_sign_name}->{sign_name}"
         dist_str = f" ~{distance_cm:.0f}cm" if distance_cm is not None else ""
+        traffic_str = ""
+        if traffic_light_info is not None:
+            traffic_str = (
+                f" color={traffic_light_info.get('color', 'unknown')}"
+                f" reason={traffic_light_info.get('reason', '')}"
+            )
         print(
             f"\033[1;97m[ Local AI ] :\033[0m \033[1;96mDETECTED\033[0m - "
-            f"{sign_display} ({confidence:.1%}) box={box_area:.3%}{dist_str}"
+            f"{sign_display} ({confidence:.1%}) box={box_area:.3%}{dist_str}{traffic_str}"
             f"{'' if is_close else f' (TOO FAR <{effective_min_box:.1%})'}"
             f"{'' if self.enable_actions else ' [actions=OFF]'}"
             f"{'' if self.is_sign_actions_active else ' [inactive_mode]'}"
             f"{'' if is_actionable else ' [not_actionable]'}"
         )
 
-        # In PARKING mode the parking-spot sign triggers the state machine in
+        # In PARKING mode the parking area/spot triggers the state machine in
         # threadLineFollowing instead of signActions, so we skip the action here
         # to avoid signActions stopping the vehicle indefinitely.
         _parking_mode_active = self._current_mode == "parking"
-        _skip_parking_action = _parking_mode_active and sign_name == "parking"
+        _skip_parking_action = _parking_mode_active and sign_name in self.PARKING_AREA_CLASSES
+        _skip_traffic_light_action = traffic_light_info is not None
 
         if (
             self.enable_actions
@@ -509,6 +697,7 @@ class threadLocalPerception(ThreadWithStop):
             and is_close
             and is_actionable
             and not _skip_parking_action
+            and not _skip_traffic_light_action
             and not self._walk_area_active
         ):
             self.sign_actions.execute(
@@ -705,7 +894,8 @@ class threadLocalPerception(ThreadWithStop):
             detections = result.get("detections", [])
             self._handle_walk_area(detections, now)
             self._handle_pedestrian_obstacle(detections, now)
-            self._publish_sign(detections, now, img_shape=self._last_frame_shape)
+            self._handle_parking_sign(detections)
+            self._publish_sign(detections, now, img_shape=self._last_frame_shape, frame=frame)
             self._publish_status(result, now)
             if build_debug:
                 self._show_debug_windows(result, now)
