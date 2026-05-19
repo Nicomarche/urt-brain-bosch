@@ -82,6 +82,9 @@ class threadLocalPerception(ThreadWithStop):
         self._walk_area_cooldown          = float(getattr(config, "WALK_AREA_COOLDOWN", 10.0))
         self._walk_area_last_cleared      = 0.0     # timestamp of last walk_area resume
 
+        # AUTO-mode pedestrian/obstacle stop (independent of walk_area)
+        self._pedestrian_stop_active = False
+
         self.stateChangeSubscriber = messageHandlerSubscriber(
             self.queuesList, StateChange, "lastOnly", True
         )
@@ -393,6 +396,61 @@ class threadLocalPerception(ThreadWithStop):
                 )
                 self._enter_parking_mode()
 
+    def _handle_pedestrian_obstacle(self, detections, now):
+        """In AUTO mode, freeze the car while a pedestrian/obstacle is visible.
+
+        Resumes immediately when the frame no longer contains any
+        pedestrian/obstacle. Independent of walk_area handling — that one has
+        its own timers and PARKING transition.
+        """
+        _OBSTACLE_CLASSES = frozenset({
+            "obstacle", "pedestrian", "person", "yaya", "human",
+        })
+
+        in_auto = (self._current_mode == "auto")
+
+        # If we are not in AUTO anymore, drop any active stop we own.
+        if not in_auto:
+            if self._pedestrian_stop_active:
+                self._pedestrian_stop_active = False
+                # Only release the shared event if walk_area isn't also using it.
+                if not self._walk_area_active and self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.clear()
+            return
+
+        # Walk-area handler already controls the stop in this frame.
+        if self._walk_area_active:
+            return
+
+        # A blocking sign action (stop/red_light/crosswalk) is in progress —
+        # don't interfere with its speed control.
+        if self.sign_actions._is_blocking_action_running():
+            return
+
+        obstacle_seen = any(
+            str(d.get("class", "")).strip().lower() in _OBSTACLE_CLASSES
+            for d in detections
+        )
+
+        if obstacle_seen:
+            if not self._pedestrian_stop_active:
+                self._pedestrian_stop_active = True
+                if self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.set()
+                print(
+                    f"\033[1;97m[ Local AI ] :\033[0m \033[1;91mAUTO_STOP\033[0m - "
+                    f"Pedestrian/obstacle detectado, frenando hasta que despeje"
+                )
+            self.sign_actions._send_speed(0)
+        elif self._pedestrian_stop_active:
+            self._pedestrian_stop_active = False
+            if self.sign_actions.sign_action_event:
+                self.sign_actions.sign_action_event.clear()
+            print(
+                f"\033[1;97m[ Local AI ] :\033[0m \033[1;92mAUTO_STOP\033[0m - "
+                f"Vía despejada, reanudando marcha"
+            )
+
     def _publish_sign(self, detections, now, img_shape=None):
         if not self.enable_sign_detection or not detections:
             return
@@ -646,6 +704,7 @@ class threadLocalPerception(ThreadWithStop):
 
             detections = result.get("detections", [])
             self._handle_walk_area(detections, now)
+            self._handle_pedestrian_obstacle(detections, now)
             self._publish_sign(detections, now, img_shape=self._last_frame_shape)
             self._publish_status(result, now)
             if build_debug:
