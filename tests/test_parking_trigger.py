@@ -137,6 +137,48 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertTrue(detector.sign_actions.sign_action_event.is_set)
         self.assertEqual(detector.sign_actions.speeds, [0])
 
+    def test_walk_area_is_ignored_outside_auto(self):
+        detector = make_local_perception()
+        detector._current_mode = "manual"
+
+        detector._handle_walk_area([
+            {
+                "class": "walk_area",
+                "confidence": 0.9,
+                "box": [0.1, 0.1, 0.4, 0.4],
+            },
+            {
+                "class": "pedestrian",
+                "confidence": 0.9,
+                "box": [0.1, 0.1, 0.3, 0.3],
+            },
+        ], now=1.0)
+
+        self.assertFalse(detector._walk_area_active)
+        self.assertIsNone(detector._walk_area_mode)
+        self.assertFalse(detector.sign_actions.sign_action_event.is_set)
+        self.assertEqual(detector.sign_actions.speeds, [])
+
+    def test_walk_area_control_clears_when_leaving_auto(self):
+        detector = make_local_perception()
+        detector._walk_area_active = True
+        detector._walk_area_mode = "slow"
+        detector.sign_actions.sign_action_event.set()
+        detector._current_mode = "parking"
+
+        detector._handle_walk_area([
+            {
+                "class": "walk_area",
+                "confidence": 0.9,
+                "box": [0.1, 0.1, 0.4, 0.4],
+            }
+        ], now=1.0)
+
+        self.assertFalse(detector._walk_area_active)
+        self.assertIsNone(detector._walk_area_mode)
+        self.assertFalse(detector.sign_actions.sign_action_event.is_set)
+        self.assertEqual(detector.sign_actions.speeds, [])
+
     def test_walk_area_passed_resumes_normal_without_parking(self):
         detector = make_local_perception()
         detector._walk_area_active = True

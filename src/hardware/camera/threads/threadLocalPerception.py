@@ -322,12 +322,21 @@ class threadLocalPerception(ThreadWithStop):
         """Slow down in empty walk_area; stop only when pedestrians/obstacles are present.
 
         Rules:
+        - Only applies in AUTO mode; MANUAL/PARKING must not be overridden.
         - Only trigger when the walk_area bbox area >= WALK_AREA_MIN_BOX_AREA
           (filters detections that are too far away).
         - If obstacle/pedestrian is visible in the walk_area → stop the car.
         - If the walk_area is clear → hold speed at WALK_AREA_SLOW_SPEED_CM_S.
         - Once the walk_area is no longer visible/close → return control to line following.
         """
+        if self._current_mode != "auto":
+            if self._walk_area_active:
+                self._walk_area_active = False
+                self._walk_area_mode = None
+                if self.sign_actions.sign_action_event:
+                    self.sign_actions.sign_action_event.clear()
+            return
+
         _OBSTACLE_CLASSES = frozenset({
             "obstacle", "pedestrian", "person", "yaya", "human",
         })
