@@ -626,6 +626,8 @@ class threadLaneObserver(ThreadWithStop):
             visual_waypoint_count=len(lane_observation.center_waypoints_body or ()),
             visual_line_point_count=len(lane_observation.line_points_body or ()),
             extrapolated_side=lane_observation.extrapolated_side,
+            lane_side_sources=dict(lane_observation.debug.get("lane_side_sources") or {}),
+            source_quality_cap_reason=lane_observation.debug.get("source_quality_cap_reason"),
             lane_width_m=lane_observation.lane_width_m,
         )
 

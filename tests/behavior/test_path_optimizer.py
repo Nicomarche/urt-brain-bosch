@@ -191,6 +191,64 @@ def test_path_optimizer_map_authority_keeps_route_source_not_visual_primary() ->
     assert abs(float(out.target_path[0, 1]) - ctx.pose.fused_pose.y) < 1e-6
 
 
+def test_path_optimizer_blends_route_with_single_line_visual_waypoints() -> None:
+    lanelet_map = from_track_graph(
+        _build_track_graph(
+            [("n1", 0.0, 0.0, 0), ("n2", 1.0, 0.0, 0), ("n3", 2.0, 0.0, 0)]
+        ),
+        step_m=0.10,
+    )
+    ctx = make_context(
+        pose_x=0.0,
+        pose_y=0.0,
+        pose_yaw=0.0,
+        horizon_n=12,
+        dt=0.05,
+        current_lanelet_id="n1->n2",
+        next_lanelet_ids=("n2->n3",),
+        lanelet_map=lanelet_map,
+        nominal_speed_mps=0.20,
+    )
+    ctx = replace(
+        ctx,
+        lane_observation=LaneObservation(
+            detected_sides=("left",),
+            quality=0.85,
+            measurement_mode="single_line",
+            direct_error_valid=False,
+            control_policy_mode="ROUTE_TRACKING",
+            planner_priority_active=True,
+            center_waypoints_body=tuple((0.05 + 0.05 * i, -0.20, 0.0) for i in range(30)),
+            extrapolated_side="right",
+            lane_width_m=0.35,
+        ),
+    )
+    plan = BehaviorPathPlan(
+        timestamp=ctx.now_s,
+        raw_path=np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.8, 0.0, 0.0],
+                [1.2, 0.0, 0.0],
+            ],
+            dtype=float,
+        ),
+        base_speed_profile=np.full(ctx.horizon_n, 0.20, dtype=float),
+        scenario_name=ScenarioName.LANE_KEEP.value,
+        valid=True,
+        notes={"path_source": "route_waypoints", "path_authority": "route"},
+    )
+
+    out = PathOptimizer().optimize(plan, ctx)
+
+    assert out.notes["visual_route_blend_applied"] is True
+    assert out.notes["visual_route_blend_reason"] == "single_line_route_lane"
+    assert 0.0 < out.notes["visual_route_blend_max_shift_m"] <= 0.08
+    assert float(out.target_path[1, 1]) > 0.005
+    assert abs(float(out.target_path[1, 1])) <= 0.09
+
+
 def test_path_optimizer_clamps_route_back_inside_lanelet_corridor() -> None:
     lanelet_map = from_track_graph(
         _build_track_graph(

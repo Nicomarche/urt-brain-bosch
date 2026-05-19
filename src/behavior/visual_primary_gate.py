@@ -398,6 +398,14 @@ def _visual_candidate_is_usable(
         notes["visual_primary_single_line_enabled"] = bool(cfg.single_line_enabled)
         if not cfg.single_line_enabled:
             return False, "single_line_primary_disabled", notes
+        detected_sides = tuple(getattr(lane_observation, "detected_sides", ()) or ())
+        notes["visual_primary_single_line_detected_sides"] = list(detected_sides)
+        if len(detected_sides) != 1:
+            return False, "single_line_side_count_mismatch", notes
+        direct_error_valid = bool(getattr(lane_observation, "direct_error_valid", False))
+        notes["visual_primary_single_line_direct_error_valid"] = bool(direct_error_valid)
+        if not direct_error_valid:
+            return False, "single_line_primary_no_direct_error", notes
         min_quality = cfg.single_line_min_quality
     else:
         return False, f"unsupported_measurement_mode:{mode}", notes
