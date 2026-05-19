@@ -442,8 +442,16 @@ class threadWrite(ThreadWithStop):
                 speed_or_steer_updated = speedRecv is not None or steerRecv is not None
                 if speed_or_steer_updated and brakeRecv is None:
                     if self.engineEnabled:
-                        if self.last_speed_cmd is not None and self.last_steer_cmd is not None:
-                            self._handle_continuous_motion_command(self.last_speed_cmd, self.last_steer_cmd)
+                        # En manual el dashboard manda eventos por eje: ↑/↓
+                        # solo emite SPEED_MOTOR, ←/→ solo emite STEER_MOTOR.
+                        # Antes exigíamos que AMBOS estuvieran cacheados para
+                        # despachar — eso dejaba "← sin tocar speed" sin
+                        # comando, así que las ruedas de giro no se movían.
+                        # Defaulteamos el eje no tocado a 0 (= centro / sin
+                        # movimiento) apenas tengamos el otro.
+                        speed_to_send = self.last_speed_cmd if self.last_speed_cmd is not None else 0
+                        steer_to_send = self.last_steer_cmd if self.last_steer_cmd is not None else 0
+                        self._handle_continuous_motion_command(speed_to_send, steer_to_send)
                     else:
                         self.last_blocked_reason = "klem_not_30"
                         self._record_motion_command(
