@@ -19,14 +19,20 @@ class SignActions:
     DEFAULT_CURVE_STRAIGHT_STEER_DEG = 5.0
     DEFAULT_PENDING_TIMEOUT = 8.0
 
-    # Giro izquierda 90° post-stop.
-    # Usa ángulo máximo de dirección (-25°) para un giro visible.
-    # Radio efectivo ≈ 55.8 cm (wheelbase=26cm, steer=25°).
-    # Arco 90° ≈ 87.6 cm → calibrar STOP_TURN_DURATION en el hardware real.
-    STOP_LEFT_TURN_ENABLED = getattr(config, "SIGN_STOP_LEFT_TURN_ENABLED", True)
-    STOP_TURN_STEER_DEG    = getattr(config, "SIGN_STOP_TURN_STEER_DEG",   -25.0)
-    STOP_TURN_SPEED        = getattr(config, "SIGN_STOP_TURN_SPEED",        5)
-    STOP_TURN_DURATION     = getattr(config, "SIGN_STOP_TURN_DURATION",     5.0)
+    # Giro a la derecha tras el PRIMER STOP de la corrida.
+    # Todos los STOP frenan SIGN_STOP_DURATION segundos; solo el primero añade
+    # un giro a la derecha de STOP_TURN_DURATION a la velocidad de crucero.
+    STOP_TURN_STEER_DEG = getattr(config, "SIGN_STOP_TURN_STEER_DEG", 25.0)
+    STOP_TURN_DURATION  = getattr(config, "SIGN_STOP_TURN_DURATION",  8.0)
+
+    # Rotonda: trigger por trailing edge.
+    # Se registra la señal mientras se ve (sin actuar). Cuando deja de verse
+    # durante ROUNDABOUT_LOST_THRESHOLD segundos, se asume que el auto ya la
+    # pasó y se inicia un giro a la derecha fijo (ignorando la cámara) por
+    # ROUNDABOUT_DURATION segundos hasta caer en el siguiente carril.
+    ROUNDABOUT_STEER_DEG    = getattr(config, "SIGN_ROUNDABOUT_STEER_DEG",    25.0)
+    ROUNDABOUT_DURATION     = getattr(config, "SIGN_ROUNDABOUT_DURATION",     8.0)
+    ROUNDABOUT_LOST_THRESHOLD = getattr(config, "SIGN_ROUNDABOUT_LOST_THRESHOLD", 0.4)
 
     SIGN_ALIASES = {
         # Common canonical variants
@@ -43,6 +49,7 @@ class SignActions:
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
         "green_light", "speed_20", "speed_30",
         "highway_entrance", "highway_exit",
+        "roundabout",
         # "parking" is intentionally excluded: the parking state machine in
         # threadLineFollowing handles it via _poll_sign_detected(). Routing it
         # through SignActions would stop the car indefinitely.
@@ -61,6 +68,7 @@ class SignActions:
         # Keep entry/exit separate so a recent highway_entry does not block highway_exit.
         "highway_entrance": "highway_entrance",
         "highway_exit": "highway_exit",
+        "roundabout": "roundabout",
     }
 
     # Tiempo de gracia después de un giro fijo durante el cual se bypasea el
@@ -96,6 +104,9 @@ class SignActions:
         # Hilo daemon que ejecuta acciones bloqueantes (stop+giro, crosswalk).
         # Permite que thread_work() siga corriendo para detección e inferencia.
         self._blocking_action_thread = None
+        # Rotonda: timestamp de la última detección. tick() dispara el giro
+        # cuando esto supera ROUNDABOUT_LOST_THRESHOLD segundos sin ver la señal.
+        self._roundabout_last_seen_at = 0.0
 
     @classmethod
     def normalize_sign_name(cls, sign_name):
@@ -183,6 +194,25 @@ class SignActions:
 
     def tick(self, curve_state=None, steering_deg=0.0):
         """Try executing a previously deferred sign once the car is straight enough."""
+        # Rotonda: si ya no la vemos hace ROUNDABOUT_LOST_THRESHOLD seg., asumimos
+        # que el auto la pasó y disparamos el giro hardcodeado a la derecha.
+        if self._roundabout_last_seen_at > 0.0:
+            elapsed = time.time() - self._roundabout_last_seen_at
+            if elapsed >= self.ROUNDABOUT_LOST_THRESHOLD:
+                self._roundabout_last_seen_at = 0.0
+                if not self._is_blocking_action_running():
+                    now = time.time()
+                    self.last_sign = "roundabout"
+                    self.last_action_time["roundabout"] = now
+
+                    t = threading.Thread(
+                        target=self._execute_roundabout,
+                        daemon=True,
+                        name="sign-roundabout",
+                    )
+                    self._blocking_action_thread = t
+                    t.start()
+
         if self.pending_sign is None:
             self._pending_straight_frames = 0
             return False
@@ -236,6 +266,21 @@ class SignActions:
         # No iniciar nueva acción mientras una bloqueante sigue corriendo.
         if self._is_blocking_action_running():
             return False
+
+        # Rotonda: trigger por trailing edge. Solo registramos cuándo se vio;
+        # tick() ejecuta el giro cuando la señal deja de verse.
+        if sign_name == "roundabout":
+            last_time = self.last_action_time.get("roundabout", 0.0)
+            if (time.time() - last_time) < self.action_cooldown:
+                return False
+            now = time.time()
+            if self._roundabout_last_seen_at == 0.0:
+                print(
+                    f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mARMED\033[0m - "
+                    f"ROUNDABOUT visible — esperando perder la señal para girar"
+                )
+            self._roundabout_last_seen_at = now
+            return True
 
         if self.pending_sign == "highway_entrance" and sign_name in {
             "highway_exit", "stop", "red_light", "no_entry", "parking"
@@ -311,42 +356,38 @@ class SignActions:
             "msgValue": steer_value,
         })
 
-    def _execute_left_turn_90(self):
-        """Giro izquierda 90° hardcodeado.
+    def _execute_roundabout(self):
+        """Giro derecha fijo para entrar en el primer carril de la rotonda.
 
-        Se llama con el auto ya completamente detenido (después de STOP_DURATION).
+        Se llama desde tick() cuando la señal dejó de verse (trailing edge),
+        asumiendo que el auto ya pasó el cartel y está en la entrada.
         Secuencia:
-          1. Toma control del steer (bloquea line-following).
-          2. Centra ruedas a 0° (breve settle).
-          3. Aplica ángulo de giro máximo y espera que el servo llegue.
-          4. Avanza durante STOP_TURN_DURATION → arco de ~90°.
-          5. Para, centra ruedas, devuelve control al line-following.
+          1. Toma control de speed y steer (bloquea line-following).
+          2. Aplica ángulo a la derecha y mantiene durante ROUNDABOUT_DURATION,
+             ignorando la cámara.
+          3. Centra ruedas y devuelve control a la autonomía.
         """
+        # Mantiene la velocidad de crucero actual durante el giro (no cambia speed).
+        cruise_speed = self.current_speed
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;95mACTION\033[0m - "
+            f"ROUNDABOUT - hard right (δ={self.ROUNDABOUT_STEER_DEG}°, "
+            f"speed={cruise_speed}, t={self.ROUNDABOUT_DURATION}s)"
+        )
+        if self.sign_action_event:
+            self.sign_action_event.set()
         if self.steer_override_event:
             self.steer_override_event.set()
 
-        # Centrar ruedas primero (el auto está parado, esto no afecta la trayectoria)
-        self._send_steer(0)
-        time.sleep(0.3)
-
-        # Aplicar ángulo de giro y esperar que el servo llegue al ángulo
-        self._send_steer(self.STOP_TURN_STEER_DEG)
-        time.sleep(0.5)
-
-        print(
-            f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
-            f"LEFT TURN 90° (δ={self.STOP_TURN_STEER_DEG}°, "
-            f"speed={self.STOP_TURN_SPEED}, t={self.STOP_TURN_DURATION}s)"
-        )
         try:
             turn_start = time.time()
-            while time.time() - turn_start < self.STOP_TURN_DURATION:
-                self._send_steer(self.STOP_TURN_STEER_DEG)
-                self._send_speed(self.STOP_TURN_SPEED)
+            while time.time() - turn_start < self.ROUNDABOUT_DURATION:
+                self._send_steer(self.ROUNDABOUT_STEER_DEG)
+                self._send_speed(cruise_speed)
                 time.sleep(0.02)
-            # Detener y centrar ruedas al finalizar el arco
-            self._send_speed(0)
+            # Centrar ruedas y mantener la velocidad de crucero al salir.
             self._send_steer(0)
+            self._send_speed(cruise_speed)
         finally:
             if self.steer_override_event:
                 self.steer_override_event.clear()
@@ -355,8 +396,7 @@ class SignActions:
             self._fixed_turn_end_time = time.time()
             print(
                 f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mRESUME\033[0m - "
-                f"LEFT TURN complete — returning control to line following "
-                f"(grace {self.fixed_turn_grace_s:.1f}s)"
+                f"ROUNDABOUT complete — returning control to line following"
             )
 
     def _execute_stop(self):
@@ -367,20 +407,18 @@ class SignActions:
         if self.sign_action_event:
             self.sign_action_event.set()
 
-        # Frenar primero. Durante el frenado y la parada, el line-following sigue
-        # controlando el steer para mantener la alineación de carril (comportamiento correcto).
-        self._send_speed(0)
+        # Frenar y mantener speed=0 reissuing every 20ms (un solo send no aguanta).
+        # El line-following sigue controlando el steer para mantener la alineación.
         self.is_stopped = True
-        time.sleep(self.STOP_DURATION)
+        stop_start = time.time()
+        while time.time() - stop_start < self.STOP_DURATION:
+            self._send_speed(0)
+            time.sleep(0.02)
         self.is_stopped = False
 
-        if self.STOP_LEFT_TURN_ENABLED:
-            # Auto completamente parado: ahora tomar control del steer y girar.
-            self._execute_left_turn_90()
-        else:
-            self._send_speed(self.current_speed)
-            if self.sign_action_event:
-                self.sign_action_event.clear()
+        self._send_speed(self.current_speed)
+        if self.sign_action_event:
+            self.sign_action_event.clear()
 
     def _execute_crosswalk(self):
         print(
@@ -389,8 +427,12 @@ class SignActions:
         )
         if self.sign_action_event:
             self.sign_action_event.set()
-        self._send_speed(self.LOW_SPEED)
-        time.sleep(self.CROSSWALK_DURATION)
+        # Hold the slow speed at 20ms cadence so the motor stays at LOW_SPEED
+        # for the full crosswalk duration.
+        cross_start = time.time()
+        while time.time() - cross_start < self.CROSSWALK_DURATION:
+            self._send_speed(self.LOW_SPEED)
+            time.sleep(0.02)
         self._send_speed(self.current_speed)
         if self.sign_action_event:
             self.sign_action_event.clear()

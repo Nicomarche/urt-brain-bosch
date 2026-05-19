@@ -453,6 +453,21 @@ Args:
         # If the car overshoots past center and hits the opposite line, lower this.
         # If the car hugs the visible line too closely, raise this.
         self.single_line_offset_factor = 0.42
+        # FOLLOW_RIGHT-only override: cuando se pierde la línea izquierda
+        # (típicamente una intersección), apuntamos a un punto más cercano
+        # a la línea derecha para que el auto siga avanzando con la
+        # derecha pegada (~3 cm del flanco derecho del chasis). Con
+        # lane_width_cm=35 y auto ~14 cm de ancho: target=0.30 → punto
+        # objetivo a 10.5 cm de la línea derecha → ~3.5 cm del costado
+        # del auto. Subí (→ 0.40) si se acerca demasiado; bajá (→ 0.25)
+        # si se queda muy adentro del carril.
+        self.follow_right_single_line_target_factor = 0.30
+        # Frames consecutivos sin línea izquierda antes de aplicar el
+        # offset agresivo a la derecha (~1 s a 15-20 FPS). Filtra
+        # parpadeos por sombras / oclusión momentánea. Si la izquierda
+        # vuelve antes, no hay efecto observable y el carril se sigue
+        # centrando como en AUTO.
+        self.follow_right_single_line_hysteresis_frames = 16
         # Extra bias when only the OUTER curve line is visible.
         # Higher = stronger negative correction as the car gets closer to that line.
         self.single_line_outer_bias_gain = 0.60
@@ -1803,6 +1818,29 @@ Args:
                 )
             else:
                 virtual_target_factor = 0.50
+            # FOLLOW_RIGHT: cuando solo se ve la línea derecha (intersección o
+            # tramo donde la izquierda no aparece) DE FORMA SOSTENIDA,
+            # apuntamos a un punto más cercano a la derecha en lugar del
+            # 0.50 (centro exacto). Esto mantiene el auto pegado al carril
+            # derecho con ~3 cm de separación entre el chasis y la línea,
+            # en vez de irse al medio de la intersección.
+            #
+            # Histéresis: `consecutive_single_right` ya es incrementado por
+            # process_frame en frames donde solo se vio la derecha. Sólo
+            # aplicamos el offset agresivo después de N frames seguidos
+            # (~1 s) para evitar reaccionar a parpadeos por sombras o
+            # oclusión momentánea de la izquierda. El AUTO normal sigue
+            # intacto porque _follow_right_only=False.
+            if (
+                getattr(self, '_follow_right_only', False)
+                and visible_side == 'right'
+                and int(getattr(self, 'consecutive_single_right', 0) or 0)
+                >= int(getattr(self, 'follow_right_single_line_hysteresis_frames', 16))
+            ):
+                virtual_target_factor = max(
+                    0.20,
+                    min(0.50, float(getattr(self, 'follow_right_single_line_target_factor', 0.30)))
+                )
             for row_key in ('bottom', 'reference'):
                 visible_x = samples[visible_side][row_key]
                 if visible_x is None:
@@ -2760,18 +2798,6 @@ Args:
             height,
             width,
         )
-        # FOLLOW_RIGHT: drop la línea izquierda apenas la red la entrega.
-        # El resto del pipeline (build_local_mask_guidance, single-line
-        # tracking, fusión Stanley) ya sabe operar con un único lado, así
-        # que tratamos el frame como si la izquierda nunca hubiese
-        # existido — el auto hugea la derecha y si la pierde cae al grace
-        # de frames_without_line → steer=0 + min_speed.
-        if getattr(self, '_follow_right_only', False):
-            prepared_side_masks['left'] = None
-            if isinstance(prepared_side_lines, dict):
-                prepared_side_lines['left'] = None
-            if isinstance(lane_side_sources, dict):
-                lane_side_sources['left'] = 'none'
         duplicate_collapse = getattr(self, '_last_local_ai_duplicate_collapse', None)
         if isinstance(duplicate_collapse, dict):
             debug_info['duplicate_line_collapse'] = duplicate_collapse
@@ -8263,10 +8289,8 @@ Returns:
             self._read_sensor_data()
             if self._startup_replay_pending_green:
                 self._maybe_start_pending_startup_replay()
-                return
             if self._startup_replay_active:
                 self._step_startup_replay()
-                return
             self._publish_startup_move_status()
 
             # Parking maneuver phases that bypass lane detection entirely
@@ -8363,11 +8387,12 @@ Returns:
                         2,
                     )
             else:
-                # FOLLOW_RIGHT comparte el pipeline de AUTO. El filtro
-                # right-only vive adentro de _detect_with_local_ai (y del
-                # path opencv/bfmc) — dropea la línea izquierda apenas la
-                # red la entrega, así el resto del pipeline ya conocido
-                # opera como en AUTO pero hugeando la derecha.
+                # FOLLOW_RIGHT comparte el pipeline de AUTO (mismas dos
+                # líneas dibujadas, mismo centrado del carril). La única
+                # diferencia se inyecta más abajo en process_frame:
+                # cuando se pierde la línea izquierda por una intersección,
+                # forzamos un giro a la derecha en lugar del fallback
+                # single-right que va recto.
                 steering_angle, speed, debug_frame = self.process_frame(frame)
                 if steering_angle is not None:
                     self._last_safe_steering = steering_angle
@@ -8480,9 +8505,10 @@ Returns:
             
             if self.show_debug:
                 if debug_frame is not None and self._is_window_enabled("final_result"):
-                    status_text = "ACTIVE" if self.is_line_following_active else "INACTIVE (Debug Mode)"
+                    show_active = self.is_line_following_active or self._current_system_mode == SystemMode.AUTO
+                    status_text = "ACTIVE" if show_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                               (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
+                               (0, 255, 0) if show_active else (0, 0, 255), 2)
                     self._show_preview_window("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
@@ -8768,11 +8794,6 @@ Returns:
                     threshold_override=self.binary_threshold_retry,
                     kernel_override=3
                 )
-
-            # FOLLOW_RIGHT en modo opencv/bfmc: descartar la línea izquierda
-            # detectada para que el pipeline trate el frame como single-right.
-            if getattr(self, '_follow_right_only', False):
-                avg_left = None
 
             if 'hsv' in debug_info:
                 self._store_debug_image('hsv', cv2.cvtColor(debug_info['hsv'], cv2.COLOR_HSV2BGR))
