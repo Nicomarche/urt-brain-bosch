@@ -91,6 +91,15 @@ _IMU_STEER_TRUST_ZERO_DEG = float(getattr(_cfg_auto, "TRACKING_IMU_STEER_TRUST_Z
 _IMU_STEER_RATE_TRUST_FULL_DEGS = float(getattr(_cfg_auto, "TRACKING_IMU_STEER_RATE_TRUST_FULL_DEGS", 20.0))
 _IMU_STEER_RATE_TRUST_ZERO_DEGS = float(getattr(_cfg_auto, "TRACKING_IMU_STEER_RATE_TRUST_ZERO_DEGS", 90.0))
 _IMU_STEER_INHIBIT_HOLD_S = float(getattr(_cfg_auto, "TRACKING_IMU_STEER_INHIBIT_HOLD_S", 0.35))
+_IMU_VISUAL_LOST_YAW_CORRECTION_ENABLED = bool(
+    getattr(_cfg_auto, "TRACKING_IMU_VISUAL_LOST_YAW_CORRECTION_ENABLED", True)
+)
+_IMU_VISUAL_LOST_TWO_LINE_MIN_QUALITY = float(
+    getattr(_cfg_auto, "TRACKING_IMU_VISUAL_LOST_TWO_LINE_MIN_QUALITY", 0.80)
+)
+_IMU_VISUAL_LOST_MIN_SPEED_MPS = float(getattr(_cfg_auto, "TRACKING_IMU_VISUAL_LOST_MIN_SPEED_MPS", 0.03))
+_IMU_VISUAL_LOST_MIN_GAIN = float(getattr(_cfg_auto, "TRACKING_IMU_VISUAL_LOST_MIN_GAIN", 0.35))
+_IMU_VISUAL_LOST_MAX_GAIN = float(getattr(_cfg_auto, "TRACKING_IMU_VISUAL_LOST_MAX_GAIN", 0.70))
 _LANE_YAW_RESET_ENABLED = bool(getattr(_cfg_auto, "TRACKING_LANE_YAW_RESET_ENABLED", True))
 _LANE_YAW_RESET_CONSECUTIVE = max(1, int(getattr(_cfg_auto, "TRACKING_LANE_YAW_RESET_CONSECUTIVE", 2)))
 _LANE_YAW_RESET_QUALITY_MIN = float(getattr(_cfg_auto, "TRACKING_LANE_YAW_RESET_QUALITY_MIN", 0.80))
@@ -137,6 +146,9 @@ _VISUAL_LANE_MAP_ALIGNMENT_MIN_DELTA_M = float(
 )
 _VISUAL_LANE_MAP_ALIGNMENT_GAIN = float(
     getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_GAIN", 1.0)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_BLEND = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_BLEND", 1.0)
 )
 _VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M = float(
     getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M", 0.08)
@@ -204,6 +216,22 @@ def _single_line_direction_conflicts_with_route(
         return True
 
     return abs(_wrap_angle(float(heading_hint) - float(route_delta))) > _SINGLE_LINE_ROUTE_MAX_YAW_MISMATCH_RAD
+
+
+def _lane_observation_is_reliable_two_line(
+    lane_observation: LaneObservation | None,
+    *,
+    min_quality: float,
+) -> bool:
+    if lane_observation is None:
+        return False
+    detected_sides = {str(side).strip().lower() for side in (lane_observation.detected_sides or ())}
+    return (
+        str(getattr(lane_observation, "measurement_mode", "") or "").strip().lower() == "two_line"
+        and {"left", "right"}.issubset(detected_sides)
+        and bool(getattr(lane_observation, "direct_error_valid", False))
+        and float(getattr(lane_observation, "quality", 0.0) or 0.0) >= float(min_quality)
+    )
 
 
 class threadPoseEstimator(threadTracking):
@@ -1317,12 +1345,16 @@ class threadPoseEstimator(threadTracking):
         dt: float,
         imu_dict: dict | None,
         previous_imu_t: float | None,
+        lane_observation: LaneObservation | None = None,
     ) -> float:
         """Fuse IMU yaw with a delayed bicycle-model body-yaw prediction.
 
         The BNO055 yaw can jump when the steering servo moves.  The safe path is
         to predict body yaw from speed, wheelbase and lagged wheel angle, then
-        use IMU yaw only as a rate-limited correction when steering is quiet.
+        use IMU yaw as a rate-limited correction.  When two visual lane lines
+        are reliable, vision owns the lateral pose anchor; when they are not,
+        the IMU gets extra yaw authority so dead reckoning keeps carrying the
+        car through the visually uncertain section.
         """
         dt = max(0.0, min(float(dt), float(_MAX_INTEGRATION_DT)))
         steer_rad, steer_rate_rad_s = self._filtered_steer_for_yaw(dt)
@@ -1345,6 +1377,11 @@ class threadPoseEstimator(threadTracking):
         self._last_yaw_used_rad = float(yaw_kinematic)
         self._last_imu_yaw_limited_rad = None
         self._last_imu_yaw_gain = 0.0
+        self._last_imu_visual_lost_correction_active = False
+        self._last_visual_two_line_reliable = _lane_observation_is_reliable_two_line(
+            lane_observation,
+            min_quality=float(_IMU_VISUAL_LOST_TWO_LINE_MIN_QUALITY),
+        )
         self._last_yaw_rejected = imu_dict is not None
 
         p_prior = min(
@@ -1410,6 +1447,16 @@ class threadPoseEstimator(threadTracking):
         r_imu = float(_YAW_EKF_R_STRAIGHT) + float(_YAW_EKF_R_STEER_K) * (float(steer_rad) ** 2)
         base_gain = p_prior / (p_prior + r_imu) if (p_prior + r_imu) > 1e-12 else 0.0
         imu_gain = max(0.0, min(1.0, base_gain * confidence))
+        if (
+            bool(_IMU_VISUAL_LOST_YAW_CORRECTION_ENABLED)
+            and not bool(getattr(self, "_last_visual_two_line_reliable", False))
+            and abs(float(getattr(self, "_last_speed", 0.0) or 0.0)) >= float(_IMU_VISUAL_LOST_MIN_SPEED_MPS)
+        ):
+            min_gain = max(0.0, min(1.0, float(_IMU_VISUAL_LOST_MIN_GAIN)))
+            max_gain = max(min_gain, min(1.0, float(_IMU_VISUAL_LOST_MAX_GAIN)))
+            if float(imu_gain) < min_gain:
+                imu_gain = min(min_gain, max_gain)
+            self._last_imu_visual_lost_correction_active = imu_gain > 1e-6
         innovation = _wrap_angle(float(yaw_imu_limited) - float(yaw_kinematic))
         yaw_used = float(yaw_kinematic) + imu_gain * innovation
 
@@ -1747,13 +1794,10 @@ class threadPoseEstimator(threadTracking):
         if self._visual_lane_map_alignment_semantic_blocked(route_context):
             return raw_x, raw_y, raw_yaw, 0.0, False, False
 
-        measurement_mode = str(getattr(lane_observation, "measurement_mode", "") or "").strip().lower()
-        detected_sides = {str(side).strip().lower() for side in (lane_observation.detected_sides or ())}
-        if measurement_mode != "two_line" or not {"left", "right"}.issubset(detected_sides):
-            return raw_x, raw_y, raw_yaw, 0.0, False, False
-        if not bool(getattr(lane_observation, "direct_error_valid", False)):
-            return raw_x, raw_y, raw_yaw, 0.0, False, False
-        if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY):
+        if not _lane_observation_is_reliable_two_line(
+            lane_observation,
+            min_quality=float(_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY),
+        ):
             return raw_x, raw_y, raw_yaw, 0.0, False, False
 
         try:
@@ -1778,6 +1822,7 @@ class threadPoseEstimator(threadTracking):
             return raw_x, raw_y, raw_yaw, 0.0, True, False
 
         correction_m = delta_m * float(_VISUAL_LANE_MAP_ALIGNMENT_GAIN)
+        correction_m *= max(0.0, min(1.0, float(_VISUAL_LANE_MAP_ALIGNMENT_BLEND)))
         max_step_m = max(0.0, float(_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M))
         if max_step_m > 0.0 and abs(correction_m) > max_step_m:
             correction_m = math.copysign(max_step_m, correction_m)
@@ -1788,16 +1833,25 @@ class threadPoseEstimator(threadTracking):
         if path_yaw_value is None:
             path_yaw_value = getattr(route_context.matched_pose, "yaw", raw_yaw)
         path_yaw = float(path_yaw_value)
-        self._dr.correct_lateral(float(correction_m), path_yaw)
+        normal_x = -math.sin(path_yaw)
+        normal_y = math.cos(path_yaw)
+        # The IMU/bicycle integration owns yaw and forward motion.  Vision only
+        # moves the map pose laterally so its route offset equals the two-line
+        # physical lane offset.
+        new_pose_x = float(raw_x) - float(correction_m) * normal_x
+        new_pose_y = float(raw_y) - float(correction_m) * normal_y
+        self._dr.reset(new_pose_x, new_pose_y, float(raw_yaw))
         self._last_visual_lane_map_alignment_monotonic = float(now)
         new_x, new_y, new_yaw = self._dr.get_state()
         live_log(
             "pose_estimator",
             event="visual_lane_map_alignment",
             correction_m=float(correction_m),
+            target_lateral_error_m=float(map_error - correction_m),
             map_lateral_error_m=float(map_error),
             visual_lateral_error_m=float(visual_error),
             delta_m=float(delta_m),
+            imu_yaw_rad=float(raw_yaw),
             scenario=str(scenario_name or ""),
             quality=float(getattr(lane_observation, "quality", 0.0) or 0.0),
         )
@@ -2238,6 +2292,17 @@ class threadPoseEstimator(threadTracking):
         self._resolve_speed_mps(now)
         self._last_steer_rad = self._resolve_steer_rad(now)
 
+        route_context, _, _ = self.route_context_buffer.read_latest(with_metadata=True)
+        if not isinstance(route_context, RouteContext):
+            route_context = None
+
+        lane_observation, _, _ = self.lane_observation_buffer.read_latest(with_metadata=True)
+        if not isinstance(lane_observation, LaneObservation):
+            lane_observation = None
+        stopline_observation, _, _ = self.stopline_observation_buffer.read_latest(with_metadata=True)
+        if not isinstance(stopline_observation, StoplineObservation):
+            stopline_observation = None
+
         yaw_start_rad = float(self._last_yaw_rad)
         dr_dt = min(dt, _MAX_INTEGRATION_DT)
 
@@ -2252,6 +2317,7 @@ class threadPoseEstimator(threadTracking):
             dt=dr_dt,
             imu_dict=imu_dict,
             previous_imu_t=previous_imu_t,
+            lane_observation=lane_observation,
         )
         self._dr.update_from_yaw(
             float(getattr(self, "_last_dr_speed_integrated_mps", self._last_speed)),
@@ -2265,17 +2331,6 @@ class threadPoseEstimator(threadTracking):
         raw_x, raw_y, raw_yaw = self._dr.get_state()
         self._last_yaw_rad = float(raw_yaw)
         raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
-
-        route_context, _, _ = self.route_context_buffer.read_latest(with_metadata=True)
-        if not isinstance(route_context, RouteContext):
-            route_context = None
-
-        lane_observation, _, _ = self.lane_observation_buffer.read_latest(with_metadata=True)
-        if not isinstance(lane_observation, LaneObservation):
-            lane_observation = None
-        stopline_observation, _, _ = self.stopline_observation_buffer.read_latest(with_metadata=True)
-        if not isinstance(stopline_observation, StoplineObservation):
-            stopline_observation = None
 
         gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw, now)
         if gps_relocalized:
@@ -2428,6 +2483,12 @@ class threadPoseEstimator(threadTracking):
             yaw_kinematic=float(getattr(self, "_last_yaw_kinematic_rad", fused_pose.yaw)),
             yaw_rejected=bool(getattr(self, "_last_yaw_rejected", False)),
             imu_yaw_gain=float(getattr(self, "_last_imu_yaw_gain", 0.0) or 0.0),
+            imu_visual_lost_correction=bool(
+                getattr(self, "_last_imu_visual_lost_correction_active", False)
+            ),
+            visual_two_line_reliable=bool(
+                getattr(self, "_last_visual_two_line_reliable", False)
+            ),
             imu_sample_age_s=(
                 None
                 if getattr(self, "_last_imu_sample_age_s", None) is None

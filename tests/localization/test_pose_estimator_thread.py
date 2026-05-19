@@ -192,6 +192,51 @@ def test_thread_work_uses_trusted_imu_yaw_when_steering_is_quiet() -> None:
     assert estimator._last_yaw_rejected is False
 
 
+def test_imu_yaw_gets_extra_authority_when_two_line_visual_is_lost() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=12.0, imu_yaw_deg=10.0)
+    estimator._last_steer_rad = math.radians(12.0)
+
+    yaw = estimator._fuse_yaw_for_dead_reckoning(
+        now=100.0,
+        yaw_start_rad=0.0,
+        dt=0.10,
+        imu_dict={"yaw": 10.0},
+        previous_imu_t=99.9,
+        lane_observation=None,
+    )
+
+    assert yaw > 0.0
+    assert estimator._last_imu_yaw_gain >= 0.35
+    assert estimator._last_imu_visual_lost_correction_active is True
+    assert estimator._last_visual_two_line_reliable is False
+
+
+def test_reliable_two_line_visual_keeps_imu_yaw_on_normal_steer_gate() -> None:
+    estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=12.0, imu_yaw_deg=10.0)
+    estimator._last_steer_rad = math.radians(12.0)
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=0.0,
+        direct_error_m=0.0,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+    )
+
+    yaw = estimator._fuse_yaw_for_dead_reckoning(
+        now=100.0,
+        yaw_start_rad=0.0,
+        dt=0.10,
+        imu_dict={"yaw": 10.0},
+        previous_imu_t=99.9,
+        lane_observation=lane_observation,
+    )
+
+    assert yaw < 0.0
+    assert estimator._last_imu_visual_lost_correction_active is False
+    assert estimator._last_visual_two_line_reliable is True
+
+
 def test_pose_estimator_reuses_fresh_imu_between_messages() -> None:
     estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=0.0, imu_yaw_deg=12.0)
     now = 100.0
@@ -415,9 +460,7 @@ def test_apply_lane_observation_aligns_map_pose_to_two_line_visual_offset() -> N
     assert new_y == pytest.approx(0.14, abs=1e-9)
     assert new_yaw == pytest.approx(0.0, abs=1e-9)
     assert estimator._last_lane_relocalization_kind == "visual_lane_map_alignment"
-    assert len(estimator._dr.corrections) == 1
-    assert estimator._dr.corrections[0][0] == pytest.approx(0.08, abs=1e-9)
-    assert estimator._dr.corrections[0][1] == pytest.approx(0.0, abs=1e-9)
+    assert estimator._dr.corrections == []
 
 
 def test_apply_lane_observation_blocks_strong_visual_map_alignment_near_intersection() -> None:
