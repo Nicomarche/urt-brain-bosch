@@ -319,6 +319,44 @@ def test_zero_speed_output_neutralizes_steering() -> None:
     assert mc._prev_steer_deg == pytest.approx(0.0)
 
 
+def test_zero_speed_route_solver_holds_previous_steering_memory() -> None:
+    """Si el path sigue pidiendo avanzar, no metemos un pulso 0° entre ticks."""
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(-0.05, 25.0))))
+    mc._prev_steer_deg = 7.0
+    pose = _pose()
+    x_fwd_m = 0.13
+    y_left_m = 0.21
+    c = math.cos(pose.fused_pose.yaw)
+    s = math.sin(pose.fused_pose.yaw)
+    dx = (c * x_fwd_m) + (s * y_left_m)
+    dy = (s * x_fwd_m) - (c * y_left_m)
+    target_path = np.array(
+        [
+            [pose.fused_pose.x, pose.fused_pose.y, pose.fused_pose.yaw],
+            [pose.fused_pose.x + dx, pose.fused_pose.y + dy, pose.fused_pose.yaw],
+            [pose.fused_pose.x + (2.0 * dx), pose.fused_pose.y + (2.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (3.0 * dx), pose.fused_pose.y + (3.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (4.0 * dx), pose.fused_pose.y + (4.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (5.0 * dx), pose.fused_pose.y + (5.0 * dy), pose.fused_pose.yaw],
+        ],
+        dtype=float,
+    )
+
+    cmd = mc.compute(
+        _bo(
+            speed_mps=0.20,
+            target_path=target_path,
+            notes={"path_source": "route_waypoints"},
+        ),
+        pose,
+    )
+
+    assert cmd.valid is True
+    assert cmd.speed_mps == 0.0
+    assert cmd.steering_deg == pytest.approx(7.0)
+    assert mc._prev_steer_deg == pytest.approx(7.0)
+
+
 def test_negative_solver_speed_gets_forward_recovery_on_route_path() -> None:
     """Si la ruta tiene una referencia adelante, no dejamos al auto clavado."""
     target_path = np.array(
@@ -341,6 +379,41 @@ def test_negative_solver_speed_gets_forward_recovery_on_route_path() -> None:
             notes={"path_source": "route_waypoints"},
         ),
         _pose(),
+    )
+
+    assert cmd.valid is True
+    assert cmd.speed_mps == pytest.approx(0.20)
+
+
+def test_negative_solver_speed_forward_recovery_accepts_small_forward_sample() -> None:
+    """El caso de pista tenía x_fwd≈1.9 cm: eso ya es un punto adelante."""
+    pose = _pose()
+    x_fwd_m = 0.019
+    y_left_m = 0.02
+    c = math.cos(pose.fused_pose.yaw)
+    s = math.sin(pose.fused_pose.yaw)
+    dx = (c * x_fwd_m) + (s * y_left_m)
+    dy = (s * x_fwd_m) - (c * y_left_m)
+    target_path = np.array(
+        [
+            [pose.fused_pose.x, pose.fused_pose.y, pose.fused_pose.yaw],
+            [pose.fused_pose.x + dx, pose.fused_pose.y + dy, pose.fused_pose.yaw],
+            [pose.fused_pose.x + (2.0 * dx), pose.fused_pose.y + (2.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (3.0 * dx), pose.fused_pose.y + (3.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (4.0 * dx), pose.fused_pose.y + (4.0 * dy), pose.fused_pose.yaw],
+            [pose.fused_pose.x + (5.0 * dx), pose.fused_pose.y + (5.0 * dy), pose.fused_pose.yaw],
+        ],
+        dtype=float,
+    )
+    mc = _disable_rate_limits(MotionController(solver=_FakeSolver(result=(-0.05, 1.0))))
+
+    cmd = mc.compute(
+        _bo(
+            speed_mps=0.20,
+            target_path=target_path,
+            notes={"path_source": "route_waypoints"},
+        ),
+        pose,
     )
 
     assert cmd.valid is True

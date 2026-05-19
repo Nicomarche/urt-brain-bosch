@@ -14,6 +14,10 @@ _VISUAL_PATH_MIN_POINTS = max(2, int(getattr(_config, "LANE_VISUAL_MIN_POLY_POIN
 _LANE_WIDTH_M = max(0.01, float(getattr(_config, "LANE_WIDTH_CM", 35.0) or 35.0) / 100.0)
 _LINE_DISTANCE_MARGIN_M = max(0.04, _LANE_WIDTH_M * 0.18)
 _DEFAULT_WIDTH_CONSISTENCY_TOLERANCE = 0.25  # plan TANDA 0.1: |L+R - W|/W < esto
+_GUESSED_TWO_LINE_QUALITY_CAP = 0.30
+_PARTLY_GUESSED_TWO_LINE_QUALITY_CAP = 0.72
+_GUESSED_TWO_LINE_YAW_CONF_CAP = 0.25
+_PARTLY_GUESSED_TWO_LINE_YAW_CONF_CAP = 0.45
 
 
 class threadLaneObserver(ThreadWithStop):
@@ -244,6 +248,63 @@ class threadLaneObserver(ThreadWithStop):
         return "none"
 
     @staticmethod
+    def _lane_side_sources(snapshot: VisualStateSnapshot) -> dict[str, str]:
+        sources: dict[str, str] = {}
+
+        def _merge(raw) -> None:
+            if not isinstance(raw, dict):
+                return
+            for side in ("left", "right"):
+                value = raw.get(side)
+                if value is not None:
+                    sources[side] = str(value or "none").strip().lower()
+
+        frame_trace = snapshot.frame_trace or {}
+        debug = frame_trace.get("debug") or {}
+        local_payload = snapshot.local_lane_payload or {}
+        _merge(local_payload.get("lane_side_sources"))
+        _merge(frame_trace.get("lane_side_sources"))
+        if isinstance(debug, dict):
+            _merge(debug.get("lane_side_sources"))
+            nested_payload = debug.get("local_lane_payload")
+            if isinstance(nested_payload, dict):
+                _merge(nested_payload.get("lane_side_sources"))
+        nested_payload = frame_trace.get("local_lane_payload")
+        if isinstance(nested_payload, dict):
+            _merge(nested_payload.get("lane_side_sources"))
+        return sources
+
+    @staticmethod
+    def _source_quality_cap(
+        lane_side_sources: dict[str, str],
+        detected_sides: tuple[str, ...],
+        measurement_mode: str,
+    ) -> tuple[float, float, str | None]:
+        if str(measurement_mode or "").strip().lower() != "two_line":
+            return 1.0, 1.0, None
+        sides = [str(side).strip().lower() for side in detected_sides or ()]
+        if not {"left", "right"}.issubset(set(sides)):
+            return 1.0, 1.0, None
+        detected_sources = {
+            side: str(lane_side_sources.get(side, "none") or "none").strip().lower()
+            for side in ("left", "right")
+        }
+        guessed = [side for side, source in detected_sources.items() if source == "guessed_single"]
+        if len(guessed) >= 2:
+            return (
+                float(_GUESSED_TWO_LINE_QUALITY_CAP),
+                float(_GUESSED_TWO_LINE_YAW_CONF_CAP),
+                "both_detected_sides_guessed_single",
+            )
+        if guessed:
+            return (
+                float(_PARTLY_GUESSED_TWO_LINE_QUALITY_CAP),
+                float(_PARTLY_GUESSED_TWO_LINE_YAW_CONF_CAP),
+                "detected_side_guessed_single",
+            )
+        return 1.0, 1.0, None
+
+    @staticmethod
     def _control_policy_mode(snapshot: VisualStateSnapshot) -> str | None:
         frame_trace = snapshot.frame_trace or {}
         debug = frame_trace.get("debug") or {}
@@ -360,6 +421,7 @@ class threadLaneObserver(ThreadWithStop):
         detected_sides = self._detected_sides(snapshot)
         raw_direct_error_m = self._direct_error_m(snapshot)
         measurement_mode = self._measurement_mode(snapshot, detected_sides, blind_mode)
+        lane_side_sources = self._lane_side_sources(snapshot)
         direct_error_valid = self._direct_error_valid(
             snapshot,
             measurement_mode=measurement_mode,
@@ -437,8 +499,22 @@ class threadLaneObserver(ThreadWithStop):
         else:
             quality = base_quality
 
+        source_quality_cap, yaw_conf_cap, source_quality_reason = self._source_quality_cap(
+            lane_side_sources,
+            detected_sides,
+            measurement_mode,
+        )
+        if source_quality_reason is not None:
+            quality = min(float(quality), float(source_quality_cap))
+
         observation_debug = dict(debug)
         observation_debug["raw_direct_error_m"] = raw_direct_error_m
+        if lane_side_sources:
+            observation_debug["lane_side_sources"] = dict(lane_side_sources)
+        if source_quality_reason is not None:
+            observation_debug["source_quality_cap_reason"] = source_quality_reason
+            observation_debug["source_quality_cap"] = float(source_quality_cap)
+            observation_debug["source_yaw_confidence_cap"] = float(yaw_conf_cap)
         observation_debug["line_geometry_valid"] = bool(line_geometry_valid)
         if not line_geometry_valid:
             observation_debug["line_geometry_reject_reason"] = (
@@ -458,6 +534,9 @@ class threadLaneObserver(ThreadWithStop):
                 side: len(points)
                 for side, points in line_points_body_by_side.items()
             }
+        camera_yaw_confidence = float(snapshot.camera_yaw_hint_confidence or 0.0)
+        if source_quality_reason is not None:
+            camera_yaw_confidence = min(camera_yaw_confidence, float(yaw_conf_cap))
         return LaneObservation(
             timestamp=float(snapshot.timestamp),
             source_mode=str(snapshot.detection_mode or "unknown"),
@@ -472,7 +551,7 @@ class threadLaneObserver(ThreadWithStop):
             quality=quality,
             curve_hint=str(snapshot.curve_state or "STRAIGHT"),
             camera_yaw_hint_rad=snapshot.camera_yaw_hint_rad,
-            camera_yaw_hint_confidence=float(snapshot.camera_yaw_hint_confidence or 0.0),
+            camera_yaw_hint_confidence=camera_yaw_confidence,
             measurement_mode=measurement_mode,
             direct_error_valid=direct_error_valid,
             control_policy_mode=self._control_policy_mode(snapshot),

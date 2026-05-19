@@ -47,6 +47,43 @@ class LaneObserverTests(unittest.TestCase):
         self.assertAlmostEqual(lane_observation.camera_yaw_hint_confidence, 0.85, places=4)
         self.assertGreater(lane_observation.quality, 0.9)
 
+    def test_build_lane_observation_caps_quality_when_two_lines_are_guessed(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=10.5,
+            detection_mode="ai_local",
+            curve_state="STRAIGHT",
+            heading_error_rad=0.01,
+            camera_yaw_hint_rad=0.10,
+            camera_yaw_hint_confidence=0.90,
+            local_lane_payload={
+                "lane_side_point_counts": {"left": 8, "right": 8},
+                "lane_side_sources": {"left": "guessed_single", "right": "guessed_single"},
+            },
+            frame_trace={
+                "debug": {
+                    "measurement_mode": "two_line",
+                    "two_line_direct_error_m": 0.02,
+                    "two_line_D_left_cm": 15.5,
+                    "two_line_D_right_cm": 19.5,
+                },
+                "visual_lane_waypoints": {
+                    "center_waypoints_body": tuple((0.05 * idx, 0.02, 0.0) for idx in range(20)),
+                    "lane_width_m": 0.35,
+                },
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertEqual(lane_observation.measurement_mode, "two_line")
+        self.assertLess(lane_observation.quality, 0.8)
+        self.assertLess(lane_observation.camera_yaw_hint_confidence, 0.3)
+        self.assertEqual(
+            lane_observation.debug["source_quality_cap_reason"],
+            "both_detected_sides_guessed_single",
+        )
+
     def test_build_lane_observation_preserves_single_line_physical_direct_error(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)
         snapshot = VisualStateSnapshot(

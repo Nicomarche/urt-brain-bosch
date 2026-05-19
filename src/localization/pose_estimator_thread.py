@@ -165,6 +165,17 @@ _VISUAL_LANE_MAP_ALIGNMENT_COOLDOWN_S = float(
 _VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = float(
     getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M", 0.25)
 )
+_VISUAL_POSE_CORRECTION_ALLOWED_STATES_RAW = getattr(
+    _cfg_auto,
+    "TRACKING_VISUAL_POSE_CORRECTION_ALLOWED_STATES",
+    {"AUTO"},
+)
+if isinstance(_VISUAL_POSE_CORRECTION_ALLOWED_STATES_RAW, str):
+    _VISUAL_POSE_CORRECTION_ALLOWED_STATES_RAW = {_VISUAL_POSE_CORRECTION_ALLOWED_STATES_RAW}
+_VISUAL_POSE_CORRECTION_ALLOWED_STATES = {
+    str(item).strip().upper()
+    for item in (_VISUAL_POSE_CORRECTION_ALLOWED_STATES_RAW or set())
+}
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -369,6 +380,22 @@ class threadPoseEstimator(threadTracking):
         self._last_imu_sample_age_s = None
         self._last_imu_sample_reused = False
         return None, previous_imu_t
+
+    def _visual_pose_corrections_allowed(self) -> tuple[bool, str]:
+        state = str(getattr(self, "_current_state_message", "") or "").strip().upper()
+        if state and state in _VISUAL_POSE_CORRECTION_ALLOWED_STATES:
+            return True, "state_allowed"
+        reason_state = state.lower() if state else "unknown"
+        return False, f"state_{reason_state}_disabled"
+
+    def _set_visual_pose_corrections_disabled_diag(self, reason: str) -> None:
+        self._last_visual_lane_map_alignment_diag = {
+            "attempted": False,
+            "applied": False,
+            "handled": False,
+            "reason": str(reason),
+            "state": str(getattr(self, "_current_state_message", "") or ""),
+        }
 
     @staticmethod
     def _gps_dashboard_calibration_enabled() -> bool:
@@ -906,6 +933,13 @@ class threadPoseEstimator(threadTracking):
             source=str(source),
             error_m=float(error_m or 0.0),
             sample_count=int(sample_count or 0),
+            imu_yaw_offset_calibrated=bool(getattr(self, "_yaw_offset_calibrated", False)),
+            imu_yaw_offset_deg=math.degrees(float(getattr(self, "_yaw_offset", 0.0) or 0.0)),
+            pending_yaw_offset_target_deg=(
+                None
+                if getattr(self, "_pending_yaw_offset_target_rad", None) is None
+                else math.degrees(float(self._pending_yaw_offset_target_rad))
+            ),
         )
 
     def _start_gps_calibration_recent_status(self, now: float) -> tuple[str, str, float] | None:
@@ -1797,6 +1831,7 @@ class threadPoseEstimator(threadTracking):
                 "visual_lateral_error_m": None if visual_error_m is None else float(visual_error_m),
                 "delta_m": None if delta_m is None else float(delta_m),
                 "target_lateral_error_m": None if target_error_m is None else float(target_error_m),
+                "waypoint_mode_active": bool(getattr(route_context, "waypoint_mode_active", False)),
             }
             return raw_x, raw_y, raw_yaw, float(correction_m or 0.0), bool(handled), bool(applied)
 
@@ -1808,8 +1843,6 @@ class threadPoseEstimator(threadTracking):
             return _diag("missing_lateral_errors")
         if not bool(getattr(route_context, "route_active", False)):
             return _diag("route_inactive")
-        if bool(getattr(route_context, "waypoint_mode_active", False)):
-            return _diag("waypoint_mode")
 
         scenario_name = None
         if self.tracking_state is not None:
@@ -1901,6 +1934,7 @@ class threadPoseEstimator(threadTracking):
             "visual_lateral_error_m": float(visual_error),
             "delta_m": float(delta_m),
             "target_lateral_error_m": float(target_error_m),
+            "waypoint_mode_active": bool(getattr(route_context, "waypoint_mode_active", False)),
         }
         live_log(
             "pose_estimator",
@@ -1913,6 +1947,7 @@ class threadPoseEstimator(threadTracking):
             imu_yaw_rad=float(raw_yaw),
             scenario=str(scenario_name or ""),
             quality=float(getattr(lane_observation, "quality", 0.0) or 0.0),
+            waypoint_mode_active=bool(getattr(route_context, "waypoint_mode_active", False)),
         )
         return new_x, new_y, new_yaw, float(correction_m), True, True
 
@@ -2391,6 +2426,8 @@ class threadPoseEstimator(threadTracking):
         self._last_yaw_rad = float(raw_yaw)
         raw_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
 
+        visual_pose_corrections_allowed, visual_pose_corrections_reason = self._visual_pose_corrections_allowed()
+
         gps_relocalized, gps_match = self._apply_localisation_fix(raw_yaw, now)
         if gps_relocalized:
             raw_x, raw_y, raw_yaw = self._dr.get_state()
@@ -2407,11 +2444,16 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized = False
             stopline_match = None
         else:
-            yaw_correction_rad = self._try_lane_yaw_reset(now, raw_yaw, route_context, lane_observation)
-            if abs(yaw_correction_rad) <= 1e-9:
-                yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, route_context, lane_observation)
-            if abs(yaw_correction_rad) > 1e-9:
-                raw_x, raw_y, raw_yaw = self._dr.get_state()
+            yaw_correction_rad = 0.0
+            if visual_pose_corrections_allowed:
+                yaw_correction_rad = self._try_lane_yaw_reset(now, raw_yaw, route_context, lane_observation)
+                if abs(yaw_correction_rad) <= 1e-9:
+                    yaw_correction_rad = self._apply_camera_yaw_hint(now, raw_yaw, route_context, lane_observation)
+                if abs(yaw_correction_rad) > 1e-9:
+                    raw_x, raw_y, raw_yaw = self._dr.get_state()
+            else:
+                self._lane_yaw_reset_count = 0
+                self._set_visual_pose_corrections_disabled_diag(visual_pose_corrections_reason)
 
             self._consume_sign_observation(now)
 
@@ -2425,32 +2467,43 @@ class threadPoseEstimator(threadTracking):
                     route_context.matched_pose.yaw,
                 )
 
-            raw_x, raw_y, raw_yaw, lane_relocalization_m, lane_measurement_reliable = self._apply_lane_observation(
-                route_context,
-                lane_observation,
-                now,
-                raw_x,
-                raw_y,
-                raw_yaw,
-                raw_lateral_error_m=raw_lateral_error_m,
-            )
+            if visual_pose_corrections_allowed:
+                raw_x, raw_y, raw_yaw, lane_relocalization_m, lane_measurement_reliable = self._apply_lane_observation(
+                    route_context,
+                    lane_observation,
+                    now,
+                    raw_x,
+                    raw_y,
+                    raw_yaw,
+                    raw_lateral_error_m=raw_lateral_error_m,
+                )
 
-            raw_x, raw_y, raw_yaw, chamfer_alignment_m, chamfer_aligned, chamfer_match = self._apply_chamfer_map_alignment(
-                route_context,
-                lane_observation,
-                now,
-                raw_x,
-                raw_y,
-                raw_yaw,
-            )
+                raw_x, raw_y, raw_yaw, chamfer_alignment_m, chamfer_aligned, chamfer_match = self._apply_chamfer_map_alignment(
+                    route_context,
+                    lane_observation,
+                    now,
+                    raw_x,
+                    raw_y,
+                    raw_yaw,
+                )
 
-            semantic_relocalized, semantic_match = self._apply_semantic_reset(route_context, now)
-            if semantic_relocalized:
-                raw_x, raw_y, raw_yaw = self._dr.get_state()
+                semantic_relocalized, semantic_match = self._apply_semantic_reset(route_context, now)
+                if semantic_relocalized:
+                    raw_x, raw_y, raw_yaw = self._dr.get_state()
 
-            stopline_relocalized, stopline_match = self._apply_stopline_reset(route_context, stopline_observation, now)
-            if stopline_relocalized:
-                raw_x, raw_y, raw_yaw = self._dr.get_state()
+                stopline_relocalized, stopline_match = self._apply_stopline_reset(route_context, stopline_observation, now)
+                if stopline_relocalized:
+                    raw_x, raw_y, raw_yaw = self._dr.get_state()
+            else:
+                lane_relocalization_m = 0.0
+                lane_measurement_reliable = False
+                chamfer_alignment_m = 0.0
+                chamfer_aligned = False
+                chamfer_match = None
+                semantic_relocalized = False
+                semantic_match = None
+                stopline_relocalized = False
+                stopline_match = None
 
         pre_correction_lateral_error_m = float(raw_lateral_error_m or 0.0)
         if route_context is not None:
@@ -2554,6 +2607,15 @@ class threadPoseEstimator(threadTracking):
                 else float(self._last_imu_sample_age_s)
             ),
             imu_sample_reused=bool(getattr(self, "_last_imu_sample_reused", False)),
+            imu_yaw_offset_calibrated=bool(getattr(self, "_yaw_offset_calibrated", False)),
+            imu_yaw_offset_deg=math.degrees(float(getattr(self, "_yaw_offset", 0.0) or 0.0)),
+            pending_yaw_offset_target_deg=(
+                None
+                if getattr(self, "_pending_yaw_offset_target_rad", None) is None
+                else math.degrees(float(self._pending_yaw_offset_target_rad))
+            ),
+            visual_pose_corrections_allowed=bool(visual_pose_corrections_allowed),
+            visual_pose_corrections_reason=str(visual_pose_corrections_reason),
             distance_raw_mm=getattr(self, "_last_raw_distance", None),
             distance_speed_mps=float(getattr(self, "_last_distance_speed_mps", 0.0) or 0.0),
             reloc_mode=relocalization_mode,
@@ -2607,6 +2669,16 @@ class threadPoseEstimator(threadTracking):
                     str(side): len(points or ())
                     for side, points in by_side.items()
                 },
+                "lane_side_sources": (
+                    dict(lane_debug.get("lane_side_sources") or {})
+                    if isinstance(lane_debug, dict) and isinstance(lane_debug.get("lane_side_sources"), dict)
+                    else {}
+                ),
+                "source_quality_cap_reason": (
+                    str(lane_debug.get("source_quality_cap_reason"))
+                    if isinstance(lane_debug, dict) and lane_debug.get("source_quality_cap_reason") is not None
+                    else None
+                ),
                 "control_policy_mode": lane_observation.control_policy_mode,
                 "planner_priority_active": bool(lane_observation.planner_priority_active),
             }
@@ -2662,6 +2734,13 @@ class threadPoseEstimator(threadTracking):
                 "used_rad": float(getattr(self, "_last_yaw_used_rad", fused_pose.yaw)),
                 "kinematic_rad": float(getattr(self, "_last_yaw_kinematic_rad", fused_pose.yaw)),
                 "gain": float(getattr(self, "_last_imu_yaw_gain", 0.0) or 0.0),
+                "offset_calibrated": bool(getattr(self, "_yaw_offset_calibrated", False)),
+                "offset_deg": math.degrees(float(getattr(self, "_yaw_offset", 0.0) or 0.0)),
+                "pending_offset_target_deg": (
+                    None
+                    if getattr(self, "_pending_yaw_offset_target_rad", None) is None
+                    else math.degrees(float(self._pending_yaw_offset_target_rad))
+                ),
                 "rejected": bool(getattr(self, "_last_yaw_rejected", False)),
                 "visual_two_line_reliable": bool(getattr(self, "_last_visual_two_line_reliable", False)),
                 "visual_lost_correction": bool(getattr(self, "_last_imu_visual_lost_correction_active", False)),
@@ -2680,6 +2759,8 @@ class threadPoseEstimator(threadTracking):
                 "pre_lateral_error_m": float(pre_correction_lateral_error_m or 0.0),
                 "post_lateral_error_m": float(raw_lateral_error_m or 0.0),
                 "visual_map_alignment": dict(getattr(self, "_last_visual_lane_map_alignment_diag", {}) or {}),
+                "visual_pose_corrections_allowed": bool(visual_pose_corrections_allowed),
+                "visual_pose_corrections_reason": str(visual_pose_corrections_reason),
                 "chamfer_aligned": bool(chamfer_aligned),
                 "chamfer_alignment_m": float(chamfer_alignment_m or 0.0),
                 "chamfer_reason": (

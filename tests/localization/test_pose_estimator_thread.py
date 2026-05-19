@@ -153,6 +153,8 @@ def _make_thread_work_estimator(*, speed_mps: float, steer_deg: float, imu_yaw_d
     estimator._last_imu_t = time.monotonic() - 0.10
     estimator._last_absolute_yaw_fix_monotonic = 0.0
     estimator._last_absolute_yaw_fix_source = None
+    estimator._current_state_message = "AUTO"
+    estimator._last_visual_lane_map_alignment_diag = {"attempted": False, "applied": False, "reason": "not_attempted"}
 
     estimator._consume_state_change = lambda: None
     estimator._resolve_speed_mps = lambda _now: estimator._last_speed
@@ -303,17 +305,30 @@ def test_thread_work_rejects_imu_yaw_spike_when_steering_at_zero_speed() -> None
     assert estimator._last_imu_yaw_gain == pytest.approx(0.0, abs=1e-9)
 
 
-def test_thread_work_uses_bicycle_yaw_when_imu_is_inhibited_in_turn() -> None:
+def test_thread_work_blends_imu_yaw_when_visual_two_line_is_lost_in_turn() -> None:
     estimator = _make_thread_work_estimator(speed_mps=0.20, steer_deg=25.0, imu_yaw_deg=45.0)
 
     estimator.thread_work()
 
     x, y, yaw = estimator._dr.get_state()
     assert x > 0.0
-    assert y < 0.0
-    assert -0.08 < yaw < -0.01
+    assert yaw > 0.0
     assert estimator._last_yaw_rejected is True
-    assert estimator._last_imu_yaw_gain == pytest.approx(0.0, abs=1e-9)
+    assert estimator._last_imu_yaw_gain >= 0.35
+    assert estimator._last_imu_visual_lost_correction_active is True
+
+
+def test_visual_pose_corrections_disabled_outside_auto_state() -> None:
+    estimator = _make_estimator(speed_mps=0.20, dr_y=0.10)
+    estimator._current_state_message = "MANUAL"
+
+    allowed, reason = estimator._visual_pose_corrections_allowed()
+    estimator._set_visual_pose_corrections_disabled_diag(reason)
+
+    assert allowed is False
+    assert reason == "state_manual_disabled"
+    assert estimator._last_visual_lane_map_alignment_diag["attempted"] is False
+    assert estimator._last_visual_lane_map_alignment_diag["reason"] == "state_manual_disabled"
 
 
 def test_lane_yaw_reset_uses_straight_two_line_camera_yaw() -> None:
@@ -461,6 +476,41 @@ def test_apply_lane_observation_aligns_map_pose_to_two_line_visual_offset() -> N
     assert new_yaw == pytest.approx(0.0, abs=1e-9)
     assert estimator._last_lane_relocalization_kind == "visual_lane_map_alignment"
     assert estimator._dr.corrections == []
+
+
+def test_visual_lane_map_alignment_still_applies_in_waypoint_mode() -> None:
+    estimator = _make_estimator(speed_mps=0.0, dr_y=0.22)
+    estimator.tracking_state.current_scenario = "lane_keep"
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=0.02,
+        direct_error_m=0.02,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+        control_policy_mode="VISUAL_ASSIST",
+    )
+    route_context = RouteContext(
+        route_active=True,
+        waypoint_mode_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        route_context,
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.22,
+        raw_yaw=0.0,
+        raw_lateral_error_m=0.22,
+    )
+
+    assert reliable is True
+    assert correction_m == pytest.approx(0.08, abs=1e-9)
+    assert (new_x, new_y, new_yaw) == pytest.approx((0.0, 0.14, 0.0), abs=1e-9)
+    assert estimator._last_visual_lane_map_alignment_diag["reason"] == "applied"
+    assert estimator._last_visual_lane_map_alignment_diag["waypoint_mode_active"] is True
 
 
 def test_apply_lane_observation_blocks_strong_visual_map_alignment_near_intersection() -> None:

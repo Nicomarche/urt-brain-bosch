@@ -58,6 +58,9 @@ _CONNECTOR_MAX_YAW_DELTA_DEG = 30.0
 _VISUAL_PREFIX_MIN_FORWARD_M = 0.02
 _VISUAL_PREFIX_NEAR_ORIGIN_M = 0.02
 _VISUAL_PREFIX_MIN_TANGENT_X_M = -0.001
+_VISUAL_PREFIX_LATERAL_GUARD_M = 0.08
+_VISUAL_PREFIX_MAX_LATERAL_TO_FORWARD = 2.5
+_VISUAL_PREFIX_MAX_TRANSVERSE_HEADING_DEG = 75.0
 
 
 def build_target_path(
@@ -568,9 +571,11 @@ def _trim_nonforward_visual_prefix(
 def _visual_prefix_is_forward(body_xy: np.ndarray) -> bool:
     if body_xy.ndim != 2 or body_xy.shape[0] == 0:
         return True
+    if not np.isfinite(body_xy).all():
+        return False
     first = np.asarray(body_xy[0], dtype=float)
     if float(first[0]) >= _VISUAL_PREFIX_MIN_FORWARD_M:
-        return True
+        return not _visual_prefix_looks_transverse(body_xy)
     if body_xy.shape[0] < 2:
         return False
     first_gap_m = float(np.linalg.norm(first))
@@ -578,6 +583,38 @@ def _visual_prefix_is_forward(body_xy: np.ndarray) -> bool:
     return (
         first_gap_m <= _VISUAL_PREFIX_NEAR_ORIGIN_M
         and tangent_x >= _VISUAL_PREFIX_MIN_TANGENT_X_M
+        and not _visual_prefix_looks_transverse(body_xy)
+    )
+
+
+def _visual_prefix_looks_transverse(body_xy: np.ndarray) -> bool:
+    if body_xy.ndim != 2 or body_xy.shape[0] < 2:
+        return False
+    first = np.asarray(body_xy[0], dtype=float)
+    first_x = max(float(first[0]), 1e-6)
+    first_y_abs = abs(float(first[1]))
+    lateral_limit = max(
+        float(_VISUAL_PREFIX_LATERAL_GUARD_M),
+        first_x * float(_VISUAL_PREFIX_MAX_LATERAL_TO_FORWARD),
+    )
+    if first_y_abs > lateral_limit and float(first[0]) < 0.12:
+        return True
+
+    lookahead = np.asarray(body_xy[: min(5, body_xy.shape[0])], dtype=float)
+    rel = lookahead - first
+    forward_span = float(np.max(rel[:, 0])) if rel.size else 0.0
+    lateral_span = float(np.max(np.abs(rel[:, 1]))) if rel.size else 0.0
+    if forward_span < float(_VISUAL_PREFIX_MIN_FORWARD_M) and lateral_span > 0.04:
+        return True
+
+    first_delta = lookahead[1] - lookahead[0]
+    first_delta_norm = float(np.linalg.norm(first_delta))
+    if first_delta_norm <= 1e-9:
+        return False
+    heading_deg = abs(math.degrees(math.atan2(float(first_delta[1]), float(first_delta[0]))))
+    return (
+        heading_deg > float(_VISUAL_PREFIX_MAX_TRANSVERSE_HEADING_DEG)
+        and forward_span < 0.12
     )
 
 

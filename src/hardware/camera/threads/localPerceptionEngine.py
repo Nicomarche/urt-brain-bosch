@@ -893,14 +893,21 @@ class LocalPerceptionEngine:
             return None
         return math.atan2(dx, dy)
 
-    def _estimate_heading_hint(self, lane_side_lines):
+    def _estimate_heading_hint(self, lane_side_lines, lane_side_sources=None):
         if not isinstance(lane_side_lines, dict):
             return 0.0, 0.0, "none"
 
         left_heading = self._line_heading_rad(lane_side_lines.get("left"))
         right_heading = self._line_heading_rad(lane_side_lines.get("right"))
+        sources = lane_side_sources if isinstance(lane_side_sources, dict) else {}
+        left_source = str(sources.get("left", "none") or "none").strip().lower()
+        right_source = str(sources.get("right", "none") or "none").strip().lower()
 
         if left_heading is not None and right_heading is not None:
+            if left_source == "guessed_single" and right_source == "guessed_single":
+                return float((left_heading + right_heading) * 0.5), 0.20, "guessed_two_line"
+            if left_source == "guessed_single" or right_source == "guessed_single":
+                return float((left_heading + right_heading) * 0.5), 0.45, "mixed_guessed_two_line"
             return float((left_heading + right_heading) * 0.5), 0.9, "two_line"
         if left_heading is not None:
             return float(left_heading * 0.5), 0.55, "single_left"
@@ -1173,7 +1180,8 @@ class LocalPerceptionEngine:
             side_candidates, detections = self._split_candidates(result, frame_shape)
             side_masks, lane_points, lane_side_points, lane_side_lines, lane_side_sources, lane_mask = self._build_lane_geometry(side_candidates)
             heading_hint_rad, heading_hint_confidence, heading_hint_source = self._estimate_heading_hint(
-                lane_side_lines
+                lane_side_lines,
+                lane_side_sources,
             )
             road_type_class, road_type_confidence, road_type_source = self._estimate_road_type(
                 detections

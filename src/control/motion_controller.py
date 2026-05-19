@@ -63,7 +63,7 @@ try:
     from config import BEHAVIOR_MIN_SPEED_MPS as _FORWARD_RECOVERY_MIN_SPEED_MPS
 except Exception:
     _FORWARD_RECOVERY_MIN_SPEED_MPS = 0.20
-_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M = 0.02
+_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M = 0.015
 _FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M = 0.18
 _FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG = 90.0
 _FORWARD_RECOVERY_PATH_SOURCES = frozenset({"route_waypoints", "visual_lane_waypoints"})
@@ -220,6 +220,8 @@ def _first_forward_reference_hint(
         return None
     cos_yaw = math.cos(float(pose_yaw))
     sin_yaw = math.sin(float(pose_yaw))
+    first_hint: dict[str, float] | None = None
+    best_forward_hint: dict[str, float] | None = None
     for idx in range(1, path.shape[0]):
         dx = float(path[idx, 0]) - float(pose_x)
         dy = float(path[idx, 1]) - float(pose_y)
@@ -229,14 +231,24 @@ def _first_forward_reference_hint(
         x_fwd_m = (cos_yaw * dx) + (sin_yaw * dy)
         y_left_m = (sin_yaw * dx) - (cos_yaw * dy)
         heading_error_deg = abs(math.degrees(_wrap_angle(float(path[idx, 2]) - float(pose_yaw))))
-        return {
+        hint = {
             "sample_idx": float(idx),
             "distance_m": float(dist_m),
             "x_fwd_m": float(x_fwd_m),
             "y_left_m": float(y_left_m),
             "heading_error_deg": float(heading_error_deg),
         }
-    return None
+        if first_hint is None:
+            first_hint = hint
+        if best_forward_hint is None or hint["x_fwd_m"] > best_forward_hint["x_fwd_m"]:
+            best_forward_hint = hint
+        if (
+            hint["x_fwd_m"] >= float(_FORWARD_RECOVERY_MIN_SAMPLE_FORWARD_M)
+            and abs(hint["y_left_m"]) <= float(_FORWARD_RECOVERY_MAX_SAMPLE_LATERAL_M)
+            and hint["heading_error_deg"] <= float(_FORWARD_RECOVERY_MAX_HEADING_ERROR_DEG)
+        ):
+            return hint
+    return best_forward_hint or first_hint
 
 
 # ---------------------------------------------------------------------------
@@ -1245,15 +1257,25 @@ class MotionController(IMotionController):
         zero_speed_steering_guard_reason = ""
         steering_deg_before_zero_guard = float(steering_deg)
         if speed_mps <= 1e-6:
-            # If the solver decided the car should not move, holding a large
-            # steering angle only makes the wheels hunt in place. The next
-            # moving tick will re-enter through the normal rate limiter.
-            steering_deg = 0.0
-            self._prev_steer_deg = 0.0
+            hold_previous_steer = (
+                float(v_opt) <= 0.0
+                and requested_speed_mps > 1e-6
+                and path_source in _FORWARD_RECOVERY_PATH_SOURCES
+            )
+            if hold_previous_steer:
+                # The path is still asking to move, but the OCP found a tiny
+                # reverse optimum. Do not snap steering memory to zero: that
+                # created the observed 0°↔7° wheel hunting while stationary.
+                steering_deg = float(self._prev_steer_deg)
+            else:
+                steering_deg = 0.0
+                self._prev_steer_deg = 0.0
             zero_speed_steering_guard = abs(steering_deg_before_zero_guard) > 1e-6
             if zero_speed_steering_guard:
                 zero_speed_steering_guard_reason = (
-                    "speed_zero_after_solver"
+                    "speed_zero_after_solver_hold_steer"
+                    if hold_previous_steer
+                    else "speed_zero_after_solver"
                     if float(v_opt) <= 0.0
                     else "speed_zero_after_limits"
                 )
