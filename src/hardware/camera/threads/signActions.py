@@ -34,7 +34,6 @@ class SignActions:
     # pasó y se inicia un giro a la derecha fijo (ignorando la cámara) por
     # ROUNDABOUT_DURATION segundos hasta caer en el siguiente carril.
     ROUNDABOUT_STEER_DEG    = getattr(config, "SIGN_ROUNDABOUT_STEER_DEG",    25.0)
-    ROUNDABOUT_SPEED        = getattr(config, "SIGN_ROUNDABOUT_SPEED",        20)
     ROUNDABOUT_DURATION     = getattr(config, "SIGN_ROUNDABOUT_DURATION",     5.0)
     ROUNDABOUT_LOST_THRESHOLD = getattr(config, "SIGN_ROUNDABOUT_LOST_THRESHOLD", 0.4)
 
@@ -419,10 +418,12 @@ class SignActions:
              ignorando la cámara.
           3. Centra ruedas y devuelve control a la autonomía.
         """
+        # Mantiene la velocidad de crucero actual durante el giro (no cambia speed).
+        cruise_speed = self.current_speed
         print(
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;95mACTION\033[0m - "
             f"ROUNDABOUT - hard right (δ={self.ROUNDABOUT_STEER_DEG}°, "
-            f"speed={self.ROUNDABOUT_SPEED}, t={self.ROUNDABOUT_DURATION}s)"
+            f"speed={cruise_speed}, t={self.ROUNDABOUT_DURATION}s)"
         )
         if self.sign_action_event:
             self.sign_action_event.set()
@@ -433,11 +434,11 @@ class SignActions:
             turn_start = time.time()
             while time.time() - turn_start < self.ROUNDABOUT_DURATION:
                 self._send_steer(self.ROUNDABOUT_STEER_DEG)
-                self._send_speed(self.ROUNDABOUT_SPEED)
+                self._send_speed(cruise_speed)
                 time.sleep(0.02)
-            # Centrar ruedas y restaurar velocidad de crucero al salir.
+            # Centrar ruedas y mantener la velocidad de crucero al salir.
             self._send_steer(0)
-            self._send_speed(self.current_speed)
+            self._send_speed(cruise_speed)
         finally:
             if self.steer_override_event:
                 self.steer_override_event.clear()
