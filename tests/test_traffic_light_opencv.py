@@ -95,6 +95,10 @@ def make_line_following():
     detector._traffic_light_last_color = "unknown"
     detector._traffic_light_last_reason = ""
     detector._traffic_light_last_box_area = 0.0
+    detector.traffic_light_green_confirmations = 2
+    detector._traffic_light_candidate_state = ""
+    detector._traffic_light_candidate_count = 0
+    detector._traffic_light_candidate_last_seen = 0.0
     detector._traffic_light_holding = False
     detector._traffic_light_last_log = 0.0
     detector.show_debug = False
@@ -165,8 +169,43 @@ class TrafficLightOpenCVTests(unittest.TestCase):
         self.assertEqual(payload["traffic_light_state"], "red_light")
         self.assertEqual(detector.sign_actions.executed, [])
 
+    def test_local_perception_coerces_yellow_to_red_hold(self):
+        detector = make_local_perception()
+        box = (0.1, 0.35, 0.9, 0.65)
+        frame = draw_synthetic_light("yellow", box=box)
+
+        detector._publish_sign(
+            [{"class": "yellow_light", "confidence": 0.9, "box": box}],
+            now=1.0,
+            img_shape=frame.shape[:2],
+            frame=frame,
+        )
+
+        payload = detector.signDetectedSender.values[-1]
+        self.assertEqual(payload["sign"], "red_light")
+        self.assertEqual(payload["traffic_light_state"], "red_light")
+        self.assertEqual(payload["traffic_light_color"], "red")
+        self.assertIn("yellow_as_red", payload["traffic_light_reason"])
+
+    def test_local_perception_coerces_raw_yellow_label_to_red_hold(self):
+        detector = make_local_perception()
+        box = (0.1, 0.35, 0.9, 0.65)
+
+        detector._publish_sign(
+            [{"class": "yellow", "confidence": 0.9, "box": box}],
+            now=1.0,
+            img_shape=None,
+            frame=None,
+        )
+
+        payload = detector.signDetectedSender.values[-1]
+        self.assertEqual(payload["sign"], "red_light")
+        self.assertEqual(payload["traffic_light_state"], "red_light")
+        self.assertEqual(payload["traffic_light_color"], "red")
+        self.assertIn("yellow_as_red", payload["traffic_light_reason"])
+
     def test_line_following_blocks_auto_speed_for_red_yellow_and_unknown(self):
-        for sign in ("red_light", "yellow_light", "traffic_light_unknown"):
+        for sign in ("red_light", "yellow", "yellow_light", "traffic_light_unknown"):
             detector = make_line_following()
             detector._update_traffic_light_hold(
                 {
@@ -182,8 +221,16 @@ class TrafficLightOpenCVTests(unittest.TestCase):
             self.assertTrue(holding, sign)
             self.assertEqual(speed, 0.0)
 
-    def test_line_following_allows_auto_speed_for_green(self):
+    def test_line_following_requires_confirmed_green_after_red(self):
         detector = make_line_following()
+        detector._update_traffic_light_hold(
+            {
+                "sign": "red_light",
+                "traffic_light_state": "red_light",
+                "box_area": 0.05,
+            },
+            now=9.8,
+        )
         detector._update_traffic_light_hold(
             {
                 "sign": "green_light",
@@ -194,6 +241,20 @@ class TrafficLightOpenCVTests(unittest.TestCase):
         )
 
         speed, holding = detector._guard_speed_for_traffic_light(15.0, now=10.1)
+
+        self.assertTrue(holding)
+        self.assertEqual(speed, 0.0)
+
+        detector._update_traffic_light_hold(
+            {
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            },
+            now=10.2,
+        )
+
+        speed, holding = detector._guard_speed_for_traffic_light(15.0, now=10.3)
 
         self.assertFalse(holding)
         self.assertEqual(speed, 15.0)

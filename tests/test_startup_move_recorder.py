@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from src.hardware.camera.threads.threadLineFollowing import ParkingState, threadLineFollowing
@@ -48,6 +49,9 @@ class StartupMoveRecorderTests(unittest.TestCase):
         detector._startup_replay_next_index = 0
         detector._startup_replay_duration_s = 0.0
         detector._startup_replay_last_sample = None
+        detector._startup_replay_pending_green = False
+        detector._startup_replay_paused_since = 0.0
+        detector.startup_move_wait_for_green_light = True
         detector._manual_last_speed_x10 = 0
         detector._manual_last_steer_x10 = 0
         detector._startup_move_last_status_snapshot = None
@@ -75,6 +79,19 @@ class StartupMoveRecorderTests(unittest.TestCase):
         detector._last_requested_motor_command = None
         detector._last_state_change_message = None
         detector._reset_pid_state = lambda: None
+        detector.traffic_light_hold_enabled = True
+        detector.traffic_light_hold_timeout_s = 1.5
+        detector.traffic_light_green_confirmations = 2
+        detector._traffic_light_last_seen = 0.0
+        detector._traffic_light_last_state = ""
+        detector._traffic_light_last_color = "unknown"
+        detector._traffic_light_last_reason = ""
+        detector._traffic_light_last_box_area = 0.0
+        detector._traffic_light_candidate_state = ""
+        detector._traffic_light_candidate_count = 0
+        detector._traffic_light_candidate_last_seen = 0.0
+        detector._traffic_light_holding = False
+        detector._traffic_light_last_log = 0.0
         return detector
 
     def test_start_record_stop_saves_json_trajectory(self):
@@ -117,7 +134,7 @@ class StartupMoveRecorderTests(unittest.TestCase):
             self.assertEqual(trajectory["samples"][0]["t"], 0.0)
             self.assertEqual(trajectory["duration_s"], 1.5)
 
-    def test_entering_auto_with_trajectory_starts_replay_before_line_following(self):
+    def test_entering_auto_with_trajectory_waits_for_green_before_replay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             detector = self._make_detector(tmpdir)
             detector._startup_move_loaded = {
@@ -132,7 +149,24 @@ class StartupMoveRecorderTests(unittest.TestCase):
 
             detector.check_state_change()
 
+            self.assertFalse(detector._startup_replay_active)
+            self.assertTrue(detector._startup_replay_pending_green)
+            self.assertFalse(detector.is_line_following_active)
+
+            now = time.time()
+            detector._update_traffic_light_hold({
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            }, now=now)
+            detector._update_traffic_light_hold({
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            }, now=now + 0.1)
+            self.assertTrue(detector._maybe_start_pending_startup_replay())
             self.assertTrue(detector._startup_replay_active)
+            self.assertFalse(detector._startup_replay_pending_green)
             self.assertFalse(detector.is_line_following_active)
 
     def test_entering_auto_without_trajectory_goes_directly_to_line_following(self):
@@ -159,6 +193,41 @@ class StartupMoveRecorderTests(unittest.TestCase):
             self.assertFalse(detector._startup_replay_active)
             self.assertEqual(detector.steerMotorSender.values[-1], "0")
             self.assertEqual(detector.speedMotorSender.values[-1], "0")
+
+    def test_startup_replay_pauses_under_red_light_hold(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            detector = self._make_detector(tmpdir)
+            detector._current_system_mode = SystemMode.AUTO
+            detector._startup_replay_active = True
+            detector._startup_replay_samples = [{"t": 0.0, "speed_x10": 100, "steer_x10": 20}]
+            detector._startup_replay_duration_s = 1.0
+            detector._startup_replay_started_at = time.monotonic() - 0.1
+            now = time.time()
+            detector._update_traffic_light_hold({
+                "sign": "red_light",
+                "traffic_light_state": "red_light",
+                "box_area": 0.05,
+            }, now=now)
+
+            self.assertTrue(detector._step_startup_replay())
+            self.assertEqual(detector._startup_replay_next_index, 0)
+            self.assertEqual(detector.speedMotorSender.values[-1], "0")
+
+            detector._update_traffic_light_hold({
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            }, now=now + 0.1)
+            detector._update_traffic_light_hold({
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            }, now=now + 0.2)
+
+            self.assertTrue(detector._step_startup_replay())
+            self.assertEqual(detector._startup_replay_next_index, 1)
+            self.assertEqual(detector.steerMotorSender.values[-1], "20")
+            self.assertEqual(detector.speedMotorSender.values[-1], "100")
 
 
 if __name__ == "__main__":

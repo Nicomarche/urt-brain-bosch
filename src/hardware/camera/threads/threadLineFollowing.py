@@ -111,6 +111,9 @@ PARKING_T_WAIT_STEER = float(getattr(_config, "PARKING_T_WAIT_STEER", 1.0))
 TRAFFIC_LIGHT_SIGN_CLASSES = frozenset({
     "traffic_light",
     "traffic_light_unknown",
+    "red",
+    "yellow",
+    "green",
     "red_light",
     "yellow_light",
     "green_light",
@@ -726,6 +729,11 @@ Args:
         self._startup_replay_next_index = 0
         self._startup_replay_duration_s = 0.0
         self._startup_replay_last_sample = None
+        self._startup_replay_pending_green = False
+        self._startup_replay_paused_since = 0.0
+        self.startup_move_wait_for_green_light = bool(
+            getattr(_config, "STARTUP_MOVE_WAIT_FOR_GREEN_LIGHT", True)
+        )
         self._manual_last_speed_x10 = 0
         self._manual_last_steer_x10 = 0
         self._startup_move_last_status_snapshot = None
@@ -741,11 +749,17 @@ Args:
         self.traffic_light_min_box_area = float(
             getattr(_config, "TRAFFIC_LIGHT_MIN_BOX_AREA", getattr(_config, "SIGN_MIN_BOX_AREA", 0.01))
         )
+        self.traffic_light_green_confirmations = max(
+            1, int(getattr(_config, "TRAFFIC_LIGHT_GREEN_CONFIRMATIONS", 2))
+        )
         self._traffic_light_last_seen = 0.0
         self._traffic_light_last_state = ""
         self._traffic_light_last_color = "unknown"
         self._traffic_light_last_reason = ""
         self._traffic_light_last_box_area = 0.0
+        self._traffic_light_candidate_state = ""
+        self._traffic_light_candidate_count = 0
+        self._traffic_light_candidate_last_seen = 0.0
         self._traffic_light_holding = False
         self._traffic_light_last_log = 0.0
 
@@ -7523,6 +7537,8 @@ Returns:
             )
         if self._startup_replay_active:
             return (round(float(self._startup_replay_duration_s), 2), len(self._startup_replay_samples))
+        if self._startup_replay_pending_green:
+            return (round(float(self._startup_replay_duration_s), 2), len(self._startup_replay_samples))
         if self._startup_move_loaded:
             return (
                 round(float(self._startup_move_loaded.get("duration_s", 0.0)), 2),
@@ -7543,6 +7559,8 @@ Returns:
 
         if self._startup_replay_active:
             state = "replaying"
+        elif self._startup_replay_pending_green:
+            state = "waiting_green"
         elif self._startup_move_recording:
             state = "recording"
         elif self._startup_move_loaded:
@@ -7757,19 +7775,28 @@ Returns:
                 f" - Steer: {steer_x10} Speed: {speed_x10}"
             )
 
-    def _start_startup_replay_if_available(self):
-        if not self.startup_move_auto_replay:
-            return False
-        trajectory = self._load_startup_move_trajectory()
-        if not trajectory or not trajectory.get("samples"):
-            self._publish_startup_move_status(force=True)
-            return False
+    def _traffic_light_green_ready(self, now=None):
+        if not bool(getattr(self, "startup_move_wait_for_green_light", True)):
+            return True
+        if not bool(getattr(self, "traffic_light_hold_enabled", True)):
+            return True
+        now = time.time() if now is None else now
+        last_seen = self._safe_float(getattr(self, "_traffic_light_last_seen", 0.0), 0.0)
+        timeout_s = max(
+            0.05,
+            self._safe_float(getattr(self, "traffic_light_hold_timeout_s", 1.5), 1.5),
+        )
+        state = TrafficLightClassifier.normalize_sign_name(
+            getattr(self, "_traffic_light_last_state", "")
+        )
+        return state == "green_light" and last_seen > 0.0 and (now - last_seen) <= timeout_s
 
-        self._startup_replay_samples = list(trajectory["samples"])
-        self._startup_replay_duration_s = float(trajectory.get("duration_s", 0.0))
+    def _activate_startup_replay(self):
         self._startup_replay_started_at = time.monotonic()
         self._startup_replay_next_index = 0
         self._startup_replay_last_sample = None
+        self._startup_replay_paused_since = 0.0
+        self._startup_replay_pending_green = False
         self._startup_replay_active = True
         self.is_line_following_active = False
         print(
@@ -7780,8 +7807,50 @@ Returns:
         self._publish_startup_move_status(force=True)
         return True
 
+    def _maybe_start_pending_startup_replay(self):
+        if not self._startup_replay_pending_green:
+            return False
+        if not self._traffic_light_green_ready():
+            self.is_line_following_active = False
+            self._publish_startup_move_status()
+            return False
+        print(
+            "\033[1;97m[ Startup Move ] :\033[0m \033[1;92mGREEN\033[0m"
+            " - Green light confirmed, starting startup replay"
+        )
+        return self._activate_startup_replay()
+
+    def _start_startup_replay_if_available(self):
+        if not self.startup_move_auto_replay:
+            return False
+        trajectory = self._load_startup_move_trajectory()
+        if not trajectory or not trajectory.get("samples"):
+            self._publish_startup_move_status(force=True)
+            return False
+
+        self._startup_replay_samples = list(trajectory["samples"])
+        self._startup_replay_duration_s = float(trajectory.get("duration_s", 0.0))
+        self._startup_replay_next_index = 0
+        self._startup_replay_last_sample = None
+        self._startup_replay_paused_since = 0.0
+        self.is_line_following_active = False
+        if bool(getattr(self, "startup_move_wait_for_green_light", True)) and not self._traffic_light_green_ready():
+            self._startup_replay_pending_green = True
+            self._startup_replay_active = False
+            print(
+                f"\033[1;97m[ Startup Move ] :\033[0m \033[1;93mWAIT\033[0m"
+                f" - Waiting for green light before replaying "
+                f"{len(self._startup_replay_samples)} samples"
+            )
+            self._publish_startup_move_status(force=True)
+            return True
+
+        return self._activate_startup_replay()
+
     def _finish_startup_replay(self, completed=True):
-        was_active = self._startup_replay_active
+        was_active = self._startup_replay_active or self._startup_replay_pending_green
+        self._startup_replay_pending_green = False
+        self._startup_replay_paused_since = 0.0
         self._startup_replay_active = False
         self._startup_replay_next_index = 0
         self._startup_replay_last_sample = None
@@ -7804,14 +7873,28 @@ Returns:
         self._publish_startup_move_status(force=True)
 
     def _cancel_startup_replay(self):
-        if self._startup_replay_active:
+        if self._startup_replay_active or self._startup_replay_pending_green:
             self._finish_startup_replay(completed=False)
 
     def _step_startup_replay(self):
         """Advance replay according to recorded sample timestamps."""
         if not self._startup_replay_active:
             return False
-        elapsed = time.monotonic() - self._startup_replay_started_at
+        now_wall = time.time()
+        now_mono = time.monotonic()
+        if self._traffic_light_hold_active(now_wall):
+            if self._startup_replay_paused_since <= 0.0:
+                self._startup_replay_paused_since = now_mono
+                self.speedMotorSender.send("0")
+            self._log_traffic_light_hold_state(True, now=now_wall)
+            self._publish_startup_move_status()
+            return True
+        if self._startup_replay_paused_since > 0.0:
+            self._startup_replay_started_at += now_mono - self._startup_replay_paused_since
+            self._startup_replay_paused_since = 0.0
+            self._log_traffic_light_hold_state(False, now=now_wall)
+
+        elapsed = now_mono - self._startup_replay_started_at
         sample_to_send = None
         while self._startup_replay_next_index < len(self._startup_replay_samples):
             sample = self._startup_replay_samples[self._startup_replay_next_index]
@@ -8148,6 +8231,9 @@ Returns:
             self._poll_local_ai_messages()
             self._poll_sign_detected()
             self._read_sensor_data()
+            if self._startup_replay_pending_green:
+                self._maybe_start_pending_startup_replay()
+                return
             if self._startup_replay_active:
                 self._step_startup_replay()
                 return
@@ -9779,7 +9865,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             try:
                 next_mode = SystemMode[message]
                 self._current_system_mode = next_mode
-                if self._startup_replay_active and next_mode != SystemMode.AUTO:
+                if (self._startup_replay_active or self._startup_replay_pending_green) and next_mode != SystemMode.AUTO:
                     self._cancel_startup_replay()
                 if self._startup_move_recording and next_mode != SystemMode.MANUAL:
                     reason = "auto_transition" if next_mode == SystemMode.AUTO else "mode_change"
@@ -9840,11 +9926,17 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         )
         color = str(data.get("traffic_light_color") or "").strip().lower()
 
-        if state in {"red_light", "yellow_light", "green_light"}:
+        if state in {"yellow", "yellow_light"}:
+            return "red_light", "red"
+        if state in {"red", "green"}:
+            return TrafficLightClassifier.sign_for_color(state), state
+        if state in {"red_light", "green_light"}:
             color = TrafficLightClassifier.color_for_sign(state)
             return state, color
 
-        if color in {"red", "yellow", "green"}:
+        if color == "yellow":
+            return "red_light", "red"
+        if color in {"red", "green"}:
             return TrafficLightClassifier.sign_for_color(color), color
 
         if state in {"traffic_light", "traffic_light_unknown"}:
@@ -9870,6 +9962,42 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             return False
 
         now = time.time() if now is None else now
+        if state == "green_light":
+            candidate_last_seen = self._safe_float(
+                getattr(self, "_traffic_light_candidate_last_seen", 0.0), 0.0
+            )
+            timeout_s = max(
+                0.05,
+                self._safe_float(getattr(self, "traffic_light_hold_timeout_s", 1.5), 1.5),
+            )
+            if now - candidate_last_seen > timeout_s:
+                self._traffic_light_candidate_state = ""
+                self._traffic_light_candidate_count = 0
+
+            if self._traffic_light_candidate_state == state:
+                self._traffic_light_candidate_count += 1
+            else:
+                self._traffic_light_candidate_state = state
+                self._traffic_light_candidate_count = 1
+            self._traffic_light_candidate_last_seen = now
+
+            required = max(
+                1,
+                int(getattr(self, "traffic_light_green_confirmations", 2) or 1),
+            )
+            if self._traffic_light_candidate_count < required:
+                last_state = TrafficLightClassifier.normalize_sign_name(
+                    getattr(self, "_traffic_light_last_state", "")
+                )
+                if last_state and last_state != "green_light":
+                    self._traffic_light_last_seen = now
+                    self._traffic_light_last_reason = "green_candidate_wait"
+                return True
+        else:
+            self._traffic_light_candidate_state = state
+            self._traffic_light_candidate_count = 0
+            self._traffic_light_candidate_last_seen = now
+
         self._traffic_light_last_seen = now
         self._traffic_light_last_state = state
         self._traffic_light_last_color = color or TrafficLightClassifier.UNKNOWN_COLOR

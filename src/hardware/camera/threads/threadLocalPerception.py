@@ -30,6 +30,9 @@ class threadLocalPerception(ThreadWithStop):
     TRAFFIC_LIGHT_CLASSES = frozenset({
         "traffic_light",
         "traffic_light_unknown",
+        "red",
+        "yellow",
+        "green",
         "red_light",
         "yellow_light",
         "green_light",
@@ -450,8 +453,21 @@ class threadLocalPerception(ThreadWithStop):
 
     def _classify_traffic_light_detection(self, sign_name, box, frame):
         sign_name = TrafficLightClassifier.normalize_sign_name(sign_name)
-        if sign_name in {"red_light", "yellow_light", "green_light"}:
+        if getattr(self, "traffic_light_opencv_enabled", True):
+            if getattr(self, "traffic_light_classifier", None) is None:
+                self.traffic_light_classifier = TrafficLightClassifier()
+
+            if frame is not None:
+                traffic_light_info = self.traffic_light_classifier.classify(frame, box)
+                if traffic_light_info.get("sign") != TrafficLightClassifier.UNKNOWN_SIGN:
+                    return self._coerce_traffic_light_no_yellow(traffic_light_info)
+
+        if sign_name in {"red", "green", "red_light", "green_light"}:
             return TrafficLightClassifier.payload_for_known_sign(sign_name)
+        if sign_name in {"yellow", "yellow_light"}:
+            return self._coerce_traffic_light_no_yellow(
+                TrafficLightClassifier.payload_for_known_sign(sign_name)
+            )
 
         if not getattr(self, "traffic_light_opencv_enabled", True):
             return {
@@ -462,9 +478,6 @@ class threadLocalPerception(ThreadWithStop):
                 "scores": {},
             }
 
-        if getattr(self, "traffic_light_classifier", None) is None:
-            self.traffic_light_classifier = TrafficLightClassifier()
-
         if frame is None:
             return {
                 "sign": TrafficLightClassifier.UNKNOWN_SIGN,
@@ -474,7 +487,30 @@ class threadLocalPerception(ThreadWithStop):
                 "scores": {},
             }
 
-        return self.traffic_light_classifier.classify(frame, box)
+        return self._coerce_traffic_light_no_yellow(
+            self.traffic_light_classifier.classify(frame, box)
+        )
+
+    def _coerce_traffic_light_no_yellow(self, traffic_light_info):
+        """This track has only red/green lights; yellow is treated as a red hold."""
+        if not isinstance(traffic_light_info, dict):
+            return traffic_light_info
+        sign = TrafficLightClassifier.normalize_sign_name(
+            traffic_light_info.get("sign") or traffic_light_info.get("state")
+        )
+        color = str(traffic_light_info.get("color") or "").strip().lower()
+        if sign not in {"yellow", "yellow_light"} and color != "yellow":
+            return traffic_light_info
+
+        coerced = dict(traffic_light_info)
+        coerced["source_sign"] = coerced.get("sign", sign)
+        coerced["source_color"] = coerced.get("color", color)
+        coerced["sign"] = "red_light"
+        coerced["state"] = "red_light"
+        coerced["color"] = "red"
+        reason = str(coerced.get("reason") or "")
+        coerced["reason"] = f"{reason}+yellow_as_red" if reason else "yellow_as_red"
+        return coerced
 
     def _publish_sign(self, detections, now, img_shape=None, frame=None):
         if not self.enable_sign_detection or not detections:

@@ -75,6 +75,9 @@ class TrafficLightClassifier:
         return sign_name in {
             "traffic_light",
             "traffic_light_unknown",
+            "red",
+            "yellow",
+            "green",
             "red_light",
             "yellow_light",
             "green_light",
@@ -87,6 +90,8 @@ class TrafficLightClassifier:
     @classmethod
     def color_for_sign(cls, sign_name):
         sign_name = cls.normalize_sign_name(sign_name)
+        if sign_name in cls.COLOR_TO_SIGN:
+            return sign_name
         if sign_name in cls.SIGN_TO_COLOR:
             return cls.SIGN_TO_COLOR[sign_name]
         return cls.UNKNOWN_COLOR
@@ -94,6 +99,8 @@ class TrafficLightClassifier:
     @classmethod
     def payload_for_known_sign(cls, sign_name, reason="model_class"):
         sign_name = cls.normalize_sign_name(sign_name)
+        if sign_name in cls.COLOR_TO_SIGN:
+            sign_name = cls.COLOR_TO_SIGN[sign_name]
         color = cls.color_for_sign(sign_name)
         state = cls.sign_for_color(color)
         return {

@@ -354,8 +354,12 @@ TRAFFIC_LIGHT_OPENCV_ENABLED = True
 # En AUTO, si hay un semaforo visible y vigente, solo se permite velocidad
 # positiva cuando el estado clasificado es green_light.
 TRAFFIC_LIGHT_HOLD_ENABLED = True
-TRAFFIC_LIGHT_HOLD_TIMEOUT_S = 0.6
+TRAFFIC_LIGHT_HOLD_TIMEOUT_S = 1.5
 TRAFFIC_LIGHT_MIN_BOX_AREA = SIGN_MIN_BOX_AREA
+TRAFFIC_LIGHT_GREEN_CONFIRMATIONS = 2
+
+# AUTO startup replay waits here instead of consuming the hardcoded move at red.
+STARTUP_MOVE_WAIT_FOR_GREEN_LIGHT = True
 
 # Defaults portados del LightClassifier de referencia.
 TRAFFIC_LIGHT_RED_HSV_1 = ((0, 150, 150), (10, 255, 255))
