@@ -8481,9 +8481,10 @@ Returns:
             
             if self.show_debug:
                 if debug_frame is not None and self._is_window_enabled("final_result"):
-                    status_text = "ACTIVE" if self.is_line_following_active else "INACTIVE (Debug Mode)"
+                    show_active = self.is_line_following_active or self._current_system_mode == SystemMode.AUTO
+                    status_text = "ACTIVE" if show_active else "INACTIVE (Debug Mode)"
                     cv2.putText(debug_frame, status_text, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                               (0, 255, 0) if self.is_line_following_active else (0, 0, 255), 2)
+                               (0, 255, 0) if show_active else (0, 0, 255), 2)
                     self._show_preview_window("1. Final Result", debug_frame)
                 
                 # Show control panel with current status
