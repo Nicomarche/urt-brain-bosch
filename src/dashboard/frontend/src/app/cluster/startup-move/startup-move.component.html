@@ -4,10 +4,6 @@
     <span>{{ durationLabel }} - {{ status.samples || 0 }}</span>
   </div>
 
-  <div class="startup-move-progress" *ngIf="isReplaying">
-    <div class="startup-move-progress-fill" [style.width]="progressStyle"></div>
-  </div>
-
   <div class="startup-move-actions">
     <button
       class="startup-move-button startup-move-button--primary"

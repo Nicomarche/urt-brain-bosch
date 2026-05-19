@@ -41,7 +41,7 @@ import { Subscription } from 'rxjs';
   styleUrl: './state-switch.component.css'
 })
 export class StateSwitchComponent implements OnInit {
-  public states: string[] = ['stop', 'manual', 'legacy', 'auto', 'follow_right'];
+  public states: string[] = ['stop', 'manual', 'legacy', 'auto'];
   public currentStateIndex: number = 0;
   public isParkingActive: boolean = false;
 
@@ -354,10 +354,6 @@ export class StateSwitchComponent implements OnInit {
 
     if (this.currentState === 'auto') {
       return '#5cb85c';
-    }
-
-    if (this.currentState === 'follow_right') {
-      return '#8e44ad';
     }
 
     return '#2b8fd1';
