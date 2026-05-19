@@ -107,9 +107,6 @@ class SignActions:
         # Rotonda: timestamp de la última detección. tick() dispara el giro
         # cuando esto supera ROUNDABOUT_LOST_THRESHOLD segundos sin ver la señal.
         self._roundabout_last_seen_at = 0.0
-        # Contador de STOPs ejecutados en esta corrida. El primero dispara el
-        # giro a la derecha; los siguientes solo frenan y reanudan.
-        self._stop_count = 0
 
     @classmethod
     def normalize_sign_name(cls, sign_name):
@@ -359,58 +356,6 @@ class SignActions:
             "msgValue": steer_value,
         })
 
-    def _execute_first_stop_right_turn(self):
-        """Giro a la derecha hardcodeado tras el PRIMER STOP de la corrida.
-
-        Se llama con el auto ya completamente detenido (después de STOP_DURATION).
-        Mantiene la velocidad de crucero actual durante todo el giro.
-        Secuencia:
-          1. Toma control del steer (bloquea line-following).
-          2. Centra ruedas a 0° (breve settle).
-          3. Aplica ángulo de giro a la derecha y deja que el servo llegue.
-          4. Avanza durante STOP_TURN_DURATION a la velocidad de crucero.
-          5. Centra ruedas (manteniendo la velocidad de crucero) y devuelve
-             control al line-following.
-        """
-        cruise_speed = self.current_speed
-
-        if self.steer_override_event:
-            self.steer_override_event.set()
-
-        # Centrar ruedas primero (el auto está parado, esto no afecta la trayectoria)
-        self._send_steer(0)
-        time.sleep(0.3)
-
-        # Aplicar ángulo de giro y esperar que el servo llegue al ángulo
-        self._send_steer(self.STOP_TURN_STEER_DEG)
-        time.sleep(0.5)
-
-        print(
-            f"\033[1;97m[ SignActions ] :\033[0m \033[1;96mACTION\033[0m - "
-            f"FIRST STOP RIGHT TURN (δ={self.STOP_TURN_STEER_DEG}°, "
-            f"speed={cruise_speed}, t={self.STOP_TURN_DURATION}s)"
-        )
-        try:
-            turn_start = time.time()
-            while time.time() - turn_start < self.STOP_TURN_DURATION:
-                self._send_steer(self.STOP_TURN_STEER_DEG)
-                self._send_speed(cruise_speed)
-                time.sleep(0.02)
-            # Centrar ruedas y mantener la velocidad de crucero al salir.
-            self._send_steer(0)
-            self._send_speed(cruise_speed)
-        finally:
-            if self.steer_override_event:
-                self.steer_override_event.clear()
-            if self.sign_action_event:
-                self.sign_action_event.clear()
-            self._fixed_turn_end_time = time.time()
-            print(
-                f"\033[1;97m[ SignActions ] :\033[0m \033[1;92mRESUME\033[0m - "
-                f"FIRST STOP RIGHT TURN complete — returning control to line following "
-                f"(grace {self.fixed_turn_grace_s:.1f}s)"
-            )
-
     def _execute_roundabout(self):
         """Giro derecha fijo para entrar en el primer carril de la rotonda.
 
@@ -455,21 +400,15 @@ class SignActions:
             )
 
     def _execute_stop(self):
-        self._stop_count += 1
-        is_first_stop = (self._stop_count == 1)
-
         print(
             f"\033[1;97m[ SignActions ] :\033[0m \033[1;91mACTION\033[0m - "
-            f"STOP #{self._stop_count} ({self.STOP_DURATION}s)"
-            + (" → RIGHT TURN" if is_first_stop else "")
+            f"STOP ({self.STOP_DURATION}s)"
         )
         if self.sign_action_event:
             self.sign_action_event.set()
 
-        # Frenar primero. Durante el frenado y la parada, el line-following sigue
-        # controlando el steer para mantener la alineación de carril (comportamiento correcto).
-        # Reissue speed=0 every 20ms — a single send does not hold the motor at 0
-        # for the full duration (see _execute_first_stop_right_turn for the same pattern).
+        # Frenar y mantener speed=0 reissuing every 20ms (un solo send no aguanta).
+        # El line-following sigue controlando el steer para mantener la alineación.
         self.is_stopped = True
         stop_start = time.time()
         while time.time() - stop_start < self.STOP_DURATION:
@@ -477,13 +416,9 @@ class SignActions:
             time.sleep(0.02)
         self.is_stopped = False
 
-        if is_first_stop:
-            # Auto completamente parado: tomar control del steer y girar a la derecha.
-            self._execute_first_stop_right_turn()
-        else:
-            self._send_speed(self.current_speed)
-            if self.sign_action_event:
-                self.sign_action_event.clear()
+        self._send_speed(self.current_speed)
+        if self.sign_action_event:
+            self.sign_action_event.clear()
 
     def _execute_crosswalk(self):
         print(

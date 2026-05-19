@@ -824,8 +824,8 @@ class threadLocalPerception(ThreadWithStop):
 
         # Hold speed=0 at ~50Hz while a pedestrian/obstacle stop is active.
         # A single send per AI frame (10Hz) isn't enough — the motor needs
-        # repeated commands to stay braked (same pattern as the 20ms tight
-        # loop in SignActions._execute_first_stop_right_turn).
+        # repeated commands to stay braked (same 20ms cadence used in
+        # SignActions._execute_stop).
         if self._pedestrian_stop_active:
             _now = time.time()
             if _now - self._pedestrian_stop_last_send >= 0.02:
