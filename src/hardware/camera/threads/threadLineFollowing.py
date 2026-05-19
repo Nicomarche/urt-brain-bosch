@@ -93,6 +93,7 @@ PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_C
 PARKING_SPOT_ARM_DELAY_S = max(0.0, float(getattr(_config, "PARKING_SPOT_ARM_DELAY_S", 0.75)))
 PARKING_SPOT_LENGTH_MIN_CM = max(0.0, float(getattr(_config, "PARKING_SPOT_LENGTH_MIN_CM", 30.0)))
 PARKING_SPOT_LENGTH_MAX_CM = max(PARKING_SPOT_LENGTH_MIN_CM, float(getattr(_config, "PARKING_SPOT_LENGTH_MAX_CM", 140.0)))
+PARKING_AREA_MIN_BOX_AREA = max(0.0, float(getattr(_config, "PARKING_AREA_MIN_BOX_AREA", 0.08)))
 PARKING_SEARCH_SIDE_BIAS_STEER = abs(float(getattr(_config, "PARKING_SEARCH_SIDE_BIAS_STEER", 4.0)))
 PARKING_SIGN_ENABLE_CLASSES = frozenset({"parking", "parking_sign"})
 PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
@@ -10095,6 +10096,19 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         box_area = self._safe_float(data.get("box_area"), 0.0)
         return confidence >= PARKING_SIGN_MIN_CONFIDENCE and box_area >= PARKING_SIGN_MIN_BOX_AREA
 
+    def _parking_area_box_area(self, data):
+        box_area = self._safe_float(data.get("box_area"), 0.0)
+        if box_area > 0.0:
+            return box_area
+        box = data.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return 0.0
+        try:
+            y1, x1, y2, x2 = [float(v) for v in box]
+        except (TypeError, ValueError):
+            return 0.0
+        return max(0.0, (y2 - y1) * (x2 - x1))
+
     def _enable_parking_search(self, now=None, source="parking_sign"):
         """Arm parking search without switching out of AUTO lane following."""
         now = time.time() if now is None else now
@@ -10207,6 +10221,16 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             return False
 
         if sign_name not in PARKING_SPOT_SIGN_CLASSES:
+            return False
+
+        area_box = self._parking_area_box_area(data)
+        if area_box < PARKING_AREA_MIN_BOX_AREA:
+            if self.show_debug:
+                print(
+                    "\033[1;97m[ Parking ] :\033[0m \033[1;93mIGNORE\033[0m - "
+                    f"{sign_name} too small for parking_area "
+                    f"(box={area_box:.2%} < {PARKING_AREA_MIN_BOX_AREA:.2%}); likely parking_sign"
+                )
             return False
 
         if not bool(getattr(self, "_parking_enabled", False)):

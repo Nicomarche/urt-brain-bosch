@@ -251,8 +251,10 @@ class SignActions:
 
     ACTIONABLE_SIGNS = {
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
-        "green_light", "speed_20", "speed_30", "parking",
+        "green_light", "speed_20", "speed_30",
         "highway_entrance", "highway_exit",
+        # Parking is handled by threadLineFollowing via SignDetected:
+        # parking_sign only enables search, parking_area starts the maneuver.
     }
 
     ACTION_GROUP = {

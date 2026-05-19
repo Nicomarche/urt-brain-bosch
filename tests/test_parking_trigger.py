@@ -306,7 +306,7 @@ class ParkingTriggerTests(unittest.TestCase):
         detector = make_line_following({
             "sign": "parking_area",
             "distance_cm": 25.0,
-            "box": [0.1, 0.1, 0.3, 0.3],
+            "box": [0.2, 0.55, 0.8, 0.95],
         }, parking_state=ParkingState.IDLE, parking_enabled=False)
 
         self.assertFalse(detector._poll_sign_detected())
@@ -320,7 +320,7 @@ class ParkingTriggerTests(unittest.TestCase):
             "timestamp": 11.0,
             "parking_sign_recent": True,
             "parking_sign_last_seen": 10.0,
-            "box": [0.1, 0.55, 0.3, 0.85],
+            "box": [0.2, 0.55, 0.8, 0.95],
         }, parking_state=ParkingState.IDLE, parking_enabled=False)
 
         self.assertTrue(detector._poll_sign_detected())
@@ -328,11 +328,23 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
         self.assertEqual(detector._parking_side, "right")
 
+    def test_line_following_ignores_small_area_like_parking_sign(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "box_area": 0.01,
+            "box": [0.1, 0.1, 0.2, 0.2],
+        })
+
+        self.assertFalse(detector._poll_sign_detected())
+        self.assertEqual(detector._parking_state, ParkingState.LANE_KEEPING)
+        self.assertIsNone(detector._parking_last_spot_box)
+
     def test_line_following_tracks_parking_area_as_spot(self):
         detector = make_line_following({
             "sign": "parking_area",
             "distance_cm": 25.0,
-            "box": [0.1, 0.1, 0.3, 0.3],
+            "box": [0.2, 0.1, 0.8, 0.5],
         })
 
         self.assertTrue(detector._poll_sign_detected())
@@ -343,7 +355,7 @@ class ParkingTriggerTests(unittest.TestCase):
         detector = make_line_following({
             "sign": "parking_area",
             "distance_cm": 25.0,
-            "box": [0.1, 0.05, 0.3, 0.35],
+            "box": [0.2, 0.05, 0.8, 0.45],
         })
 
         self.assertTrue(detector._poll_sign_detected())
@@ -368,6 +380,7 @@ class ParkingTriggerTests(unittest.TestCase):
             "box_px_width": 800.0,
             "box_px_height": 280.0,
             "box": [0.1, 0.1, 0.5, 0.7],
+            "box_area": 0.24,
         })
         detector._stanley_last_px_per_cm = 10.0
 
@@ -382,7 +395,7 @@ class ParkingTriggerTests(unittest.TestCase):
             "sign": "parking_area",
             "distance_cm": 25.0,
             "timestamp": 9.0,
-            "box": [0.1, 0.1, 0.3, 0.3],
+            "box": [0.2, 0.1, 0.8, 0.5],
         })
         detector._parking_mode_started_at = 10.0
 
@@ -395,7 +408,7 @@ class ParkingTriggerTests(unittest.TestCase):
             "sign": "parking_area",
             "distance_cm": 25.0,
             "timestamp": time.time(),
-            "box": [0.1, 0.1, 0.3, 0.3],
+            "box": [0.2, 0.1, 0.8, 0.5],
         })
         detector._parking_mode_started_at = time.time() - 0.1
         detector._parking_spot_ignore_until = time.time() + 10.0

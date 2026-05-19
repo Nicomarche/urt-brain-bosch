@@ -57,6 +57,7 @@ PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot est�
 PARKING_SPOT_ARM_DELAY_S     = 0.75   # Ignorar spots viejos al entrar en PARKING; primero buscar adelante
 PARKING_SPOT_LENGTH_MIN_CM   = 30.0   # Clamp inferior para medición dinámica por bbox
 PARKING_SPOT_LENGTH_MAX_CM   = 140.0  # Clamp superior para medición dinámica por bbox
+PARKING_AREA_MIN_BOX_AREA    = 0.08   # parking_area real en piso debe verse grande; evita confundirlo con cartel
 PARKING_SEARCH_SIDE_BIAS_STEER = 4.0  # Sesgo suave hacia la linea del lado del spot mientras lo trackea
 
 # --- Distancias de cada fase (odometría del encoder) ---
