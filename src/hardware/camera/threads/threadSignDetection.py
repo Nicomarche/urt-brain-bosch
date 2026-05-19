@@ -239,6 +239,11 @@ class SignActions:
     STOP_DURATION = 3.0
     CROSSWALK_DURATION = 3.0
     RED_LIGHT_CHECK_INTERVAL = 0.5  # Re-check every 0.5s
+    # Roundabout: always turn right into the first lane.  Held for the time it
+    # takes the car to leave the entrance and settle in the next lane.
+    ROUNDABOUT_DURATION = 5.0
+    ROUNDABOUT_STEER_DEG = 25.0  # Matches Stanley/PID max_steering (±25°)
+    ROUNDABOUT_SPEED = LOW_SPEED
 
     SIGN_ALIASES = {
         "highway_entry": "highway_entrance",
@@ -252,7 +257,7 @@ class SignActions:
     ACTIONABLE_SIGNS = {
         "stop", "no_entry", "crosswalk", "red_light", "yellow_light",
         "green_light", "speed_20", "speed_30", "parking",
-        "highway_entrance", "highway_exit",
+        "highway_entrance", "highway_exit", "roundabout",
     }
 
     ACTION_GROUP = {
@@ -263,13 +268,17 @@ class SignActions:
         "parking": "parking",
         "highway_entrance": "highway_entrance",
         "highway_exit": "highway_exit",
+        "roundabout": "roundabout",
     }
 
     def __init__(self, queuesList, sign_action_event=None, action_cooldown=15.0,
-                 highway_mode_event=None):
+                 highway_mode_event=None, steer_override_event=None):
         self.queuesList = queuesList
         self.sign_action_event = sign_action_event  # Shared with line following
         self.highway_mode_event = highway_mode_event  # Shared with line following
+        # When set, line following yields steer control too (used for hardcoded
+        # turns like the roundabout right-entry).
+        self.steer_override_event = steer_override_event
         self.action_cooldown = action_cooldown
         self.last_sign = None
         self.last_action_time = {}  # {action_group: timestamp} — cooldown per group
@@ -327,6 +336,8 @@ class SignActions:
             self._execute_highway_entrance()
         elif sign_name == "highway_exit":
             self._execute_highway_exit()
+        elif sign_name == "roundabout":
+            self._execute_roundabout()
         else:
             # Non-actionable signs (direction, objects, etc.) — just log
             print(
@@ -349,6 +360,17 @@ class SignActions:
             "msgID": SpeedMotor.msgID.value,
             "msgType": SpeedMotor.msgType.value,
             "msgValue": speed_value,
+        })
+
+    def _send_steer(self, steer_deg):
+        # SteerMotor protocol: value is degrees * 10 (tenths of a degree).
+        # Positive = right turn (matches Stanley convention in line following).
+        steer_value = str(int(round(steer_deg * 10)))
+        self.queuesList["General"].put({
+            "Owner": SteerMotor.Owner.value,
+            "msgID": SteerMotor.msgID.value,
+            "msgType": SteerMotor.msgType.value,
+            "msgValue": steer_value,
         })
 
     def _execute_stop(self):
@@ -434,6 +456,30 @@ class SignActions:
             self._send_speed(self.BASE_SPEED)
         if self.highway_mode_event:
             self.highway_mode_event.clear()
+
+    def _execute_roundabout(self):
+        # Hardcoded right-turn entry: take over both speed and steer from line
+        # following, hold a hard right at low speed for ROUNDABOUT_DURATION,
+        # then release control so line following picks up the new lane.
+        print(
+            f"\033[1;97m[ SignActions ] :\033[0m \033[1;95mACTION\033[0m - "
+            f"ROUNDABOUT - hard right ({self.ROUNDABOUT_STEER_DEG:.0f}°) "
+            f"@ speed {self.ROUNDABOUT_SPEED} for {self.ROUNDABOUT_DURATION}s"
+        )
+        if self.sign_action_event:
+            self.sign_action_event.set()
+        if self.steer_override_event:
+            self.steer_override_event.set()
+        self._send_steer(self.ROUNDABOUT_STEER_DEG)
+        self._send_speed(self.ROUNDABOUT_SPEED)
+        time.sleep(self.ROUNDABOUT_DURATION)
+        # Release steer first so line following can re-align, then restore the
+        # commanded cruise speed.
+        if self.steer_override_event:
+            self.steer_override_event.clear()
+        self._send_speed(self.current_speed)
+        if self.sign_action_event:
+            self.sign_action_event.clear()
 
 
 # ============================================================================
