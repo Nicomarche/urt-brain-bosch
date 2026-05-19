@@ -200,16 +200,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. */
     z-index: 5;
 }
 
-.cluster-startup-move {
-    position: absolute;
-    width: 12%;
-    left: 56.5%;
-    height: 6.5%;
-    top: 91.5%;
-    z-index: 5;
-}
-
-.cluster-live-camera { 
+.cluster-live-camera {
     position: absolute;
     top: 76.5%;
     left: 75%;
