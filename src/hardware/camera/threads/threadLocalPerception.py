@@ -207,6 +207,20 @@ class threadLocalPerception(ThreadWithStop):
             except (TypeError, ValueError):
                 pass
 
+        # Keep SignActions' cruise speed in sync with what line-following is
+        # actually commanding, so hardcoded maneuvers (e.g. roundabout) can
+        # hold the current speed instead of falling back to BASE_SPEED.
+        cruise_speed = status.get("commanded_speed")
+        if cruise_speed is None:
+            cruise_speed = status.get("speed")
+        if cruise_speed is not None:
+            try:
+                cruise_val = float(cruise_speed)
+                if cruise_val > 0.0:
+                    self.sign_actions.current_speed = cruise_val
+            except (TypeError, ValueError):
+                pass
+
         px_per_cm = status.get("stanley_px_per_cm")
         if px_per_cm is not None:
             try:
