@@ -572,6 +572,15 @@ class threadLocalPerception(ThreadWithStop):
             "distance_cm": distance_cm,
             "timestamp": now,
         }
+        if img_shape is not None and len(img_shape) >= 2:
+            img_h = int(img_shape[0])
+            img_w = int(img_shape[1])
+            payload.update({
+                "image_height": img_h,
+                "image_width": img_w,
+                "box_px_height": round(max(0.0, (float(box[2]) - float(box[0])) * img_h), 2),
+                "box_px_width": round(max(0.0, (float(box[3]) - float(box[1])) * img_w), 2),
+            })
         if traffic_light_info is not None:
             payload.update({
                 "traffic_light_color": traffic_light_info.get("color", "unknown"),

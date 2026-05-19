@@ -72,6 +72,12 @@ def make_line_following(payload):
     detector._parking_last_spot_distance_cm = None
     detector._parking_mode_started_at = 0.0
     detector._parking_spot_ignore_until = 0.0
+    detector._parking_spot_length_cm = 0.0
+    detector._parking_spot_length_px = 0.0
+    detector._parking_spot_px_per_cm = 0.0
+    detector._stanley_last_px_per_cm = 0.0
+    detector._last_two_line_ref_px_per_cm = 0.0
+    detector._last_px_per_cm = 0.0
     detector.show_debug = False
     return detector
 
@@ -261,6 +267,22 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertTrue(detector._poll_sign_detected())
         self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
         self.assertEqual(detector._parking_spot_miss_frames, 0)
+
+    def test_line_following_measures_parking_area_length_from_bbox_px(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "box_px_width": 800.0,
+            "box_px_height": 280.0,
+            "box": [0.1, 0.1, 0.5, 0.7],
+        })
+        detector._stanley_last_px_per_cm = 10.0
+
+        self.assertTrue(detector._poll_sign_detected())
+
+        self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
+        self.assertAlmostEqual(detector._parking_spot_length_cm, 80.0)
+        self.assertAlmostEqual(detector._parking_forward_target_cm(), 80.0)
 
     def test_line_following_ignores_spot_seen_before_parking_mode(self):
         detector = make_line_following({

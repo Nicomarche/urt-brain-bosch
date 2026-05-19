@@ -91,6 +91,8 @@ PARKING_ALIGN_STEER = float(getattr(_config, "PARKING_ALIGN_STEER", -20.0))
 PARKING_SPOT_MISS_THRESHOLD = int(getattr(_config,   "PARKING_SPOT_MISS_THRESHOLD",  8))
 PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
 PARKING_SPOT_ARM_DELAY_S = max(0.0, float(getattr(_config, "PARKING_SPOT_ARM_DELAY_S", 0.75)))
+PARKING_SPOT_LENGTH_MIN_CM = max(0.0, float(getattr(_config, "PARKING_SPOT_LENGTH_MIN_CM", 30.0)))
+PARKING_SPOT_LENGTH_MAX_CM = max(PARKING_SPOT_LENGTH_MIN_CM, float(getattr(_config, "PARKING_SPOT_LENGTH_MAX_CM", 140.0)))
 PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot"})
 
 # Distancias por fase (odometría del encoder)
@@ -920,6 +922,9 @@ Args:
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM  # Computed at spot-lost transition
         self._parking_mode_started_at      = 0.0
         self._parking_spot_ignore_until    = 0.0
+        self._parking_spot_length_cm       = 0.0
+        self._parking_spot_length_px       = 0.0
+        self._parking_spot_px_per_cm       = 0.0
 
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
@@ -8272,22 +8277,19 @@ Returns:
                     self._parking_phase_dist_cm = 0.0
                     self._parking_last_sm_time = now_t
                     last_dist = self._parking_last_spot_distance_cm
-                    # Dynamic advance: if the spot disappeared while still ahead of the
-                    # camera (curve-exit case), the car hasn't fully passed it yet.
-                    # Add the remaining distance so the car stops at the correct position.
-                    _lost_thr = float(getattr(_config, "PARKING_SPOT_LOST_DIST_THRESHOLD_CM", 10.0))
-                    if last_dist is not None and last_dist > _lost_thr:
-                        extra_cm = last_dist - _lost_thr
-                        self._parking_dynamic_forward_cm = PARKING_D_FORWARD_CM + extra_cm
-                    else:
-                        self._parking_dynamic_forward_cm = PARKING_D_FORWARD_CM
+                    self._parking_dynamic_forward_cm = self._parking_forward_target_cm(last_dist)
                     dist_str = f"~{last_dist:.0f}cm" if last_dist is not None else "unknown"
+                    measured_length = self._safe_float(
+                        getattr(self, "_parking_spot_length_cm", 0.0), 0.0
+                    )
+                    length_str = f"~{measured_length:.0f}cm" if measured_length > 0.0 else "unknown"
                     print(
                         f"\033[1;97m[ Parking ] :\033[0m \033[1;96mFORWARD_PAST_SPOT\033[0m - "
                         f"Spot lost after {self._parking_spot_miss_frames} frames, "
                         f"last distance={dist_str}, "
+                        f"measured length={length_str}, "
                         f"advance={self._parking_dynamic_forward_cm:.0f}cm "
-                        f"(base={PARKING_D_FORWARD_CM:.0f}cm)"
+                        f"(fallback={PARKING_D_FORWARD_CM:.0f}cm)"
                     )
                     # Transition immediately to maneuver in this cycle
                     park_steer, park_speed = self._parking_state_machine()
@@ -10134,6 +10136,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
 
         self._parking_last_spot_box = data.get("box")
         self._parking_spot_miss_frames = 0
+        self._update_parking_spot_measurement(data)
 
         raw_dist = data.get("distance_cm")
         if raw_dist is not None:
@@ -10163,6 +10166,69 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                     f"Spot at ~{dist:.0f}cm"
                 )
         return True
+
+    def _parking_px_per_cm_for_spot(self):
+        px_per_cm = self._safe_float(getattr(self, "_stanley_last_px_per_cm", 0.0), 0.0)
+        if px_per_cm > 0.5:
+            return px_per_cm
+        px_per_cm = self._safe_float(getattr(self, "_last_two_line_ref_px_per_cm", 0.0), 0.0)
+        if px_per_cm > 0.5:
+            return px_per_cm
+        px_per_cm = self._safe_float(getattr(self, "_last_px_per_cm", 0.0), 0.0)
+        if px_per_cm > 0.5:
+            return px_per_cm
+        try:
+            px_per_cm = self._safe_float(self._resolve_px_per_cm(), 0.0)
+        except Exception:
+            px_per_cm = 0.0
+        return px_per_cm if px_per_cm > 0.5 else 0.0
+
+    def _parking_spot_long_px(self, data):
+        width_px = self._safe_float(data.get("box_px_width"), 0.0)
+        height_px = self._safe_float(data.get("box_px_height"), 0.0)
+        if width_px > 0.0 or height_px > 0.0:
+            return max(width_px, height_px)
+
+        box = data.get("box")
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            return 0.0
+        img_h = self._safe_float(data.get("image_height"), 0.0)
+        img_w = self._safe_float(data.get("image_width"), 0.0)
+        if img_h <= 0.0 or img_w <= 0.0:
+            return 0.0
+        try:
+            y1, x1, y2, x2 = [float(v) for v in box]
+        except (TypeError, ValueError):
+            return 0.0
+        height_px = max(0.0, (y2 - y1) * img_h)
+        width_px = max(0.0, (x2 - x1) * img_w)
+        return max(width_px, height_px)
+
+    def _update_parking_spot_measurement(self, data):
+        long_px = self._parking_spot_long_px(data)
+        px_per_cm = self._parking_px_per_cm_for_spot()
+        if long_px <= 0.0 or px_per_cm <= 0.0:
+            return
+
+        length_cm = long_px / px_per_cm
+        length_cm = max(PARKING_SPOT_LENGTH_MIN_CM, min(PARKING_SPOT_LENGTH_MAX_CM, length_cm))
+        if length_cm > self._safe_float(getattr(self, "_parking_spot_length_cm", 0.0), 0.0):
+            self._parking_spot_length_cm = length_cm
+            self._parking_spot_length_px = long_px
+            self._parking_spot_px_per_cm = px_per_cm
+            print(
+                f"\033[1;97m[ Parking ] :\033[0m \033[1;94mSIZE\033[0m - "
+                f"Spot length ~{length_cm:.0f}cm ({long_px:.0f}px @ {px_per_cm:.2f}px/cm)"
+            )
+
+    def _parking_forward_target_cm(self, last_dist=None):
+        measured_length = self._safe_float(getattr(self, "_parking_spot_length_cm", 0.0), 0.0)
+        target_cm = measured_length if measured_length > 0.0 else PARKING_D_FORWARD_CM
+
+        lost_thr = float(getattr(_config, "PARKING_SPOT_LOST_DIST_THRESHOLD_CM", 10.0))
+        if last_dist is not None and last_dist > lost_thr:
+            target_cm += last_dist - lost_thr
+        return max(0.0, target_cm)
 
     def _parking_advance_distance(self, now):
         """Integrate encoder odometry to get distance traveled in the current phase (cm).
@@ -10334,6 +10400,9 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         self._parking_dynamic_forward_cm   = PARKING_D_FORWARD_CM
         self._parking_mode_started_at      = 0.0
         self._parking_spot_ignore_until    = 0.0
+        self._parking_spot_length_cm       = 0.0
+        self._parking_spot_length_px       = 0.0
+        self._parking_spot_px_per_cm       = 0.0
 
     def stop(self):
         """Stop the thread and cleanup."""
