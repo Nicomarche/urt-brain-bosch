@@ -8,6 +8,7 @@ docs/build/
 logs/
 **/logs/
 temp/logs/
+temp/remote_logs/
 output_video*.avi
 temp/**/*.avi
 
