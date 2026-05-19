@@ -357,6 +357,13 @@ LF_HIGHWAY_SPEED_RAMP_STEP   = 3.0  # Aceleración más rápida en autopista (re
 # Con 0.0 el auto mantiene max speed incluso durante correcciones en autopista.
 LF_HIGHWAY_STEER_SPEED_FACTOR = 0.2
 
+# ===================== AUTO STARTUP MANUAL MOVE =====================
+# Trayectoria manual fija que se reproduce una vez al entrar en AUTO,
+# antes de liberar el seguimiento autonomo de carril.
+STARTUP_MOVE_PATH = "temp/startup_manual_trajectory.json"
+STARTUP_MOVE_MAX_DURATION_S = 20.0
+STARTUP_MOVE_AUTO_REPLAY = True
+
 # ===================== SIGN ACTIONS - VELOCIDADES =====================
 # Velocidades enviadas al motor por las acciones de señales.
 # Escala interna 0–10; se transmiten como speed*10 sobre el canal SpeedMotor

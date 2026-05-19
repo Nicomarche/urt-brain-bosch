@@ -13,7 +13,7 @@ import os
 from collections import deque
 from enum import Enum
 import config as _config
-from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode
+from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode, StartupMoveControl, StartupMoveStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
 from src.templates.threadwithstop import ThreadWithStop
@@ -695,6 +695,33 @@ Args:
         self._auto_run_log_frame_idx = 0
         self._last_frame_trace = {}
 
+        # Manual startup-move recorder/replayer. The dashboard records a short
+        # manual trajectory in MANUAL mode; AUTO replays it once before lane follow.
+        startup_move_path = str(getattr(_config, "STARTUP_MOVE_PATH", "temp/startup_manual_trajectory.json"))
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+        if not os.path.isabs(startup_move_path):
+            startup_move_path = os.path.join(project_root, startup_move_path)
+        self.startup_move_path = os.path.abspath(startup_move_path)
+        self.startup_move_max_duration_s = max(0.1, float(getattr(_config, "STARTUP_MOVE_MAX_DURATION_S", 20.0)))
+        self.startup_move_auto_replay = bool(getattr(_config, "STARTUP_MOVE_AUTO_REPLAY", True))
+        self._current_system_mode = SystemMode.DEFAULT
+        self._startup_move_recording = False
+        self._startup_move_record_start_monotonic = 0.0
+        self._startup_move_samples = []
+        self._startup_move_loaded = None
+        self._startup_move_error = None
+        self._startup_replay_active = False
+        self._startup_replay_samples = []
+        self._startup_replay_started_at = 0.0
+        self._startup_replay_next_index = 0
+        self._startup_replay_duration_s = 0.0
+        self._startup_replay_last_sample = None
+        self._manual_last_speed_x10 = 0
+        self._manual_last_steer_x10 = 0
+        self._startup_move_last_status_snapshot = None
+        self._startup_move_last_status_ts = 0.0
+        self._load_startup_move_trajectory()
+
         # Calibration mode state
         self._calib_mode_active = False
         self._calib_log_frame_idx = 0
@@ -822,6 +849,9 @@ Args:
         self.steerMotorSender = messageHandlerSender(self.queuesList, SteerMotor)
         self.stateChangeSubscriber = messageHandlerSubscriber(self.queuesList, StateChange, "lastOnly", True)
         self.configSubscriber = messageHandlerSubscriber(self.queuesList, LineFollowingConfig, "lastOnly", True)
+        self.startupMoveControlSubscriber = messageHandlerSubscriber(self.queuesList, StartupMoveControl, "fifo", True)
+        self.startupMoveSpeedSubscriber = messageHandlerSubscriber(self.queuesList, SpeedMotor, "fifo", True)
+        self.startupMoveSteerSubscriber = messageHandlerSubscriber(self.queuesList, SteerMotor, "fifo", True)
         self.localLanePerceptionSubscriber = messageHandlerSubscriber(self.queuesList, LocalLanePerception, "lastOnly", True)
         self.localPerceptionStatusSubscriber = messageHandlerSubscriber(self.queuesList, LocalPerceptionStatus, "lastOnly", True)
         self.actuatorStatusSubscriber = messageHandlerSubscriber(self.queuesList, ActuatorCommandStatus, "lastOnly", True)
@@ -850,6 +880,7 @@ Args:
         # Debug stream senders
         self.debugStreamSender = messageHandlerSender(self.queuesList, LineFollowingDebug)
         self.statusSender = messageHandlerSender(self.queuesList, LineFollowingStatus)
+        self.startupMoveStatusSender = messageHandlerSender(self.queuesList, StartupMoveStatus)
 
         print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Line following thread initialized")
         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;92mINFO\033[0m - Debug mode: {self.show_debug}")
@@ -7378,6 +7409,401 @@ Returns:
             log_file.write("\n\n")
 
     # ------------------------------------------------------------------
+    # Manual startup-move recorder/replayer
+    # ------------------------------------------------------------------
+
+    def _normalize_startup_move_samples(self, samples):
+        """Return validated samples normalized to t=0 and capped by config."""
+        normalized = []
+        for sample in samples or []:
+            try:
+                t = max(0.0, float(sample.get("t", 0.0)))
+                speed_x10 = int(float(sample.get("speed_x10", 0)))
+                steer_x10 = int(float(sample.get("steer_x10", 0)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if t > self.startup_move_max_duration_s:
+                break
+            normalized.append({
+                "t": t,
+                "speed_x10": speed_x10,
+                "steer_x10": steer_x10,
+            })
+
+        if not normalized:
+            return []
+
+        normalized.sort(key=lambda item: item["t"])
+        first_t = normalized[0]["t"]
+        last_t = 0.0
+        for item in normalized:
+            item["t"] = round(max(0.0, item["t"] - first_t), 4)
+            if item["t"] < last_t:
+                item["t"] = last_t
+            last_t = item["t"]
+        return normalized
+
+    def _load_startup_move_trajectory(self):
+        """Load the persisted startup trajectory if present."""
+        self._startup_move_loaded = None
+        self._startup_move_error = None
+        if not os.path.exists(self.startup_move_path):
+            return None
+
+        try:
+            with open(self.startup_move_path, "r", encoding="utf-8") as trajectory_file:
+                payload = json.load(trajectory_file)
+            samples = self._normalize_startup_move_samples(payload.get("samples", []))
+            if not samples:
+                self._startup_move_error = "trajectory_empty"
+                return None
+            self._startup_move_loaded = {
+                "version": 1,
+                "created_at": float(payload.get("created_at", time.time())),
+                "duration_s": round(float(samples[-1]["t"]), 4),
+                "samples": samples,
+            }
+            return self._startup_move_loaded
+        except Exception as exc:
+            self._startup_move_error = f"load_failed: {exc}"
+            self._startup_move_loaded = None
+            return None
+
+    def _save_startup_move_trajectory(self):
+        """Persist the current recorded trajectory to disk."""
+        samples = self._normalize_startup_move_samples(self._startup_move_samples)
+        payload = {
+            "version": 1,
+            "created_at": time.time(),
+            "duration_s": round(float(samples[-1]["t"]), 4) if samples else 0.0,
+            "samples": samples,
+        }
+        os.makedirs(os.path.dirname(self.startup_move_path), exist_ok=True)
+        tmp_path = f"{self.startup_move_path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as trajectory_file:
+            json.dump(payload, trajectory_file, indent=2, sort_keys=True)
+            trajectory_file.write("\n")
+        os.replace(tmp_path, self.startup_move_path)
+        self._startup_move_loaded = payload if samples else None
+        self._startup_move_error = None
+        return payload
+
+    def _startup_move_duration_and_count(self):
+        if self._startup_move_recording:
+            return (
+                round(max(0.0, time.monotonic() - self._startup_move_record_start_monotonic), 2),
+                len(self._startup_move_samples),
+            )
+        if self._startup_replay_active:
+            return (round(float(self._startup_replay_duration_s), 2), len(self._startup_replay_samples))
+        if self._startup_move_loaded:
+            return (
+                round(float(self._startup_move_loaded.get("duration_s", 0.0)), 2),
+                len(self._startup_move_loaded.get("samples", []) or []),
+            )
+        return 0.0, 0
+
+    def _publish_startup_move_status(self, force=False):
+        """Publish compact recorder/replay state for the dashboard."""
+        now = time.time()
+        duration_s, sample_count = self._startup_move_duration_and_count()
+        progress_s = 0.0
+        progress_pct = 0.0
+        if self._startup_replay_active:
+            progress_s = round(max(0.0, time.monotonic() - self._startup_replay_started_at), 2)
+            if self._startup_replay_duration_s > 0:
+                progress_pct = round(min(100.0, progress_s / self._startup_replay_duration_s * 100.0), 1)
+
+        if self._startup_replay_active:
+            state = "replaying"
+        elif self._startup_move_recording:
+            state = "recording"
+        elif self._startup_move_loaded:
+            state = "ready"
+        else:
+            state = "empty"
+
+        payload = {
+            "state": state,
+            "duration_s": duration_s,
+            "samples": sample_count,
+            "progress_s": progress_s,
+            "progress_pct": progress_pct,
+            "path": self.startup_move_path,
+            "auto_replay": bool(self.startup_move_auto_replay),
+            "can_record": self._current_system_mode == SystemMode.MANUAL and not self._startup_replay_active,
+            "error": self._startup_move_error,
+        }
+        snapshot = dict(payload)
+        snapshot.pop("progress_s", None)
+        snapshot.pop("progress_pct", None)
+        should_send = (
+            force
+            or snapshot != self._startup_move_last_status_snapshot
+            or self._startup_replay_active
+            or self._startup_move_recording
+            or (now - self._startup_move_last_status_ts) >= 1.0
+        )
+        if not should_send:
+            return
+        self.startupMoveStatusSender.send(payload)
+        self._startup_move_last_status_snapshot = snapshot
+        self._startup_move_last_status_ts = now
+
+    def _append_startup_move_sample(self, speed_x10=None, steer_x10=None):
+        if not self._startup_move_recording:
+            return
+        now = time.monotonic()
+        t = now - self._startup_move_record_start_monotonic
+        if t > self.startup_move_max_duration_s:
+            self._stop_startup_move_recording(reason="max_duration")
+            return
+        if speed_x10 is not None:
+            self._manual_last_speed_x10 = int(speed_x10)
+        if steer_x10 is not None:
+            self._manual_last_steer_x10 = int(steer_x10)
+        self._startup_move_samples.append({
+            "t": round(max(0.0, t), 4),
+            "speed_x10": int(self._manual_last_speed_x10),
+            "steer_x10": int(self._manual_last_steer_x10),
+        })
+
+    def _start_startup_move_recording(self):
+        if self._current_system_mode != SystemMode.MANUAL:
+            self._startup_move_error = "recording_requires_manual_mode"
+            self._publish_startup_move_status(force=True)
+            return False
+        if self._startup_replay_active:
+            self._startup_move_error = "replay_active"
+            self._publish_startup_move_status(force=True)
+            return False
+
+        self._startup_move_recording = True
+        self._startup_move_record_start_monotonic = time.monotonic()
+        self._startup_move_samples = []
+        self._startup_move_error = None
+        self._append_startup_move_sample(
+            speed_x10=self._manual_last_speed_x10,
+            steer_x10=self._manual_last_steer_x10,
+        )
+        self.startupMoveSpeedSubscriber.empty()
+        self.startupMoveSteerSubscriber.empty()
+        print(
+            f"\033[1;97m[ Startup Move ] :\033[0m \033[1;92mREC\033[0m"
+            f" - Recording started"
+        )
+        self._publish_startup_move_status(force=True)
+        return True
+
+    def _stop_startup_move_recording(self, reason="manual_stop"):
+        if not self._startup_move_recording:
+            return False
+        elapsed = min(
+            self.startup_move_max_duration_s,
+            max(0.0, time.monotonic() - self._startup_move_record_start_monotonic),
+        )
+        last_t = float(self._startup_move_samples[-1]["t"]) if self._startup_move_samples else -1.0
+        if elapsed > last_t + 1e-3:
+            self._startup_move_samples.append({
+                "t": round(elapsed, 4),
+                "speed_x10": int(self._manual_last_speed_x10),
+                "steer_x10": int(self._manual_last_steer_x10),
+            })
+        self._startup_move_recording = False
+        try:
+            payload = self._save_startup_move_trajectory()
+            print(
+                f"\033[1;97m[ Startup Move ] :\033[0m \033[1;92mSAVE\033[0m"
+                f" - Saved {len(payload['samples'])} samples, "
+                f"{payload['duration_s']:.2f}s ({reason})"
+            )
+        except Exception as exc:
+            self._startup_move_error = f"save_failed: {exc}"
+            print(
+                f"\033[1;97m[ Startup Move ] :\033[0m \033[1;91mERROR\033[0m"
+                f" - Failed to save trajectory: {exc}"
+            )
+        self._publish_startup_move_status(force=True)
+        return True
+
+    def _clear_startup_move_trajectory(self):
+        if self._startup_replay_active:
+            self._startup_move_error = "cannot_clear_while_replaying"
+            self._publish_startup_move_status(force=True)
+            return False
+        if self._startup_move_recording:
+            self._startup_move_recording = False
+            self._startup_move_samples = []
+        try:
+            if os.path.exists(self.startup_move_path):
+                os.remove(self.startup_move_path)
+            self._startup_move_loaded = None
+            self._startup_move_error = None
+            print(
+                f"\033[1;97m[ Startup Move ] :\033[0m \033[1;93mCLEAR\033[0m"
+                f" - Trajectory cleared"
+            )
+        except Exception as exc:
+            self._startup_move_error = f"clear_failed: {exc}"
+        self._publish_startup_move_status(force=True)
+        return self._startup_move_error is None
+
+    def _check_startup_move_control(self):
+        """Consume dashboard recorder controls."""
+        handled = False
+        while True:
+            msg = self.startupMoveControlSubscriber.receive()
+            if msg is None:
+                break
+            handled = True
+            action = str((msg or {}).get("action", "")).strip().lower()
+            if action == "start":
+                self._start_startup_move_recording()
+            elif action == "stop":
+                self._stop_startup_move_recording()
+            elif action == "clear":
+                self._clear_startup_move_trajectory()
+            else:
+                self._startup_move_error = f"unknown_action: {action}"
+                self._publish_startup_move_status(force=True)
+        if handled:
+            self._publish_startup_move_status(force=True)
+
+    def _poll_startup_move_manual_commands(self):
+        """Track manual SpeedMotor/SteerMotor commands and record when armed."""
+        manual_mode = self._current_system_mode == SystemMode.MANUAL and not self._startup_replay_active
+
+        while True:
+            speed_msg = self.startupMoveSpeedSubscriber.receive()
+            if speed_msg is None:
+                break
+            if manual_mode:
+                try:
+                    speed_x10 = int(float(speed_msg))
+                    self._manual_last_speed_x10 = speed_x10
+                    self._append_startup_move_sample(speed_x10=speed_x10)
+                except (TypeError, ValueError):
+                    self._startup_move_error = "invalid_speed_command"
+
+        while True:
+            steer_msg = self.startupMoveSteerSubscriber.receive()
+            if steer_msg is None:
+                break
+            if manual_mode:
+                try:
+                    steer_x10 = int(float(steer_msg))
+                    self._manual_last_steer_x10 = steer_x10
+                    self._append_startup_move_sample(steer_x10=steer_x10)
+                except (TypeError, ValueError):
+                    self._startup_move_error = "invalid_steer_command"
+
+        if self._startup_move_recording:
+            elapsed = time.monotonic() - self._startup_move_record_start_monotonic
+            if elapsed >= self.startup_move_max_duration_s:
+                self._stop_startup_move_recording(reason="max_duration")
+            else:
+                self._publish_startup_move_status()
+
+    def _send_startup_replay_command(self, sample):
+        """Send one x10 command pair directly during startup replay."""
+        speed_x10 = int(sample.get("speed_x10", 0))
+        steer_x10 = int(sample.get("steer_x10", 0))
+        self.steerMotorSender.send(str(steer_x10))
+        self.speedMotorSender.send(str(speed_x10))
+        self._last_requested_motor_command = {
+            "timestamp": round(time.time(), 3),
+            "steering_deg": round(steer_x10 / 10.0, 3),
+            "speed": round(speed_x10 / 10.0, 3),
+            "steer_x10": steer_x10,
+            "speed_x10": speed_x10,
+            "startup_replay": True,
+        }
+        now_log = time.monotonic()
+        if self.show_debug or (now_log - self._last_motor_tx_log) >= 1.0:
+            self._last_motor_tx_log = now_log
+            print(
+                f"\033[1;97m[ Startup Move ] :\033[0m \033[1;92mREPLAY\033[0m"
+                f" - Steer: {steer_x10} Speed: {speed_x10}"
+            )
+
+    def _start_startup_replay_if_available(self):
+        if not self.startup_move_auto_replay:
+            return False
+        trajectory = self._load_startup_move_trajectory()
+        if not trajectory or not trajectory.get("samples"):
+            self._publish_startup_move_status(force=True)
+            return False
+
+        self._startup_replay_samples = list(trajectory["samples"])
+        self._startup_replay_duration_s = float(trajectory.get("duration_s", 0.0))
+        self._startup_replay_started_at = time.monotonic()
+        self._startup_replay_next_index = 0
+        self._startup_replay_last_sample = None
+        self._startup_replay_active = True
+        self.is_line_following_active = False
+        print(
+            f"\033[1;97m[ Startup Move ] :\033[0m \033[1;96mAUTO\033[0m"
+            f" - Replaying {len(self._startup_replay_samples)} samples "
+            f"({self._startup_replay_duration_s:.2f}s) before lane following"
+        )
+        self._publish_startup_move_status(force=True)
+        return True
+
+    def _finish_startup_replay(self, completed=True):
+        was_active = self._startup_replay_active
+        self._startup_replay_active = False
+        self._startup_replay_next_index = 0
+        self._startup_replay_last_sample = None
+        if completed and self._current_system_mode == SystemMode.AUTO:
+            self._reset_pid_state()
+            self._current_speed = self.base_speed
+            self.is_line_following_active = True
+            print(
+                "\033[1;97m[ Startup Move ] :\033[0m \033[1;92mDONE\033[0m"
+                " - Replay complete, lane following released"
+            )
+        elif was_active:
+            self.is_line_following_active = False
+            self.steerMotorSender.send("0")
+            self.speedMotorSender.send("0")
+            print(
+                "\033[1;97m[ Startup Move ] :\033[0m \033[1;93mCANCEL\033[0m"
+                " - Replay cancelled, neutral command sent"
+            )
+        self._publish_startup_move_status(force=True)
+
+    def _cancel_startup_replay(self):
+        if self._startup_replay_active:
+            self._finish_startup_replay(completed=False)
+
+    def _step_startup_replay(self):
+        """Advance replay according to recorded sample timestamps."""
+        if not self._startup_replay_active:
+            return False
+        elapsed = time.monotonic() - self._startup_replay_started_at
+        sample_to_send = None
+        while self._startup_replay_next_index < len(self._startup_replay_samples):
+            sample = self._startup_replay_samples[self._startup_replay_next_index]
+            if float(sample.get("t", 0.0)) > elapsed + 1e-6:
+                break
+            sample_to_send = sample
+            self._startup_replay_next_index += 1
+
+        if sample_to_send is not None and sample_to_send != self._startup_replay_last_sample:
+            self._startup_replay_last_sample = sample_to_send
+            self._send_startup_replay_command(sample_to_send)
+
+        if (
+            self._startup_replay_next_index >= len(self._startup_replay_samples)
+            and elapsed >= self._startup_replay_duration_s
+        ):
+            self._finish_startup_replay(completed=True)
+            return False
+
+        self._publish_startup_move_status()
+        return True
+
+    # ------------------------------------------------------------------
     # Calibration mode helpers
     # ------------------------------------------------------------------
 
@@ -7684,11 +8110,17 @@ Returns:
         """Main loop for line following."""
         try:
             self.check_state_change()
+            self._check_startup_move_control()
+            self._poll_startup_move_manual_commands()
             self._check_calib_mode()
             self._check_config()
             self._poll_local_ai_messages()
             self._poll_sign_detected()
             self._read_sensor_data()
+            if self._startup_replay_active:
+                self._step_startup_replay()
+                return
+            self._publish_startup_move_status()
 
             # Parking maneuver phases that bypass lane detection entirely
             _maneuver_states = (
@@ -9312,7 +9744,15 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
             print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - Received: {message}")
             
             try:
-                mode_dict = SystemMode[message].value.get("camera", {}).get("lineFollowing", {})
+                next_mode = SystemMode[message]
+                self._current_system_mode = next_mode
+                if self._startup_replay_active and next_mode != SystemMode.AUTO:
+                    self._cancel_startup_replay()
+                if self._startup_move_recording and next_mode != SystemMode.MANUAL:
+                    reason = "auto_transition" if next_mode == SystemMode.AUTO else "mode_change"
+                    self._stop_startup_move_recording(reason=reason)
+
+                mode_dict = next_mode.value.get("camera", {}).get("lineFollowing", {})
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;96mSTATE\033[0m - lineFollowing config: {mode_dict}")
 
                 # FOLLOW_RIGHT: bypass the full pipeline. The flag is sticky to the mode.
@@ -9325,13 +9765,18 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 if mode_dict.get("enabled", False):
                     self.is_line_following_active = True
                     self._last_inactive_log = False  # Reset inactive log flag
-                    if str(message) == "AUTO":
+                    replay_started = False
+                    if next_mode == SystemMode.AUTO:
                         self._reset_auto_run_log(message)
-                    elif str(message) == "PARKING":
+                        replay_started = self._start_startup_replay_if_available()
+                        if replay_started:
+                            self.is_line_following_active = False
+                    elif next_mode == SystemMode.PARKING:
                         self._reset_parking_state()
                         self._parking_state = ParkingState.LANE_KEEPING
                         print("\033[1;97m[ Parking ] :\033[0m \033[1;92mLANE_KEEPING\033[0m - Parking mode activated, searching for spot")
-                    print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
+                    if not replay_started:
+                        print("\033[1;97m[ Line Following ] :\033[0m \033[1;92mACTIVATED\033[0m - Line following is now ACTIVE!")
                 else:
                     self.is_line_following_active = False
                     self._auto_run_log_enabled = False
@@ -9339,6 +9784,7 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                         self._reset_parking_state()
                         print("\033[1;97m[ Parking ] :\033[0m \033[1;93mCANCELLED\033[0m - Parking aborted due to mode change")
                     print("\033[1;97m[ Line Following ] :\033[0m \033[1;93mDEACTIVATED\033[0m - Line following is now INACTIVE")
+                self._publish_startup_move_status(force=True)
             except KeyError as e:
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
 

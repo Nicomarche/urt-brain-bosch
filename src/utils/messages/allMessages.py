@@ -205,6 +205,12 @@ class LaneCalibMode(Enum):
     msgID = 22
     msgType = "str"  # "true" / "false"
 
+class StartupMoveControl(Enum):
+    Queue = "General"
+    Owner = "Dashboard"
+    msgID = 23
+    msgType = "dict"  # {"action": "start" | "stop" | "clear"}
+
 ################################# From Line Following ##################################
 class LineFollowingDebug(Enum):
     Queue = "General"
@@ -217,6 +223,12 @@ class LineFollowingStatus(Enum):
     Owner = "threadLineFollowing"
     msgID = 2
     msgType = "dict"  # steering, speed, mode, fps, etc.
+
+class StartupMoveStatus(Enum):
+    Queue = "General"
+    Owner = "threadLineFollowing"
+    msgID = 3
+    msgType = "dict"  # recorder/replay status for dashboard
 
 ################################# From Local Perception ##################################
 class LocalLanePerception(Enum):
