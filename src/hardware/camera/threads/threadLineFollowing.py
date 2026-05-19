@@ -2660,6 +2660,18 @@ Args:
             height,
             width,
         )
+        # FOLLOW_RIGHT: drop la línea izquierda apenas la red la entrega.
+        # El resto del pipeline (build_local_mask_guidance, single-line
+        # tracking, fusión Stanley) ya sabe operar con un único lado, así
+        # que tratamos el frame como si la izquierda nunca hubiese
+        # existido — el auto hugea la derecha y si la pierde cae al grace
+        # de frames_without_line → steer=0 + min_speed.
+        if getattr(self, '_follow_right_only', False):
+            prepared_side_masks['left'] = None
+            if isinstance(prepared_side_lines, dict):
+                prepared_side_lines['left'] = None
+            if isinstance(lane_side_sources, dict):
+                lane_side_sources['left'] = 'none'
         duplicate_collapse = getattr(self, '_last_local_ai_duplicate_collapse', None)
         if isinstance(duplicate_collapse, dict):
             debug_info['duplicate_line_collapse'] = duplicate_collapse
@@ -7773,10 +7785,12 @@ Returns:
                         2,
                     )
             else:
-                if self._follow_right_only:
-                    steering_angle, speed, debug_frame = self._step_follow_right_only(frame)
-                else:
-                    steering_angle, speed, debug_frame = self.process_frame(frame)
+                # FOLLOW_RIGHT comparte el pipeline de AUTO. El filtro
+                # right-only vive adentro de _detect_with_local_ai (y del
+                # path opencv/bfmc) — dropea la línea izquierda apenas la
+                # red la entrega, así el resto del pipeline ya conocido
+                # opera como en AUTO pero hugeando la derecha.
+                steering_angle, speed, debug_frame = self.process_frame(frame)
                 if steering_angle is not None:
                     self._last_safe_steering = steering_angle
                     if speed is not None:
@@ -8172,6 +8186,11 @@ Returns:
                     threshold_override=self.binary_threshold_retry,
                     kernel_override=3
                 )
+
+            # FOLLOW_RIGHT en modo opencv/bfmc: descartar la línea izquierda
+            # detectada para que el pipeline trate el frame como single-right.
+            if getattr(self, '_follow_right_only', False):
+                avg_left = None
 
             if 'hsv' in debug_info:
                 self._store_debug_image('hsv', cv2.cvtColor(debug_info['hsv'], cv2.COLOR_HSV2BGR))
