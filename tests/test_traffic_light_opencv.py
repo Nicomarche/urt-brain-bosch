@@ -117,6 +117,32 @@ class TrafficLightOpenCVTests(unittest.TestCase):
             self.assertEqual(result["color"], color)
             self.assertEqual(result["sign"], f"{color}_light")
 
+    def test_classifier_prefers_hsv_color_over_position(self):
+        classifier = TrafficLightClassifier()
+        box = (0.1, 0.35, 0.9, 0.65)
+        frame = draw_synthetic_light("green", box=box)
+        height, width = frame.shape[:2]
+        y1, x1, y2, x2 = box
+        px_y1 = int(y1 * height)
+        px_x1 = int(x1 * width)
+        px_y2 = int(y2 * height)
+        px_x2 = int(x2 * width)
+        frame[px_y1:px_y2, px_x1:px_x2] = 0
+        cv2.circle(
+            frame,
+            (px_x1 + (px_x2 - px_x1) // 2, px_y1 + 18),
+            10,
+            (0, 255, 0),
+            -1,
+            cv2.LINE_AA,
+        )
+
+        result = classifier.classify(frame, box)
+
+        self.assertEqual(result["color"], "green")
+        self.assertEqual(result["sign"], "green_light")
+        self.assertEqual(result["reason"], "hsv_color")
+
     def test_classifier_returns_unknown_for_empty_crop(self):
         classifier = TrafficLightClassifier()
         frame = np.zeros((160, 120, 3), dtype=np.uint8)

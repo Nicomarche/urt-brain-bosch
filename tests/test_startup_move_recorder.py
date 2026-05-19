@@ -134,7 +134,7 @@ class StartupMoveRecorderTests(unittest.TestCase):
             self.assertEqual(trajectory["samples"][0]["t"], 0.0)
             self.assertEqual(trajectory["duration_s"], 1.5)
 
-    def test_entering_auto_with_trajectory_waits_for_green_before_replay(self):
+    def test_entering_auto_with_trajectory_and_no_traffic_light_starts_replay(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             detector = self._make_detector(tmpdir)
             detector._startup_move_loaded = {
@@ -149,21 +149,45 @@ class StartupMoveRecorderTests(unittest.TestCase):
 
             detector.check_state_change()
 
+            self.assertTrue(detector._startup_replay_active)
+            self.assertFalse(detector._startup_replay_pending_green)
+            self.assertFalse(detector.is_line_following_active)
+
+    def test_entering_auto_with_red_light_waits_for_green_before_replay(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            detector = self._make_detector(tmpdir)
+            detector._startup_move_loaded = {
+                "version": 1,
+                "created_at": 1.0,
+                "duration_s": 0.5,
+                "samples": [{"t": 0.0, "speed_x10": 100, "steer_x10": 0}],
+            }
+            with open(detector.startup_move_path, "w", encoding="utf-8") as f:
+                json.dump(detector._startup_move_loaded, f)
+            detector.stateChangeSubscriber = FakeSubscriber(["AUTO"])
+            now = time.time()
+            detector._update_traffic_light_hold({
+                "sign": "red_light",
+                "traffic_light_state": "red_light",
+                "box_area": 0.05,
+            }, now=now)
+
+            detector.check_state_change()
+
             self.assertFalse(detector._startup_replay_active)
             self.assertTrue(detector._startup_replay_pending_green)
             self.assertFalse(detector.is_line_following_active)
 
-            now = time.time()
-            detector._update_traffic_light_hold({
-                "sign": "green_light",
-                "traffic_light_state": "green_light",
-                "box_area": 0.05,
-            }, now=now)
             detector._update_traffic_light_hold({
                 "sign": "green_light",
                 "traffic_light_state": "green_light",
                 "box_area": 0.05,
             }, now=now + 0.1)
+            detector._update_traffic_light_hold({
+                "sign": "green_light",
+                "traffic_light_state": "green_light",
+                "box_area": 0.05,
+            }, now=now + 0.2)
             self.assertTrue(detector._maybe_start_pending_startup_replay())
             self.assertTrue(detector._startup_replay_active)
             self.assertFalse(detector._startup_replay_pending_green)

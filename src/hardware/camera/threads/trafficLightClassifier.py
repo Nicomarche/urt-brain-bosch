@@ -25,11 +25,11 @@ class TrafficLightClassifier:
     def __init__(self):
         self.red_low1, self.red_high1 = self._range_from_config(
             "TRAFFIC_LIGHT_RED_HSV_1",
-            ((0, 150, 150), (10, 255, 255)),
+            ((0, 80, 80), (12, 255, 255)),
         )
         self.red_low2, self.red_high2 = self._range_from_config(
             "TRAFFIC_LIGHT_RED_HSV_2",
-            ((170, 150, 150), (180, 255, 255)),
+            ((165, 80, 80), (180, 255, 255)),
         )
         self.yellow_low, self.yellow_high = self._range_from_config(
             "TRAFFIC_LIGHT_YELLOW_HSV",
@@ -37,8 +37,12 @@ class TrafficLightClassifier:
         )
         self.green_low, self.green_high = self._range_from_config(
             "TRAFFIC_LIGHT_GREEN_HSV",
-            ((60, 150, 150), (85, 255, 255)),
+            ((40, 80, 80), (95, 255, 255)),
         )
+        self.active_colors = self._active_colors_from_config()
+        self.hsv_color_min_ratio = float(getattr(config, "TRAFFIC_LIGHT_HSV_COLOR_MIN_RATIO", 0.60))
+        self.hsv_color_min_area_ratio = float(getattr(config, "TRAFFIC_LIGHT_HSV_COLOR_MIN_AREA_RATIO", 0.005))
+        self.hsv_color_dominance = float(getattr(config, "TRAFFIC_LIGHT_HSV_COLOR_DOMINANCE", 1.15))
         self.adaptive_sat_min = float(getattr(config, "TRAFFIC_LIGHT_ADAPTIVE_SAT_MIN", 100.0))
         self.adaptive_sat_max = float(getattr(config, "TRAFFIC_LIGHT_ADAPTIVE_SAT_MAX", 200.0))
         self.adaptive_val_min = float(getattr(config, "TRAFFIC_LIGHT_ADAPTIVE_VAL_MIN", 50.0))
@@ -64,6 +68,23 @@ class TrafficLightClassifier:
         except Exception:
             lower, upper = default
             return np.array(lower, dtype=np.uint8), np.array(upper, dtype=np.uint8)
+
+    @classmethod
+    def _active_colors_from_config(cls):
+        raw_colors = getattr(config, "TRAFFIC_LIGHT_ACTIVE_COLORS", ("red", "green"))
+        if isinstance(raw_colors, str):
+            raw_colors = [raw_colors]
+        try:
+            iterator = iter(raw_colors)
+        except TypeError:
+            iterator = iter(("red", "green"))
+
+        colors = []
+        for color in iterator:
+            normalized = str(color or "").strip().lower()
+            if normalized in cls.COLOR_TO_SIGN and normalized not in colors:
+                colors.append(normalized)
+        return tuple(colors) or ("red", "green")
 
     @staticmethod
     def normalize_sign_name(sign_name):
@@ -181,6 +202,12 @@ class TrafficLightClassifier:
         contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         contours = sorted(contours, key=cv2.contourArea, reverse=True)
 
+        hsv_color, hsv_scores = self._classify_by_hsv_color(hsv)
+        if hsv_color is not None:
+            result = self._known(hsv_color, "hsv_color", baseline_brightness)
+            result["scores"] = hsv_scores
+            return result
+
         slot_geometry = self._slot_geometry(detected_light.shape[:2])
         position_color = self._classify_by_bright_contour_position(
             contours,
@@ -212,18 +239,73 @@ class TrafficLightClassifier:
             scores={**brightness_scores, **backup_scores},
         )
 
+    def _color_masks(self, hsv):
+        red_mask1 = cv2.inRange(hsv, self.red_low1, self.red_high1)
+        red_mask2 = cv2.inRange(hsv, self.red_low2, self.red_high2)
+        return {
+            "red": cv2.bitwise_or(red_mask1, red_mask2),
+            "yellow": cv2.inRange(hsv, self.yellow_low, self.yellow_high),
+            "green": cv2.inRange(hsv, self.green_low, self.green_high),
+        }
+
+    def _classify_by_hsv_color(self, hsv):
+        img_height, img_width = hsv.shape[:2]
+        total_area = float(max(1, img_height * img_width))
+        masks = self._color_masks(hsv)
+        colors = tuple(self.COLOR_TO_SIGN.keys())
+        counts = {
+            color: float(cv2.countNonZero(masks[color]))
+            for color in colors
+        }
+        scores = {
+            f"{color}_area_ratio": counts[color] / total_area
+            for color in colors
+        }
+        colored_pixels = sum(counts.values())
+        if colored_pixels <= 0.0:
+            scores["colored_pixels"] = 0.0
+            return None, scores
+
+        best_color = max(colors, key=lambda color: counts[color])
+        best_count = counts[best_color]
+        second_count = max(
+            (count for color, count in counts.items() if color != best_color),
+            default=0.0,
+        )
+        best_share = best_count / colored_pixels
+        best_area_ratio = best_count / total_area
+        scores.update({
+            "colored_pixels": colored_pixels,
+            "best_color": best_color,
+            "best_share": best_share,
+            "best_area_ratio": best_area_ratio,
+        })
+
+        if best_area_ratio < self.hsv_color_min_area_ratio:
+            return None, scores
+        if best_share < self.hsv_color_min_ratio:
+            return None, scores
+        if second_count > 0.0 and best_count < second_count * self.hsv_color_dominance:
+            return None, scores
+        return best_color, scores
+
     def _slot_geometry(self, shape):
         img_height, img_width = shape
-        circle_diameter = max(1, int(img_height * 0.9 / 3.0))
-        red_y = int(circle_diameter / 2.0 + img_height / 32.0)
-        yellow_y = int(red_y + circle_diameter + img_height / 32.0)
-        green_y = int(yellow_y + circle_diameter + img_height / 32.0)
+        colors = self.active_colors
+        circle_diameter = max(1, int(img_height * 0.85 / float(len(colors))))
+        spacing = max(
+            1.0,
+            (float(img_height) - circle_diameter * len(colors)) / float(len(colors) + 1),
+        )
         x_center = int(img_width / 2.0)
         radius = max(1, int(circle_diameter / 2.0))
         return {
-            "red": (x_center, red_y, radius),
-            "yellow": (x_center, yellow_y, radius),
-            "green": (x_center, green_y, radius),
+            color: (
+                x_center,
+                int(spacing * (index + 1) + circle_diameter * index + circle_diameter / 2.0),
+                radius,
+            )
+            for index, color in enumerate(colors)
         }
 
     def _classify_by_bright_contour_position(self, contours, shape, slot_geometry):
@@ -258,7 +340,7 @@ class TrafficLightClassifier:
                 continue
 
             return min(
-                ("red", "yellow", "green"),
+                self.active_colors,
                 key=lambda color: abs(y_center - slot_geometry[color][1]),
             )
         return None
@@ -276,11 +358,11 @@ class TrafficLightClassifier:
             self.brightness_threshold_min,
         )
         scores["brightness_threshold"] = threshold
-        best_color = max(("red", "yellow", "green"), key=lambda color: scores[f"{color}_brightness"])
+        best_color = max(self.active_colors, key=lambda color: scores[f"{color}_brightness"])
         best_score = scores[f"{best_color}_brightness"]
         other_scores = [
             scores[f"{color}_brightness"]
-            for color in ("red", "yellow", "green")
+            for color in self.active_colors
             if color != best_color
         ]
         if best_score > threshold and all(best_score > score for score in other_scores):
@@ -301,12 +383,15 @@ class TrafficLightClassifier:
         )
         red_low1 = np.array([0, sat_threshold, val_threshold], dtype=np.uint8)
         red_high1 = self.red_high1
-        red_low2 = np.array([170, sat_threshold, val_threshold], dtype=np.uint8)
+        red_low2 = np.array([165, sat_threshold, val_threshold], dtype=np.uint8)
         red_high2 = self.red_high2
-        yellow_low = np.array([15, 50, 50], dtype=np.uint8)
-        yellow_high = np.array([35, 255, 255], dtype=np.uint8)
-        green_low = np.array([40, 50, 50], dtype=np.uint8)
-        green_high = np.array([90, 255, 255], dtype=np.uint8)
+        yellow_low = self.yellow_low
+        yellow_high = self.yellow_high
+        green_low = np.array(
+            [40, min(sat_threshold, 80.0), min(val_threshold, 80.0)],
+            dtype=np.uint8,
+        )
+        green_high = self.green_high
 
         for contour in contours:
             x, y, width, height = cv2.boundingRect(contour)
@@ -332,10 +417,14 @@ class TrafficLightClassifier:
             for color, ratio in ratios.items():
                 scores[f"{color}_ratio"] = max(scores.get(f"{color}_ratio", 0.0), ratio)
 
-            best_color = max(("red", "yellow", "green"), key=lambda color: ratios[color])
+            best_color = max(self.active_colors, key=lambda color: ratios[color])
             if (
                 ratios[best_color] > self.backup_color_ratio_min
-                and all(ratios[best_color] > ratios[color] for color in ratios if color != best_color)
+                and all(
+                    ratios[best_color] > ratios[color]
+                    for color in self.active_colors
+                    if color != best_color
+                )
             ):
                 return best_color, scores
         return None, scores

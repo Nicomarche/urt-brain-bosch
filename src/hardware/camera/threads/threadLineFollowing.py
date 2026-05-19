@@ -7789,7 +7789,9 @@ Returns:
         state = TrafficLightClassifier.normalize_sign_name(
             getattr(self, "_traffic_light_last_state", "")
         )
-        return state == "green_light" and last_seen > 0.0 and (now - last_seen) <= timeout_s
+        if last_seen <= 0.0 or (now - last_seen) > timeout_s:
+            return True
+        return state == "green_light"
 
     def _activate_startup_replay(self):
         self._startup_replay_started_at = time.monotonic()
