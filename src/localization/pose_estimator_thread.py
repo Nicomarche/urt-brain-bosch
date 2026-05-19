@@ -123,6 +123,36 @@ _CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = float(
     getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M", 0.80)
 )
 _CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX = max(1, int(getattr(_cfg_auto, "TRACKING_CHAMFER_ALIGNMENT_MAP_LINE_WIDTH_PX", 3)))
+_VISUAL_LANE_MAP_ALIGNMENT_ENABLED = bool(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_ENABLED", True)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_ALLOWED_SCENARIOS = set(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_ALLOWED_SCENARIOS", {"lane_keep"}) or set()
+)
+_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY", 0.80)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_MIN_DELTA_M = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MIN_DELTA_M", 0.025)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_GAIN = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_GAIN", 1.0)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M", 0.08)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_MAX_VISUAL_ERROR_M = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_VISUAL_ERROR_M", 0.22)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_MAX_ROUTE_ERROR_M = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_ROUTE_ERROR_M", 0.45)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_COOLDOWN_S = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_COOLDOWN_S", 0.08)
+)
+_VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = float(
+    getattr(_cfg_auto, "TRACKING_VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M", 0.25)
+)
 
 
 def _wrap_angle(angle_rad: float) -> float:
@@ -197,6 +227,8 @@ class threadPoseEstimator(threadTracking):
         self.pose_estimate_buffer = pose_estimate_buffer
         self.route_context_buffer = route_context_buffer
         self._last_camera_lateral_correction_monotonic = 0.0
+        self._last_visual_lane_map_alignment_monotonic = 0.0
+        self._last_lane_relocalization_kind = "lane_center"
         self._last_chamfer_alignment_monotonic = 0.0
         self._chamfer_matcher: ChamferMapMatcher | None = None
         self._chamfer_matcher_failed = False
@@ -1559,6 +1591,22 @@ class threadPoseEstimator(threadTracking):
                 near = False
         return (semantic_type in blocking and near) or expected in blocking
 
+    @staticmethod
+    def _visual_lane_map_alignment_semantic_blocked(route_context: RouteContext | None) -> bool:
+        if route_context is None:
+            return False
+        semantic_type = str(getattr(route_context, "next_semantic_type", "") or "").strip().lower()
+        expected = str(getattr(route_context, "expected_control_type", "") or "").strip().lower()
+        blocking = {"intersection", "roundabout", "stopline", "crosswalk", "parking"}
+        distance = getattr(route_context, "next_semantic_distance_m", None)
+        near = False
+        if distance is not None:
+            try:
+                near = float(distance) <= float(_VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M)
+            except (TypeError, ValueError):
+                near = False
+        return (semantic_type in blocking and near) or expected in blocking
+
     def _apply_chamfer_map_alignment(
         self,
         route_context: RouteContext | None,
@@ -1663,6 +1711,98 @@ class threadPoseEstimator(threadTracking):
         new_x, new_y, new_yaw = self._dr.get_state()
         return new_x, new_y, new_yaw, float(norm), True, result
 
+    def _apply_visual_lane_map_alignment(
+        self,
+        route_context: RouteContext | None,
+        lane_observation: LaneObservation | None,
+        now: float,
+        raw_x: float,
+        raw_y: float,
+        raw_yaw: float,
+        raw_lateral_error_m: float | None,
+        visual_lateral_error_m: float | None,
+    ) -> tuple[float, float, float, float, bool, bool]:
+        """Align the map pose laterally to a reliable two-line visual measurement."""
+        if not bool(_VISUAL_LANE_MAP_ALIGNMENT_ENABLED):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if self._dr is None or route_context is None or lane_observation is None:
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if raw_lateral_error_m is None or visual_lateral_error_m is None:
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if not bool(getattr(route_context, "route_active", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if bool(getattr(route_context, "waypoint_mode_active", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+
+        scenario_name = None
+        if self.tracking_state is not None:
+            try:
+                scenario_name = self.tracking_state.current_scenario
+            except Exception:
+                scenario_name = None
+        allowed = {str(item).strip().lower() for item in (_VISUAL_LANE_MAP_ALIGNMENT_ALLOWED_SCENARIOS or set())}
+        clean_scenario = str(scenario_name or "").strip().lower()
+        if allowed and clean_scenario not in allowed:
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if self._visual_lane_map_alignment_semantic_blocked(route_context):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+
+        measurement_mode = str(getattr(lane_observation, "measurement_mode", "") or "").strip().lower()
+        detected_sides = {str(side).strip().lower() for side in (lane_observation.detected_sides or ())}
+        if measurement_mode != "two_line" or not {"left", "right"}.issubset(detected_sides):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if not bool(getattr(lane_observation, "direct_error_valid", False)):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if float(getattr(lane_observation, "quality", 0.0) or 0.0) < float(_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+
+        try:
+            map_error = float(raw_lateral_error_m)
+            visual_error = float(visual_lateral_error_m)
+        except (TypeError, ValueError):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if not (math.isfinite(map_error) and math.isfinite(visual_error)):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if abs(visual_error) > float(_VISUAL_LANE_MAP_ALIGNMENT_MAX_VISUAL_ERROR_M):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+        if abs(map_error) > float(_VISUAL_LANE_MAP_ALIGNMENT_MAX_ROUTE_ERROR_M):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+
+        delta_m = map_error - visual_error
+        if abs(delta_m) < float(_VISUAL_LANE_MAP_ALIGNMENT_MIN_DELTA_M):
+            return raw_x, raw_y, raw_yaw, 0.0, False, False
+
+        if (float(now) - float(getattr(self, "_last_visual_lane_map_alignment_monotonic", 0.0) or 0.0)) < float(
+            _VISUAL_LANE_MAP_ALIGNMENT_COOLDOWN_S
+        ):
+            return raw_x, raw_y, raw_yaw, 0.0, True, False
+
+        correction_m = delta_m * float(_VISUAL_LANE_MAP_ALIGNMENT_GAIN)
+        max_step_m = max(0.0, float(_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M))
+        if max_step_m > 0.0 and abs(correction_m) > max_step_m:
+            correction_m = math.copysign(max_step_m, correction_m)
+        if abs(correction_m) < 1e-9:
+            return raw_x, raw_y, raw_yaw, 0.0, True, False
+
+        path_yaw_value = getattr(route_context, "path_psi", None)
+        if path_yaw_value is None:
+            path_yaw_value = getattr(route_context.matched_pose, "yaw", raw_yaw)
+        path_yaw = float(path_yaw_value)
+        self._dr.correct_lateral(float(correction_m), path_yaw)
+        self._last_visual_lane_map_alignment_monotonic = float(now)
+        new_x, new_y, new_yaw = self._dr.get_state()
+        live_log(
+            "pose_estimator",
+            event="visual_lane_map_alignment",
+            correction_m=float(correction_m),
+            map_lateral_error_m=float(map_error),
+            visual_lateral_error_m=float(visual_error),
+            delta_m=float(delta_m),
+            scenario=str(scenario_name or ""),
+            quality=float(getattr(lane_observation, "quality", 0.0) or 0.0),
+        )
+        return new_x, new_y, new_yaw, float(correction_m), True, True
+
     def _apply_lane_observation(
         self,
         route_context: RouteContext | None,
@@ -1671,16 +1811,52 @@ class threadPoseEstimator(threadTracking):
         raw_x: float,
         raw_y: float,
         raw_yaw: float,
+        raw_lateral_error_m: float | None = None,
     ) -> tuple[float, float, float, float, bool]:
         if self._dr is None or route_context is None:
             return raw_x, raw_y, raw_yaw, 0.0, False
         if lane_observation is None:
             return raw_x, raw_y, raw_yaw, 0.0, False
+        self._last_lane_relocalization_kind = "lane_center"
         supports_lateral_relocalization = lane_observation_supports_lateral_relocalization(
             lane_observation
         )
         if not supports_lateral_relocalization:
             return raw_x, raw_y, raw_yaw, 0.0, False
+
+        measurement = lane_observation.direct_error_m
+        if measurement is None:
+            measurement = lane_observation.lateral_offset_m
+        if measurement is None:
+            return raw_x, raw_y, raw_yaw, 0.0, False
+
+        (
+            map_aligned_x,
+            map_aligned_y,
+            map_aligned_yaw,
+            map_alignment_m,
+            map_alignment_handled,
+            _map_alignment_applied,
+        ) = self._apply_visual_lane_map_alignment(
+            route_context,
+            lane_observation,
+            now,
+            raw_x,
+            raw_y,
+            raw_yaw,
+            raw_lateral_error_m,
+            float(measurement),
+        )
+        if map_alignment_handled:
+            self._last_lane_relocalization_kind = "visual_lane_map_alignment"
+            return (
+                map_aligned_x,
+                map_aligned_y,
+                map_aligned_yaw,
+                float(map_alignment_m),
+                True,
+            )
+
         min_speed_mps = float(_VISUAL_LANE_RELOCALIZATION_SPEED_MIN_MPS)
         if bool(route_context.waypoint_mode_active):
             min_speed_mps = min(
@@ -1688,12 +1864,6 @@ class threadPoseEstimator(threadTracking):
                 float(_WAYPOINT_TWO_LINE_LATERAL_RELOCALIZATION_SPEED_MIN_MPS),
             )
         if abs(self._last_speed) < min_speed_mps:
-            return raw_x, raw_y, raw_yaw, 0.0, False
-
-        measurement = lane_observation.direct_error_m
-        if measurement is None:
-            measurement = lane_observation.lateral_offset_m
-        if measurement is None:
             return raw_x, raw_y, raw_yaw, 0.0, False
 
         # NOTA: probamos modo CONFIDENT (snap rápido cuando quality≥0.7)
@@ -2148,6 +2318,7 @@ class threadPoseEstimator(threadTracking):
                 raw_x,
                 raw_y,
                 raw_yaw,
+                raw_lateral_error_m=raw_lateral_error_m,
             )
 
             raw_x, raw_y, raw_yaw, chamfer_alignment_m, chamfer_aligned, chamfer_match = self._apply_chamfer_map_alignment(
@@ -2166,6 +2337,16 @@ class threadPoseEstimator(threadTracking):
             stopline_relocalized, stopline_match = self._apply_stopline_reset(route_context, stopline_observation, now)
             if stopline_relocalized:
                 raw_x, raw_y, raw_yaw = self._dr.get_state()
+
+        pre_correction_lateral_error_m = float(raw_lateral_error_m or 0.0)
+        if route_context is not None:
+            raw_lateral_error_m = self._signed_lateral_error_to_path(
+                raw_x,
+                raw_y,
+                route_context.matched_pose.x,
+                route_context.matched_pose.y,
+                route_context.matched_pose.yaw,
+            )
 
         relocalization_mode = "dead_reckoning"
         relocalization_source = "dead_reckoning"
@@ -2196,8 +2377,14 @@ class threadPoseEstimator(threadTracking):
             relocalization_source = f"visual_chamfer:{reason}"
             relocalization_error_m = abs(float(chamfer_alignment_m))
         elif abs(lane_relocalization_m) > 1e-9:
-            relocalization_mode = "lane_relocalization"
-            relocalization_source = "lane_center"
+            relocalization_source = str(
+                getattr(self, "_last_lane_relocalization_kind", "lane_center") or "lane_center"
+            )
+            relocalization_mode = (
+                "visual_lane_map"
+                if relocalization_source == "visual_lane_map_alignment"
+                else "lane_relocalization"
+            )
             relocalization_error_m = abs(float(lane_relocalization_m))
 
         fused_pose = Pose2D(float(raw_x), float(raw_y), float(raw_yaw))
@@ -2270,6 +2457,7 @@ class threadPoseEstimator(threadTracking):
                 else None
             ),
             raw_lateral_error_m=float(raw_lateral_error_m or 0.0),
+            pre_correction_lateral_error_m=float(pre_correction_lateral_error_m or 0.0),
             imu_received=bool(getattr(self, "_imu_received", False)),
             ts_pose=float(pose_estimate.timestamp),
         )

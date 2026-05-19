@@ -891,6 +891,21 @@ TRACKING_CAMERA_CORRECTION_MIN_SPEED_MPS = 0.02
 TRACKING_CAMERA_LATERAL_CORRECTION_STEP_MAX_M = 0.015
 TRACKING_CAMERA_LATERAL_CORRECTION_COOLDOWN_S = 0.10
 
+# When the camera sees both lane lines, the car is physically inside a lane.
+# If dead-reckoning/map matching says the fused pose is laterally elsewhere,
+# pull the map pose toward the visual lane offset so map_view/planning do not
+# report an off-lane state caused only by odometry drift.
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_ENABLED = True
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_ALLOWED_SCENARIOS = {"lane_keep"}
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MIN_QUALITY = 0.80
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MIN_DELTA_M = 0.025
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_GAIN = 1.00
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_STEP_M = 0.08
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_VISUAL_ERROR_M = 0.22
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_MAX_ROUTE_ERROR_M = 0.45
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_COOLDOWN_S = 0.08
+TRACKING_VISUAL_LANE_MAP_ALIGNMENT_BLOCK_SEMANTIC_DISTANCE_M = 0.25
+
 # Visual-map chamfer alignment (ref: urt-ref template_maching/chamfer.py).
 # Uses BEV lane-line points from the camera as a sparse template and matches
 # them against a distance transform of the lanelet map boundaries.  The result

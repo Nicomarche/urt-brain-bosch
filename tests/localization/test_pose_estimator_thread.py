@@ -386,6 +386,75 @@ def test_apply_lane_observation_accepts_valid_two_line_measurement() -> None:
     assert len(estimator._dr.corrections) == 1
 
 
+def test_apply_lane_observation_aligns_map_pose_to_two_line_visual_offset() -> None:
+    estimator = _make_estimator(speed_mps=0.0, dr_y=0.22)
+    estimator.tracking_state.current_scenario = "lane_keep"
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=0.02,
+        direct_error_m=0.02,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+        control_policy_mode="VISUAL_ASSIST",
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        _make_route_context(),
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.22,
+        raw_yaw=0.0,
+        raw_lateral_error_m=0.22,
+    )
+
+    assert reliable is True
+    assert correction_m == pytest.approx(0.08, abs=1e-9)
+    assert new_x == pytest.approx(0.0, abs=1e-9)
+    assert new_y == pytest.approx(0.14, abs=1e-9)
+    assert new_yaw == pytest.approx(0.0, abs=1e-9)
+    assert estimator._last_lane_relocalization_kind == "visual_lane_map_alignment"
+    assert len(estimator._dr.corrections) == 1
+    assert estimator._dr.corrections[0][0] == pytest.approx(0.08, abs=1e-9)
+    assert estimator._dr.corrections[0][1] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_apply_lane_observation_blocks_strong_visual_map_alignment_near_intersection() -> None:
+    estimator = _make_estimator(speed_mps=0.0, dr_y=0.22)
+    estimator.tracking_state.current_scenario = "lane_keep"
+    lane_observation = LaneObservation(
+        detected_sides=("left", "right"),
+        lateral_offset_m=0.02,
+        direct_error_m=0.02,
+        quality=1.0,
+        measurement_mode="two_line",
+        direct_error_valid=True,
+        control_policy_mode="VISUAL_ASSIST",
+    )
+    route_context = RouteContext(
+        route_active=True,
+        matched_pose=Pose2D(x=0.0, y=0.0, yaw=0.0),
+        next_semantic_type="intersection",
+        next_semantic_distance_m=0.10,
+    )
+
+    new_x, new_y, new_yaw, correction_m, reliable = estimator._apply_lane_observation(
+        route_context,
+        lane_observation,
+        now=10.0,
+        raw_x=0.0,
+        raw_y=0.22,
+        raw_yaw=0.0,
+        raw_lateral_error_m=0.22,
+    )
+
+    assert reliable is False
+    assert correction_m == 0.0
+    assert (new_x, new_y, new_yaw) == pytest.approx((0.0, 0.22, 0.0), abs=1e-9)
+    assert estimator._dr.corrections == []
+
+
 def test_apply_camera_yaw_hint_blocks_conflicting_single_line_turn_on_straight_route() -> None:
     estimator = _make_estimator(speed_mps=0.20)
     lane_observation = LaneObservation(

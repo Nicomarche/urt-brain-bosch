@@ -145,6 +145,37 @@ class LaneObserverTests(unittest.TestCase):
         self.assertGreaterEqual(lane_observation.quality, 0.85)
         self.assertEqual(len(lane_observation.line_points_body), 10)
 
+    def test_build_lane_observation_preserves_line_points_by_side(self):
+        observer = threadLaneObserver.__new__(threadLaneObserver)
+        snapshot = VisualStateSnapshot(
+            timestamp=12.7,
+            detection_mode="ai_local",
+            local_lane_payload={
+                "lane_side_point_counts": {"left": 8, "right": 8},
+            },
+            frame_trace={
+                "debug": {"measurement_mode": "two_line"},
+                "visual_lane_waypoints": {
+                    "center_waypoints_body": tuple((0.05 * idx, 0.0, 0.0) for idx in range(20)),
+                    "line_points_body_by_side": {
+                        "left": ((0.10, 0.18), (0.20, 0.18)),
+                        "right": ((0.10, -0.18), (0.20, -0.18), (0.30, -0.18)),
+                    },
+                    "lane_width_m": 0.35,
+                },
+            },
+        )
+
+        lane_observation = observer._build_lane_observation(snapshot)
+
+        self.assertEqual(len(lane_observation.line_points_body), 5)
+        self.assertEqual(len(lane_observation.line_points_body_by_side["left"]), 2)
+        self.assertEqual(len(lane_observation.line_points_body_by_side["right"]), 3)
+        self.assertEqual(
+            lane_observation.debug["visual_line_point_count_by_side"],
+            {"left": 2, "right": 3},
+        )
+
     def test_build_lane_observation_prefers_resolved_visible_side_over_raw_payload_counts(self):
         observer = threadLaneObserver.__new__(threadLaneObserver)
         snapshot = VisualStateSnapshot(

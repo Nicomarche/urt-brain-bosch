@@ -376,6 +376,7 @@ class threadLaneObserver(ThreadWithStop):
         visual_payload = frame_trace.get("visual_lane_waypoints") if isinstance(frame_trace, dict) else None
         center_waypoints_body: tuple[tuple[float, float, float], ...] = ()
         line_points_body: tuple[tuple[float, float], ...] = ()
+        line_points_body_by_side: dict[str, tuple[tuple[float, float], ...]] = {}
         left_poly_coeffs: tuple[float, ...] | None = None
         right_poly_coeffs: tuple[float, ...] | None = None
         lane_width_m: float | None = None
@@ -383,14 +384,18 @@ class threadLaneObserver(ThreadWithStop):
         if isinstance(visual_payload, dict):
             center_waypoints_body = self._coerce_waypoints(visual_payload.get("center_waypoints_body"))
             line_points_body = self._coerce_body_points(visual_payload.get("line_points_body"))
-            if not line_points_body:
-                by_side = visual_payload.get("line_points_body_by_side")
-                if isinstance(by_side, dict):
+            by_side = visual_payload.get("line_points_body_by_side")
+            if isinstance(by_side, dict):
+                for side in ("left", "right"):
+                    points = self._coerce_body_points(by_side.get(side))
+                    if points:
+                        line_points_body_by_side[side] = points
+                if not line_points_body and line_points_body_by_side:
                     line_points_body = tuple(
-                        self._coerce_body_points(by_side.get(side))
+                        point
                         for side in ("left", "right")
+                        for point in line_points_body_by_side.get(side, ())
                     )
-                    line_points_body = tuple(point for group in line_points_body for point in group)
             left_poly_coeffs = self._coerce_poly(visual_payload.get("left_poly_coeffs"))
             right_poly_coeffs = self._coerce_poly(visual_payload.get("right_poly_coeffs"))
             lw = visual_payload.get("lane_width_m")
@@ -448,6 +453,11 @@ class threadLaneObserver(ThreadWithStop):
                 observation_debug["visual_extrapolated_side"] = extrapolated_side
         if line_points_body:
             observation_debug["visual_line_point_count"] = len(line_points_body)
+        if line_points_body_by_side:
+            observation_debug["visual_line_point_count_by_side"] = {
+                side: len(points)
+                for side, points in line_points_body_by_side.items()
+            }
         return LaneObservation(
             timestamp=float(snapshot.timestamp),
             source_mode=str(snapshot.detection_mode or "unknown"),
@@ -470,6 +480,7 @@ class threadLaneObserver(ThreadWithStop):
             blind_mode=str(blind_mode) if blind_mode else None,
             center_waypoints_body=center_waypoints_body,
             line_points_body=line_points_body,
+            line_points_body_by_side=line_points_body_by_side,
             left_poly_coeffs=left_poly_coeffs,
             right_poly_coeffs=right_poly_coeffs,
             lane_width_m=lane_width_m,

@@ -60,6 +60,10 @@ class LaneObservation:
       - `line_points_body`: puntos sparse de las líneas/bordes visuales en
         frame body. Los usa el chamfer matcher para alinear pose local contra
         el mapa sin depender de la imagen completa.
+      - `line_points_body_by_side`: los mismos puntos separados por lado
+        físico (`left`/`right`). Mantener esta separación permite asociar una
+        detección visual con un bound concreto del lanelet; `line_points_body`
+        queda como formato legacy aplanado.
       - `extrapolated_side`: `"left"` o `"right"` cuando esa línea fue
         sintetizada desplazando la opuesta (single_line). None si se
         vieron ambas o no hay waypoints.
@@ -86,6 +90,7 @@ class LaneObservation:
     blind_mode: str | None = None
     center_waypoints_body: tuple[tuple[float, float, float], ...] = field(default_factory=tuple)
     line_points_body: tuple[tuple[float, float], ...] = field(default_factory=tuple)
+    line_points_body_by_side: dict[str, tuple[tuple[float, float], ...]] = field(default_factory=dict)
     left_poly_coeffs: tuple[float, ...] | None = None
     right_poly_coeffs: tuple[float, ...] | None = None
     lane_width_m: float | None = None
