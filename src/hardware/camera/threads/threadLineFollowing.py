@@ -13,6 +13,7 @@ import os
 from collections import deque
 from enum import Enum
 import config as _config
+from src.hardware.camera.threads.trafficLightClassifier import TrafficLightClassifier
 from src.utils.messages.allMessages import SpeedMotor, SteerMotor, StateChange, LineFollowingConfig, LineFollowingDebug, LineFollowingStatus, ImuData, CurrentSpeed, CurrentSteer, LocalLanePerception, LocalPerceptionStatus, ActuatorCommandStatus, SignDetected, LaneCalibMode, StartupMoveControl, StartupMoveStatus
 from src.utils.messages.messageHandlerSender import messageHandlerSender
 from src.utils.messages.messageHandlerSubscriber import messageHandlerSubscriber
@@ -89,6 +90,7 @@ PARKING_ALIGN_STEER = float(getattr(_config, "PARKING_ALIGN_STEER", -20.0))
 # Detección del spot
 PARKING_SPOT_MISS_THRESHOLD = int(getattr(_config,   "PARKING_SPOT_MISS_THRESHOLD",  8))
 PARKING_TRIGGER_DISTANCE_CM = float(getattr(_config, "PARKING_TRIGGER_DISTANCE_CM",  100.0))
+PARKING_SPOT_SIGN_CLASSES = frozenset({"parking_area", "parking_spot", "parking"})
 
 # Distancias por fase (odometría del encoder)
 PARKING_D_FORWARD_CM         = float(getattr(_config, "PARKING_D_FORWARD_CM",          40.0))
@@ -105,6 +107,14 @@ PARKING_T_FORWARD_CORR    = float(getattr(_config, "PARKING_T_FORWARD_CORR",    
 # Tiempo de espera servo
 PARKING_T_WAIT_STEER = float(getattr(_config, "PARKING_T_WAIT_STEER", 1.0))
 
+
+TRAFFIC_LIGHT_SIGN_CLASSES = frozenset({
+    "traffic_light",
+    "traffic_light_unknown",
+    "red_light",
+    "yellow_light",
+    "green_light",
+})
 
 
 class PIDController:
@@ -721,6 +731,23 @@ Args:
         self._startup_move_last_status_snapshot = None
         self._startup_move_last_status_ts = 0.0
         self._load_startup_move_trajectory()
+
+        # Traffic-light gate. Color classification happens in threadLocalPerception;
+        # line-following only blocks positive AUTO speed unless the latest light is green.
+        self.traffic_light_hold_enabled = bool(getattr(_config, "TRAFFIC_LIGHT_HOLD_ENABLED", True))
+        self.traffic_light_hold_timeout_s = max(
+            0.05, float(getattr(_config, "TRAFFIC_LIGHT_HOLD_TIMEOUT_S", 0.6))
+        )
+        self.traffic_light_min_box_area = float(
+            getattr(_config, "TRAFFIC_LIGHT_MIN_BOX_AREA", getattr(_config, "SIGN_MIN_BOX_AREA", 0.01))
+        )
+        self._traffic_light_last_seen = 0.0
+        self._traffic_light_last_state = ""
+        self._traffic_light_last_color = "unknown"
+        self._traffic_light_last_reason = ""
+        self._traffic_light_last_box_area = 0.0
+        self._traffic_light_holding = False
+        self._traffic_light_last_log = 0.0
 
         # Calibration mode state
         self._calib_mode_active = False
@@ -7708,6 +7735,9 @@ Returns:
         """Send one x10 command pair directly during startup replay."""
         speed_x10 = int(sample.get("speed_x10", 0))
         steer_x10 = int(sample.get("steer_x10", 0))
+        guarded_speed, traffic_hold = self._guard_speed_for_traffic_light(speed_x10 / 10.0)
+        if traffic_hold:
+            speed_x10 = int(round(guarded_speed * 10))
         self.steerMotorSender.send(str(steer_x10))
         self.speedMotorSender.send(str(speed_x10))
         self._last_requested_motor_command = {
@@ -7717,6 +7747,7 @@ Returns:
             "steer_x10": steer_x10,
             "speed_x10": speed_x10,
             "startup_replay": True,
+            "traffic_light_hold": bool(traffic_hold),
         }
         now_log = time.monotonic()
         if self.show_debug or (now_log - self._last_motor_tx_log) >= 1.0:
@@ -8243,20 +8274,22 @@ Returns:
             
             if self.is_line_following_active:
                 if steering_angle is not None:
+                    guarded_speed, traffic_hold = self._guard_speed_for_traffic_light(speed, now=loop_start)
                     commanded_steering = steering_angle
-                    commanded_speed = speed
-                    command_source = "stale_hold" if stale_frame else "normal"
-                    self.send_motor_commands(steering_angle, speed)
+                    commanded_speed = guarded_speed
+                    command_source = "traffic_light_hold" if traffic_hold else ("stale_hold" if stale_frame else "normal")
+                    self.send_motor_commands(steering_angle, guarded_speed)
                     self.frames_without_line = 0
                 else:
                     self.frames_without_line += 1
                     if self.show_debug and self.frames_without_line % 10 == 1:
                         print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;93mWAIT\033[0m - No steering, frame {self.frames_without_line}/{self.max_frames_without_line}")
                     if self.frames_without_line > self.max_frames_without_line:
+                        fallback_speed, traffic_hold = self._guard_speed_for_traffic_light(self.min_speed, now=loop_start)
                         commanded_steering = 0
-                        commanded_speed = self.min_speed
-                        command_source = "normal"
-                        self.send_motor_commands(0, self.min_speed)
+                        commanded_speed = fallback_speed
+                        command_source = "traffic_light_hold" if traffic_hold else "normal"
+                        self.send_motor_commands(0, fallback_speed)
             else:
                 command_source = "blocked_inactive"
                 if hasattr(self, '_last_inactive_log') == False:
@@ -9789,13 +9822,131 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
                 print(f"\033[1;97m[ Line Following ] :\033[0m \033[1;91mERROR\033[0m - Unknown mode: {message} - {e}")
 
     # ------------------------------------------------------------------
+    # Traffic-light AUTO gate
+    # ------------------------------------------------------------------
+
+    def _is_auto_mode(self):
+        return getattr(self, "_current_system_mode", SystemMode.DEFAULT) == SystemMode.AUTO
+
+    def _safe_float(self, value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_traffic_light_state(self, data):
+        state = TrafficLightClassifier.normalize_sign_name(
+            data.get("traffic_light_state") or data.get("sign")
+        )
+        color = str(data.get("traffic_light_color") or "").strip().lower()
+
+        if state in {"red_light", "yellow_light", "green_light"}:
+            color = TrafficLightClassifier.color_for_sign(state)
+            return state, color
+
+        if color in {"red", "yellow", "green"}:
+            return TrafficLightClassifier.sign_for_color(color), color
+
+        if state in {"traffic_light", "traffic_light_unknown"}:
+            return TrafficLightClassifier.UNKNOWN_SIGN, TrafficLightClassifier.UNKNOWN_COLOR
+
+        return None, None
+
+    def _update_traffic_light_hold(self, data, now=None):
+        state, color = self._resolve_traffic_light_state(data)
+        if state is None:
+            return False
+
+        box_area = self._safe_float(data.get("box_area"), 0.0)
+        min_area = self._safe_float(
+            getattr(
+                self,
+                "traffic_light_min_box_area",
+                getattr(_config, "TRAFFIC_LIGHT_MIN_BOX_AREA", getattr(_config, "SIGN_MIN_BOX_AREA", 0.01)),
+            ),
+            0.01,
+        )
+        if box_area < min_area:
+            return False
+
+        now = time.time() if now is None else now
+        self._traffic_light_last_seen = now
+        self._traffic_light_last_state = state
+        self._traffic_light_last_color = color or TrafficLightClassifier.UNKNOWN_COLOR
+        self._traffic_light_last_reason = str(data.get("traffic_light_reason") or "")
+        self._traffic_light_last_box_area = box_area
+        return True
+
+    def _traffic_light_hold_active(self, now=None):
+        if not bool(getattr(self, "traffic_light_hold_enabled", True)):
+            return False
+        if not self._is_auto_mode():
+            return False
+
+        last_seen = self._safe_float(getattr(self, "_traffic_light_last_seen", 0.0), 0.0)
+        if last_seen <= 0.0:
+            return False
+
+        now = time.time() if now is None else now
+        timeout_s = max(
+            0.05,
+            self._safe_float(getattr(self, "traffic_light_hold_timeout_s", 0.6), 0.6),
+        )
+        if now - last_seen > timeout_s:
+            return False
+
+        state = TrafficLightClassifier.normalize_sign_name(
+            getattr(self, "_traffic_light_last_state", "")
+        )
+        return state != "green_light"
+
+    def _log_traffic_light_hold_state(self, holding, now=None):
+        now = time.time() if now is None else now
+        was_holding = bool(getattr(self, "_traffic_light_holding", False))
+
+        if holding:
+            last_log = self._safe_float(getattr(self, "_traffic_light_last_log", 0.0), 0.0)
+            if getattr(self, "show_debug", False) or now - last_log >= 1.0:
+                self._traffic_light_last_log = now
+                state = getattr(self, "_traffic_light_last_state", "traffic_light_unknown")
+                reason = getattr(self, "_traffic_light_last_reason", "")
+                box_area = self._safe_float(getattr(self, "_traffic_light_last_box_area", 0.0), 0.0)
+                print(
+                    f"\033[1;97m[ Traffic Light ] :\033[0m \033[1;91mHOLD\033[0m - "
+                    f"{state} visible (box={box_area:.2%}{', ' + reason if reason else ''}), speed=0"
+                )
+        elif was_holding:
+            state = getattr(self, "_traffic_light_last_state", "")
+            print(
+                f"\033[1;97m[ Traffic Light ] :\033[0m \033[1;92mRELEASE\033[0m - "
+                f"{state or 'no light'}"
+            )
+        self._traffic_light_holding = bool(holding)
+
+    def _guard_speed_for_traffic_light(self, speed, now=None):
+        if speed is None:
+            return speed, False
+        try:
+            speed_value = float(speed)
+        except (TypeError, ValueError):
+            return speed, False
+
+        hold = bool(speed_value > 0.0 and self._traffic_light_hold_active(now))
+        self._log_traffic_light_hold_state(hold, now=now)
+        if hold:
+            return 0.0, True
+        return speed, False
+
+    # ------------------------------------------------------------------
     # Parking maneuver helpers
     # ------------------------------------------------------------------
 
     def _poll_sign_detected(self):
-        """Consume SignDetected messages and update parking-spot tracking.
+        """Consume SignDetected messages and update parking-area/spot tracking.
 
-        Returns True if a parking detection was received this cycle.
+        Returns True if a parking-area/spot detection was received this cycle.
+        The parking sign only starts PARKING mode in threadLocalPerception; it is
+        not a valid spot trigger here.
 
         The LANE_KEEPING → SPOT_TRACKED transition is gated by metric distance:
         the spot must be within PARKING_TRIGGER_DISTANCE_CM to activate tracking.
@@ -9810,7 +9961,15 @@ Uses weighted average of all detected lines, then determines left/right lanes.""
         except Exception:
             return False
 
-        if data.get("sign") != "parking":
+        now = time.time()
+        sign_name = str(data.get("sign", "") or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if sign_name in TRAFFIC_LIGHT_SIGN_CLASSES or TrafficLightClassifier.is_traffic_light_sign(
+            data.get("traffic_light_state")
+        ):
+            self._update_traffic_light_hold(data, now=now)
+            return False
+
+        if sign_name not in PARKING_SPOT_SIGN_CLASSES:
             return False
 
         self._parking_last_spot_box = data.get("box")
