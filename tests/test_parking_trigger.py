@@ -4,6 +4,7 @@ import time
 import config
 from src.hardware.camera.threads.threadLineFollowing import ParkingState, threadLineFollowing
 from src.hardware.camera.threads.threadLocalPerception import threadLocalPerception
+from src.statemachine.systemMode import SystemMode
 
 
 class FakeSender:
@@ -48,7 +49,11 @@ def make_local_perception():
     detector = threadLocalPerception.__new__(threadLocalPerception)
     detector._current_mode = "auto"
     detector.stateChangeSender = FakeSender()
+    detector.signDetectedSender = FakeSender()
     detector.sign_actions = FakeSignActions()
+    detector.enable_sign_detection = True
+    detector.enable_actions = False
+    detector.is_sign_actions_active = False
     detector.sign_min_confidence = 0.5
     detector.sign_min_box_area = 0.01
     detector.sign_min_box_area_per_sign = dict(getattr(config, "SIGN_MIN_BOX_AREA_PER_SIGN", {}))
@@ -60,13 +65,17 @@ def make_local_perception():
     detector._walk_area_active = False
     detector._walk_area_mode = None
     detector._walk_area_last_seen = 0.0
+    detector.detection_count = 0
+    detector.last_sign_name = ""
+    detector.traffic_light_min_box_area = 0.01
+    detector.traffic_light_classifier = None
     return detector
 
 
-def make_line_following(payload):
+def make_line_following(payload, parking_state=ParkingState.LANE_KEEPING, parking_enabled=True):
     detector = threadLineFollowing.__new__(threadLineFollowing)
     detector.signDetectedSubscriber = FakeSubscriber([payload])
-    detector._parking_state = ParkingState.LANE_KEEPING
+    detector._parking_state = parking_state
     detector._parking_last_spot_box = None
     detector._parking_spot_miss_frames = 3
     detector._parking_last_spot_distance_cm = None
@@ -78,12 +87,20 @@ def make_line_following(payload):
     detector._stanley_last_px_per_cm = 0.0
     detector._last_two_line_ref_px_per_cm = 0.0
     detector._last_px_per_cm = 0.0
+    detector._parking_enabled = parking_enabled
+    detector._parking_enabled_at = 0.0
+    detector._parking_side = None
+    detector._current_system_mode = SystemMode.AUTO
+    detector.max_steering = 25
+    detector._curve_state = "STRAIGHT"
+    detector._measured_speed = 0.0
+    detector.stanley_measured_speed_to_mps = 1.0
     detector.show_debug = False
     return detector
 
 
 class ParkingTriggerTests(unittest.TestCase):
-    def test_parking_sign_enters_parking_mode(self):
+    def test_parking_sign_does_not_send_state_change(self):
         detector = make_local_perception()
 
         detector._handle_parking_sign([
@@ -94,7 +111,7 @@ class ParkingTriggerTests(unittest.TestCase):
             }
         ])
 
-        self.assertEqual(detector.stateChangeSender.values, ["PARKING"])
+        self.assertEqual(detector.stateChangeSender.values, [])
 
     def test_parking_area_does_not_enter_parking_mode(self):
         detector = make_local_perception()
@@ -109,7 +126,7 @@ class ParkingTriggerTests(unittest.TestCase):
 
         self.assertEqual(detector.stateChangeSender.values, [])
 
-    def test_parking_sign_after_parking_area_enters_parking_mode(self):
+    def test_parking_sign_after_parking_area_does_not_send_state_change(self):
         detector = make_local_perception()
 
         detector._handle_parking_sign([
@@ -125,9 +142,9 @@ class ParkingTriggerTests(unittest.TestCase):
             },
         ])
 
-        self.assertEqual(detector.stateChangeSender.values, ["PARKING"])
+        self.assertEqual(detector.stateChangeSender.values, [])
 
-    def test_legacy_parking_label_is_treated_as_parking_sign(self):
+    def test_legacy_parking_label_does_not_send_state_change(self):
         detector = make_local_perception()
 
         detector._handle_parking_sign([
@@ -138,7 +155,29 @@ class ParkingTriggerTests(unittest.TestCase):
             }
         ])
 
-        self.assertEqual(detector.stateChangeSender.values, ["PARKING"])
+        self.assertEqual(detector.stateChangeSender.values, [])
+
+    def test_publish_sign_prioritizes_parking_sign_once_then_area(self):
+        detector = make_local_perception()
+        detector._parking_sign_cooldown = 8.0
+        detections = [
+            {
+                "class": "parking_area",
+                "confidence": 0.95,
+                "box": [0.2, 0.55, 0.8, 0.95],
+            },
+            {
+                "class": "parking_sign",
+                "confidence": 0.9,
+                "box": [0.1, 0.1, 0.2, 0.2],
+            },
+        ]
+
+        detector._publish_sign(detections, now=10.0, img_shape=(480, 640))
+        detector._publish_sign(detections, now=11.0, img_shape=(480, 640))
+
+        self.assertEqual(detector.signDetectedSender.values[0]["sign"], "parking_sign")
+        self.assertEqual(detector.signDetectedSender.values[1]["sign"], "parking_area")
 
     def test_empty_walk_area_slows_to_10_cm_s(self):
         detector = make_local_perception()
@@ -235,27 +274,59 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertEqual(detector.stateChangeSender.values, [])
         self.assertEqual(detector.sign_actions.speeds, [])
 
-    def test_line_following_ignores_parking_sign_as_spot(self):
+    def test_line_following_parking_sign_enables_search_without_tracking_spot(self):
         detector = make_line_following({
             "sign": "parking_sign",
+            "confidence": 0.9,
+            "box_area": 0.01,
             "distance_cm": 25.0,
             "box": [0.1, 0.1, 0.3, 0.3],
-        })
+        }, parking_state=ParkingState.IDLE, parking_enabled=False)
 
         self.assertFalse(detector._poll_sign_detected())
         self.assertEqual(detector._parking_state, ParkingState.LANE_KEEPING)
+        self.assertTrue(detector._parking_enabled)
         self.assertIsNone(detector._parking_last_spot_box)
 
-    def test_line_following_ignores_legacy_parking_label_as_spot(self):
+    def test_line_following_legacy_parking_label_enables_search(self):
         detector = make_line_following({
             "sign": "parking",
+            "confidence": 0.9,
+            "box_area": 0.01,
             "distance_cm": 25.0,
             "box": [0.1, 0.1, 0.3, 0.3],
-        })
+        }, parking_state=ParkingState.IDLE, parking_enabled=False)
 
         self.assertFalse(detector._poll_sign_detected())
         self.assertEqual(detector._parking_state, ParkingState.LANE_KEEPING)
+        self.assertTrue(detector._parking_enabled)
         self.assertIsNone(detector._parking_last_spot_box)
+
+    def test_line_following_ignores_parking_area_until_sign_enabled(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "box": [0.1, 0.1, 0.3, 0.3],
+        }, parking_state=ParkingState.IDLE, parking_enabled=False)
+
+        self.assertFalse(detector._poll_sign_detected())
+        self.assertEqual(detector._parking_state, ParkingState.IDLE)
+        self.assertIsNone(detector._parking_last_spot_box)
+
+    def test_line_following_accepts_area_with_recent_sign_hint(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "timestamp": 11.0,
+            "parking_sign_recent": True,
+            "parking_sign_last_seen": 10.0,
+            "box": [0.1, 0.55, 0.3, 0.85],
+        }, parking_state=ParkingState.IDLE, parking_enabled=False)
+
+        self.assertTrue(detector._poll_sign_detected())
+        self.assertTrue(detector._parking_enabled)
+        self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
+        self.assertEqual(detector._parking_side, "right")
 
     def test_line_following_tracks_parking_area_as_spot(self):
         detector = make_line_following({
@@ -267,6 +338,28 @@ class ParkingTriggerTests(unittest.TestCase):
         self.assertTrue(detector._poll_sign_detected())
         self.assertEqual(detector._parking_state, ParkingState.SPOT_TRACKED)
         self.assertEqual(detector._parking_spot_miss_frames, 0)
+
+    def test_line_following_sets_parking_side_from_area_box(self):
+        detector = make_line_following({
+            "sign": "parking_area",
+            "distance_cm": 25.0,
+            "box": [0.1, 0.05, 0.3, 0.35],
+        })
+
+        self.assertTrue(detector._poll_sign_detected())
+        self.assertEqual(detector._parking_side, "left")
+
+    def test_left_parking_mirrors_maneuver_steering(self):
+        detector = make_line_following({}, parking_state=ParkingState.WAIT_STEER_1)
+        detector._parking_side = "left"
+        detector._parking_phase_start_time = time.time()
+        detector._parking_phase_dist_cm = 0.0
+        detector._parking_last_sm_time = time.time()
+
+        steer, speed = detector._parking_state_machine()
+
+        self.assertLess(steer, 0)
+        self.assertEqual(speed, 0)
 
     def test_line_following_measures_parking_area_length_from_bbox_px(self):
         detector = make_line_following({

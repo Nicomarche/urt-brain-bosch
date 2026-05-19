@@ -40,7 +40,7 @@ CAMERA_PITCH_DEG = 16.4
 # Secuencia: LANE_KEEPING → SPOT_TRACKED → FORWARD_PAST_SPOT →
 #            WAIT_STEER_1 → REVERSING_ENTRY → WAIT_STEER_2 →
 #            REVERSING_ALIGN → WAIT_STEER_3 → FORWARD_CORRECTION → PARKED
-# El spot se asume a la DERECHA del carril.
+# El spot puede estar a la derecha o izquierda; la maniobra se espeja segun el lado.
 
 # --- Velocidades (mismas unidades que min_speed / max_speed) ---
 PARKING_SEARCH_SPEED  = 13   # Velocidad buscando el spot
@@ -57,6 +57,7 @@ PARKING_TRIGGER_DISTANCE_CM  = 100.0  # Activar SPOT_TRACKED cuando el spot est�
 PARKING_SPOT_ARM_DELAY_S     = 0.75   # Ignorar spots viejos al entrar en PARKING; primero buscar adelante
 PARKING_SPOT_LENGTH_MIN_CM   = 30.0   # Clamp inferior para medición dinámica por bbox
 PARKING_SPOT_LENGTH_MAX_CM   = 140.0  # Clamp superior para medición dinámica por bbox
+PARKING_SEARCH_SIDE_BIAS_STEER = 4.0  # Sesgo suave hacia la linea del lado del spot mientras lo trackea
 
 # --- Distancias de cada fase (odometría del encoder) ---
 PARKING_D_FORWARD_CM         = 55.0   # Avanzar más allá del spot antes de reversar
@@ -122,7 +123,7 @@ PARKING_FRONT_MARGIN_CM      = 5.0
 # no se inicia otro ciclo de maniobra (el auto ya está bien posicionado).
 PARKING_MIN_USEFUL_REVERSE_CM = 8.0
 
-# Evita reenviar PARKING en cada frame mientras el parking_sign sigue visible.
+# Evita priorizar parking_sign en cada frame mientras sigue visible; despues se publica parking_area.
 PARKING_SIGN_COOLDOWN        = 8.0
 
 # ═══════════════════════════════════════════════════════════════════════════
