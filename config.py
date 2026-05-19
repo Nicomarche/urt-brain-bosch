@@ -419,26 +419,12 @@ SIGN_HIGHWAY_SPEED   = 10   # Velocidad autopista (se activa con highway_entranc
 SIGN_STOP_DURATION      = 3.0   # Segundos detenido en señal STOP / no_entry
 SIGN_CROSSWALK_DURATION = 3.0   # Segundos detenido en cruce peatonal
 
-# ── Giro a la izquierda tras señal STOP ───────────────────────────────────────
-# Después de la parada completa, el auto realiza un giro izquierda de 90° con
-# un radio de 1,02 m de forma hardcodeada, ignorando el seguimiento de línea.
-#
-# Estrategia de control:
-#   Se usa el ÁNGULO MÁXIMO de dirección (-25°) para que las ruedas giren a tope
-#   y el giro sea claramente visible. El arco recorrido se controla con la
-#   DURACIÓN: más segundos → más grados girados.
-#
-#   Radio efectivo con steer máximo (TC-04, wheelbase=26 cm, steer=25°):
-#     R = L / tan(25°) = 26 / 0.466 ≈ 55.8 cm
-#   Arco 90° a ese radio: arc = (π/2) × 55.8 ≈ 87.6 cm
-#
-# SIGN_STOP_TURN_DURATION: tiempo para recorrer el arco de 90°. Calibrar en el
-# hardware real: aumentar si el auto gira menos de 90°, reducir si gira más.
-# Secuencia completa: STOP → ruedas a 0° → ruedas a -25° (0.5s settle) → AVANZAR.
-SIGN_STOP_LEFT_TURN_ENABLED = True    # Activar/desactivar el giro post-stop
-SIGN_STOP_TURN_STEER_DEG   = -25.0  # Ángulo máximo izquierda (negativo = izquierda)
-SIGN_STOP_TURN_SPEED       = 10      # Velocidad durante el giro (misma escala que SIGN_BASE_SPEED)
-SIGN_STOP_TURN_DURATION    = 21   # Segundos para completar el arco de 90° — CALIBRAR
+# ── Giro a la derecha tras el PRIMER STOP ─────────────────────────────────────
+# Comportamiento: todos los STOP detenidos por SIGN_STOP_DURATION y luego avanza.
+# Excepción: el PRIMER STOP de la corrida añade un giro a la derecha hardcodeado
+# de SIGN_STOP_TURN_DURATION segundos a la velocidad de crucero actual del auto.
+SIGN_STOP_TURN_STEER_DEG   = 25.0   # Ángulo derecha (positivo = derecha)
+SIGN_STOP_TURN_DURATION    = 8.0    # Segundos de giro a la derecha tras el primer STOP
 
 # ===================== LOCAL AI PERCEPTION =====================
 # Modelo local unificado (carriles + senales) ejecutado dentro de processCamera.
